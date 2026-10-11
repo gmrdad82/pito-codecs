@@ -11,6 +11,107 @@ use crate::h264::dec::slice::{SliceHeader, SliceType};
 use crate::h264::dec::tables::*;
 use crate::h264::dec::transform::{self, LevelScale};
 
+const RING: usize = 4;
+
+pub struct MbRing {
+    data: Vec<MbState>,
+    slot: Box<[u32]>,
+    tag: [usize; RING],
+    mb_w: usize,
+    mb_h: usize,
+    full: bool,
+}
+
+impl MbRing {
+    fn new(mb_w: usize, mb_h: usize) -> Self {
+        let mut r = MbRing {
+            data: Vec::new(),
+            slot: Box::new([]),
+            tag: [usize::MAX; RING],
+            mb_w,
+            mb_h,
+            full: true,
+        };
+        r.reset();
+        r
+    }
+
+    fn reset(&mut self) {
+        if self.full || self.data.is_empty() {
+            let rows = RING.min(self.mb_h);
+            self.data = vec![MbState::default(); rows * self.mb_w];
+            self.slot = (0..self.mb_w * self.mb_h)
+                .map(|a| ((a / self.mb_w % rows) * self.mb_w + a % self.mb_w) as u32)
+                .collect();
+            self.full = rows == self.mb_h && self.mb_h <= RING;
+        }
+        self.tag = [usize::MAX; RING];
+        for m in &mut self.data {
+            m.slice_num = u32::MAX;
+        }
+        if self.full {
+            for (k, t) in self.tag.iter_mut().enumerate().take(self.mb_h) {
+                *t = k;
+            }
+        }
+    }
+
+    #[inline]
+    fn enter_row(&mut self, y: usize, published: usize) {
+        if self.full {
+            return;
+        }
+        for yy in y.saturating_sub(1)..=y {
+            let k = yy % RING;
+            let t = self.tag[k];
+            if t == yy {
+                continue;
+            }
+            if t != usize::MAX && t >= published {
+                self.grow();
+                return;
+            }
+            for m in &mut self.data[k * self.mb_w..(k + 1) * self.mb_w] {
+                m.slice_num = u32::MAX;
+            }
+            self.tag[k] = yy;
+        }
+    }
+
+    fn grow(&mut self) {
+        let mut data = vec![MbState::default(); self.mb_w * self.mb_h];
+        for (k, &t) in self.tag.iter().enumerate() {
+            if t < self.mb_h {
+                data[t * self.mb_w..(t + 1) * self.mb_w]
+                    .copy_from_slice(&self.data[k * self.mb_w..(k + 1) * self.mb_w]);
+            }
+        }
+        self.data = data;
+        self.slot = (0..self.mb_w * self.mb_h).map(|a| a as u32).collect();
+        self.full = true;
+    }
+
+    fn row(&self, r: usize) -> &[MbState] {
+        let s = self.slot[r * self.mb_w] as usize;
+        &self.data[s..s + self.mb_w]
+    }
+}
+
+impl std::ops::Index<usize> for MbRing {
+    type Output = MbState;
+    #[inline(always)]
+    fn index(&self, a: usize) -> &MbState {
+        &self.data[self.slot[a] as usize]
+    }
+}
+
+impl std::ops::IndexMut<usize> for MbRing {
+    #[inline(always)]
+    fn index_mut(&mut self, a: usize) -> &mut MbState {
+        &mut self.data[self.slot[a] as usize]
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct SliceInfo {
     pub disable_deblocking_filter_idc: u32,
@@ -21,7 +122,7 @@ pub struct SliceInfo {
 
 pub struct PicState {
     pub planes: PicPlanes,
-    pub mbs: Vec<MbState>,
+    pub mbs: MbRing,
     pub slices: Vec<SliceInfo>,
     pub mb_w: usize,
     pub mb_h: usize,
@@ -40,7 +141,7 @@ impl PicState {
         let (mb_w, mb_h) = (frame.mb_w, frame.mb_h());
         PicState {
             planes: unsafe { frame.writer() },
-            mbs: vec![MbState::default(); mb_w * mb_h],
+            mbs: MbRing::new(mb_w, mb_h),
             slices: Vec::new(),
             mb_w,
             mb_h,
@@ -57,9 +158,7 @@ impl PicState {
 
     pub fn reset(&mut self, frame: FrameRef) {
         debug_assert_eq!((self.mb_w, self.mb_h), (frame.mb_w, frame.mb_h()));
-        for m in &mut self.mbs {
-            m.slice_num = u32::MAX;
-        }
+        self.mbs.reset();
         self.slices.clear();
         self.planes = unsafe { frame.writer() };
         self.poc = frame.poc;
@@ -114,7 +213,7 @@ impl PicState {
                     .unwrap_or(u32::MAX)
             };
             let row = if self.reference {
-                Frame::make_row(self.mb_w, r, &self.mbs, &ids)
+                Frame::make_row(self.mb_w, 0, self.mbs.row(r), &ids)
             } else {
                 Frame::empty_row()
             };
@@ -388,6 +487,7 @@ impl<'a> SliceDecoder<'a> {
         self.mb_addr = addr;
         self.mb_x = addr % self.mb_w;
         self.mb_y = addr / self.mb_w;
+        self.pic.mbs.enter_row(self.mb_y, self.pic.rows_published);
         if self.mb_x & 3 == 0 {
             self.pic.planes.prefetch_mb(self.mb_x + 4, self.mb_y);
         }
@@ -622,24 +722,17 @@ impl<'a> SliceDecoder<'a> {
         }
     }
 
-    fn colocated(&self, raster: usize) -> ([i16; 2], i8, u32) {
-        let Some(col) = self.refs[1].first() else {
-            return ([0, 0], -1, u32::MAX);
-        };
+    fn colocated(&self, m: Option<&FrameRow>, raster: usize) -> ([i16; 2], i8, u32) {
         let raster = if self.sps.direct_8x8_inference {
             let (bx, by) = (raster & 3, raster >> 2);
             (if by >= 2 { 12 } else { 0 }) + if bx >= 2 { 3 } else { 0 }
         } else {
             raster
         };
-        if col.frame.mb_w != self.mb_w || self.mb_y >= col.frame.mb_h() {
-            return ([0, 0], -1, u32::MAX);
-        }
-        let m = col.frame.row(self.mb_y);
         let mb = self.mb_x;
-        if m.intra[mb] {
+        let Some(m) = m.filter(|m| !m.intra[mb]) else {
             return ([0, 0], -1, u32::MAX);
-        }
+        };
         let b8 = mb * 4 + (raster >> 3) * 2 + ((raster & 3) >> 1);
         let l = if m.ref_idx[0][b8] >= 0 { 0 } else { 1 };
         (m.mv[l][mb * 16 + raster], m.ref_idx[l][b8], m.ref_id[l][b8])
@@ -679,6 +772,11 @@ impl<'a> SliceDecoder<'a> {
             ([0, 0], [[0, 0]; 2], false)
         };
         let col_short_term = self.refs[1].first().map(|r| !r.long_term).unwrap_or(false);
+        let col = self.refs[1]
+            .first()
+            .filter(|c| c.frame.mb_w == self.mb_w && self.mb_y < c.frame.mb_h())
+            .map(|c| c.frame.clone());
+        let col_row = col.as_ref().map(|f| f.row(self.mb_y));
         for b8 in 0..4 {
             if b8_mask & (1 << b8) == 0 {
                 continue;
@@ -688,7 +786,7 @@ impl<'a> SliceDecoder<'a> {
             for sub in (0..4).filter(|s| unit == 1 || *s == 0) {
                 let (x, y) = (x8 + (sub & 1), y8 + (sub >> 1));
                 let raster = y * 4 + x;
-                let (mv_col, ref_col, id_col) = self.colocated(raster);
+                let (mv_col, ref_col, id_col) = self.colocated(col_row, raster);
                 let (refs, mvs) = if spatial {
                     let col_zero = col_short_term
                         && ref_col == 0
