@@ -881,8 +881,6 @@ pub fn decode_rgba(data: &[u8], out: &mut [u8]) -> Result<()> {
         let (mode_tx, mode_rx) = channel::<(usize, RowData)>();
         let (full_tx, full_rx) = channel::<(usize, RowData)>();
         let (done_tx, done_rx) = channel::<(usize, RowData)>();
-        let (even_tx, even_rx) = channel::<(usize, usize, &mut [u8])>();
-        let (odd_tx, odd_rx) = channel::<(usize, usize, &mut [u8])>();
         for _ in 0..RING {
             free_tx.send(RowData::new(mb_w)).ok();
         }
@@ -907,18 +905,11 @@ pub fn decode_rgba(data: &[u8], out: &mut [u8]) -> Result<()> {
             for (my, row) in done_rx {
                 unsafe { sh.filter_row(my, &row.mbs) };
                 free_tx.send(row).ok();
-                if let Some(b) = bands.next() {
-                    if my % 2 == 0 { &even_tx } else { &odd_tx }.send(b).ok();
+                if let Some((a, b, band)) = bands.next() {
+                    unsafe { sh.convert(a, b, band) };
                 }
             }
         });
-        for rx in [even_rx, odd_rx] {
-            s.spawn(move || {
-                for (a, b, band) in rx {
-                    unsafe { sh.convert(a, b, band) };
-                }
-            });
-        }
         for my in 0..mb_h {
             let Ok(mut row) = free_rx.recv() else { break };
             modes.row(&mut row.mbs);
