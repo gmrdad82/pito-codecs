@@ -240,6 +240,7 @@ pub fn inverse_transform_add(
 }
 }
 
+#[cfg(any(test, target_arch = "x86_64"))]
 const WIDE_L1: u64 = 130_000;
 
 struct TxParams {
@@ -1096,6 +1097,7 @@ pub(crate) mod tests {
             };
             let stride = N + 5;
             let base: Vec<u16> = (0..N * stride).map(|_| (rnd() % 256) as u16).collect();
+            #[cfg(target_arch = "x86_64")]
             let base_c = base.clone();
             let (mut a, mut b) = (base.clone(), base);
             itx_narrow::<N>(&coefs, &p, &mut a, stride);

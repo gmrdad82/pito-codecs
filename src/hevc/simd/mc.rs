@@ -1,5 +1,6 @@
 use crate::hevc::pel::Pel;
 
+#[cfg(target_arch = "x86_64")]
 const WIN: usize = 71;
 
 pub(crate) fn interp<const T: usize, P: Pel>(
@@ -31,6 +32,7 @@ pub(crate) fn interp<const T: usize, P: Pel>(
     false
 }
 
+#[cfg(target_arch = "x86_64")]
 fn fits<P>(p: &[i16], w: usize, h: usize, dst: &[P], ds: usize) -> bool {
     w.is_multiple_of(2)
         && w >= 2

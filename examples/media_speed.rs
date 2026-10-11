@@ -1,18 +1,42 @@
+use std::io::Write;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::time::Instant;
 
 use pito_codecs::media::{
-    Choice, ExportOptions, Piece, Prefs, Rgba, decode_video, export, first_frame, frames_at, probe,
-    to_rgba, to_rgba_height,
+    Choice, ExportOptions, Piece, Prefs, Rgba, VideoFrame, decode_video, decode_video_gpu, export,
+    first_frame, frames_at, probe, to_rgba, to_rgba_height,
 };
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+type Res<T> = Result<T, Box<dyn std::error::Error>>;
+
+macro_rules! say {
+    ($($t:tt)*) => {
+        writeln!(std::io::stdout(), $($t)*)?
+    };
+}
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "media_speed: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Res<()> {
     let mut args = std::env::args().skip(1);
     let path = PathBuf::from(
         args.next()
-            .ok_or("usage: media_speed <file> [ffmpeg|auto]")?,
+            .ok_or("usage: media_speed <file> [ffmpeg|auto|cpu|gpu]")?,
     );
-    let prefs = match args.next().as_deref() {
+    let mode = args.next();
+    if mode.as_deref() == Some("gpu") {
+        return gpu_playback(&path);
+    }
+    let prefs = match mode.as_deref() {
         Some("auto") => Prefs::default(),
         Some("cpu") => Prefs {
             decode: Choice::Cpu,
@@ -23,10 +47,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let t = Instant::now();
     let p = probe(&path, &prefs)?;
-    println!("probe {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+    say!("probe {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
     let t = Instant::now();
     let f = first_frame(&path, 240, &prefs)?;
-    println!(
+    say!(
         "first frame {}x{} {:.1} ms",
         f.width,
         f.height,
@@ -37,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     let t = Instant::now();
     let strip = frames_at(&path, &times, 240, &prefs)?;
-    println!(
+    say!(
         "filmstrip {} stills {:.1} ms",
         strip.len(),
         t.elapsed().as_secs_f64() * 1e3
@@ -55,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             n += 1;
         }
         let s = t.elapsed().as_secs_f64();
-        println!(
+        say!(
             "decode {n} frames at {:?}: {:.1} fps",
             height.unwrap_or(p.height),
             n as f64 / s
@@ -66,7 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for _ in 0..20 {
                 img = to_rgba(&fr);
             }
-            println!(
+            say!(
                 "  to_rgba {}x{}: {:.2} ms",
                 img.width,
                 img.height,
@@ -76,7 +100,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for _ in 0..20 {
                 img = to_rgba_height(&fr, 240);
             }
-            println!(
+            say!(
                 "  to_rgba_height 240 ({}x{}): {:.2} ms",
                 img.width,
                 img.height,
@@ -105,7 +129,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         |_| true,
     )?;
     let s = t.elapsed().as_secs_f64();
-    println!(
+    say!(
         "smart export {seconds:.1} s of video in {s:.2} s ({:.0}x realtime): {} frames, {} copied, {} encoded",
         seconds / s,
         done.frames,
@@ -126,10 +150,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         |_| true,
     )?;
     let s = t.elapsed().as_secs_f64();
-    println!(
+    say!(
         "overlay export {} frames in {s:.2} s: {:.1} fps",
         done.frames,
         done.frames as f64 / s
     );
+    Ok(())
+}
+
+fn gpu_playback(path: &std::path::Path) -> Res<()> {
+    let prefs = Prefs::default();
+    let p = probe(path, &prefs)?;
+    for size in [None, Some((1920, 1080)), Some((1280, 720))] {
+        for touch in 0..3 {
+            let t = Instant::now();
+            let mut video = decode_video_gpu(path, 0.0, size, &prefs)?;
+            let mut first = None;
+            let mut held = std::collections::VecDeque::new();
+            let mut n = 0;
+            while let Some(f) = video.next() {
+                let f = f?;
+                if let VideoFrame::Gpu(g) = &f {
+                    match touch {
+                        1 => g.sync()?,
+                        #[cfg(target_os = "linux")]
+                        2 => drop(g.dmabuf(false)?),
+                        _ => {}
+                    }
+                }
+                first.get_or_insert_with(|| t.elapsed().as_secs_f64() * 1e3);
+                held.push_back(f);
+                if held.len() > 3
+                    && let Some(old) = held.pop_front()
+                {
+                    video.recycle(old);
+                }
+                n += 1;
+            }
+            let s = t.elapsed().as_secs_f64();
+            let (w, h) = size.unwrap_or((p.width, p.height));
+            say!(
+                "gpu playback {}x{} -> {w}x{h} {}: {n} frames, first {:.1} ms, {:.1} fps ({}, {})",
+                p.width,
+                p.height,
+                ["frames only", "sync each", "dmabuf each"][touch],
+                first.unwrap_or(0.0),
+                n as f64 / s,
+                video.route,
+                if video.on_gpu() {
+                    "on the GPU"
+                } else {
+                    "in memory"
+                }
+            );
+        }
+    }
     Ok(())
 }

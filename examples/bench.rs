@@ -1510,72 +1510,210 @@ fn fmt_value(v: f64, unit: &str) -> String {
     match unit {
         "ms" if v < 100.0 => format!("{v:.1} MS"),
         "ms" => format!("{v:.0} MS"),
-        "x realtime" if v < 100.0 => format!("{v:.1}X RT"),
-        "x realtime" => format!("{v:.0}X RT"),
+        "x realtime" if v < 100.0 => format!("{v:.1}×"),
+        "x realtime" => format!("{v:.0}×"),
         "stills/s" => format!("{v:.0} STILLS/S"),
         _ => format!("{v:.0} FPS"),
     }
 }
 
+fn kind(id: &str) -> (usize, &'static str) {
+    match id.split('.').next().unwrap_or("") {
+        "decode" if id.contains(".cpu") => (0, "DECODE, CPU"),
+        "decode" => (1, "DECODE, GPU (VA-API)"),
+        "encode" | "transcode" => (2, "ENCODE AND GPU TRANSCODE"),
+        "audio" => (3, "AUDIO"),
+        "first-frame" | "filmstrip" => (4, "FIRST FRAME AND FILMSTRIP"),
+        "smartcut" => (5, "SMART-CUT EXPORT"),
+        _ => (6, "SCALE"),
+    }
+}
+
+fn mark(id: &str) -> &'static str {
+    if id.starts_with("encode.") && id.contains(".cpu.") {
+        " *"
+    } else if id.starts_with("smartcut.") {
+        " †"
+    } else {
+        ""
+    }
+}
+
+const X264_NOTE: &str = "* NOT LIKE FOR LIKE: LIBX264 RUNS HAND-WRITTEN ASSEMBLY, WHILE OUR CPU H.264 ENCODER IS RUST WITH NO HAND-WRITTEN SIMD YET.";
+const CUT_NOTE: &str = "† NOT LIKE FOR LIKE: OUR EXPORT IS FRAME-ACCURATE; IT COPIES THE MIDDLE OF EACH PIECE AND RE-ENCODES THE FRAMES BETWEEN EACH CUT AND ITS NEAREST KEYFRAME (540 OF 780 FRAMES AT 1080P HERE). FFMPEG'S STREAM COPY ENCODES NOTHING AND CUTS ON KEYFRAMES, SO IT IS NOT FRAME-ACCURATE. FFMPEG'S RE-ENCODE IS FRAME-ACCURATE AND RE-ENCODES EVERY FRAME WITH LIBX264 VERYFAST, CRF 18.";
+
+fn strip(label: &str, word: &str) -> String {
+    if word.is_empty() {
+        label.to_string()
+    } else {
+        label.replacen(word, "", 1)
+    }
+}
+
+struct Spec {
+    file: &'static str,
+    title: &'static str,
+    unit: &'static str,
+    pick: fn(&str) -> bool,
+    group: fn(&str) -> (usize, &'static str),
+    strip: &'static str,
+    notes: &'static [&'static str],
+}
+
 fn charts(rows: &[Row], images: &Path, machine: &Machine, date: &str) -> Res<()> {
-    let sub = format!("{} + {} | {}", machine.cpu, machine.gpu, date);
-    let groups = [
-        (
-            "decode",
-            "bench-decode.png",
-            "DECODE SPEED",
-            "FFMPEG TIMES INCLUDE STARTING THE PROCESS. BIGGER BAR IS FASTER.",
-        ),
-        (
-            "encode",
-            "bench-encode.png",
-            "ENCODE SPEED",
-            "SAME RAW FRAMES AND SETTINGS ON BOTH SIDES. SEE RESULTS.JSON FOR SIZE AND PSNR.",
-        ),
-        (
-            "audio",
-            "bench-audio.png",
-            "AUDIO SPEED",
-            "RT = SECONDS OF AUDIO PER SECOND OF WORK. BIGGER BAR IS FASTER.",
-        ),
-        (
-            "pipeline",
-            "bench-pipeline.png",
-            "APP PIPELINE SPEED",
-            "FIRST FRAME: OURS IS IN-PROCESS, FFMPEG STARTS A PROCESS. BIGGER BAR IS FASTER.",
-        ),
+    let sub = format!("{} + {}, {}", machine.cpu, machine.gpu, date);
+    let none = |_: &str| (0, "");
+    let specs = [
+        Spec {
+            file: "bench-decode.png",
+            title: "DECODE SPEED",
+            unit: "FRAMES PER SECOND, HIGHER IS BETTER",
+            pick: |id| id.starts_with("decode."),
+            group: |id| {
+                if id.contains(".cpu") {
+                    (0, "CPU")
+                } else {
+                    (1, "GPU (VA-API)")
+                }
+            },
+            strip: " DECODE",
+            notes: &[
+                "SURFACE ONLY: FRAMES STAY ON THE GPU. READ BACK: EVERY FRAME IS COPIED TO MEMORY. FFMPEG'S TIMES INCLUDE STARTING ITS PROCESS.",
+            ],
+        },
+        Spec {
+            file: "bench-encode.png",
+            title: "ENCODE SPEED",
+            unit: "FRAMES PER SECOND, HIGHER IS BETTER",
+            pick: |id| id.starts_with("encode.") || id.starts_with("transcode."),
+            group: |id| {
+                if id.starts_with("transcode.") {
+                    (2, "GPU TRANSCODE: DECODE AND ENCODE ON THE GPU")
+                } else if id.contains(".cpu.") {
+                    (0, "CPU, CRF 23 (FFMPEG: LIBX264)")
+                } else {
+                    (1, "GPU (VA-API), QP 23")
+                }
+            },
+            strip: " ENCODE",
+            notes: &[
+                X264_NOTE,
+                "BOTH SIDES ENCODE THE SAME 240 RAW FRAMES; OURS HOLDS THEM IN MEMORY, FFMPEG READS THEM FROM A FILE.",
+            ],
+        },
+        Spec {
+            file: "bench-first-frame.png",
+            title: "TIME TO FIRST FRAME",
+            unit: "MILLISECONDS, LOWER IS BETTER",
+            pick: |id| id.starts_with("first-frame."),
+            group: none,
+            strip: " TIME TO FIRST FRAME",
+            notes: &[
+                "A COLD FILE OPENED AND ITS FIRST FRAME DECODED. OURS RUNS IN THE APP'S PROCESS; FFMPEG'S TIME INCLUDES STARTING ITS PROCESS, AS AN APP THAT CALLS FFMPEG PAYS IT.",
+            ],
+        },
+        Spec {
+            file: "bench-filmstrip.png",
+            title: "FILMSTRIP SPEED",
+            unit: "STILLS PER SECOND, HIGHER IS BETTER",
+            pick: |id| id.starts_with("filmstrip."),
+            group: none,
+            strip: " FILMSTRIP STILLS",
+            notes: &[
+                "12 STILLS AT 240 PX, SNAPPED TO KEYFRAMES. OURS RUNS IN ONE PROCESS; FFMPEG RUNS 12 PROCESSES, 8 AT A TIME.",
+            ],
+        },
+        Spec {
+            file: "bench-export.png",
+            title: "SMART-CUT EXPORT",
+            unit: "× REAL TIME, HIGHER IS BETTER",
+            pick: |id| id.starts_with("smartcut."),
+            group: none,
+            strip: "SMART-CUT EXPORT ",
+            notes: &[
+                "3 CUTS KEEP 10.1 S OF A 20 S CLIP. × REAL TIME IS SECONDS KEPT PER SECOND OF WORK.",
+                CUT_NOTE,
+            ],
+        },
+        Spec {
+            file: "bench-scale.png",
+            title: "SCALE SPEED",
+            unit: "FRAMES PER SECOND, HIGHER IS BETTER",
+            pick: |id| id.starts_with("scale."),
+            group: none,
+            strip: "SCALE ",
+            notes: &[
+                "BICUBIC, 8-BIT 4:2:0, ALL THREADS ON BOTH SIDES. OURS SCALES FRAMES IN MEMORY; FFMPEG READS THEM FROM A FILE.",
+            ],
+        },
+        Spec {
+            file: "bench-audio.png",
+            title: "AUDIO SPEED",
+            unit: "× REAL TIME, HIGHER IS BETTER",
+            pick: |id| id.starts_with("audio."),
+            group: none,
+            strip: "",
+            notes: &["× REAL TIME IS SECONDS OF AUDIO PER SECOND OF WORK."],
+        },
     ];
-    let mut all = Vec::new();
-    for (group, file, title, foot) in groups {
-        let entries: Vec<charts::Entry> = rows
+    let done: Vec<&Row> = rows
+        .iter()
+        .filter(|r| r.ours.is_some() && r.ffmpeg.is_some() && r.speedup.is_some())
+        .collect();
+    for spec in &specs {
+        let mut picked: Vec<&Row> = done
             .iter()
-            .filter(|r| r.group == group)
-            .filter_map(|r| {
-                let (o, f, s) = (r.ours?, r.ffmpeg?, r.speedup?);
-                let speed = |v: f64| if r.higher_is_better { v } else { 1.0 / v };
-                Some(charts::Entry {
-                    label: r.label.clone(),
-                    ours: speed(o),
-                    ffmpeg: speed(f),
-                    ours_text: fmt_value(o, &r.unit),
-                    ffmpeg_text: fmt_value(f, &r.unit),
-                    speedup: s,
-                })
+            .copied()
+            .filter(|r| (spec.pick)(&r.id))
+            .collect();
+        picked.sort_by_key(|r| (spec.group)(&r.id).0);
+        let entries: Vec<charts::Pair> = picked
+            .iter()
+            .map(|r| charts::Pair {
+                group: (spec.group)(&r.id).1.into(),
+                label: format!("{}{}", strip(&r.label, spec.strip), mark(&r.id)),
+                ours: r.ours.unwrap_or(0.0),
+                ffmpeg: r.ffmpeg.unwrap_or(0.0),
+                ours_text: fmt_value(r.ours.unwrap_or(0.0), &r.unit),
+                ffmpeg_text: fmt_value(r.ffmpeg.unwrap_or(0.0), &r.unit),
+                speedup: r.speedup.unwrap_or(1.0),
             })
             .collect();
-        for e in &entries {
-            all.push((e.label.clone(), e.speedup));
-        }
         if !entries.is_empty() {
-            charts::grouped(&images.join(file), title, &sub, foot, &entries)?;
+            let notes: Vec<String> = spec.notes.iter().map(|n| n.to_string()).collect();
+            charts::paired(
+                &images.join(spec.file),
+                spec.title,
+                spec.unit,
+                &sub,
+                &notes,
+                &entries,
+            )?;
         }
     }
-    if !all.is_empty() {
-        charts::speedup(
+    let mut all = done;
+    all.sort_by_key(|r| kind(&r.id).0);
+    let ratios: Vec<charts::Ratio> = all
+        .iter()
+        .map(|r| charts::Ratio {
+            group: kind(&r.id).1.into(),
+            label: format!("{}{}", r.label, mark(&r.id)),
+            speedup: r.speedup.unwrap_or(1.0),
+        })
+        .collect();
+    if !ratios.is_empty() {
+        let notes = [
+            "THE SAME JOB ON BOTH SIDES, AS MANY TIMES FASTER OR SLOWER THAN FFMPEG. THE MEASURED VALUES ARE IN THE CHARTS PER UNIT.".to_string(),
+            X264_NOTE.to_string(),
+            "† NOT LIKE FOR LIKE: OUR EXPORT IS FRAME-ACCURATE AND RE-ENCODES THE FRAMES AROUND EACH CUT. FFMPEG'S STREAM COPY ENCODES NOTHING AND CUTS ON KEYFRAMES; ITS RE-ENCODE RE-ENCODES EVERY FRAME.".to_string(),
+        ];
+        charts::ratios(
             &images.join("bench-speedup.png"),
             "PITO-CODECS VS FFMPEG",
+            "TIMES FASTER OR SLOWER, LOG SCALE",
             &sub,
-            &all,
+            &notes,
+            &ratios,
         )?;
     }
     Ok(())

@@ -38,7 +38,10 @@ fn generate(name: &str, seconds: u32, video: &[&str]) -> PathBuf {
         .status()
         .unwrap();
     assert!(st.success());
-    std::fs::rename(&tmp, &path).unwrap();
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        assert!(std::path::Path::new(&path).exists(), "{e}");
+        let _ = std::fs::remove_file(&tmp);
+    }
     path
 }
 

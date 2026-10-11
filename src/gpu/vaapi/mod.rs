@@ -3,6 +3,7 @@ mod ffi;
 mod h264;
 mod headers;
 mod hevc;
+mod host;
 mod va;
 #[cfg(feature = "vp9")]
 mod vp9;
@@ -62,6 +63,7 @@ pub trait Accel: Send {
         slices: &[(ffi::VASliceParameterBufferHEVC, Vec<u8>)],
     ) -> std::result::Result<(), String>;
     fn read(&mut self, index: usize) -> std::result::Result<Picture, String>;
+    fn prefetch(&mut self, _index: usize) {}
     fn held(&self, index: usize) -> bool;
     fn fill(&mut self, index: usize, from: Option<usize>) -> std::result::Result<(), String>;
 }
