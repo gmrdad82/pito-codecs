@@ -5,7 +5,9 @@
     feature = "aac",
     feature = "mp4",
     feature = "gpu",
-    feature = "filter"
+    feature = "filter",
+    feature = "mkv",
+    feature = "vp9"
 ))]
 
 use std::path::{Path, PathBuf};
@@ -529,4 +531,94 @@ fn gpu_playback_keeps_frames_on_the_gpu_and_falls_back_to_the_cpu() {
     );
     let diff = luma_diff(&ours, &cpu);
     assert!(diff < 1.0, "{diff}");
+}
+
+fn matroska(name: &str, codec: &[&str]) -> PathBuf {
+    let out = dir().join(name);
+    if out.exists() {
+        return out;
+    }
+    let part = dir().join(format!("{}.{name}", std::process::id()));
+    let ok = Command::new("ffmpeg")
+        .args(["-v", "error", "-y"])
+        .args(["-f", "lavfi", "-i", "testsrc2=s=640x360:r=30:d=3"])
+        .args(["-pix_fmt", "yuv420p", "-g", "30"])
+        .args(codec)
+        .arg(&part)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok);
+    if std::fs::rename(&part, &out).is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    out
+}
+
+#[test]
+fn matroska_and_webm_play_through_the_media_front() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let files = [
+        (
+            matroska("h264.mkv", &["-c:v", "libx264", "-bf", "2"]),
+            Codec::H264,
+        ),
+        (
+            matroska(
+                "vp9.webm",
+                &[
+                    "-c:v",
+                    "libvpx-vp9",
+                    "-b:v",
+                    "1M",
+                    "-deadline",
+                    "realtime",
+                    "-cpu-used",
+                    "8",
+                ],
+            ),
+            Codec::Vp9,
+        ),
+    ];
+    let cpu = Prefs {
+        decode: Choice::Cpu,
+        ..Prefs::default()
+    };
+    for (path, codec) in files {
+        let p = probe(&path, &cpu).unwrap();
+        assert_eq!(
+            (p.video_codec, p.width, p.height, p.fps),
+            (Some(codec), 640, 360, (30, 1))
+        );
+        let gpu = pito_codecs::gpu::available().iter().any(|&(c, d, b)| {
+            c == codec
+                && d == pito_codecs::gpu::Direction::Decode
+                && b == pito_codecs::gpu::Backend::VaApi
+        });
+        let mut firsts = Vec::new();
+        for (prefs, on_gpu) in [(Prefs::default(), gpu), (cpu.clone(), false)] {
+            let video = decode_video_gpu(&path, 1.0, None, &prefs).unwrap();
+            let mut n = 0;
+            for f in video {
+                let f = f.unwrap();
+                assert_eq!(
+                    (f.on_gpu(), f.size(), f.pts()),
+                    (on_gpu, (640, 360), 30 + n),
+                    "{codec}"
+                );
+                if n == 0 {
+                    firsts.push(match f {
+                        VideoFrame::Gpu(g) => g.download().unwrap(),
+                        VideoFrame::Cpu(c) => c,
+                    });
+                }
+                n += 1;
+            }
+            assert_eq!(n, 60, "{codec}");
+        }
+        let diff = luma_diff(&firsts[0], &firsts[1]);
+        assert!(diff < 1.0, "{codec}: {diff}");
+    }
 }

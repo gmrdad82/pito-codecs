@@ -6,6 +6,7 @@ use crate::gpu::{GpuFrame, GpuScaler};
 use crate::mp4::Reader;
 
 use super::ffmpeg::{Child, Ffmpeg};
+use super::demux::Demux;
 use super::native;
 use super::picture::{Color, resize};
 use super::probe::{Probe, probe};
@@ -21,6 +22,7 @@ pub struct Source {
     pub ffmpeg: Option<Ffmpeg>,
     pub ffmpeg_codec: Option<String>,
     pub reader: Option<Arc<Reader>>,
+    pub demux: Option<Demux>,
 }
 
 impl std::fmt::Debug for Video {
@@ -32,7 +34,8 @@ impl std::fmt::Debug for Video {
 pub fn source(path: &Path, prefs: &Prefs) -> Result<Source> {
     let probe = probe(path, prefs)?;
     let caps = Caps::detect(prefs);
-    let reader = native::reader(path).ok();
+    let demux = Demux::open(path).ok();
+    let reader = demux.as_ref().and_then(Demux::mp4).cloned();
     let (mut route, mut reasons, mut ffmpeg_codec) = match probe.video_codec {
         Some(codec) => {
             let p = pick_decode(codec, prefs, &caps)?;
@@ -48,16 +51,16 @@ pub fn source(path: &Path, prefs: &Prefs) -> Result<Source> {
             }
         },
     };
-    if route != Route::Ffmpeg && reader.is_none() {
+    if route != Route::Ffmpeg && demux.is_none() {
         match (&caps.ffmpeg, &prefs.decode) {
             (Some(_), Choice::Ffmpeg(u)) => {
-                reasons.push("our MP4 reader can't open this file".to_string());
+                reasons.push("our MP4 and MKV readers can't open this file".to_string());
                 route = Route::Ffmpeg;
                 ffmpeg_codec = u.codec.clone();
             }
             _ => {
                 return Err(Error::Unsupported(
-                    "our MP4 reader can't open this file; pick ffmpeg in the settings to read it"
+                    "our MP4 and MKV readers can't open this file; pick ffmpeg in the settings to read it"
                         .to_string(),
                 ));
             }
@@ -71,6 +74,7 @@ pub fn source(path: &Path, prefs: &Prefs) -> Result<Source> {
         ffmpeg: caps.ffmpeg,
         ffmpeg_codec,
         reader,
+        demux,
     })
 }
 
@@ -86,6 +90,12 @@ impl Source {
             "the {} route for {} is not in this build yet",
             self.route, self.probe.video_codec_name
         ))
+    }
+
+    pub fn demux(&self) -> Result<&Demux> {
+        self.demux.as_ref().ok_or_else(|| {
+            Error::Unsupported("our MP4 and MKV readers can't open this file".to_string())
+        })
     }
 
     pub fn reader(&self) -> Result<&Arc<Reader>> {
@@ -138,7 +148,7 @@ pub fn open(
     match src.route {
         Route::Cpu | Route::Gpu => {
             let decoded =
-                native::Frames::open(src.reader()?.clone(), from, native::threads(), src.route)?;
+                native::Frames::open(src.demux()?.clone(), from, native::threads(), src.route)?;
             let mut reasons = src.reasons.clone();
             reasons.extend(decoded.reason.clone());
             let format = if p.bit_depth <= 8 {
@@ -236,8 +246,7 @@ impl Video {
                 let Some(mut frame) = frames.next_frame()? else {
                     return Ok(None);
                 };
-                let t = frames.track();
-                let seconds = t.seconds(frame.pts);
+                let seconds = frames.seconds(frame.pts);
                 frame.pts = (seconds * fps.0 as f64 / fps.1.max(1) as f64).round() as i64;
                 frame.time_base = self.time_base;
                 if (frame.width, frame.height) != (self.width, self.height) {
@@ -356,10 +365,10 @@ fn even(v: u32) -> u32 {
 }
 
 fn stream_color(src: &Source) -> Color {
-    let found = src.reader.as_ref().and_then(|r| {
-        let t = &r.tracks[r.video()?];
-        crate::gpu::color(t.codec()?, &t.extradata()?)
-    });
+    let found = src
+        .demux
+        .as_ref()
+        .and_then(|d| d.stream(d.video().ok()?).ok()?.color);
     let (matrix, full_range) = found.unwrap_or((2, false));
     Color { matrix, full_range }
 }
@@ -393,7 +402,7 @@ pub fn open_gpu(
         PixelFormat::Yuv420p10
     };
     if src.route == Route::Gpu {
-        let frames = native::Frames::open(src.reader()?.clone(), from, native::threads(), Route::Gpu)?;
+        let frames = native::Frames::open(src.demux()?.clone(), from, native::threads(), Route::Gpu)?;
         let mut reasons = src.reasons.clone();
         reasons.extend(frames.reason.clone());
         if frames.route() == Route::Gpu {
@@ -499,7 +508,7 @@ impl GpuVideo {
         let Some(mut frame) = frames.next_gpu()? else {
             return Ok(None);
         };
-        let seconds = frames.track().seconds(frame.pts());
+        let seconds = frames.seconds(frame.pts());
         let pts = (seconds * fps.0 as f64 / fps.1.max(1) as f64).round() as i64;
         if !frame.on_gpu() {
             let Some(mut cpu) = frame.into_cpu() else {

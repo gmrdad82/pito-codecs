@@ -69,15 +69,15 @@ opt-level = 3
 
 [[example]]
 name = "media_speed"
-required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter"]
+required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter", "mkv", "vp9"]
 
 [[example]]
 name = "bench"
-required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter"]
+required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter", "mkv", "vp9"]
 
 [[example]]
 name = "pcod"
-required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter"]
+required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter", "mkv", "vp9"]
 
 [dev-dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
