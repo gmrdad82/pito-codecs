@@ -518,9 +518,11 @@ struct Bench {
 impl Bench {
     fn want(&self, ids: &[&str]) -> bool {
         self.only.is_empty()
-            || ids
-                .iter()
-                .any(|id| self.only.iter().any(|o| id.contains(o.as_str())))
+            || ids.iter().any(|id| {
+                self.only
+                    .iter()
+                    .any(|o| id.contains(o.as_str()) || o.starts_with(id))
+            })
     }
 
     #[allow(clippy::too_many_arguments)]
