@@ -287,6 +287,10 @@ impl Vp9Decoder {
             }
         }
         if h.show_frame {
+            if let Some(s) = self.session.as_mut() {
+                s.gpu = self.gpu;
+                s.prefetch(target);
+            }
             self.queue.push_back((target, pts));
             out.extend(self.drain(LAG)?);
         }
