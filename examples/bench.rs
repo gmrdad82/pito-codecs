@@ -1,11 +1,13 @@
 #[path = "bench/charts.rs"]
 mod charts;
+#[path = "support/fail.rs"]
+mod fail;
 
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitCode};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
@@ -295,8 +297,8 @@ enum Dec {
 }
 
 fn packet_of(r: &Reader, track: usize, index: usize, buf: &mut Vec<u8>) -> Res<Packet> {
-    let t = &r.tracks[track];
-    let s = t.samples[index];
+    let t = r.tracks.get(track).ok_or("no such track")?;
+    let s = *t.samples.get(index).ok_or("no such sample")?;
     r.read_into(track, index, buf)?;
     Ok(Packet {
         data: std::mem::take(buf),
@@ -390,18 +392,29 @@ fn load_raw(path: &Path, w: u32, h: u32) -> Res<Vec<Frame>> {
     let bytes = fs::read(path)?;
     let (y, c) = (w as usize * h as usize, (w as usize / 2) * (h as usize / 2));
     let each = y + 2 * c;
+    if each == 0 {
+        return Err(format!("{}: a {w}x{h} frame is empty", path.display()).into());
+    }
     let tb = TimeBase::new(1, 60);
-    Ok(bytes
+    bytes
         .chunks_exact(each)
         .enumerate()
         .map(|(i, b)| {
             let mut f = Frame::new(PixelFormat::Yuv420p8, w, h, i as i64, tb);
-            f.planes[0].data.copy_from_slice(&b[..y]);
-            f.planes[1].data.copy_from_slice(&b[y..y + c]);
-            f.planes[2].data.copy_from_slice(&b[y + c..]);
-            f
+            let parts = [&b[..y], &b[y..y + c], &b[y + c..]];
+            for (plane, part) in f.planes.iter_mut().zip(parts) {
+                if plane.data.len() != part.len() {
+                    return Err(format!(
+                        "{}: {w}x{h} planes don't match the frame size",
+                        path.display()
+                    )
+                    .into());
+                }
+                plane.data.copy_from_slice(part);
+            }
+            Ok(f)
         })
-        .collect())
+        .collect()
 }
 
 fn encode_cpu(frames: &[Frame], w: u32, h: u32) -> Res<(f64, Vec<u8>)> {
@@ -1125,7 +1138,9 @@ impl Bench {
                         first_frame(&copy, 240, &prefs)?;
                         m.ours.push(t0.elapsed().as_secs_f64() * 1e3);
                     }
-                    m.details.insert("ours_first_call_ms".into(), m.ours[0]);
+                    if let Some(&first) = m.ours.first() {
+                        m.details.insert("ours_first_call_ms".into(), first);
+                    }
                     let pstr = path_str(&path);
                     let mut args = vec![];
                     if key == "gpu" {
@@ -1219,14 +1234,16 @@ impl Bench {
                                             let i = next
                                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                             let Some(t) = strs.get(i) else { break };
-                                            if let Err(e) = one(t) {
-                                                *failed.lock().unwrap() = Some(e.to_string());
+                                            if let Err(e) = one(t)
+                                                && let Ok(mut slot) = failed.lock()
+                                            {
+                                                *slot = Some(e.to_string());
                                             }
                                         }
                                     });
                                 }
                             });
-                            if let Some(e) = failed.into_inner().unwrap() {
+                            if let Some(e) = failed.into_inner().ok().flatten() {
                                 return Err(e.into());
                             }
                             Ok(12.0 / t0.elapsed().as_secs_f64())
@@ -1581,7 +1598,11 @@ fn charts(rows: &[Row], images: &Path, machine: &Machine, date: &str) -> Res<()>
     Ok(())
 }
 
-fn main() -> Res<()> {
+fn main() -> ExitCode {
+    fail::run("bench", run)
+}
+
+fn run() -> Res<()> {
     let mut args = std::env::args().skip(1);
     let mut runs = 3usize;
     let mut quick = false;

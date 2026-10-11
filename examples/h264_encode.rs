@@ -1,15 +1,26 @@
+#[path = "support/fail.rs"]
+mod fail;
+
 use std::io::{Read, Write};
+use std::process::ExitCode;
 use std::time::Instant;
 
 use pito_codecs::h264::{Bitstream, Encoder, EncoderConfig, Preset, Rate};
 use pito_codecs::media::{Frame, PixelFormat, Plane, TimeBase};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> ExitCode {
+    fail::run("h264_encode", run)
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 4 {
         return Err("usage: h264_encode <in.yuv> <width> <height> <out.h264> [crf=23|qp=N|kbps=N] [preset=speed|balanced|quality] [bframes=N] [threads=N] [frames=N]".into());
     }
     let (w, h): (u32, u32) = (args[1].parse()?, args[2].parse()?);
+    if w == 0 || h == 0 || w % 2 == 1 || h % 2 == 1 {
+        return Err(format!("{w}x{h}: width and height must be even and above zero").into());
+    }
     let mut cfg = EncoderConfig {
         width: w,
         height: h,
@@ -40,7 +51,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (cw, ch) = (ws / 2, hs / 2);
     let size = ws * hs + 2 * cw * ch;
     let mut raw = Vec::new();
-    std::fs::File::open(&args[0])?.read_to_end(&mut raw)?;
+    std::fs::File::open(&args[0])
+        .and_then(|mut f| f.read_to_end(&mut raw))
+        .map_err(|e| format!("{}: {e}", args[0]))?;
+    if raw.len() < size {
+        return Err(format!("{}: shorter than one {w}x{h} frame", args[0]).into());
+    }
     let tb = TimeBase::new(1, 30);
     let frames: Vec<Frame> = raw
         .chunks_exact(size)
@@ -75,7 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
     drop(raw);
-    let mut out = std::fs::File::create(&args[3])?;
+    let mut out = std::fs::File::create(&args[3]).map_err(|e| format!("{}: {e}", args[3]))?;
     let t = Instant::now();
     let mut enc = Encoder::new(cfg)?;
     let mut bytes = 0usize;
