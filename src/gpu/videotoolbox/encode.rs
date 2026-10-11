@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
@@ -36,7 +37,6 @@ enum Output {
     Packet {
         data: Vec<u8>,
         pts: i64,
-        dts: CMTime,
         keyframe: bool,
     },
     Failed(Error),
@@ -229,11 +229,9 @@ fn read_packet(sample: &CMSampleBuffer, shared: &Shared, pts: i64) -> Result<Out
             nal::length_prefix(&kept)
         }
     };
-    let dts = unsafe { sample.decode_time_stamp() };
     Ok(Output::Packet {
         data,
         pts,
-        dts,
         keyframe,
     })
 }
@@ -415,7 +413,7 @@ pub struct VtEncoder {
     attrs: CFRetained<CFDictionary<CFString, CFType>>,
     extradata: Option<Vec<u8>>,
     time_base: Option<TimeBase>,
-    last_dts: Option<i64>,
+    queued: VecDeque<i64>,
     submitted: u64,
 }
 
@@ -540,7 +538,7 @@ impl VtEncoder {
             attrs,
             extradata: None,
             time_base: None,
-            last_dts: None,
+            queued: VecDeque::new(),
             submitted: 0,
         })
     }
@@ -621,6 +619,7 @@ impl VtEncoder {
                 "VTCompressionSessionEncodeFrame failed ({status})"
             )));
         }
+        self.queued.push_back(frame.pts);
         self.submitted += 1;
         if self.submitted == 1 {
             let status = unsafe { self.session.session.complete_frames(pts) };
@@ -660,23 +659,23 @@ impl VtEncoder {
             }
         }
         let tb = self.time_base.unwrap_or(TimeBase::new(1, 90000));
+        let delay = if self.b_frames > 0 {
+            ticks(self.duration, tb).unwrap_or(1).max(1)
+        } else {
+            0
+        };
         let mut packets = Vec::with_capacity(outputs.len());
         for o in outputs {
-            let (data, pts, dts, keyframe) = match o {
+            let (data, pts, keyframe) = match o {
                 Output::Packet {
                     data,
                     pts,
-                    dts,
                     keyframe,
-                } => (data, pts, dts, keyframe),
+                } => (data, pts, keyframe),
                 Output::Failed(e) => return Err(e),
             };
-            let dts = ticks(dts, tb).unwrap_or(pts).min(pts);
-            let dts = match self.last_dts {
-                Some(last) if dts <= last => last + 1,
-                _ => dts,
-            };
-            self.last_dts = Some(dts);
+            let base = self.queued.pop_front().unwrap_or(pts);
+            let dts = (base - delay).min(pts);
             packets.push(Packet {
                 data,
                 pts,

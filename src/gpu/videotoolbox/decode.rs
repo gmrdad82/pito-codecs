@@ -20,6 +20,7 @@ use objc2_video_toolbox::{
     kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder,
 };
 
+use super::order::{Key, Order};
 use super::{Locked, NV12_FULL, NV12_VIDEO, P010_FULL, P010_VIDEO, codec_type, label, planes};
 use crate::gpu::nal::{self, Framing};
 use crate::gpu::syntax::bits::unescape_rbsp;
@@ -405,8 +406,10 @@ pub struct VtDecoder {
     sets: Vec<Vec<u8>>,
     layout: Option<Layout>,
     session: Option<Session>,
-    pending: Vec<Frame>,
-    in_flight: Vec<i64>,
+    order: Order,
+    seq: i64,
+    pending: Vec<(Key, Frame)>,
+    in_flight: Vec<(i64, i64, Key)>,
     skip_rasl: bool,
     first: bool,
 }
@@ -426,6 +429,8 @@ impl VtDecoder {
             sets: Vec::new(),
             layout: None,
             session: None,
+            order: Order::new(),
+            seq: 0,
             pending: Vec::new(),
             in_flight: Vec::new(),
             skip_rasl: false,
@@ -462,19 +467,19 @@ impl VtDecoder {
         }
     }
 
-    fn insert(&mut self, f: Frame) {
-        let at = self.pending.partition_point(|p| p.pts <= f.pts);
-        self.pending.insert(at, f);
+    fn insert(&mut self, key: Key, f: Frame) {
+        let at = self.pending.partition_point(|(k, _)| *k <= key);
+        self.pending.insert(at, (key, f));
     }
 
     fn bump(&mut self) -> Vec<Frame> {
         let reorder = self.layout.as_ref().map_or(0, |l| l.reorder);
         let mut out = Vec::new();
         while self.pending.len() + self.in_flight.len() > reorder {
-            let first = self.pending.first().map(|f| f.pts);
-            match (first, self.in_flight.iter().min()) {
-                (Some(p), Some(&q)) if q < p => break,
-                (Some(_), _) => out.push(self.pending.remove(0)),
+            let first = self.pending.first().map(|(k, _)| *k);
+            match (first, self.in_flight.iter().map(|&(_, _, k)| k).min()) {
+                (Some(p), Some(q)) if q < p => break,
+                (Some(_), _) => out.push(self.pending.remove(0).1),
                 (None, _) => break,
             }
         }
@@ -486,17 +491,23 @@ impl VtDecoder {
             return Ok(());
         };
         for o in session.take() {
-            let pts = match o {
-                Output::Frame(f) => {
-                    let pts = f.pts;
-                    self.insert(f);
-                    pts
-                }
-                Output::Dropped(pts) => pts,
-                Output::Failed(e) => return Err(e),
+            let seq = match &o {
+                Output::Frame(f) => f.pts,
+                Output::Dropped(seq) => *seq,
+                Output::Failed(_) => -1,
             };
-            if let Some(i) = self.in_flight.iter().position(|&p| p == pts) {
-                self.in_flight.swap_remove(i);
+            let entry = self
+                .in_flight
+                .iter()
+                .position(|&(s, _, _)| s == seq)
+                .map(|i| self.in_flight.swap_remove(i));
+            match (o, entry) {
+                (Output::Failed(e), _) => return Err(e),
+                (Output::Frame(mut f), Some((_, pts, key))) => {
+                    f.pts = pts;
+                    self.insert(key, f);
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -515,6 +526,7 @@ impl VtDecoder {
             }
             self.open(sets)?;
         }
+        let key = self.order.key(self.codec, &nals)?;
         let skip = self.skip(&nals);
         self.first = false;
         if skip || !nals.iter().any(|n| has_picture(self.codec, n)) {
@@ -534,8 +546,11 @@ impl VtDecoder {
         let Some(session) = self.session.as_ref() else {
             return Err(Error::Backend("no VideoToolbox session".into()));
         };
-        session.submit(&sample, packet.pts)?;
-        self.in_flight.push(packet.pts);
+        let key = key.ok_or_else(|| Error::Invalid("a picture without its first slice".into()))?;
+        let seq = self.seq;
+        self.seq += 1;
+        session.submit(&sample, seq)?;
+        self.in_flight.push((seq, packet.pts, key));
         if self.in_flight.len() > IN_FLIGHT {
             session.wait();
         }
@@ -549,12 +564,16 @@ impl VtDecoder {
         }
         let collected = self.collect();
         self.in_flight.clear();
-        let frames = std::mem::take(&mut self.pending);
+        let frames = std::mem::take(&mut self.pending)
+            .into_iter()
+            .map(|(_, f)| f)
+            .collect();
         collected.map(|_| frames)
     }
 
     pub fn reset(&mut self) {
         self.session = None;
+        self.order.reset();
         self.pending.clear();
         self.in_flight.clear();
         self.skip_rasl = false;

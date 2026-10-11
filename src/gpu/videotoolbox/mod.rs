@@ -1,5 +1,6 @@
 mod decode;
 mod encode;
+mod order;
 mod planes;
 
 use objc2_core_media::{CMVideoCodecType, kCMVideoCodecType_H264, kCMVideoCodecType_HEVC};

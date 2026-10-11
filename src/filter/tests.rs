@@ -32,6 +32,17 @@ fn ffmpeg(args: &[&str]) -> String {
     err
 }
 
+fn has_filter(name: &str) -> bool {
+    Command::new("ffmpeg")
+        .args(["-hide_banner", "-filters"])
+        .output()
+        .is_ok_and(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .any(|w| w == name)
+        })
+}
+
 fn path(name: &str) -> String {
     dir().join(name).to_string_lossy().into_owned()
 }
@@ -259,6 +270,10 @@ fn r128_matches_ffmpeg_ebur128() {
 #[test]
 fn scale_matches_zscale() {
     if !ffmpeg_present() {
+        return;
+    }
+    if !has_filter("zscale") {
+        eprintln!("this ffmpeg has no zscale (built without zimg), skipping");
         return;
     }
     let src = &source_1440p();
