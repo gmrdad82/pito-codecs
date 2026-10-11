@@ -144,6 +144,7 @@ fn sat(v: i32, lim: i32) -> i32 {
     v.clamp(-lim, lim)
 }
 
+crate::vp9::isa::dispatch! {
 #[allow(clippy::too_many_arguments)]
 pub fn inverse_transform_add(
     coefs: &[i32],
@@ -212,6 +213,7 @@ pub fn inverse_transform_add(
         (2, false) => itx_wide::<16>(coefs, &p, dst, stride),
         (_, false) => itx_wide::<32>(coefs, &p, dst, stride),
     }
+}
 }
 
 struct TxParams {

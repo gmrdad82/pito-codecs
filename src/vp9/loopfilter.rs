@@ -2,6 +2,9 @@ use crate::vp9::frame::{MiGrid, MiInfo};
 use crate::vp9::header::{LoopFilterParams, Segmentation};
 use crate::vp9::tables::*;
 
+#[cfg(target_arch = "x86_64")]
+mod avx2;
+
 pub struct LfFrame {
     pub lvl: [[[u8; 2]; 4]; 8],
     pub limits: [(i32, i32, i32); 64],
@@ -108,6 +111,13 @@ pub fn filter_superblock(
     }
 }
 
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Group {
+    pub size: u8,
+    pub lvl: u8,
+    pub apply: u8,
+}
+
 fn filter_sb_plane(
     v: &mut PlaneView,
     mi: &MiGrid,
@@ -124,10 +134,15 @@ fn filter_sb_plane(
         (sub_y, 64 >> sub_x)
     };
     let (mi_rows, mi_cols) = (f.mi_rows, f.mi_cols);
-    let across = if pass == 0 { 1isize } else { v.stride as isize };
+    let across = if pass == 0 { 1usize } else { v.stride };
+    let along = if pass == 0 { v.stride } else { 1 };
+    let groups_n = edge_len / 8;
     for edge in 0..(16 >> sub) {
-        let mut i = 0;
-        while i < edge_len {
+        let mut groups = [Group::default(); 8];
+        let mut any = false;
+        let mut first = None;
+        for (gi, g) in groups.iter_mut().enumerate().take(groups_n) {
+            let i = gi * 8;
             let (x, y) = if pass == 0 {
                 (col * 8 + edge * (4 << sub_x), row * 8 + (i << sub_y))
             } else {
@@ -138,115 +153,175 @@ fn filter_sb_plane(
                 || (pass == 0 && x == 0)
                 || (pass == 1 && y == 0)
             {
-                i += 8;
                 continue;
             }
-            let loop_col = ((x >> 3) >> sub_x) << sub_x;
-            let loop_row = ((y >> 3) >> sub_y) << sub_y;
-            let m = mi.at(loop_row, loop_col);
-            let tx_sz = if plane > 0 {
-                if m.sb_size < BLOCK_8X8 {
-                    0
-                } else {
-                    m.tx_size.min(
-                        MAX_TXSIZE
-                            [SS_SIZE_LOOKUP[m.sb_size as usize][f.ss_x][f.ss_y].min(12) as usize],
-                    )
-                }
-            } else {
-                m.tx_size
-            };
-            let sb_size = if sub == 0 {
-                m.sb_size
-            } else {
-                m.sb_size.max(BLOCK_16X16)
-            } as usize;
-            let is_intra = m.ref_frame[0] <= INTRA_FRAME;
-            let is_block_edge = if pass == 0 {
-                x & (8 * NUM_8X8_WIDE[sb_size] as usize - 1) == 0
-            } else {
-                y & (8 * NUM_8X8_HIGH[sb_size] as usize - 1) == 0
-            };
-            let tx_ok = edge & ((1 << tx_sz) - 1) == 0 && (is_intra || !m.skip);
-            if !is_block_edge && !tx_ok {
-                i += 8;
-                continue;
+            if first.is_none() {
+                first = Some((gi, x, y));
             }
-            let lvl = f.level(m);
-            if lvl == 0 {
-                i += 8;
-                continue;
-            }
-            let is32 = edge % 8 == 0;
-            let base_size = if tx_sz == TX_4X4 && is32 {
-                TX_8X8
-            } else {
-                tx_sz.min(TX_16X16)
-            };
-            let filter_size = if base_size == TX_16X16
-                && ((pass == 0 && sub_x == 1 && (x >> 3) == mi_cols - 1)
-                    || (pass == 1 && sub_y == 1 && (y >> 3) == mi_rows - 1))
-            {
-                TX_8X8
-            } else {
-                base_size
-            };
-            let (limit, blimit, thresh) = f.limits[lvl as usize];
-            let n = if pass == 0 {
-                (8 * mi_rows - y).div_ceil(1 << sub_y)
-            } else {
-                (8 * mi_cols - x).div_ceil(1 << sub_x)
-            }
-            .min(LANES)
-            .min(edge_len - i);
-            let odd_last = pass == 1 && sub_x == 1 && mi_cols & 1 == 1 && edge & 1 == 1;
-            let mut apply = [false; LANES];
-            for (l, a) in apply.iter_mut().enumerate().take(n) {
-                let is_tx_edge = tx_ok && !(odd_last && x + (l << sub_x) + 8 >= mi_cols * 8);
-                *a = is_block_edge || is_tx_edge;
-            }
-            if apply.iter().any(|&a| a) {
-                let px = x >> sub_x;
-                let py = y >> sub_y;
-                let pos = (py - v.oy) * v.stride + px - v.ox;
-                let along = if pass == 0 { v.stride } else { 1 };
-                let lim = Limits {
-                    apply,
-                    limit,
-                    blimit,
-                    thresh,
-                    filter_size,
-                    bit_depth: f.bit_depth,
-                };
-                let (d, st) = (&mut *v.data, across as usize);
-                match (f.bit_depth <= 10, filter_size == TX_16X16, pass == 1) {
-                    (true, false, false) => {
-                        lanes16::filter_group::<4, false>(d, pos, along, st, &lim)
-                    }
-                    (true, false, true) => {
-                        lanes16::filter_group::<4, true>(d, pos, along, st, &lim)
-                    }
-                    (true, true, false) => {
-                        lanes16::filter_group::<8, false>(d, pos, along, st, &lim)
-                    }
-                    (true, true, true) => lanes16::filter_group::<8, true>(d, pos, along, st, &lim),
-                    (false, false, false) => {
-                        lanes32::filter_group::<4, false>(d, pos, along, st, &lim)
-                    }
-                    (false, false, true) => {
-                        lanes32::filter_group::<4, true>(d, pos, along, st, &lim)
-                    }
-                    (false, true, false) => {
-                        lanes32::filter_group::<8, false>(d, pos, along, st, &lim)
-                    }
-                    (false, true, true) => {
-                        lanes32::filter_group::<8, true>(d, pos, along, st, &lim)
-                    }
-                }
-            }
-            i += 8;
+            *g = decide(mi, f, plane, pass, edge, x, y, sub_x, sub_y, edge_len - i);
+            any |= g.apply != 0;
+        }
+        let Some((g0, x, y)) = first else {
+            continue;
+        };
+        if !any {
+            continue;
+        }
+        let i0 = g0 * 8;
+        let (x0, y0) = if pass == 0 {
+            (x, y - (i0 << sub_y))
+        } else {
+            (x - (i0 << sub_x), y)
+        };
+        let px = x0 >> sub_x;
+        let py = y0 >> sub_y;
+        let pos = (py - v.oy) * v.stride + px - v.ox;
+        filter_edge(
+            v.data,
+            pos,
+            along,
+            across,
+            &groups[..groups_n],
+            f,
+            pass == 1,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn decide(
+    mi: &MiGrid,
+    f: &LfFrame,
+    plane: usize,
+    pass: usize,
+    edge: usize,
+    x: usize,
+    y: usize,
+    sub_x: usize,
+    sub_y: usize,
+    remaining: usize,
+) -> Group {
+    let (mi_rows, mi_cols) = (f.mi_rows, f.mi_cols);
+    let sub = if pass == 0 { sub_x } else { sub_y };
+    let loop_col = ((x >> 3) >> sub_x) << sub_x;
+    let loop_row = ((y >> 3) >> sub_y) << sub_y;
+    let m = mi.at(loop_row, loop_col);
+    let tx_sz = if plane > 0 {
+        if m.sb_size < BLOCK_8X8 {
+            0
+        } else {
+            m.tx_size.min(
+                MAX_TXSIZE[SS_SIZE_LOOKUP[m.sb_size as usize][f.ss_x][f.ss_y].min(12) as usize],
+            )
+        }
+    } else {
+        m.tx_size
+    };
+    let sb_size = if sub == 0 {
+        m.sb_size
+    } else {
+        m.sb_size.max(BLOCK_16X16)
+    } as usize;
+    let is_intra = m.ref_frame[0] <= INTRA_FRAME;
+    let is_block_edge = if pass == 0 {
+        x & (8 * NUM_8X8_WIDE[sb_size] as usize - 1) == 0
+    } else {
+        y & (8 * NUM_8X8_HIGH[sb_size] as usize - 1) == 0
+    };
+    let tx_ok = edge & ((1 << tx_sz) - 1) == 0 && (is_intra || !m.skip);
+    if !is_block_edge && !tx_ok {
+        return Group::default();
+    }
+    let lvl = f.level(m);
+    if lvl == 0 {
+        return Group::default();
+    }
+    let is32 = edge.is_multiple_of(8);
+    let base_size = if tx_sz == TX_4X4 && is32 {
+        TX_8X8
+    } else {
+        tx_sz.min(TX_16X16)
+    };
+    let filter_size = if base_size == TX_16X16
+        && ((pass == 0 && sub_x == 1 && (x >> 3) == mi_cols - 1)
+            || (pass == 1 && sub_y == 1 && (y >> 3) == mi_rows - 1))
+    {
+        TX_8X8
+    } else {
+        base_size
+    };
+    let n = if pass == 0 {
+        (8 * mi_rows - y).div_ceil(1 << sub_y)
+    } else {
+        (8 * mi_cols - x).div_ceil(1 << sub_x)
+    }
+    .min(LANES)
+    .min(remaining);
+    let odd_last = pass == 1 && sub_x == 1 && mi_cols & 1 == 1 && edge & 1 == 1;
+    let mut apply = 0u8;
+    for l in 0..n {
+        let is_tx_edge = tx_ok && !(odd_last && x + (l << sub_x) + 8 >= mi_cols * 8);
+        if is_block_edge || is_tx_edge {
+            apply |= 1 << l;
         }
     }
+    Group {
+        size: filter_size,
+        lvl,
+        apply,
+    }
+}
+
+crate::vp9::isa::dispatch! {
+fn filter_edge(
+    d: &mut [u16],
+    pos: usize,
+    along: usize,
+    across: usize,
+    groups: &[Group],
+    f: &LfFrame,
+    rows: bool,
+) {
+    #[cfg(target_arch = "x86_64")]
+    if f.bit_depth <= 10 && crate::vp9::isa::avx2() {
+        for (k, pair) in groups.chunks(2).enumerate() {
+            let g1 = pair.get(1).copied().unwrap_or_default();
+            if pair[0].apply | g1.apply == 0 {
+                continue;
+            }
+            let p = pos + k * 16 * along;
+            unsafe { avx2::filter16(d, p, along, across, [pair[0], g1], f, rows) };
+        }
+        return;
+    }
+    for (k, g) in groups.iter().enumerate() {
+        if g.apply == 0 {
+            continue;
+        }
+        let (limit, blimit, thresh) = f.limits[g.lvl as usize];
+        let lim = Limits {
+            apply: std::array::from_fn(|l| g.apply >> l & 1 == 1),
+            limit,
+            blimit,
+            thresh,
+            filter_size: g.size,
+            bit_depth: f.bit_depth,
+        };
+        let p = pos + k * 8 * along;
+        let wide = g.size == TX_16X16;
+        match (f.bit_depth <= 10, wide, rows) {
+            (true, false, false) => lanes16::filter_group::<4, false>(d, p, along, across, &lim),
+            (true, false, true) => lanes16::filter_group::<4, true>(d, p, along, across, &lim),
+            (true, true, false) => lanes16::filter_group::<8, false>(d, p, along, across, &lim),
+            (true, true, true) => lanes16::filter_group::<8, true>(d, p, along, across, &lim),
+            (false, false, false) => lanes32::filter_group::<4, false>(d, p, along, across, &lim),
+            (false, false, true) => lanes32::filter_group::<4, true>(d, p, along, across, &lim),
+            (false, true, false) => lanes32::filter_group::<8, false>(d, p, along, across, &lim),
+            (false, true, true) => lanes32::filter_group::<8, true>(d, p, along, across, &lim),
+        }
+    }
+}
 }
 
 const LANES: usize = 8;
