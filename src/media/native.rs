@@ -78,15 +78,14 @@ pub fn rational(fps: f64) -> (u32, u32) {
     if !fps.is_finite() || fps <= 0.0 {
         return (30, 1);
     }
-    let fps = fps.min(100_000.0);
-    if fps >= 1.0 && (fps - fps.round()).abs() < 0.01 {
+    if (fps - fps.round()).abs() < 0.01 {
         return (fps.round() as u32, 1);
     }
     let ntsc = fps * 1.001;
-    if ntsc >= 1.0 && (ntsc - ntsc.round()).abs() < 0.01 {
+    if (ntsc - ntsc.round()).abs() < 0.01 {
         return (ntsc.round() as u32 * 1000, 1001);
     }
-    (((fps * 1000.0).round() as u32).max(1), 1000)
+    ((fps * 1000.0).round() as u32, 1000)
 }
 
 fn video_track(r: &Reader) -> Result<(usize, &Track)> {
