@@ -12,8 +12,8 @@ pito-codecs is a pure Rust library of fast video, audio and image codecs and con
 
 | Part | Decode | Encode |
 | --- | --- | --- |
-| H.264 | CPU: Baseline, Main and High, progressive 8-bit 4:2:0, CAVLC and CABAC, bit-exact with ffmpeg. GPU: VA-API for the same profiles, bit-exact. | CPU: Baseline, Main and High with CABAC and B-frames; CRF, QP, CBR and VBR. GPU: VA-API High. |
-| H.265 | CPU: Main and Main 10, tiles and WPP, bit-exact with ffmpeg. GPU: VA-API Main and Main 10, bit-exact. | GPU only: VA-API Main. Without a GPU HEVC encoder it falls back to H.264 and says why. |
+| H.264 | CPU: Baseline, Main and High, progressive 8-bit 4:2:0, CAVLC and CABAC, bit-exact with ffmpeg. GPU: VA-API and VideoToolbox for the same profiles, bit-exact. | CPU: Baseline, Main and High with CABAC and B-frames; CRF, QP, CBR and VBR. GPU: VA-API High; VideoToolbox Main and High. |
+| H.265 | CPU: Main and Main 10, tiles and WPP, bit-exact with ffmpeg. GPU: VA-API and VideoToolbox, Main and Main 10, bit-exact. | GPU only: VA-API Main; VideoToolbox Main and Main 10. Without a GPU HEVC encoder it falls back to H.264 and says why. |
 | VP9 | CPU: profiles 0 to 3 (8, 10 and 12-bit; 4:2:0, 4:2:2 and 4:4:4), tiles, bit-exact with ffmpeg and libvpx. | CPU: profile 0, with motion search, trellis, rate control, AQ and tile threads. ffmpeg and libvpx decode it bit-exact to our reconstruction. Still slow. |
 | AAC | AAC-LC, mono to 7.1. | AAC-LC, CBR and VBR. |
 | Opus | SILK, CELT, hybrid and multistream; the RFC 8251 conformance vectors decode to the reference's final range on every packet. | CELT, VBR and CBR, 6 to 510 kbps, decoded clean by libopus. SILK and hybrid are in progress. |
@@ -23,7 +23,7 @@ pito-codecs is a pure Rust library of fast video, audio and image codecs and con
 | WebP | Lossless VP8L and lossy VP8, alpha, animation; bit-exact with libwebp. | In progress (lossless first). |
 | Filters | | Scale (bilinear, bicubic, Lanczos), BT.601/709/2020 colour, rotate, flip, crop, pad, fps change, RGBA overlay, resample, downmix, gain, EBU R128 loudness, true-peak limiter, normalise. |
 
-The GPU route is tested on Linux with VA-API, on an AMD Radeon RX 9060 XT with Mesa's radeonsi driver. NVENC (Linux and Windows), VideoToolbox (macOS) and Media Foundation (Windows) compile for their targets. None of them has run on its hardware yet, so they stay marked untested until one has.
+The GPU route is tested on Linux with VA-API, on an AMD Radeon RX 9060 XT with Mesa's radeonsi driver, and on macOS with VideoToolbox on GitHub's Apple Silicon runners, where CI checks its decode bit-exact with ffmpeg and decodes its encodes back on every push. NVENC (Linux and Windows) and Media Foundation (Windows) compile for their targets and pass their unit tests, but CI's runners have no GPU, so they stay untested until they run on their hardware.
 
 Known gaps in `v0.1.0`, being worked on now:
 
@@ -176,11 +176,18 @@ Each minor release up to `1.0.0` lands as its group is finished and measured:
 ## Build and test
 
 ```
-bin/gate --fast
-bin/gate
+cargo build --release
+cargo test --release
 ```
 
-`--fast` runs `cargo fmt --check`, `cargo clippy -D warnings` and the tests; the plain gate adds a release build. The tests use the system ffmpeg as an oracle when it is installed and skip those checks when it is not, and the GPU tests skip cleanly without a device.
+The tests use the system ffmpeg as an oracle when it is installed and skip those checks when it is not, and the GPU tests skip cleanly without a device. `bin/gate` runs rustfmt, clippy with warnings as errors and the tests, then a release build (`--fast` skips the build).
+
+[CI](.github/workflows/ci.yml) runs on every push and pull request. One job checks formatting and runs clippy for Linux x64 and arm64, Windows and macOS. Then four runners test in parallel: Linux x64 and Linux arm64 (Debian with its ffmpeg), Windows x64 and macOS on Apple Silicon, each with every test in release under nextest, the doc tests and a release build. On a `v` tag it also checks that the tag matches the crate's version. What that covers:
+
+- **CPU codecs, containers and filters** on x86-64 with the AVX2 kernels, and on arm64 with the portable paths and the filters' NEON kernels, on Linux, Windows and macOS.
+- **VideoToolbox** on macOS: H.264 and H.265 decode bit-exact with ffmpeg, H.264 and H.265 encode decoded back by ffmpeg, bitrate modes, and a transcode that scales on the GPU.
+- **Media Foundation and NVENC** only build and run their unit tests, since the runners have no GPU.
+- **VA-API** runs on the maintainer's AMD machine before each release, with the benchmarks.
 
 ## Contributing
 
