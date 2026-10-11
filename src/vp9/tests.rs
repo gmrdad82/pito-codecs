@@ -151,6 +151,28 @@ const CONFORMANCE: &[Fixture] = &[
 
 const BENCH: &[Fixture] = &[
     fx(
+        "bench_1080p_hq",
+        "testsrc2",
+        (1920, 1080),
+        60,
+        "noise=alls=3:allf=t",
+        "yuv420p",
+        &[
+            "-crf",
+            "12",
+            "-b:v",
+            "0",
+            "-speed",
+            "4",
+            "-tile-columns",
+            "2",
+            "-row-mt",
+            "1",
+            "-frame-parallel",
+            "0",
+        ],
+    ),
+    fx(
         "bench_1080p",
         "testsrc2",
         (1920, 1080),
