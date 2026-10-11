@@ -203,9 +203,13 @@ pub trait Pixel: Copy + Default + Send + Sync + PartialEq + std::fmt::Debug + 's
     const WIDE: bool;
     fn get(self) -> i32;
     fn put(v: i32) -> Self;
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     fn wide(s: &[Self]) -> Option<&[u16]>;
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     fn wide_mut(s: &mut [Self]) -> Option<&mut [u16]>;
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     fn narrow(s: &[Self]) -> Option<&[u8]>;
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     fn narrow_mut(s: &mut [Self]) -> Option<&mut [u8]>;
 }
 
