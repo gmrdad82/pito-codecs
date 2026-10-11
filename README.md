@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/images/decode.gif" width="800" alt="A terminal running pcodec on a 1080p H.264 clip: it probes the file, decodes it at about 590 fps on the CPU and about 1,700 fps on the GPU through VA-API, then encodes it to HEVC on the GPU at about 600 fps."></p>
+<p align="center"><img src="docs/images/decode.gif" width="800" alt="A terminal running pcod on a 1080p H.264 clip: it probes the file, decodes it at about 1,440 fps on the CPU and about 1,700 fps on the GPU through VA-API, then encodes it to HEVC on the GPU at about 620 fps."></p>
 
 # pito-codecs
 
@@ -117,7 +117,7 @@ let info = probe("clip.mp4".as_ref(), &prefs)?;
 let still = first_frame("clip.mp4".as_ref(), 240, &prefs)?;
 ```
 
-`examples/pcodec.rs` is a small command line over the library, and it is what the GIF above shows: `cargo run --release --example pcodec -- decode clip.mp4 --route gpu`.
+`examples/pcod.rs` is a small command line over the library, and it is what the GIF above shows: `cargo run --release --example pcod -- decode clip.mp4 --route gpu`.
 
 ## Routes
 
