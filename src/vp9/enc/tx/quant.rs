@@ -212,34 +212,41 @@ pub fn trellis<const N2: usize>(
     let lmax_dc = MAX_LEVEL.min((32767 << k32) / q.dc) as u32;
     let inv_ac = recip(q.ac);
     let inv_dc = recip(q.dc);
-    let mut eob0 = 0;
-    let mut abs = [0u16; N2];
-    let mut l0 = [0u16; N2];
-    for (k, &pos) in s.scan.iter().enumerate() {
-        let i = s.tpos(pos as usize);
+    let coef = &coef[..N2];
+    let iscan = &s.iscan_t[..N2];
+    let half = q.ac as u32 >> 1;
+    let mut lr = [0u16; N2];
+    let mut eob0 = 0u32;
+    for i in 0..N2 {
         let a = coef[i].unsigned_abs() as u32;
-        let (dq, inv, lmax) = if i == 0 {
-            (q.dc, inv_dc, lmax_dc)
-        } else {
-            (q.ac, inv_ac, lmax_ac)
-        };
-        let l = ((((a << k32) + (dq as u32 >> 1)) * inv.0) >> inv.1).min(lmax);
-        abs[k] = a as u16;
-        l0[k] = l as u16;
+        let l = ((((a << k32) + half) * inv_ac.0) >> inv_ac.1).min(lmax_ac);
+        lr[i] = l as u16;
+        let nz = if l != 0 { u32::MAX } else { 0 };
+        eob0 = eob0.max((iscan[i] as u32 + 1) & nz);
+    }
+    {
+        let a = coef[0].unsigned_abs() as u32;
+        let l = ((((a << k32) + (q.dc as u32 >> 1)) * inv_dc.0) >> inv_dc.1).min(lmax_dc);
+        lr[0] = l as u16;
         if l != 0 {
-            eob0 = k + 1;
+            eob0 = eob0.max(1);
         }
     }
-    let mut tail = [0u64; N2];
-    let mut acc = 0u64;
-    for k in (0..eob0).rev() {
-        let a = abs[k] as u64;
-        acc += a * a * w;
-        tail[k] = acc;
+    let eob0 = eob0 as usize;
+    let mut abs = [0u16; N2];
+    let mut l0 = [0u16; N2];
+    let mut total = 0u64;
+    for k in 0..eob0 {
+        let i = s.tpos(s.scan[k] as usize);
+        let a = coef[i].unsigned_abs();
+        abs[k] = a;
+        l0[k] = lr[i];
+        total += (a as u64 * a as u64) * w;
     }
+    let mut zeroed = 0u64;
     let mut tc = [0u8; N2];
     let band0 = s.bands[0] as usize;
-    let mut best_j = tail[0] + lam * costs.more[band0][ctx0][0] as u64;
+    let mut best_j = total + lam * costs.more[band0][ctx0][0] as u64;
     let mut best_e = 0usize;
     let mut best_r = costs.more[band0][ctx0][0];
     let mut cum_d = 0u64;
@@ -260,6 +267,7 @@ pub fn trellis<const N2: usize>(
             0
         };
         let lv = l0[k] as u32;
+        zeroed += (a * a) as u64 * w;
         let mut pick = lv;
         let mut pick_r = level_cost(c, tok, lv);
         let err = a - ((lv as i64 * dq) >> k32);
@@ -288,7 +296,7 @@ pub fn trellis<const N2: usize>(
             } else {
                 0
             };
-            let j = cum_d + tail.get(k + 1).copied().unwrap_or(0) + lam * (cum_r + r_end) as u64;
+            let j = cum_d + (total - zeroed) + lam * (cum_r + r_end) as u64;
             if j < best_j {
                 best_j = j;
                 best_e = k + 1;
