@@ -44,7 +44,7 @@ Where ffmpeg still wins:
 
 - **CPU H.264 decode:** about 1.8× faster than ours (971 against 545 fps at 1080p, all threads).
 - **CPU HEVC decode:** about 2.3× faster (897 against 384 fps at 1080p, all threads).
-- **CPU H.264 encode against x264:** libx264 medium is about 2.3× faster (189 against 83 fps at 1080p), and our encoder needs 35 to 67 % more bits for the same quality.
+- **CPU H.264 encode against x264:** libx264 medium is about 2.3× faster (189 against 83 fps at 1080p), and our encoder needs 14 to 35 % more bits for the same quality (BD-rate on three public clips).
 - **AAC decode:** about 2.1× faster (1357× against 633× real time).
 - **Smart-cut export against a stream copy:** ffmpeg's copy is about 7.5× faster (54.3× against 7.2× real time), but it cuts only on keyframes, so it isn't frame-accurate.
 - **VP9 encode:** about as fast as libvpx at `good` speed 4 (59 to 75 against 60 to 64 fps at 1080p), but ours needs 6.4 % more bits for the same PSNR.
