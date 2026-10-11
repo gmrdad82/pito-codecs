@@ -1,4 +1,6 @@
-use super::plane::{Sample, check, reshape, samples, samples_mut};
+#[cfg(target_arch = "x86_64")]
+use super::plane::Simd;
+use super::plane::{Sample, check, reshape, samples, samples_mut, simd};
 use crate::media::{Frame, PixelFormat, Result};
 use rayon::prelude::*;
 
@@ -233,35 +235,93 @@ fn affine<S: Sample, T: Sample>(src: &Frame, a: Affine, out: &mut Frame) -> Resu
     let oy = samples_mut::<T>(py)?;
     let ou = samples_mut::<T>(pu)?;
     let ov = samples_mut::<T>(pv)?;
-    let luma_only = a.y[2] == 0 && a.y[3] == 0;
+    let simd = simd();
     oy.par_chunks_mut(ty * 2)
         .zip(ou.par_chunks_mut(tu))
         .zip(ov.par_chunks_mut(tv))
         .enumerate()
         .with_min_len(rows_job(h.div_ceil(2)))
-        .for_each(|(cy, ((yrows, urow), vrow))| {
+        .for_each_init(Vec::new, |c, (cy, ((yrows, urow), vrow))| {
             let u = &iu[cy * su..cy * su + cw];
             let v = &iv[cy * sv..cy * sv + cw];
-            for (r, yrow) in yrows.chunks_mut(ty).enumerate() {
-                let y = cy * 2 + r;
-                let src_row = &iy[y * sy..y * sy + w];
-                let dst = &mut yrow[..w];
-                if luma_only {
-                    for (o, &s) in dst.iter_mut().zip(src_row) {
-                        *o = T::put(((a.y[0] + a.y[1] * s.get()) >> FRAC).clamp(0, a.max));
-                    }
-                } else {
-                    for (x, (o, &s)) in dst.iter_mut().zip(src_row).enumerate() {
-                        let c = a.y[2] * u[x / 2].get() + a.y[3] * v[x / 2].get();
-                        *o = T::put(((a.y[0] + a.y[1] * s.get() + c) >> FRAC).clamp(0, a.max));
-                    }
-                }
-            }
-            for x in 0..cw {
-                let (cu, cv) = (u[x].get(), v[x].get());
-                urow[x] = T::put(((a.u[0] + a.u[1] * cu + a.u[2] * cv) >> FRAC).clamp(0, a.max));
-                vrow[x] = T::put(((a.v[0] + a.v[1] * cu + a.v[2] * cv) >> FRAC).clamp(0, a.max));
+            let rows = (h - cy * 2).min(2);
+            let ys: [&[S]; 2] = std::array::from_fn(|r| {
+                let y = cy * 2 + r.min(rows - 1);
+                &iy[y * sy..y * sy + w]
+            });
+            let job = Job {
+                a,
+                u,
+                v,
+                ys,
+                rows,
+                w,
+            };
+            match simd {
+                #[cfg(target_arch = "x86_64")]
+                Simd::Avx2 => unsafe { job.run_avx2(c, yrows, ty, urow, vrow) },
+                _ => job.run(c, yrows, ty, urow, vrow),
             }
         });
     Ok(())
+}
+
+struct Job<'a, S> {
+    a: Affine,
+    u: &'a [S],
+    v: &'a [S],
+    ys: [&'a [S]; 2],
+    rows: usize,
+    w: usize,
+}
+
+impl<S: Sample> Job<'_, S> {
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn run_avx2<T: Sample>(
+        &self,
+        c: &mut Vec<i32>,
+        yrows: &mut [T],
+        ty: usize,
+        urow: &mut [T],
+        vrow: &mut [T],
+    ) {
+        self.run(c, yrows, ty, urow, vrow);
+    }
+
+    #[inline(always)]
+    fn run<T: Sample>(
+        &self,
+        c: &mut Vec<i32>,
+        yrows: &mut [T],
+        ty: usize,
+        urow: &mut [T],
+        vrow: &mut [T],
+    ) {
+        let a = self.a;
+        let cw = self.u.len();
+        c.clear();
+        c.resize(cw * 2, 0);
+        for (pair, (&u, &v)) in c.chunks_exact_mut(2).zip(self.u.iter().zip(self.v)) {
+            let t = a.y[0] + a.y[2] * u.get() + a.y[3] * v.get();
+            pair[0] = t;
+            pair[1] = t;
+        }
+        for (r, src) in self.ys.iter().enumerate().take(self.rows) {
+            let dst = &mut yrows[r * ty..r * ty + self.w];
+            for ((o, &s), &t) in dst.iter_mut().zip(*src).zip(c.iter()) {
+                *o = T::put(((t + a.y[1] * s.get()) >> FRAC).clamp(0, a.max));
+            }
+        }
+        for (((o, p), &u), &v) in urow[..cw]
+            .iter_mut()
+            .zip(vrow[..cw].iter_mut())
+            .zip(self.u)
+            .zip(self.v)
+        {
+            let (u, v) = (u.get(), v.get());
+            *o = T::put(((a.u[0] + a.u[1] * u + a.u[2] * v) >> FRAC).clamp(0, a.max));
+            *p = T::put(((a.v[0] + a.v[1] * u + a.v[2] * v) >> FRAC).clamp(0, a.max));
+        }
+    }
 }
