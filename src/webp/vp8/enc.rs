@@ -1,8 +1,9 @@
-use super::bits::BoolEncoder;
+use super::bits::{BoolEncoder, Code, codes};
 use super::dec::{Quant, UV_OFF, Work, Y_OFF, quant};
 use super::dsp::{self, B_PRED, BPS};
+use super::isa::dispatch;
 use super::tables::*;
-use super::tokens::{self, Counter, Counts, Writer, bit_cost, block_cost};
+use super::tokens::{self, Counter, Counts, Writer, block_cost};
 use crate::media::{Error, Result};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -47,49 +48,83 @@ fn clip_uv(v: i32) -> u8 {
     v.clamp(0, 255) as u8
 }
 
+dispatch! {
+    fn y_row(src: &[u8], out: &mut [u8]) {
+        for (o, c) in out.iter_mut().zip(src.chunks_exact(4)) {
+            *o = rgb_to_y(c[0] as i32, c[1] as i32, c[2] as i32);
+        }
+    }
+}
+
+dispatch! {
+    fn uv_row(a: &[u8], b: &[u8], uo: &mut [u8], vo: &mut [u8]) {
+        for ((u, v), (pa, pb)) in uo
+            .iter_mut()
+            .zip(vo.iter_mut())
+            .zip(a.chunks_exact(8).zip(b.chunks_exact(8)))
+        {
+            let s = |k: usize| pa[k] as i32 + pa[k + 4] as i32 + pb[k] as i32 + pb[k + 4] as i32;
+            let (sr, sg, sb) = (s(0), s(1), s(2));
+            *u = clip_uv(-9719 * sr - 19081 * sg + 28800 * sb);
+            *v = clip_uv(28800 * sr - 24116 * sg - 4684 * sb);
+        }
+    }
+}
+
 pub fn rgba_to_yuv(rgba: &[u8], width: usize, height: usize, exact: bool) -> Planes {
     use rayon::prelude::*;
     let mb_w = width.div_ceil(16);
     let mb_h = height.div_ceil(16);
     let mut p = Planes::new(mb_w, mb_h);
     let (ys, uvs) = (p.ys, p.uvs);
-    let px = |x: usize, y: usize| {
-        let o = (y.min(height - 1) * width + x.min(width - 1)) * 4;
-        &rgba[o..o + 4]
+    let row = |y: usize| {
+        let y = y.min(height - 1);
+        &rgba[y * width * 4..(y + 1) * width * 4]
+    };
+    let uv = |sr: i32, sg: i32, sb: i32| {
+        (
+            clip_uv(-9719 * sr - 19081 * sg + 28800 * sb),
+            clip_uv(28800 * sr - 24116 * sg - 4684 * sb),
+        )
     };
     p.y.par_chunks_mut(ys * 16)
         .zip(p.u.par_chunks_mut(uvs * 8))
         .zip(p.v.par_chunks_mut(uvs * 8))
         .enumerate()
         .for_each(|(my, ((yb, ub), vb))| {
-            for r in 0..16 {
-                let y = my * 16 + r;
-                for x in 0..ys {
-                    let c = px(x, y);
-                    yb[r * ys + x] = rgb_to_y(c[0] as i32, c[1] as i32, c[2] as i32);
-                }
+            for (r, out) in yb.chunks_exact_mut(ys).enumerate() {
+                y_row(row(my * 16 + r), out);
+                let last = out[width - 1];
+                out[width..].fill(last);
             }
-            for r in 0..8 {
-                let y = my * 16 + 2 * r;
-                for x in 0..uvs {
-                    let (mut sr, mut sg, mut sb) = (0, 0, 0);
-                    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                        let c = px(2 * x + dx, y + dy);
-                        sr += c[0] as i32;
-                        sg += c[1] as i32;
-                        sb += c[2] as i32;
-                    }
-                    ub[r * uvs + x] = clip_uv(-9719 * sr - 19081 * sg + 28800 * sb);
-                    vb[r * uvs + x] = clip_uv(28800 * sr - 24116 * sg - 4684 * sb);
+            for (r, (uo, vo)) in ub
+                .chunks_exact_mut(uvs)
+                .zip(vb.chunks_exact_mut(uvs))
+                .enumerate()
+            {
+                let a = row(my * 16 + 2 * r);
+                let b = row(my * 16 + 2 * r + 1);
+                uv_row(a, b, uo, vo);
+                for x in width / 2..uvs {
+                    let o0 = (2 * x).min(width - 1) * 4;
+                    let o1 = (2 * x + 1).min(width - 1) * 4;
+                    let s = |k: usize| {
+                        a[o0 + k] as i32 + a[o1 + k] as i32 + b[o0 + k] as i32 + b[o1 + k] as i32
+                    };
+                    (uo[x], vo[x]) = uv(s(0), s(1), s(2));
                 }
             }
             if !exact {
                 for mx in 0..mb_w {
-                    let clear =
-                        (0..16).all(|r| (0..16).all(|c| px(mx * 16 + c, my * 16 + r)[3] == 0));
+                    let (x0, x1) = (mx * 16, (mx * 16 + 16).min(width));
+                    let clear = (0..16).all(|r| {
+                        row(my * 16 + r)[x0 * 4..x1 * 4]
+                            .chunks_exact(4)
+                            .all(|c| c[3] == 0)
+                    });
                     if clear {
                         for r in 0..16 {
-                            yb[r * ys + mx * 16..r * ys + mx * 16 + 16].fill(128);
+                            yb[r * ys + x0..r * ys + x0 + 16].fill(128);
                         }
                         for r in 0..8 {
                             ub[r * uvs + mx * 8..r * uvs + mx * 8 + 8].fill(128);
@@ -246,23 +281,10 @@ struct Costs {
     bmode: Box<[[[u32; 10]; 10]; 10]>,
 }
 
-fn tree_cost(tree: &[i8], probs: &[u8], value: u8) -> u32 {
-    fn walk(tree: &[i8], probs: &[u8], i: usize, value: u8, acc: u32) -> Option<u32> {
-        for b in 0..2 {
-            let next = tree[i + b];
-            let c = acc + bit_cost(b == 1, probs[i >> 1]);
-            if next <= 0 {
-                if (-next) as u8 == value {
-                    return Some(c);
-                }
-            } else if let Some(r) = walk(tree, probs, next as usize, value, c) {
-                return Some(r);
-            }
-        }
-        None
-    }
-    walk(tree, probs, 0, value, 0).unwrap_or(0)
-}
+const YMODE_CODES: [Code; 5] = codes(&KF_YMODE_TREE);
+const UV_CODES: [Code; 4] = codes(&UV_MODE_TREE);
+const BMODE_CODES: [Code; 10] = codes(&BMODE_TREE);
+const SEGMENT_CODES: [Code; 4] = codes(&SEGMENT_TREE);
 
 impl Costs {
     fn new() -> Self {
@@ -270,13 +292,13 @@ impl Costs {
         for a in 0..10 {
             for l in 0..10 {
                 for m in 0..10 {
-                    bmode[a][l][m] = tree_cost(&BMODE_TREE, &KF_BMODE_PROBS[a][l], m as u8);
+                    bmode[a][l][m] = BMODE_CODES[m].cost(&KF_BMODE_PROBS[a][l]);
                 }
             }
         }
         Costs {
-            ymode: std::array::from_fn(|m| tree_cost(&KF_YMODE_TREE, &KF_YMODE_PROBS, m as u8)),
-            uvmode: std::array::from_fn(|m| tree_cost(&UV_MODE_TREE, &KF_UV_MODE_PROBS, m as u8)),
+            ymode: std::array::from_fn(|m| YMODE_CODES[m].cost(&KF_YMODE_PROBS)),
+            uvmode: std::array::from_fn(|m| UV_CODES[m].cost(&KF_UV_MODE_PROBS)),
             bmode,
         }
     }
@@ -779,18 +801,18 @@ fn modes_header(
         let mut intra_l = [0u8; 4];
         for (mx, mb) in row.iter().enumerate() {
             if let Some(p) = seg_probs {
-                bw.tree(&SEGMENT_TREE, &p, mb.segment);
+                bw.code(&SEGMENT_CODES[mb.segment as usize], &p);
             }
             if let Some(p) = skip_prob {
                 bw.put(!mb.coded, p);
             }
-            bw.tree(&KF_YMODE_TREE, &KF_YMODE_PROBS, mb.ymode);
+            bw.code(&YMODE_CODES[mb.ymode as usize], &KF_YMODE_PROBS);
             let top = &mut intra_t[mx * 4..mx * 4 + 4];
             if mb.ymode == B_PRED {
                 for (i, &m) in mb.bmodes.iter().enumerate() {
                     let a = top[i & 3] as usize;
                     let l = intra_l[i >> 2] as usize;
-                    bw.tree(&BMODE_TREE, &KF_BMODE_PROBS[a][l], m);
+                    bw.code(&BMODE_CODES[m as usize], &KF_BMODE_PROBS[a][l]);
                     top[i & 3] = m;
                     intra_l[i >> 2] = m;
                 }
@@ -799,7 +821,7 @@ fn modes_header(
                 top.fill(b);
                 intra_l.fill(b);
             }
-            bw.tree(&UV_MODE_TREE, &KF_UV_MODE_PROBS, mb.uvmode);
+            bw.code(&UV_CODES[mb.uvmode as usize], &KF_UV_MODE_PROBS);
         }
     }
 }
@@ -981,13 +1003,15 @@ pub fn encode(rgba: &[u8], width: usize, height: usize, params: &Params) -> Resu
         };
         analyse(&ctx, threads);
     }
-    let level = filter_level(&src, &rec, &mbs, q, params.effort);
     let skippable = mbs.iter().filter(|m| !m.coded).count();
     let skip_prob = (skippable > 0).then(|| {
         let p = (255 * (mbs.len() - skippable) / mbs.len()).clamp(1, 254);
         p as u8
     });
-    let counts = count(&mbs, mb_w, skip_prob.is_some());
+    let (level, counts) = rayon::join(
+        || filter_level(&src, &rec, &mbs, q, params.effort),
+        || count(&mbs, mb_w, skip_prob.is_some()),
+    );
     let (coeff, update) = tokens::choose_probs(&counts, &COEFF_PROBS);
     let wprobs = tokens::expand(&coeff);
 
@@ -998,73 +1022,78 @@ pub fn encode(rgba: &[u8], width: usize, height: usize, params: &Params) -> Resu
     } else {
         1
     };
-    let mut first = BoolEncoder::with_capacity(mb_w * mb_h * 4 + 1024);
-    first.flag(false);
-    first.flag(false);
-    first.flag(false);
-    first.flag(false);
-    first.literal(level as u32, 6);
-    first.literal(0, 3);
-    first.flag(false);
-    first.literal(nparts.trailing_zeros(), 2);
-    first.literal(q as u32, 7);
-    for _ in 0..5 {
-        first.optional_signed(0, 4);
-    }
-    first.flag(true);
-    for t in 0..4 {
-        for b in 0..8 {
-            for c in 0..3 {
-                for i in 0..11 {
-                    let u = update[t][b][c][i];
-                    first.put(u, COEFF_UPDATE_PROBS[t][b][c][i]);
-                    if u {
-                        first.literal(coeff[t][b][c][i] as u32, 8);
+    use rayon::prelude::*;
+    let (first, parts) = rayon::join(
+        || {
+            let mut first = BoolEncoder::with_capacity(mb_w * mb_h * 4 + 1024);
+            first.flag(false);
+            first.flag(false);
+            first.flag(false);
+            first.flag(false);
+            first.literal(level as u32, 6);
+            first.literal(0, 3);
+            first.flag(false);
+            first.literal(nparts.trailing_zeros(), 2);
+            first.literal(q as u32, 7);
+            for _ in 0..5 {
+                first.optional_signed(0, 4);
+            }
+            first.flag(true);
+            for t in 0..4 {
+                for b in 0..8 {
+                    for c in 0..3 {
+                        for i in 0..11 {
+                            let u = update[t][b][c][i];
+                            first.put(u, COEFF_UPDATE_PROBS[t][b][c][i]);
+                            if u {
+                                first.literal(coeff[t][b][c][i] as u32, 8);
+                            }
+                        }
                     }
                 }
             }
-        }
-    }
-    first.flag(skip_prob.is_some());
-    if let Some(p) = skip_prob {
-        first.literal(p as u32, 8);
-    }
-    modes_header(&mut first, &mbs, mb_w, None, skip_prob);
-    let first = first.finish();
+            first.flag(skip_prob.is_some());
+            if let Some(p) = skip_prob {
+                first.literal(p as u32, 8);
+            }
+            modes_header(&mut first, &mbs, mb_w, None, skip_prob);
+            first.finish()
+        },
+        || {
+            (0..nparts)
+                .into_par_iter()
+                .map(|p| {
+                    let mut bw = BoolEncoder::with_capacity(rgba.len() / (8 * nparts) + 64);
+                    for my in (p..mb_h).step_by(nparts) {
+                        let mut left = 0u32;
+                        for mx in 0..mb_w {
+                            let mb = &mbs[my * mb_w + mx];
+                            let mut top = if my > 0 {
+                                mbs[(my - 1) * mb_w + mx].top_out
+                            } else {
+                                0
+                            };
+                            if skip_prob.is_some() && !mb.coded {
+                                skip_context(mb, &mut top, &mut left);
+                                continue;
+                            }
+                            let mut sink = Writer {
+                                bw: &mut bw,
+                                probs: &wprobs,
+                            };
+                            mb_tokens(&mut sink, mb, &mut top, &mut left);
+                        }
+                    }
+                    bw.finish()
+                })
+                .collect::<Vec<Vec<u8>>>()
+        },
+    );
     if first.len() >= 1 << 19 {
         return Err(Error::Unsupported(
             "webp: VP8 first partition too large".into(),
         ));
     }
-
-    use rayon::prelude::*;
-    let parts: Vec<Vec<u8>> = (0..nparts)
-        .into_par_iter()
-        .map(|p| {
-            let mut bw = BoolEncoder::with_capacity(rgba.len() / (8 * nparts) + 64);
-            for my in (p..mb_h).step_by(nparts) {
-                let mut left = 0u32;
-                for mx in 0..mb_w {
-                    let mb = &mbs[my * mb_w + mx];
-                    let mut top = if my > 0 {
-                        mbs[(my - 1) * mb_w + mx].top_out
-                    } else {
-                        0
-                    };
-                    if skip_prob.is_some() && !mb.coded {
-                        skip_context(mb, &mut top, &mut left);
-                        continue;
-                    }
-                    let mut sink = Writer {
-                        bw: &mut bw,
-                        probs: &wprobs,
-                    };
-                    mb_tokens(&mut sink, mb, &mut top, &mut left);
-                }
-            }
-            bw.finish()
-        })
-        .collect();
 
     let total = 10 + first.len() + 3 * (nparts - 1) + parts.iter().map(|p| p.len()).sum::<usize>();
     let mut out = Vec::with_capacity(total);

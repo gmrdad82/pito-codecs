@@ -258,7 +258,7 @@ fn encode_n<I: Isa, const N: usize, const N2: usize>(
     } else {
         xform::forward::<I>(&mut co.0, tx_size, tx_type);
         if lambda == 0 {
-            let deadzone = if b.is_inter { 22 } else { 26 };
+            let deadzone = if b.is_inter { 14 } else { 21 };
             let (eob, rows) = quant::quantise::<N2>(&co.0, &mut dq.0, &s, q, deadzone, levels);
             (eob, rows, quant::rate::<N2>(levels, eob, &s, b.ctx, costs))
         } else {

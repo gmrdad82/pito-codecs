@@ -197,8 +197,40 @@ impl fmt::Display for Error {
             Error::Unsupported(s) => write!(f, "unsupported: {s}"),
             Error::Invalid(s) => write!(f, "invalid data: {s}"),
             Error::Backend(s) => write!(f, "backend: {s}"),
-            Error::Io(e) => write!(f, "io: {e}"),
+            Error::Io(e) => write!(f, "{e}"),
             Error::Cancelled => write!(f, "cancelled"),
+        }
+    }
+}
+
+impl Error {
+    pub fn at(path: &std::path::Path, e: std::io::Error) -> Self {
+        let text = e.to_string();
+        let cause = match text.rfind(" (os error ") {
+            Some(i) if text.ends_with(')') => &text[..i],
+            _ => text.as_str(),
+        };
+        Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("{}: {cause}", path.display()),
+        ))
+    }
+
+    pub fn in_file(self, path: &std::path::Path) -> Self {
+        let shown = path.display().to_string();
+        let named = |s: String| {
+            if s.contains(&shown) {
+                s
+            } else {
+                format!("{shown}: {s}")
+            }
+        };
+        match self {
+            Error::Unsupported(s) => Error::Unsupported(named(s)),
+            Error::Invalid(s) => Error::Invalid(named(s)),
+            Error::Backend(s) => Error::Backend(named(s)),
+            Error::Io(e) if !e.to_string().contains(&shown) => Error::at(path, e),
+            e => e,
         }
     }
 }

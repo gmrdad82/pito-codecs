@@ -8,6 +8,8 @@ mod track;
 mod writer;
 
 #[cfg(test)]
+mod malformed;
+#[cfg(test)]
 mod tests;
 
 pub use crate::mp4::{ByteSource, Cut, Snap, Span, TrackKind};
