@@ -1,7 +1,11 @@
 pub(crate) mod celt;
+mod isa;
+
+use std::io::Write;
 
 use crate::media::{AudioBuffer, Error, Packet, Result};
 use crate::opus::OpusHead;
+use crate::opus::ogg;
 use crate::opus::packet::Bandwidth;
 use crate::opus::range::RangeEncoder;
 
@@ -11,6 +15,8 @@ pub const FRAME: usize = 960;
 const DELAY: usize = 192;
 const CELT_DELAY: usize = 120;
 const MAX_PACKET: usize = 1276;
+const CHUNK: usize = 256;
+const HISTORY: usize = 121;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Application {
@@ -25,6 +31,7 @@ pub struct EncoderConfig {
     pub channels: u16,
     pub bitrate: u32,
     pub application: Application,
+    pub vbr: bool,
 }
 
 impl EncoderConfig {
@@ -34,6 +41,7 @@ impl EncoderConfig {
             channels,
             bitrate,
             application: Application::Audio,
+            vbr: true,
         }
     }
 }
@@ -156,47 +164,160 @@ impl Encoder {
 
     fn drain(&mut self, out: &mut Vec<Packet>) {
         let c = self.cfg.channels as usize;
-        while self.pending.len() - self.consumed >= FRAME * c {
+        let step = FRAME * c;
+        loop {
+            let avail = (self.pending.len() - self.consumed) / step;
+            if avail == 0 {
+                break;
+            }
+            let at_chunk = self.frames.is_multiple_of(CHUNK as u64);
+            if at_chunk && avail >= 2 * CHUNK && rayon::current_num_threads() > 1 {
+                self.encode_chunks(avail / CHUNK, out);
+                continue;
+            }
+            if at_chunk && self.frames > 0 {
+                let h = self.consumed - HISTORY * c;
+                self.celt.prime(&self.pending[h..self.consumed]);
+            }
             let start = self.consumed;
-            self.consumed += FRAME * c;
-            let pkt = self.encode_frame(start);
+            self.consumed += step;
+            let pcm = &self.pending[start..start + step];
+            let (pkt, rng) =
+                encode_packet(&self.cfg, &mut self.celt, &mut self.rc, pcm, self.frames);
+            self.final_range = rng;
+            self.frames += 1;
             out.push(pkt);
         }
-        if self.consumed > 0 && self.consumed * 2 >= self.pending.len() {
-            self.pending.drain(..self.consumed);
-            self.consumed = 0;
+        let keep = HISTORY * c;
+        if self.consumed > keep && (self.consumed - keep) * 2 >= self.pending.len() {
+            self.pending.drain(..self.consumed - keep);
+            self.consumed = keep;
         }
     }
 
-    fn encode_frame(&mut self, start: usize) -> Packet {
+    fn encode_chunks(&mut self, chunks: usize, out: &mut Vec<Packet>) {
+        use rayon::prelude::*;
         let c = self.cfg.channels as usize;
-        let total = ((self.cfg.bitrate as usize * FRAME) / (48000 * 8)).clamp(3, MAX_PACKET);
-        let nbytes = total - 1;
-        let bandwidth = Bandwidth::Fullband;
-        let end = bandwidth.celt_end_band();
-        let params = FrameParams {
-            start: 0,
-            end,
-            nbytes,
-            intensity: intensity_band(self.cfg.bitrate, c, end),
-        };
-        self.rc.reset(nbytes);
-        let pcm = &self.pending[start..start + FRAME * c];
-        self.celt.encode_frame(pcm, FRAME, &params, &mut self.rc);
-        let toc = (31u8 << 3) | (((c == 2) as u8) << 2);
-        let mut data = Vec::with_capacity(total);
-        data.push(toc);
-        data.extend_from_slice(self.rc.finish());
-        self.final_range = self.rc.rng();
-        let pts = self.frames as i64 * FRAME as i64;
-        self.frames += 1;
+        let step = FRAME * c;
+        let cfg = self.cfg;
+        let base = self.consumed;
+        let first = self.frames;
+        let pending = &self.pending;
+        let mut done: Vec<(Vec<Packet>, CeltEncoder, u32)> = (0..chunks)
+            .into_par_iter()
+            .map(|k| {
+                let mut celt = CeltEncoder::new(c);
+                let mut rc = RangeEncoder::new(MAX_PACKET);
+                let start = base + k * CHUNK * step;
+                let f0 = first + (k * CHUNK) as u64;
+                if f0 > 0 {
+                    celt.prime(&pending[start - HISTORY * c..start]);
+                }
+                let mut packets = Vec::with_capacity(CHUNK);
+                let mut rng = 0;
+                for i in 0..CHUNK {
+                    let s = start + i * step;
+                    let (p, r) = encode_packet(
+                        &cfg,
+                        &mut celt,
+                        &mut rc,
+                        &pending[s..s + step],
+                        f0 + i as u64,
+                    );
+                    packets.push(p);
+                    rng = r;
+                }
+                (packets, celt, rng)
+            })
+            .collect();
+        let (_, celt, rng) = done
+            .pop()
+            .map(|(p, e, r)| {
+                out.extend(done.drain(..).flat_map(|d| d.0));
+                out.extend(p);
+                ((), e, r)
+            })
+            .unwrap();
+        self.celt = celt;
+        self.final_range = rng;
+        self.frames += (chunks * CHUNK) as u64;
+        self.consumed += chunks * CHUNK * step;
+    }
+}
+
+fn encode_packet(
+    cfg: &EncoderConfig,
+    celt: &mut CeltEncoder,
+    rc: &mut RangeEncoder,
+    pcm: &[f32],
+    index: u64,
+) -> (Packet, u32) {
+    let c = cfg.channels as usize;
+    let end = Bandwidth::Fullband.celt_end_band();
+    let a = celt.analyse(pcm, FRAME, end);
+    let base = (cfg.bitrate as usize * FRAME) as f32 / (48000.0 * 8.0);
+    let total = if cfg.vbr {
+        celt.vbr.bytes(base, MAX_PACKET, &a)
+    } else {
+        (base as usize).clamp(3, MAX_PACKET)
+    };
+    let nbytes = total - 1;
+    let params = FrameParams {
+        start: 0,
+        end,
+        nbytes,
+        intensity: intensity_band(cfg.bitrate, c, end),
+    };
+    rc.reset(nbytes);
+    celt.encode_frame(FRAME, &params, &a, rc);
+    let toc = (31u8 << 3) | (((c == 2) as u8) << 2);
+    let mut data = Vec::with_capacity(total);
+    data.push(toc);
+    data.extend_from_slice(rc.finish());
+    let pts = index as i64 * FRAME as i64;
+    (
         Packet {
             data,
             pts,
             dts: pts,
             keyframe: true,
-        }
+        },
+        rc.rng(),
+    )
+}
+
+pub struct OggWriter<W: Write> {
+    enc: Encoder,
+    out: ogg::Writer<W>,
+}
+
+impl<W: Write> OggWriter<W> {
+    pub fn new(cfg: EncoderConfig, w: W) -> Result<OggWriter<W>> {
+        let enc = Encoder::new(cfg)?;
+        let out = ogg::Writer::new(w, 0x5049_544f, &enc.head(), "PITO codecs")?;
+        Ok(OggWriter { enc, out })
     }
+
+    pub fn write(&mut self, audio: &AudioBuffer) -> Result<()> {
+        for p in self.enc.encode(audio)? {
+            self.out.push(&p.data, p.pts + FRAME as i64)?;
+        }
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> Result<W> {
+        let end = (self.enc.input + self.enc.pre_skip() as u64) as i64;
+        for p in self.enc.flush()? {
+            self.out.push(&p.data, (p.pts + FRAME as i64).min(end))?;
+        }
+        self.out.finish()
+    }
+}
+
+pub fn encode_ogg(cfg: EncoderConfig, audio: &AudioBuffer) -> Result<Vec<u8>> {
+    let mut w = OggWriter::new(cfg, Vec::new())?;
+    w.write(audio)?;
+    w.finish()
 }
 
 fn intensity_band(bitrate: u32, channels: usize, end: usize) -> usize {
