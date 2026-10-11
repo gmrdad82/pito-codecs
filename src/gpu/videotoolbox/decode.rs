@@ -175,7 +175,9 @@ fn layout(codec: Codec, sets: &[Vec<u8>]) -> Result<Layout> {
                 sps.max_num_reorder as usize,
             )
         }
-        Codec::Aac => return Err(Error::Unsupported("AAC on the GPU".into())),
+        Codec::Aac | Codec::Vp9 | Codec::Opus => {
+            return Err(Error::Unsupported(format!("{codec:?} on VideoToolbox")));
+        }
     };
     let (format, pixel_format) = match (idc, luma, chroma, full) {
         (1, 8, 8, false) => (PixelFormat::Yuv420p8, NV12_VIDEO),

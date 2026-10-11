@@ -84,7 +84,10 @@ pub fn plan(codec: Codec, sets: &[Vec<u8>]) -> Result<Plan> {
                 crop: sps.crop_rect(),
             }
         }
-        Codec::Aac => return Err(unsupported("AAC is not a video codec")),
+        Codec::Vp9 => return Err(unsupported("VP9 on Media Foundation")),
+        Codec::Aac | Codec::Opus => {
+            return Err(unsupported(format!("{codec:?} is not a video codec")));
+        }
     };
     let (cx, cy, w, h) = p.crop;
     if w == 0
