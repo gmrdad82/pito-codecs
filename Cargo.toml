@@ -29,7 +29,7 @@ opus = ["media", "dep:rayon"]
 vp9 = ["media", "dep:rayon"]
 webp = ["media", "filter", "dep:rayon"]
 gif = ["filter", "dep:rayon"]
-cli = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter", "dep:clap"]
+cli = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter", "mkv", "vp9", "dep:clap"]
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 libloading = { version = "0.8", optional = true }
@@ -76,11 +76,11 @@ opt-level = 3
 
 [[example]]
 name = "media_speed"
-required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter"]
+required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter", "mkv", "vp9"]
 
 [[example]]
 name = "bench"
-required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter"]
+required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter", "mkv", "vp9"]
 
 [[bin]]
 name = "pcod"

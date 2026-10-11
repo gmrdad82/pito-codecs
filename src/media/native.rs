@@ -8,10 +8,12 @@ use rayon::prelude::*;
 use crate::gpu::GpuFrame;
 use crate::mp4::{CodecConfig, Reader, Track};
 
+use super::demux::{self, Demux, Stream};
+
 use super::picture::{Color, rotate, to_rgba_color};
 use super::probe::{AudioTrack, Probe};
 use super::types::{
-    AudioBuffer, Codec, Direction, Error, Frame, Packet, Result, Rgba, Route, TimeBase,
+    AudioBuffer, Codec, Direction, Error, Frame, Packet, Result, Rgba, Route,
 };
 
 const NO_GPU: &str = if cfg!(target_os = "macos") {
@@ -51,6 +53,7 @@ pub fn cpu() -> Vec<(Codec, Direction)> {
         (Codec::H264, Direction::Decode),
         (Codec::H264, Direction::Encode),
         (Codec::Hevc, Direction::Decode),
+        (Codec::Vp9, Direction::Decode),
         (Codec::Aac, Direction::Decode),
         (Codec::Aac, Direction::Encode),
     ]
@@ -116,7 +119,10 @@ const GENERIC: [&str; 8] = [
 ];
 
 pub fn probe(path: &Path) -> Result<Probe> {
-    let r = reader(path)?;
+    let r = match Demux::open(path)? {
+        Demux::Mp4(r) => r,
+        Demux::Mkv(r) => return demux::probe(&r),
+    };
     let (_, t) = video_track(&r)?;
     let (width, height) = t
         .entry()
@@ -124,31 +130,8 @@ pub fn probe(path: &Path) -> Result<Probe> {
         .map(|v| (v.width as u32, v.height as u32))
         .unwrap_or((t.width, t.height));
     let (profile, bit_depth) = match t.config() {
-        Some(CodecConfig::Avc(c)) => (
-            match c.profile {
-                66 => "Baseline",
-                77 => "Main",
-                88 => "Extended",
-                100 => "High",
-                110 => "High 10",
-                122 => "High 4:2:2",
-                244 => "High 4:4:4 Predictive",
-                _ => "",
-            }
-            .to_string(),
-            if c.profile >= 110 { 10 } else { 8 },
-        ),
-        Some(CodecConfig::Hevc(c)) => (
-            match c.profile {
-                1 => "Main",
-                2 => "Main 10",
-                3 => "Main Still Picture",
-                4 => "Rext",
-                _ => "",
-            }
-            .to_string(),
-            c.bit_depth_luma.max(8),
-        ),
+        Some(CodecConfig::Avc(c)) => demux::avc_profile(c.profile),
+        Some(CodecConfig::Hevc(c)) => demux::hevc_profile(c),
         _ => (String::new(), 8),
     };
     let audio = r
@@ -190,7 +173,10 @@ pub fn probe(path: &Path) -> Result<Probe> {
 }
 
 pub fn keyframes(path: &Path) -> Result<Vec<f64>> {
-    let r = reader(path)?;
+    let r = match Demux::open(path)? {
+        Demux::Mp4(r) => r,
+        Demux::Mkv(r) => return demux::keyframes(&r),
+    };
     let (_, t) = video_track(&r)?;
     let mut keys: Vec<f64> = t
         .keyframes()
@@ -211,6 +197,7 @@ pub enum Decoder {
         buf: Vec<u8>,
     },
     Hevc(Box<crate::hevc::Decoder>),
+    Vp9(Box<crate::vp9::Decoder>),
     Gpu(Box<crate::gpu::HwDecoder>),
 }
 
@@ -231,24 +218,27 @@ fn annexb_into(out: &mut Vec<u8>, data: &[u8], length: usize) {
 }
 
 impl Decoder {
-    pub fn for_route(t: &Track, threads: usize, route: Route) -> Result<(Decoder, Option<String>)> {
+    pub fn for_route(
+        st: &Stream,
+        threads: usize,
+        route: Route,
+    ) -> Result<(Decoder, Option<String>)> {
         if route == Route::Gpu {
-            let codec = t
-                .codec()
+            let codec = st
+                .codec
                 .ok_or_else(|| Error::Unsupported("an unknown video codec".to_string()))?;
-            let extradata = t.extradata().unwrap_or_default();
-            match crate::gpu::HwDecoder::new(codec, &extradata) {
+            match crate::gpu::HwDecoder::new(codec, &st.extradata) {
                 Ok(d) => {
-                    let d = d.with_time_base(TimeBase::new(1, t.timescale.max(1)));
+                    let d = d.with_time_base(st.time_base);
                     return Ok((Decoder::Gpu(Box::new(d)), None));
                 }
                 Err(e) => {
                     let why = format!("the GPU decoder failed ({e}); decoding on the CPU");
-                    return Ok((Decoder::new(t, threads)?, Some(why)));
+                    return Ok((Decoder::new(st, threads)?, Some(why)));
                 }
             }
         }
-        Ok((Decoder::new(t, threads)?, None))
+        Ok((Decoder::new(st, threads)?, None))
     }
 
     pub fn route(&self) -> Route {
@@ -258,10 +248,10 @@ impl Decoder {
         }
     }
 
-    pub fn new(t: &Track, threads: usize) -> Result<Decoder> {
-        let tb = TimeBase::new(1, t.timescale.max(1));
-        match t.config() {
-            Some(CodecConfig::Avc(c)) => {
+    pub fn new(st: &Stream, threads: usize) -> Result<Decoder> {
+        let tb = st.time_base;
+        match (st.codec, &st.avc) {
+            (Some(Codec::H264), Some(c)) => {
                 let mut dec = crate::h264::Decoder::with_threads(threads.max(1));
                 dec.set_time_base(tb);
                 let mut params = Vec::new();
@@ -276,18 +266,23 @@ impl Decoder {
                     buf: Vec::new(),
                 })
             }
-            Some(CodecConfig::Hevc(_)) => {
+            (Some(Codec::Hevc), _) => {
+                if st.extradata.is_empty() {
+                    return Err(Error::Invalid("HEVC track without hvcC".to_string()));
+                }
                 let mut dec = crate::hevc::Decoder::with_threads(threads.max(1));
-                let hvcc = t
-                    .extradata()
-                    .ok_or_else(|| Error::Invalid("HEVC track without hvcC".to_string()))?;
-                dec.configure_hvcc(&hvcc)?;
+                dec.configure_hvcc(&st.extradata)?;
                 dec.set_time_base(tb);
                 Ok(Decoder::Hevc(Box::new(dec)))
             }
-            other => Err(Error::Unsupported(format!(
-                "our decoders read H.264 and HEVC, not {}",
-                other.map(|c| c.name()).unwrap_or_default()
+            (Some(Codec::Vp9), _) => {
+                let mut dec = crate::vp9::Decoder::with_threads(threads.max(1));
+                dec.set_time_base(tb);
+                Ok(Decoder::Vp9(Box::new(dec)))
+            }
+            _ => Err(Error::Unsupported(format!(
+                "our decoders read H.264, HEVC and VP9, not {}",
+                st.name
             ))),
         }
     }
@@ -316,6 +311,7 @@ impl Decoder {
                 out
             }
             Decoder::Hevc(dec) => dec.decode(p),
+            Decoder::Vp9(dec) => dec.decode(p),
             Decoder::Gpu(dec) => dec.decode(p),
         }
     }
@@ -324,6 +320,7 @@ impl Decoder {
         match self {
             Decoder::H264 { dec, .. } => dec.flush(),
             Decoder::Hevc(dec) => dec.flush(),
+            Decoder::Vp9(dec) => dec.flush(),
             Decoder::Gpu(dec) => dec.flush(),
         }
     }
@@ -338,7 +335,7 @@ impl Decoder {
         let (matrix, full_range) = match self {
             Decoder::H264 { dec, .. } => dec.color().map(|c| (c.matrix, c.full_range)),
             Decoder::Hevc(dec) => dec.color().map(|c| (c.matrix, c.full_range)),
-            Decoder::Gpu(_) => None,
+            Decoder::Vp9(_) | Decoder::Gpu(_) => None,
         }
         .unwrap_or((2, false));
         Color { matrix, full_range }
@@ -357,7 +354,7 @@ const BEHIND: usize = 6;
 
 pub struct Frames {
     pub reason: Option<String>,
-    reader: Arc<Reader>,
+    demux: Demux,
     track: usize,
     dec: Decoder,
     next: usize,
@@ -369,15 +366,13 @@ pub struct Frames {
 }
 
 impl Frames {
-    pub fn open(reader: Arc<Reader>, from: f64, threads: usize, route: Route) -> Result<Frames> {
-        let (track, t) = video_track(&reader)?;
-        let (dec, reason) = Decoder::for_route(t, threads, route)?;
-        let at = t.sample_at(t.ticks(from.max(0.0))).unwrap_or(0);
-        let start = t.presentation(at).unwrap_or(0);
-        let next = t.keyframe_before(at);
+    pub fn open(demux: Demux, from: f64, threads: usize, route: Route) -> Result<Frames> {
+        let track = demux.video()?;
+        let (dec, reason) = Decoder::for_route(&demux.stream(track)?, threads, route)?;
+        let (next, start) = demux.seek(track, from)?;
         Ok(Frames {
             reason,
-            reader: reader.clone(),
+            demux,
             track,
             dec,
             next,
@@ -397,8 +392,8 @@ impl Frames {
         self.dec.recycle(frame);
     }
 
-    pub fn track(&self) -> &Track {
-        &self.reader.tracks[self.track]
+    pub fn seconds(&self, ticks: i64) -> f64 {
+        self.demux.seconds(self.track, ticks)
     }
 
     pub fn next_frame(&mut self) -> Result<Option<Frame>> {
@@ -440,15 +435,14 @@ impl Frames {
     }
 
     fn pump(&mut self, gpu: bool) -> Result<bool> {
-        let t = &self.reader.tracks[self.track];
-        if let Some(s) = t.samples.get(self.next).copied() {
-            self.reader
+        if let Some((pts, dts, keyframe)) = self.demux.sample(self.track, self.next) {
+            self.demux
                 .read_into(self.track, self.next, &mut self.buf)?;
             let packet = Packet {
                 data: std::mem::take(&mut self.buf),
-                pts: s.pts.saturating_add(t.edit_offset),
-                dts: s.dts.saturating_add(t.edit_offset),
-                keyframe: s.keyframe,
+                pts,
+                dts,
+                keyframe,
             };
             self.next += 1;
             let out = match &mut self.dec {
@@ -495,9 +489,10 @@ pub fn still(reader: &Reader, dec: &mut Decoder, at: f64, height: u32) -> Result
     Ok(rotate(&img, rotation))
 }
 
-pub fn still_decoder(reader: &Reader, route: Route) -> Result<Decoder> {
-    let (_, t) = video_track(reader)?;
-    Ok(Decoder::for_route(t, 1, route)?.0)
+pub fn still_decoder(reader: &Arc<Reader>, route: Route) -> Result<Decoder> {
+    let demux = Demux::Mp4(reader.clone());
+    let track = demux.video()?;
+    Ok(Decoder::for_route(&demux.stream(track)?, 1, route)?.0)
 }
 
 const PAD: f64 = 0.02;

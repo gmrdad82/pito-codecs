@@ -137,7 +137,9 @@ pub fn driver(backend: Backend) -> Result<String> {
         feature = "hevc",
         feature = "aac",
         feature = "mp4",
-        feature = "filter"
+        feature = "filter",
+        feature = "mkv",
+        feature = "vp9"
     )),
     allow(dead_code)
 )]
@@ -362,7 +364,9 @@ impl GpuFrame {
             feature = "hevc",
             feature = "aac",
             feature = "mp4",
-            feature = "filter"
+            feature = "filter",
+            feature = "mkv",
+            feature = "vp9"
         )),
         allow(dead_code)
     )]
@@ -384,7 +388,9 @@ impl GpuFrame {
             feature = "hevc",
             feature = "aac",
             feature = "mp4",
-            feature = "filter"
+            feature = "filter",
+            feature = "mkv",
+            feature = "vp9"
         )),
         allow(dead_code)
     )]

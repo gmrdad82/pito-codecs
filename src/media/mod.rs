@@ -11,7 +11,9 @@ macro_rules! front {
                 feature = "aac",
                 feature = "mp4",
                 feature = "gpu",
-                feature = "filter"
+                feature = "filter",
+                feature = "mkv",
+                feature = "vp9"
             ))]
             $item
         )*
@@ -20,6 +22,7 @@ macro_rules! front {
 
 front! {
     mod audio;
+    mod demux;
     mod export;
     mod ffmpeg;
     mod mux;
