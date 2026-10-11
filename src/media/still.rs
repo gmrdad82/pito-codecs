@@ -34,9 +34,10 @@ pub fn frames_at(path: &Path, times: &[f64], height: u32, prefs: &Prefs) -> Resu
     let out: Mutex<Vec<Option<Result<Rgba>>>> =
         Mutex::new((0..times.len()).map(|_| None).collect());
     std::thread::scope(|s| {
+        let mut handles = Vec::with_capacity(workers);
         for w in 0..workers {
             let (src, next, out, times) = (&src, &next, &out, &times);
-            s.spawn(move || {
+            handles.push(s.spawn(move || {
                 let route = if w == 0 { src.route } else { Route::Cpu };
                 let mut dec = match (src.route, &src.reader) {
                     (Route::Cpu | Route::Gpu, Some(r)) => native::still_decoder(r, route).ok(),
@@ -57,7 +58,10 @@ pub fn frames_at(path: &Path, times: &[f64], height: u32, prefs: &Prefs) -> Resu
                         o[i] = Some(got);
                     }
                 }
-            });
+            }));
+        }
+        for h in handles {
+            let _ = h.join();
         }
     });
     let done = out
