@@ -1,10 +1,11 @@
 use super::lzw::LzwDecoder;
 use super::{Error, Result};
 use crate::filter::Rgba;
-use rayon::prelude::*;
 use std::collections::VecDeque;
+use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
 
 const AHEAD: usize = 16;
+const MAX_PIXELS: usize = 1 << 28;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Disposal {
@@ -44,7 +45,6 @@ struct Raw {
     data: Vec<u8>,
     indices: Vec<u8>,
     decoded: usize,
-    ready: bool,
 }
 
 pub struct Decoder<'a> {
@@ -57,7 +57,7 @@ pub struct Decoder<'a> {
     canvas: Rgba,
     saved: Vec<u8>,
     last: Option<(Disposal, u16, u16, u16, u16)>,
-    queue: VecDeque<Raw>,
+    queue: VecDeque<Receiver<Raw>>,
     spare: Vec<Raw>,
     current: Option<Raw>,
     ended: bool,
@@ -88,6 +88,9 @@ impl<'a> Decoder<'a> {
         }
         if width == 0 || height == 0 {
             return Err(Error::Invalid("zero canvas size"));
+        }
+        if width as usize * height as usize > MAX_PIXELS {
+            return Err(Error::Invalid("canvas too large"));
         }
         let mut d = Decoder {
             data,
@@ -210,6 +213,10 @@ impl<'a> Decoder<'a> {
         let (left, top, width, height) = (word(0), word(2), word(4), word(6));
         let packed = d[p + 8];
         self.pos += 9;
+        let canvas = self.width as usize * self.height as usize;
+        if width as usize * height as usize > canvas.max(1 << 20) * 4 {
+            return Err(Error::Invalid("frame far larger than the canvas"));
+        }
         let mut palette = None;
         if packed & 0x80 != 0 {
             let n = table(packed);
@@ -239,7 +246,6 @@ impl<'a> Decoder<'a> {
             data: Vec::new(),
             indices: Vec::new(),
             decoded: 0,
-            ready: false,
         });
         raw.left = left;
         raw.top = top;
@@ -253,7 +259,6 @@ impl<'a> Decoder<'a> {
         raw.min_code = min_code;
         raw.data.clear();
         raw.decoded = 0;
-        raw.ready = false;
         let mut data = std::mem::take(&mut raw.data);
         let r = self.sub_blocks(Some(&mut data));
         raw.data = data;
@@ -269,7 +274,14 @@ impl<'a> Decoder<'a> {
         }
         while self.queue.len() < AHEAD {
             match self.scan() {
-                Ok(Some(raw)) => self.queue.push_back(raw),
+                Ok(Some(mut raw)) => {
+                    let (tx, rx) = sync_channel(1);
+                    rayon::spawn(move || {
+                        decode_raw(&mut raw);
+                        let _ = tx.send(raw);
+                    });
+                    self.queue.push_back(rx);
+                }
                 Ok(None) | Err(Error::Truncated) => {
                     self.ended = true;
                     break;
@@ -277,10 +289,6 @@ impl<'a> Decoder<'a> {
                 Err(e) => return Err(e),
             }
         }
-        self.queue
-            .par_iter_mut()
-            .filter(|r| !r.ready)
-            .for_each(decode_raw);
         Ok(())
     }
 
@@ -288,12 +296,11 @@ impl<'a> Decoder<'a> {
         if let Some(r) = self.current.take() {
             self.spare.push(r);
         }
-        if self.queue.is_empty() {
-            self.fill()?;
-        }
-        let Some(raw) = self.queue.pop_front() else {
+        self.fill()?;
+        let Some(rx) = self.queue.pop_front() else {
             return Ok(None);
         };
+        let raw = wait(rx);
         self.dispose();
         self.draw(&raw);
         let frame = (
@@ -439,6 +446,23 @@ fn interlaced_row(k: usize, h: usize) -> usize {
     }
 }
 
+fn wait(rx: Receiver<Raw>) -> Raw {
+    if rayon::current_thread_index().is_none() {
+        return rx.recv().expect("gif frame decode task");
+    }
+    loop {
+        match rx.try_recv() {
+            Ok(raw) => return raw,
+            Err(TryRecvError::Empty) => {
+                if rayon::yield_now() != Some(rayon::Yield::Executed) {
+                    std::thread::yield_now();
+                }
+            }
+            Err(TryRecvError::Disconnected) => panic!("gif frame decode task failed"),
+        }
+    }
+}
+
 fn decode_raw(raw: &mut Raw) {
     thread_local! {
         static LZW: std::cell::RefCell<LzwDecoder> = std::cell::RefCell::new(LzwDecoder::default());
@@ -447,7 +471,6 @@ fn decode_raw(raw: &mut Raw) {
     raw.indices.clear();
     raw.indices.resize(n, 0);
     raw.decoded = LZW.with_borrow_mut(|l| l.decode(raw.min_code, &raw.data, &mut raw.indices));
-    raw.ready = true;
 }
 
 pub fn decode(data: &[u8]) -> Result<Animation> {

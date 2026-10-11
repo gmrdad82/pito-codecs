@@ -869,7 +869,7 @@ impl Session {
         Ok(image)
     }
 
-    fn decode_picture<P, Q, S>(
+    pub(super) fn decode_picture<P, Q, S>(
         &mut self,
         target: usize,
         pic: &P,

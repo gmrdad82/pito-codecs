@@ -30,7 +30,7 @@ front! {
     mod still;
     mod video;
 
-    pub use audio::audio_pcm;
+    pub use audio::{audio_mix, audio_pcm, audio_pcm_range};
     pub use export::{ExportOptions, Exported, Overlay, Part, Piece, Progress, Stage, export, parts};
     pub use ffmpeg::{Ffmpeg, Listed};
     pub use picture::{

@@ -30,15 +30,6 @@ pub fn snr_db(reference: &[f32], decoded: &[f32]) -> f32 {
     (10.0 * (s / e.max(1e-20)).log10()) as f32
 }
 
-pub fn encode_all(cfg: EncoderConfig, pcm: &[f32]) -> (Encoder, Vec<Packet>) {
-    let mut enc = Encoder::new(cfg).unwrap();
-    let mut buf = AudioBuffer::new(48000, cfg.channels);
-    buf.samples = pcm.to_vec();
-    let mut packets = enc.encode(&buf).unwrap();
-    packets.extend(enc.flush().unwrap());
-    (enc, packets)
-}
-
 #[test]
 fn own_decoder_tracks_the_range_coder_and_reconstructs() {
     for (channels, bitrate) in [(1u16, 64_000u32), (2, 128_000), (2, 48_000), (1, 32_000)] {
@@ -83,73 +74,10 @@ fn own_decoder_tracks_the_range_coder_and_reconstructs() {
     }
 }
 
-fn crc(data: &[u8]) -> u32 {
-    let mut c = 0u32;
-    for &b in data {
-        c ^= (b as u32) << 24;
-        for _ in 0..8 {
-            c = if c & 0x8000_0000 != 0 {
-                (c << 1) ^ 0x04c1_1db7
-            } else {
-                c << 1
-            };
-        }
-    }
-    c
-}
-
-fn page(out: &mut Vec<u8>, flags: u8, granule: i64, seq: u32, packets: &[&[u8]]) {
-    let start = out.len();
-    out.extend_from_slice(b"OggS");
-    out.push(0);
-    out.push(flags);
-    out.extend_from_slice(&granule.to_le_bytes());
-    out.extend_from_slice(&7u32.to_le_bytes());
-    out.extend_from_slice(&seq.to_le_bytes());
-    out.extend_from_slice(&[0; 4]);
-    let mut lacing = Vec::new();
-    for p in packets {
-        let mut n = p.len();
-        while n >= 255 {
-            lacing.push(255u8);
-            n -= 255;
-        }
-        lacing.push(n as u8);
-    }
-    out.push(lacing.len() as u8);
-    out.extend_from_slice(&lacing);
-    for p in packets {
-        out.extend_from_slice(p);
-    }
-    let c = crc(&out[start..]);
-    out[start + 22..start + 26].copy_from_slice(&c.to_le_bytes());
-}
-
-pub fn ogg(enc: &Encoder, packets: &[Packet], samples: usize) -> Vec<u8> {
-    let mut out = Vec::new();
-    page(&mut out, 2, 0, 0, &[&enc.codec_private()]);
-    let mut tags = b"OpusTags".to_vec();
-    tags.extend_from_slice(&5u32.to_le_bytes());
-    tags.extend_from_slice(b"pito ");
-    tags.extend_from_slice(&0u32.to_le_bytes());
-    page(&mut out, 0, 0, 1, &[&tags]);
-    let end = (samples + enc.pre_skip() as usize) as i64;
-    for (k, p) in packets.iter().enumerate() {
-        let last = k + 1 == packets.len();
-        let g = if last {
-            end
-        } else {
-            (k as i64 + 1) * FRAME as i64
-        };
-        page(
-            &mut out,
-            if last { 4 } else { 0 },
-            g,
-            k as u32 + 2,
-            &[&p.data],
-        );
-    }
-    out
+pub fn ogg(cfg: EncoderConfig, pcm: &[f32]) -> Vec<u8> {
+    let mut buf = AudioBuffer::new(48000, cfg.channels);
+    buf.samples = pcm.to_vec();
+    encode_ogg(cfg, &buf).unwrap()
 }
 
 pub fn ffmpeg_decode(path: &std::path::Path, channels: usize) -> Option<Vec<f32>> {
@@ -189,9 +117,12 @@ fn libopus_decodes_our_ogg_with_matching_level() {
     for (channels, bitrate) in [(2u16, 128_000u32), (1, 64_000), (2, 64_000)] {
         let c = channels as usize;
         let pcm = signal(2.0, c);
-        let (enc, packets) = encode_all(EncoderConfig::new(channels, bitrate), &pcm);
+        let file = ogg(EncoderConfig::new(channels, bitrate), &pcm);
+        let ours = crate::opus::ogg::decode(&file).unwrap();
+        assert_eq!(ours.samples.len(), pcm.len(), "our trimmed length");
+        assert!(snr_db(&pcm, &ours.samples) > 12.0);
         let path = tmp_dir().join(format!("enc_{c}_{bitrate}.opus"));
-        std::fs::write(&path, ogg(&enc, &packets, pcm.len() / c)).unwrap();
+        std::fs::write(&path, file).unwrap();
         let Some(dec) = ffmpeg_decode(&path, c) else {
             return;
         };
@@ -202,5 +133,213 @@ fn libopus_decodes_our_ogg_with_matching_level() {
         eprintln!("libopus c{c} {bitrate}: snr {snr:.2} dB, level {level:+.2} dB");
         assert!(snr > 12.0, "snr {snr}");
         assert!(level.abs() < 0.5, "level {level}");
+    }
+}
+
+fn read_f32(path: &std::path::Path) -> Option<Vec<f32>> {
+    let b = std::fs::read(path).ok()?;
+    Some(
+        b.chunks_exact(4)
+            .map(|v| f32::from_le_bytes([v[0], v[1], v[2], v[3]]))
+            .collect(),
+    )
+}
+
+fn seg_snr(a: &[f32], b: &[f32], c: usize) -> f32 {
+    let w = 960 * c;
+    let mut acc = 0f64;
+    let mut n = 0;
+    for (x, y) in a.chunks(w).zip(b.chunks(w)) {
+        let s: f64 = x.iter().map(|v| (*v as f64).powi(2)).sum();
+        if s < 1e-6 * w as f64 {
+            continue;
+        }
+        let e: f64 = x
+            .iter()
+            .zip(y)
+            .map(|(p, q)| (*p as f64 - *q as f64).powi(2))
+            .sum();
+        acc += (10.0 * (s / e.max(1e-20)).log10()).clamp(-10.0, 60.0);
+        n += 1;
+    }
+    (acc / n.max(1) as f64) as f32
+}
+
+#[test]
+#[ignore]
+fn measure_against_libopus() {
+    let dir = tmp_dir();
+    for name in ["resilience", "solstice", "music"] {
+        let src = dir.join(format!("{name}.f32"));
+        let Some(pcm) = read_f32(&src) else {
+            continue;
+        };
+        let c = 2usize;
+        let secs = pcm.len() as f64 / (48000.0 * c as f64);
+        for bitrate in [64_000u32, 96_000, 128_000] {
+            let mut line = format!("{name} {} kbps:", bitrate / 1000);
+            for vbr in [false, true] {
+                let mut cfg = EncoderConfig::new(c as u16, bitrate);
+                cfg.vbr = vbr;
+                let t = std::time::Instant::now();
+                let file = ogg(cfg, &pcm);
+                let ours = t.elapsed().as_secs_f64();
+                let kbps = file.len() as f64 * 8.0 / secs / 1000.0;
+                let path = dir.join(format!("{name}_{bitrate}_{vbr}.opus"));
+                std::fs::write(&path, file).unwrap();
+                let dec = ffmpeg_decode(&path, c).unwrap();
+                line += &format!(
+                    " ours {} {:.0}x {:.1}k snr {:.2} seg {:.2} |",
+                    if vbr { "vbr" } else { "cbr" },
+                    secs / ours,
+                    kbps,
+                    snr_db(&pcm, &dec),
+                    seg_snr(&pcm, &dec, c)
+                );
+            }
+            for vbr in ["off", "on"] {
+                let lib = dir.join(format!("{name}_{bitrate}_libopus_{vbr}.opus"));
+                let t = std::time::Instant::now();
+                let st = std::process::Command::new("ffmpeg")
+                    .args([
+                        "-v", "error", "-y", "-threads", "1", "-f", "f32le", "-ar", "48000", "-ac",
+                        "2", "-i",
+                    ])
+                    .arg(&src)
+                    .args(["-c:a", "libopus", "-b:a", &bitrate.to_string(), "-vbr", vbr])
+                    .arg(&lib)
+                    .status()
+                    .unwrap();
+                let theirs = t.elapsed().as_secs_f64();
+                assert!(st.success());
+                let kbps = std::fs::metadata(&lib).unwrap().len() as f64 * 8.0 / secs / 1000.0;
+                let ldec = ffmpeg_decode(&lib, c).unwrap();
+                let n = pcm.len().min(ldec.len());
+                line += &format!(
+                    " libopus {vbr} {:.0}x {:.1}k snr {:.2} seg {:.2} |",
+                    secs / theirs,
+                    kbps,
+                    snr_db(&pcm[..n], &ldec[..n]),
+                    seg_snr(&pcm[..n], &ldec[..n], c)
+                );
+            }
+            eprintln!("{line}");
+        }
+    }
+}
+
+#[test]
+fn parallel_chunks_match_streaming_bytes() {
+    let c = 2usize;
+    let pcm = signal(11.0, c);
+    let cfg = EncoderConfig::new(c as u16, 96_000);
+    let mut buf = AudioBuffer::new(48000, 2);
+    let mut seq = Encoder::new(cfg).unwrap();
+    let mut a = Vec::new();
+    for chunk in pcm.chunks(1000 * c) {
+        buf.samples = chunk.to_vec();
+        a.extend(seq.encode(&buf).unwrap());
+    }
+    a.extend(seq.flush().unwrap());
+    let mut par = Encoder::new(cfg).unwrap();
+    buf.samples = pcm.clone();
+    let mut b = par.encode(&buf).unwrap();
+    b.extend(par.flush().unwrap());
+    assert_eq!(a.len(), b.len());
+    for (k, (x, y)) in a.iter().zip(&b).enumerate() {
+        assert_eq!(x, y, "packet {k}");
+    }
+    let mut dec = StreamDecoder::new(48000, c).unwrap();
+    let mut out = Vec::new();
+    for p in &b {
+        dec.decode_interleaved(Some(&p.data), &mut out).unwrap();
+    }
+    let skip = par.pre_skip() as usize * c;
+    let out = &out[skip..skip + pcm.len()];
+    let at = 256 * FRAME * c;
+    let w = 4 * FRAME * c;
+    let around = snr_db(&pcm[at - w..at + w], &out[at - w..at + w]);
+    let whole = snr_db(&pcm, out);
+    assert!(around > whole - 3.0, "chunk boundary {around} vs {whole}");
+}
+
+#[test]
+fn extremes_stay_in_sync() {
+    let mut loud = signal(0.5, 2);
+    for (i, v) in loud.iter_mut().enumerate() {
+        *v *= 8.0;
+        if i % 997 == 0 {
+            *v = f32::NAN;
+        }
+        if i % 1499 == 0 {
+            *v = f32::INFINITY;
+        }
+    }
+    let mut quiet = signal(0.5, 2);
+    for v in quiet.iter_mut() {
+        *v *= 1e-6;
+    }
+    let mut gaps = signal(0.5, 2);
+    for v in gaps[9600..30000].iter_mut() {
+        *v = 0.0;
+    }
+    for pcm in [&loud, &quiet, &gaps] {
+        for (channels, bitrate, vbr) in [
+            (1u16, 6_000u32, false),
+            (2, 6_000, true),
+            (1, 510_000, false),
+            (2, 510_000, true),
+            (2, 24_000, true),
+        ] {
+            let c = channels as usize;
+            let src: Vec<f32> = if c == 1 {
+                pcm.chunks(2).map(|p| p[0]).collect()
+            } else {
+                pcm.to_vec()
+            };
+            let mut cfg = EncoderConfig::new(channels, bitrate);
+            cfg.vbr = vbr;
+            let mut enc = Encoder::new(cfg).unwrap();
+            let mut dec = StreamDecoder::new(48000, c).unwrap();
+            let mut buf = AudioBuffer::new(48000, channels);
+            let mut out = Vec::new();
+            for chunk in src.chunks(960 * c) {
+                buf.samples = chunk.to_vec();
+                for p in enc.encode(&buf).unwrap() {
+                    assert!(p.data.len() <= 1276);
+                    dec.decode_interleaved(Some(&p.data), &mut out).unwrap();
+                    assert_eq!(dec.final_range(), enc.final_range(), "c{c} {bitrate}");
+                }
+            }
+            assert!(out.iter().all(|v| v.is_finite()));
+        }
+    }
+}
+
+#[test]
+#[ignore]
+fn speed() {
+    let Some(pcm) = read_f32(&tmp_dir().join("resilience.f32")) else {
+        return;
+    };
+    let secs = pcm.len() as f64 / 96000.0;
+    let mut buf = AudioBuffer::new(48000, 2);
+    for bitrate in [64_000u32, 128_000, 256_000] {
+        let mut best = f64::MAX;
+        for _ in 0..3 {
+            let mut enc = Encoder::new(EncoderConfig::new(2, bitrate)).unwrap();
+            let t = std::time::Instant::now();
+            for chunk in pcm.chunks(48000 * 2) {
+                buf.samples.clear();
+                buf.samples.extend_from_slice(chunk);
+                std::hint::black_box(enc.encode(&buf).unwrap());
+            }
+            best = best.min(t.elapsed().as_secs_f64());
+        }
+        eprintln!(
+            "single thread {} kbps: {:.0}x real time",
+            bitrate / 1000,
+            secs / best
+        );
     }
 }
