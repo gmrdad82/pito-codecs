@@ -262,7 +262,7 @@ fn ranged_audio_lines_up_with_the_whole_track_and_mixes_on_every_route() {
                     .unwrap();
             let ch = channels as usize;
             let mut joined = Vec::new();
-            for (a, b, frames) in [(1.0, 1.5, 24_000), (1.5, 2.25, 36_000)] {
+            for (a, b, frames) in [(1.0, 1.5, 24_000), (1.5, 2.25, 36_000), (3.5, 4.5, 48_000)] {
                 let part = audio_pcm_range(clip(), track, a, b, 48_000, channels, &prefs).unwrap();
                 assert_eq!(
                     (part.frames(), part.channels),
@@ -271,8 +271,12 @@ fn ranged_audio_lines_up_with_the_whole_track_and_mixes_on_every_route() {
                 );
                 joined.extend(part.samples);
             }
-            let slice = &whole.samples[48_000 * ch..108_000 * ch];
-            let d = worst(&joined, slice);
+            let slice = [
+                &whole.samples[48_000 * ch..108_000 * ch],
+                &whole.samples[168_000 * ch..216_000 * ch],
+            ]
+            .concat();
+            let d = worst(&joined, &slice);
             println!("{name} track {track}: worst sample difference {d}");
             assert!(d < limit, "{name} track {track}: {d}");
         }

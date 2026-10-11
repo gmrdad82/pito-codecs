@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::SystemTime;
 
+use rayon::prelude::*;
+
 use crate::mp4::{CodecConfig, Reader, Track};
 
 use super::picture::{Color, rotate, to_rgba_color};
@@ -446,6 +448,7 @@ pub fn still_decoder(reader: &Reader, route: Route) -> Result<Decoder> {
 }
 
 const PAD: f64 = 0.02;
+const CHUNK: f64 = 4.0;
 
 pub fn audio_range(
     path: &Path,
@@ -460,19 +463,65 @@ pub fn audio_range(
     let &i = ids
         .get(track)
         .ok_or_else(|| Error::Invalid(format!("no audio track {track}")))?;
-    let start = (from.max(0.0) * rate as f64).round() as usize;
+    let at = |t: f64| (t * rate as f64).round() as usize;
+    let start = at(from.max(0.0));
+    let length = r.tracks[i].duration_seconds();
+    let end = if to.is_finite() {
+        Some(at(to))
+    } else if length > 0.0 {
+        Some(at(length).max(start))
+    } else {
+        None
+    };
+    let Some(end) = end else {
+        return piece(&r, i, start, None, rate, channels);
+    };
+    let chunk = at(CHUNK).max(1);
+    let n = (end - start).div_ceil(chunk).max(1);
+    if n == 1 {
+        return piece(&r, i, start, Some(end), rate, channels);
+    }
+    let pieces = (0..n)
+        .into_par_iter()
+        .map(|k| {
+            let s = start + k * chunk;
+            piece(&r, i, s, Some((s + chunk).min(end)), rate, channels)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut out = AudioBuffer::new(rate, channels);
+    out.samples.reserve((end - start) * channels as usize);
+    for p in pieces {
+        out.samples.extend_from_slice(&p.samples);
+    }
+    Ok(out)
+}
+
+fn piece(
+    r: &Reader,
+    i: usize,
+    start: usize,
+    end: Option<usize>,
+    rate: u32,
+    channels: u16,
+) -> Result<AudioBuffer> {
     let pad = start.min((PAD * rate as f64).round() as usize);
     let t0 = (start - pad) as f64 / rate as f64;
-    let end = to.is_finite().then(|| (to * rate as f64).round() as usize);
     let t1 = end.map_or(f64::INFINITY, |e| e as f64 / rate as f64 + PAD);
-    let raw = decode_audio(&r, i, t0, t1)?;
-    let shaped = shape(raw, channels)?;
-    let buf = if shaped.rate == rate {
-        shaped
+    let raw = decode_audio(r, i, t0, t1)?;
+    let buf = if channels > raw.channels {
+        shape(at_rate(raw, rate), channels)?
     } else {
-        crate::aac::resample(&shaped, rate)
+        at_rate(shape(raw, channels)?, rate)
     };
-    Ok(cut(buf, pad, end.map(|e| e.saturating_sub(start))))
+    Ok(cut(buf, pad, end.map(|e| e - start)))
+}
+
+fn at_rate(buf: AudioBuffer, rate: u32) -> AudioBuffer {
+    if buf.rate == rate {
+        buf
+    } else {
+        crate::aac::resample(&buf, rate)
+    }
 }
 
 pub fn shape(buf: AudioBuffer, channels: u16) -> Result<AudioBuffer> {
