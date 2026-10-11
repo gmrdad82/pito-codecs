@@ -1,9 +1,14 @@
 # Changelog
 
-## v0.2.0 — 2026-10-11
+## v1.0.0 — 2026-10-11
+
+Every planned format decodes and encodes, on Linux, Windows and macOS. Opus speech encoding (SILK and hybrid) is experimental.
 
 ### Added
 
+- `pcod` is a real binary (behind the `cli` feature), released for Linux x86-64, Windows x86-64 and macOS on Apple Silicon, with SHA256SUMS, LICENSE, README and NOTICE in each archive.
+- The Opus SILK encoder, experimental: it decodes clean in libopus but doesn't yet sound as good as libopus.
+- An "Against ffmpeg" summary in the README, with every win and loss from one benchmark run.
 - GPU playback through the media front: `decode_video_gpu` keeps VA-API frames on the GPU, scaled there, exported as DRM PRIME, with CPU frames when the route falls back.
 - Ranged audio and a track mix in the media front: `audio_pcm_range` and `audio_mix`.
 - VA-API VP9 decode, bit-exact against ffmpeg.
@@ -14,6 +19,11 @@
 
 ### Changed
 
+- H.264 decode: AVX2 deblocking, motion compensation and weighted and bi-prediction into the planes.
+- HEVC decode: AVX2 dequantisation, batched luma deblocking, CTB rows published in two parts and row-aligned slices decoded in parallel.
+- H.264 encode: mbtree lookahead, graded scene cuts and calibrated CRF.
+- Errors name the file they failed on, and every example and pcod print one line and exit 1 instead of panicking.
+- Damaged MP4, MKV, AAC, Opus, Ogg, GIF and WebP input returns an error instead of panicking.
 - H.264 encode: one slice per frame on frame threads with row-published references.
 - VA-API encode: rate control starts with a full one-second buffer, and per-frame quality matches ffmpeg's VA-API encoders.
 - VA-API read-back decode copies into host memory ahead of time, faster than ffmpeg at 1080p and 1440p.
