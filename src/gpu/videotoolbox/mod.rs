@@ -25,7 +25,9 @@ fn codec_type(codec: Codec) -> Result<CMVideoCodecType> {
     match codec {
         Codec::H264 => Ok(kCMVideoCodecType_H264),
         Codec::Hevc => Ok(kCMVideoCodecType_HEVC),
-        Codec::Aac => Err(Error::Unsupported("AAC on the GPU".into())),
+        Codec::Aac | Codec::Vp9 | Codec::Opus => {
+            Err(Error::Unsupported(format!("{codec:?} on VideoToolbox")))
+        }
     }
 }
 
