@@ -449,7 +449,9 @@ impl Decoder {
             pts,
             slices,
         } = p;
-        self.dispatch(frame.clone(), slices);
+        let (cx, cy, cw, ch) = sps.crop_rect();
+        let crop = (cx as usize, cy as usize, cw as usize, ch as usize);
+        self.dispatch(frame.clone(), slices, crop);
         self.poc_state.update(&first, &poc);
         if first.nal_ref_idc != 0 {
             self.prev_ref_frame_num = if first.has_mmco5() {
@@ -473,7 +475,7 @@ impl Decoder {
         self.emit(outs);
     }
 
-    fn dispatch(&mut self, frame: FrameRef, slices: Vec<SliceJob>) {
+    fn dispatch(&mut self, frame: FrameRef, slices: Vec<SliceJob>, crop: Crop) {
         let shared = self.shared.clone();
         if let Some(pool) = &self.pool {
             self.in_flight.retain(|f| !f.is_published(f.mb_h() - 1));
@@ -483,10 +485,10 @@ impl Decoder {
                 }
             }
             self.in_flight.push_back(frame.clone());
-            pool.spawn_fifo(move || run_job(frame, slices, &shared));
+            pool.spawn_fifo(move || run_job(frame, slices, crop, &shared));
             return;
         }
-        run_job(frame, slices, &shared);
+        run_job(frame, slices, crop, &shared);
     }
 
     fn emit(&mut self, outs: Vec<Output<FrameRef>>) {
@@ -494,7 +496,9 @@ impl Decoder {
     }
 }
 
-fn run_job(frame: FrameRef, slices: Vec<SliceJob>, shared: &Shared) {
+type Crop = (usize, usize, usize, usize);
+
+fn run_job(frame: FrameRef, slices: Vec<SliceJob>, crop: Crop, shared: &Shared) {
     let reuse = shared.pool.lock().ok().and_then(|mut p| p.pop());
     let mut pic = match reuse {
         Some(mut p) if p.mb_w == frame.mb_w && p.mb_h == frame.mb_h() => {
@@ -530,9 +534,7 @@ fn run_job(frame: FrameRef, slices: Vec<SliceJob>, shared: &Shared) {
     if let (Some(e), Ok(mut slot)) = (err, shared.error.lock()) {
         slot.get_or_insert(e);
     }
-    if let Some(s) = slices.first() {
-        let (cx, cy, cw, ch) = s.sps.crop_rect();
-        let crop = (cx as usize, cy as usize, cw as usize, ch as usize);
+    {
         let taken = if !pic.reference && crop.0 == 0 && crop.1 == 0 {
             unsafe { frame.take_planes() }
         } else {

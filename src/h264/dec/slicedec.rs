@@ -482,10 +482,15 @@ impl<'a> SliceDecoder<'a> {
         w
     }
 
-    pub fn start_mb(&mut self, addr: usize) {
+    pub fn start_mb(&mut self, addr: usize) -> Result<()> {
         self.mb_addr = addr;
         self.mb_x = addr % self.mb_w;
         self.mb_y = addr / self.mb_w;
+        let published = self.pic.rows_published;
+        ensure!(
+            self.mb_y > published || (self.mb_y == 0 && published == 0),
+            "macroblock {addr} lies in a finished row"
+        );
         self.pic.mbs.enter_row(self.mb_y, self.pic.rows_published);
         if self.mb_x & 3 == 0 {
             self.pic.planes.prefetch_mb(self.mb_x + 4, self.mb_y);
@@ -520,6 +525,7 @@ impl<'a> SliceDecoder<'a> {
             slice_num: sn,
             ..MbState::default()
         };
+        Ok(())
     }
 
     #[inline]
@@ -1804,7 +1810,7 @@ impl<'a> SliceDecoder<'a> {
                 let run = r.read_ue()? as usize;
                 ensure!(addr + run <= total, "mb_skip_run out of range");
                 for _ in 0..run {
-                    self.start_mb(addr);
+                    self.start_mb(addr)?;
                     self.decode_skip()?;
                     self.pic.mb_done(addr);
                     addr += 1;
@@ -1814,7 +1820,7 @@ impl<'a> SliceDecoder<'a> {
                 }
                 ensure!(addr < total, "macroblock address {addr} out of range");
             }
-            self.start_mb(addr);
+            self.start_mb(addr)?;
             self.decode_mb_cavlc(r)?;
             self.pic.mb_done(addr);
             addr += 1;
