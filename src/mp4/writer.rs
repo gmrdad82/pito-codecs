@@ -146,8 +146,10 @@ impl WTrack {
         keyframe: bool,
     ) -> Result<i64> {
         let origin = *self.origin.get_or_insert(dts);
-        let offset = i32::try_from(pts - dts)
-            .map_err(|_| Error::Invalid("composition offset out of range".into()))?;
+        let offset = pts
+            .checked_sub(dts)
+            .and_then(|d| i32::try_from(d).ok())
+            .ok_or_else(|| Error::Invalid("composition offset out of range".into()))?;
         let t = &mut self.t;
         push_run(&mut t.stts, duration);
         push_run(&mut t.ctts, offset);
@@ -157,10 +159,10 @@ impl WTrack {
         } else {
             t.all_sync = false;
         }
-        let start = pts - origin;
+        let start = pts.saturating_sub(origin);
         t.comp_start = Some(t.comp_start.map_or(start, |s| s.min(start)));
-        t.comp_end = t.comp_end.max(start + duration as i64);
-        t.media_duration += duration as u64;
+        t.comp_end = t.comp_end.max(start.saturating_add(duration as i64));
+        t.media_duration = t.media_duration.saturating_add(duration as u64);
         self.last_duration = duration;
         Ok(origin)
     }
@@ -213,7 +215,7 @@ fn effective_edits(t: &WTrack, movie_ts: u32) -> Vec<Edit> {
         return Vec::new();
     }
     let end = t.t.comp_end.max(t.t.media_duration as i64);
-    let rest = (end - start).max(0) as u64;
+    let rest = end.saturating_sub(start).max(0) as u64;
     vec![Edit {
         segment_duration: rescale(rest, t.cfg.timescale, movie_ts),
         media_time: start,
@@ -226,7 +228,8 @@ fn presentation_duration(t: &WTrack, movie_ts: u32) -> u64 {
     if e.is_empty() {
         rescale(t.t.media_duration, t.cfg.timescale, movie_ts)
     } else {
-        e.iter().map(|e| e.segment_duration).sum()
+        e.iter()
+            .fold(0u64, |a, e| a.saturating_add(e.segment_duration))
     }
 }
 
@@ -505,7 +508,8 @@ impl Writer<File> {
             .write(true)
             .create(true)
             .truncate(true)
-            .open(path)?;
+            .open(path.as_ref())
+            .map_err(|e| Error::at(path.as_ref(), e))?;
         Self::new(f, Options::default())
     }
 
@@ -515,7 +519,8 @@ impl Writer<File> {
             .write(true)
             .create(true)
             .truncate(true)
-            .open(path)?;
+            .open(path.as_ref())
+            .map_err(|e| Error::at(path.as_ref(), e))?;
         Self::new(f, options)
     }
 }
@@ -643,8 +648,10 @@ impl<W: Write + Seek> Writer<W> {
             return Ok(());
         };
         let duration = match next_dts {
-            Some(d) => u32::try_from(d - p.dts)
-                .map_err(|_| Error::Invalid("packets must come in decode order".into()))?,
+            Some(d) => d
+                .checked_sub(p.dts)
+                .and_then(|d| u32::try_from(d).ok())
+                .ok_or_else(|| Error::Invalid("packets must come in decode order".into()))?,
             None => t.last_duration,
         };
         self.write_sample(track, &p.data, p.pts, p.dts, duration, p.keyframe)?;
@@ -806,7 +813,9 @@ pub struct FragmentedWriter<W: Write = File> {
 
 impl FragmentedWriter<File> {
     pub fn create(path: impl AsRef<Path>, fragment_seconds: f64) -> Result<Self> {
-        Ok(Self::new(File::create(path)?, fragment_seconds))
+        let path = path.as_ref();
+        let f = File::create(path).map_err(|e| Error::at(path, e))?;
+        Ok(Self::new(f, fragment_seconds))
     }
 }
 
@@ -866,8 +875,11 @@ impl<W: Write> FragmentedWriter<W> {
             .get_mut(track)
             .ok_or_else(|| Error::Invalid(format!("no track {track}")))?;
         if let Some(p) = t.pending.take() {
-            let duration = u32::try_from(packet.dts - p.dts)
-                .map_err(|_| Error::Invalid("packets must come in decode order".into()))?;
+            let duration = packet
+                .dts
+                .checked_sub(p.dts)
+                .and_then(|d| u32::try_from(d).ok())
+                .ok_or_else(|| Error::Invalid("packets must come in decode order".into()))?;
             self.queue(track, p, duration)?;
         }
         let t = &self.tracks[track];
@@ -890,8 +902,11 @@ impl<W: Write> FragmentedWriter<W> {
 
     fn queue(&mut self, track: usize, p: Pending, duration: u32) -> Result<()> {
         let t = &mut self.tracks[track];
-        let offset = i32::try_from(p.pts - p.dts)
-            .map_err(|_| Error::Invalid("composition offset out of range".into()))?;
+        let offset = p
+            .pts
+            .checked_sub(p.dts)
+            .and_then(|d| i32::try_from(d).ok())
+            .ok_or_else(|| Error::Invalid("composition offset out of range".into()))?;
         t.last_duration = duration;
         self.pending[track].push(FragSample {
             data: p.data,

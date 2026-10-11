@@ -254,10 +254,7 @@ impl Child {
         if status.success() {
             Ok(())
         } else {
-            Err(Error::Backend(format!(
-                "ffmpeg: {}",
-                String::from_utf8_lossy(&err).trim()
-            )))
+            Err(Error::Backend(format!("ffmpeg: {}", last_line(&err))))
         }
     }
 
@@ -267,7 +264,7 @@ impl Child {
         self.err
             .take()
             .and_then(|h| h.join().ok())
-            .map(|e| String::from_utf8_lossy(&e).trim().to_string())
+            .and_then(|e| final_line(&e))
             .unwrap_or_default()
     }
 }
@@ -308,12 +305,21 @@ fn output(mut c: Command, what: &str) -> Result<Vec<u8>> {
         .output()
         .map_err(|e| Error::Backend(format!("{what}: {e}")))?;
     if !out.status.success() {
-        return Err(Error::Backend(format!(
-            "{what}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
+        return Err(Error::Backend(format!("{what}: {}", last_line(&out.stderr))));
     }
     Ok(out.stdout)
+}
+
+fn final_line(err: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(err)
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .map(str::to_string)
+}
+
+fn last_line(err: &[u8]) -> String {
+    final_line(err).unwrap_or_else(|| "failed with no message".into())
 }
 
 fn exe(name: &str) -> String {

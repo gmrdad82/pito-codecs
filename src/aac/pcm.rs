@@ -111,6 +111,7 @@ const ZERO_CROSSINGS: f64 = 12.0;
 const ROLLOFF: f64 = 0.92;
 const BETA: f64 = 8.6;
 const MAX_PHASES: u64 = 4096;
+const MAX_WEIGHTS: u64 = 1 << 22;
 
 struct Kernel {
     taps: usize,
@@ -134,9 +135,10 @@ fn bessel_i0(x: f64) -> f64 {
 
 impl Kernel {
     fn new(from: u32, to: u32, phases: u64) -> Self {
-        let fc = 0.5 * ROLLOFF * (to as f64 / from as f64).min(1.0);
+        let fc = 0.5 * ROLLOFF * (to as f64 / from as f64).clamp(1.0 / 256.0, 1.0);
         let half = (ZERO_CROSSINGS / (2.0 * fc)).ceil() as usize;
         let taps = 2 * half;
+        let phases = phases.min(MAX_WEIGHTS / taps as u64).max(1);
         let norm = bessel_i0(BETA);
         let mut weights = Vec::with_capacity(taps * phases as usize);
         for p in 0..phases {
@@ -235,7 +237,7 @@ impl Resampler {
         let half = (taps / 2) as i64;
         let available = self.base + (self.input.len() / ch) as i64;
         let limit = if last {
-            (self.total_in * self.up).div_ceil(self.down)
+            (self.total_in as u128 * self.up as u128).div_ceil(self.down as u128) as u64
         } else {
             u64::MAX
         };

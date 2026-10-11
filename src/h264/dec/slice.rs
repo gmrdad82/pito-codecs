@@ -190,9 +190,9 @@ impl SliceHeader {
         ];
         if !slice_type.is_intra() {
             if r.read_flag()? {
-                num_ref_idx_active[0] = r.read_ue()? + 1;
+                num_ref_idx_active[0] = r.read_ue()?.saturating_add(1);
                 if slice_type.is_b() {
-                    num_ref_idx_active[1] = r.read_ue()? + 1;
+                    num_ref_idx_active[1] = r.read_ue()?.saturating_add(1);
                 }
             }
             let max = if field_pic { 32 } else { 16 };
@@ -463,15 +463,15 @@ impl PocState {
                 };
                 let max_lsb = 1i32 << sps.log2_max_poc_lsb;
                 let lsb = sh.pic_order_cnt_lsb as i32;
-                let msb = if lsb < prev_lsb && prev_lsb - lsb >= max_lsb / 2 {
-                    prev_msb + max_lsb
-                } else if lsb > prev_lsb && lsb - prev_lsb > max_lsb / 2 {
-                    prev_msb - max_lsb
+                let msb = if lsb < prev_lsb && prev_lsb.wrapping_sub(lsb) >= max_lsb / 2 {
+                    prev_msb.wrapping_add(max_lsb)
+                } else if lsb > prev_lsb && lsb.wrapping_sub(prev_lsb) > max_lsb / 2 {
+                    prev_msb.wrapping_sub(max_lsb)
                 } else {
                     prev_msb
                 };
-                let top = msb + lsb;
-                let bottom = top + sh.delta_pic_order_cnt_bottom;
+                let top = msb.wrapping_add(lsb);
+                let bottom = top.wrapping_add(sh.delta_pic_order_cnt_bottom);
                 Poc {
                     top,
                     bottom,
@@ -483,7 +483,7 @@ impl PocState {
                 let frame_num_offset = self.frame_num_offset(sh.idr, sh.frame_num, sps);
                 let n = sps.offset_for_ref_frame.len() as i32;
                 let mut abs_frame_num = if n != 0 {
-                    frame_num_offset + sh.frame_num as i32
+                    frame_num_offset.wrapping_add(sh.frame_num as i32)
                 } else {
                     0
                 };
@@ -494,17 +494,22 @@ impl PocState {
                 if abs_frame_num > 0 {
                     let cycle_cnt = (abs_frame_num - 1) / n;
                     let in_cycle = (abs_frame_num - 1) % n;
-                    let delta_cycle: i32 = sps.offset_for_ref_frame.iter().sum();
+                    let delta_cycle = sps
+                        .offset_for_ref_frame
+                        .iter()
+                        .fold(0i32, |a, &o| a.wrapping_add(o));
                     expected = cycle_cnt.wrapping_mul(delta_cycle);
-                    for &o in &sps.offset_for_ref_frame[..=in_cycle as usize] {
-                        expected += o;
+                    for &o in sps.offset_for_ref_frame.iter().take(in_cycle as usize + 1) {
+                        expected = expected.wrapping_add(o);
                     }
                 }
                 if sh.nal_ref_idc == 0 {
-                    expected += sps.offset_for_non_ref_pic;
+                    expected = expected.wrapping_add(sps.offset_for_non_ref_pic);
                 }
-                let top = expected + sh.delta_pic_order_cnt[0];
-                let bottom = top + sps.offset_for_top_to_bottom_field + sh.delta_pic_order_cnt[1];
+                let top = expected.wrapping_add(sh.delta_pic_order_cnt[0]);
+                let bottom = top
+                    .wrapping_add(sps.offset_for_top_to_bottom_field)
+                    .wrapping_add(sh.delta_pic_order_cnt[1]);
                 Poc {
                     top,
                     bottom,
@@ -517,9 +522,14 @@ impl PocState {
                 let temp = if sh.idr {
                     0
                 } else if sh.nal_ref_idc == 0 {
-                    2 * (frame_num_offset + sh.frame_num as i32) - 1
+                    frame_num_offset
+                        .wrapping_add(sh.frame_num as i32)
+                        .wrapping_mul(2)
+                        .wrapping_sub(1)
                 } else {
-                    2 * (frame_num_offset + sh.frame_num as i32)
+                    frame_num_offset
+                        .wrapping_add(sh.frame_num as i32)
+                        .wrapping_mul(2)
                 };
                 Poc {
                     top: temp,
@@ -535,7 +545,8 @@ impl PocState {
         if idr {
             0
         } else if self.prev_frame_num > frame_num {
-            self.prev_frame_num_offset + sps.max_frame_num() as i32
+            self.prev_frame_num_offset
+                .wrapping_add(sps.max_frame_num() as i32)
         } else {
             self.prev_frame_num_offset
         }
@@ -546,7 +557,7 @@ impl PocState {
         if sh.nal_ref_idc != 0 {
             if mmco5 {
                 self.prev_ref_msb = 0;
-                self.prev_ref_lsb = poc.top - poc.frame();
+                self.prev_ref_lsb = poc.top.wrapping_sub(poc.frame());
             } else {
                 self.prev_ref_msb = poc.msb;
                 self.prev_ref_lsb = sh.pic_order_cnt_lsb as i32;

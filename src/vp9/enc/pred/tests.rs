@@ -272,6 +272,7 @@ fn motion_search_finds_a_subpel_shift() {
         range: 16,
         subpel: Subpel::Full,
         filter: EIGHTTAP,
+        half: None,
     };
     let m = s.run(&[Mv::ZERO]);
     assert_eq!(m.mv, truth, "{m:?}");
@@ -332,52 +333,70 @@ fn bench() {
     let rates = [300u32, 400, 200, 900];
     let mut scratch = InterScratch::default();
     let (mi_rows, mi_cols) = (h / 8, w / 8);
-    for &(bs, bsize) in &[(64usize, 12u8), (32, 9), (16, 6), (8, 3)] {
-        let t = Instant::now();
-        let mut n = 0;
-        for by in (0..h).step_by(bs) {
-            for bx in (0..w).step_by(bs) {
-                let r = [InterRef {
-                    frame: LAST_FRAME,
-                    luma: reference.plane(),
-                    nearest: Mv::new(-24, -40),
-                    near: Mv::ZERO,
-                    best: Mv::new(-24, -40),
-                    hints: &[],
-                    ref_rate: 100,
-                }];
-                let c = InterChoice {
-                    src: &cur[by * w + bx..],
-                    src_stride: w,
-                    pos: inter::BlockPos {
-                        mi_row: by / 8,
-                        mi_col: bx / 8,
-                        bsize,
-                        mi_rows,
-                        mi_cols,
-                    },
-                    w: bs.min(w - bx),
-                    h: bs.min(h - by),
-                    refs: &r,
-                    mode_rates: &rates,
-                    is_inter_rate: 50,
-                    mv_cost: &cost,
-                    allow_hp: true,
-                    filter: EIGHTTAP,
-                    lambda: 400,
-                    range: 16,
-                    subpel: Subpel::Quarter,
-                };
-                std::hint::black_box(best_inter(&c, &mut scratch));
-                n += 1;
+    let t = Instant::now();
+    let built = super::halfpel::HalfPel::new(&reference.plane(), EIGHTTAP);
+    eprintln!(
+        "half-pel planes: {:.2} ms per 1080p reference",
+        t.elapsed().as_secs_f64() * 1e3
+    );
+    for half in [None, Some(built)] {
+        eprintln!("half-pel planes in search: {}", half.is_some());
+        for &(bs, bsize) in &[(64usize, 12u8), (32, 9), (16, 6), (8, 3)] {
+            let mut s = f64::MAX;
+            let mut n = 0;
+            for _ in 0..3 {
+                let t = Instant::now();
+                n = 0;
+                for by in (0..h).step_by(bs) {
+                    for bx in (0..w).step_by(bs) {
+                        let r = [InterRef {
+                            frame: LAST_FRAME,
+                            luma: reference.plane(),
+                            nearest: Mv::new(-24, -40),
+                            near: Mv::ZERO,
+                            best: Mv::new(-24, -40),
+                            hints: &[],
+                            ref_rate: 100,
+                            half: half.as_ref(),
+                        }];
+                        let c = InterChoice {
+                            src: &cur[by * w + bx..],
+                            src_stride: w,
+                            pos: inter::BlockPos {
+                                mi_row: by / 8,
+                                mi_col: bx / 8,
+                                bsize,
+                                mi_rows,
+                                mi_cols,
+                            },
+                            w: bs.min(w - bx),
+                            h: bs.min(h - by),
+                            refs: &r,
+                            mode_rates: &rates,
+                            is_inter_rate: 50,
+                            mv_cost: &cost,
+                            allow_hp: true,
+                            filter: EIGHTTAP,
+                            lambda: 400,
+                            range: 16,
+                            subpel: if std::env::var_os("SUBPEL_NONE").is_some() {
+                                Subpel::None
+                            } else {
+                                Subpel::Quarter
+                            },
+                        };
+                        std::hint::black_box(best_inter(&c, &mut scratch));
+                        n += 1;
+                    }
+                }
+                s = s.min(t.elapsed().as_secs_f64());
             }
+            eprintln!(
+                "best_inter {bs}x{bs}: {n} blocks, {:.2} ms per 1080p frame, {:.0} fps",
+                s * 1e3,
+                1.0 / s
+            );
         }
-        let s = t.elapsed().as_secs_f64();
-        eprintln!(
-            "best_inter {bs}x{bs}: {n} blocks, {:.2} ms per 1080p frame, {:.0} fps",
-            s * 1e3,
-            1.0 / s
-        );
     }
     let ym = [100u32; 10];
     let uvm = [[100u32; 10]; 10];
@@ -474,5 +493,38 @@ fn bench() {
             px / s2,
             px / s3
         );
+    }
+}
+
+#[test]
+fn half_pel_planes_match_mc_and_leave_the_search_unchanged() {
+    let mut rng = Rng(99);
+    let (w, h) = (150usize, 90usize);
+    let src = texture(&mut rng, w, h);
+    let reference = Padded::new(&src, w, h, 96);
+    let plane = reference.plane();
+    for filter in [EIGHTTAP, EIGHTTAP_SHARP] {
+        let hp = super::halfpel::HalfPel::new(&plane, filter);
+        for _ in 0..300 {
+            let bs = 4usize << rng.below(5);
+            let x = rng.below(w + 160 - bs) as isize - 80;
+            let y = rng.below(h + 160 - bs) as isize - 80;
+            if !hp.covers(x, y, bs, bs) {
+                continue;
+            }
+            for (fx, fy) in [(8, 0), (0, 8), (8, 8)] {
+                let (x16, y16) = (x * 16 + fx, y * 16 + fy);
+                let mut want = vec![0u8; bs * bs];
+                inter::mc(&plane, x16, y16, bs, bs, filter, &mut want, bs);
+                let (p, ps) = hp.at(x16, y16).unwrap();
+                for i in 0..bs {
+                    assert_eq!(
+                        &p[i * ps..i * ps + bs],
+                        &want[i * bs..i * bs + bs],
+                        "({x16},{y16}) {bs} filter {filter}"
+                    );
+                }
+            }
+        }
     }
 }

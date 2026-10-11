@@ -21,6 +21,7 @@ pub struct Costs {
     pub single_ref: [[[u32; 2]; 2]; 5],
     pub mv_joint: [u32; 4],
     pub mv: [MvCompCosts; 2],
+    pub tx: [[[u32; 4]; 2]; 4],
 }
 
 pub const MV_MAX: i32 = (1 << 14) - 1;
@@ -176,6 +177,17 @@ impl Costs {
         }
         let mut mv_joint = [0u32; 4];
         tree_costs(&MV_JOINT_TREE, &fc.mv_joint, &mut mv_joint);
+        let mut tx = [[[0u32; 4]; 2]; 4];
+        for (max, t) in tx.iter_mut().enumerate().skip(1) {
+            let tree: &[i8] = match max {
+                3 => &TX_SIZE_32_TREE,
+                2 => &TX_SIZE_16_TREE,
+                _ => &TX_SIZE_8_TREE,
+            };
+            for (ctx, c) in t.iter_mut().enumerate() {
+                tree_costs(tree, &fc.tx[max][ctx][..max], c);
+            }
+        }
         Costs {
             more,
             token,
@@ -190,6 +202,7 @@ impl Costs {
             single_ref,
             mv_joint,
             mv: [MvCompCosts::new(fc, 0), MvCompCosts::new(fc, 1)],
+            tx,
         }
     }
 

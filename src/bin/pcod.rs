@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::io::{self, Write};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -96,6 +97,36 @@ fn main() -> ExitCode {
         Ok(cli) => cli,
         Err(e) => e.exit(),
     };
+    panic::set_hook(Box::new(|_| {}));
+    let outcome = panic::catch_unwind(AssertUnwindSafe(|| run(cli)));
+    let text = match outcome {
+        Ok(Ok(())) => return ExitCode::SUCCESS,
+        Ok(Err(e)) => e.to_string(),
+        Err(payload) => {
+            let what = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown cause".into());
+            format!("internal error: {what}")
+        }
+    };
+    let line = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ");
+    let line = if line.is_empty() {
+        "failed with no message".to_string()
+    } else {
+        line
+    };
+    let _ = writeln!(io::stderr(), "pcod: {line}");
+    ExitCode::FAILURE
+}
+
+fn run(cli: Cli) -> Result<(), Fail> {
     let mut out = io::stdout().lock();
     let result = match cli.command {
         Command::Probe { file } => show(&mut out, &file),
@@ -113,24 +144,19 @@ fn main() -> ExitCode {
             threads,
         } => encode(&mut out, &input, &output, codec, route, crf, threads),
     };
-    match result.and_then(|()| Ok(out.flush()?)) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            let text = e.to_string();
-            let line = text
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .collect::<Vec<_>>()
-                .join("; ");
-            let _ = writeln!(io::stderr(), "pcod: {line}");
-            ExitCode::FAILURE
-        }
-    }
+    result?;
+    out.flush()?;
+    Ok(())
 }
 
 fn about(file: &Path, e: impl std::fmt::Display) -> Fail {
-    format!("{}: {e}", file.display()).into()
+    let shown = file.display().to_string();
+    let text = e.to_string();
+    if text.contains(&shown) {
+        text.into()
+    } else {
+        format!("{shown}: {text}").into()
+    }
 }
 
 fn show(out: &mut impl Write, file: &Path) -> Result<(), Fail> {
@@ -464,9 +490,9 @@ fn gop_of(fps: (u32, u32)) -> u32 {
 }
 
 fn frame_index(pts: i64, first: i64, time_base: TimeBase, fps: (u32, u32)) -> i64 {
-    let ticks = (pts - first) as i128 * fps.0 as i128 * time_base.num as i128;
+    let ticks = (pts as i128 - first as i128) * fps.0 as i128 * time_base.num as i128;
     let per = (fps.1.max(1) as i128 * time_base.den.max(1) as i128).max(1);
-    ((ticks + per / 2).div_euclid(per)) as i64
+    ((ticks + per / 2).div_euclid(per)).clamp(i64::MIN as i128, i64::MAX as i128) as i64
 }
 
 fn encode(
@@ -482,7 +508,19 @@ fn encode(
     let prefs = want.prefs();
     let info = probe(input, &prefs).map_err(|e| about(input, e))?;
     let fps = info.fps;
+    if fps.0 == 0 || fps.1 == 0 {
+        return Err(about(input, "the video track has no frame rate"));
+    }
     let (width, height) = (info.width & !1, info.height & !1);
+    if width == 0 || height == 0 || width > u16::MAX as u32 || height > u16::MAX as u32 {
+        return Err(about(
+            input,
+            format!(
+                "the video is {}x{}, which can't be encoded",
+                info.width, info.height
+            ),
+        ));
+    }
     let mut picked = pick_encode(kind.codec(), &prefs, &Caps::detect(&prefs))?;
     let mut opened = open(input, want, threads)?;
     notes(out, &opened.notes)?;
@@ -527,7 +565,10 @@ fn encode(
     let source_base = TimeBase::new(1, source_scale);
     let frame_base = TimeBase::new(fps.1, fps.0);
     let step = fps.1 as i64 * 64;
-    let timescale = fps.0 * 64;
+    let timescale = fps
+        .0
+        .checked_mul(64)
+        .ok_or("the frame rate is out of range")?;
     let rotation = opened.reader.tracks[opened.track].matrix;
 
     let start = Instant::now();
@@ -598,17 +639,17 @@ fn encode(
         .collect::<Result<_, _>>()?;
     let mut last: Option<i64> = None;
     for p in packets {
-        let mut dts = p.dts * step;
+        let mut dts = p.dts.saturating_mul(step);
         if let Some(l) = last
             && dts <= l
         {
-            dts = l + 1;
+            dts = l.saturating_add(1);
         }
         last = Some(dts);
         writer.push(
             video,
             &Packet {
-                pts: p.pts * step,
+                pts: p.pts.saturating_mul(step),
                 dts,
                 ..p
             },

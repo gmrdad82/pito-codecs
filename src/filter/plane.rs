@@ -55,7 +55,26 @@ pub(crate) fn samples_mut<S: Sample>(p: &mut Plane) -> Result<&mut [S]> {
     Ok(body)
 }
 
+pub(crate) const MAX_SIDE: u32 = 1 << 15;
+
+pub(crate) fn sized(width: u32, height: u32) -> Result<()> {
+    if width > MAX_SIDE || height > MAX_SIDE {
+        return Err(Error::Invalid(format!(
+            "{width}x{height} is larger than {MAX_SIDE} on a side"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn span(stride: usize, rows: usize, row: usize) -> Option<usize> {
+    if rows == 0 {
+        return Some(0);
+    }
+    stride.checked_mul(rows - 1)?.checked_add(row)
+}
+
 pub(crate) fn check(frame: &Frame) -> Result<()> {
+    sized(frame.width, frame.height)?;
     let bytes = frame.format.bytes_per_sample();
     let w = frame.width as usize;
     let h = frame.height as usize;
@@ -68,7 +87,7 @@ pub(crate) fn check(frame: &Frame) -> Result<()> {
                 "plane {i} is smaller than the frame"
             )));
         }
-        if ph > 0 && p.data.len() < p.stride * (ph - 1) + pw * bytes {
+        if span(p.stride, ph, pw * bytes).is_none_or(|n| p.data.len() < n) {
             return Err(Error::Invalid(format!("plane {i} data is too short")));
         }
     }

@@ -6,6 +6,9 @@ use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
 
 const AHEAD: usize = 16;
 const MAX_PIXELS: usize = 1 << 28;
+const MIN_BUDGET: usize = 1 << 20;
+const PIXELS_PER_BYTE: usize = 1 << 12;
+const LZW_PIXELS_PER_BYTE: usize = 1 << 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Disposal {
@@ -89,8 +92,12 @@ impl<'a> Decoder<'a> {
         if width == 0 || height == 0 {
             return Err(Error::Invalid("zero canvas size"));
         }
-        if width as usize * height as usize > MAX_PIXELS {
+        let pixels = width as usize * height as usize;
+        if pixels > MAX_PIXELS {
             return Err(Error::Invalid("canvas too large"));
+        }
+        if pixels > data.len().saturating_mul(PIXELS_PER_BYTE).max(MIN_BUDGET) {
+            return Err(Error::Invalid("canvas far larger than the file"));
         }
         let mut d = Decoder {
             data,
@@ -300,7 +307,7 @@ impl<'a> Decoder<'a> {
         let Some(rx) = self.queue.pop_front() else {
             return Ok(None);
         };
-        let raw = wait(rx);
+        let raw = wait(rx).ok_or(Error::Invalid("frame decode task failed"))?;
         self.dispose();
         self.draw(&raw);
         let frame = (
@@ -446,19 +453,19 @@ fn interlaced_row(k: usize, h: usize) -> usize {
     }
 }
 
-fn wait(rx: Receiver<Raw>) -> Raw {
+fn wait(rx: Receiver<Raw>) -> Option<Raw> {
     if rayon::current_thread_index().is_none() {
-        return rx.recv().expect("gif frame decode task");
+        return rx.recv().ok();
     }
     loop {
         match rx.try_recv() {
-            Ok(raw) => return raw,
+            Ok(raw) => return Some(raw),
             Err(TryRecvError::Empty) => {
                 if rayon::yield_now() != Some(rayon::Yield::Executed) {
                     std::thread::yield_now();
                 }
             }
-            Err(TryRecvError::Disconnected) => panic!("gif frame decode task failed"),
+            Err(TryRecvError::Disconnected) => return None,
         }
     }
 }
@@ -467,7 +474,8 @@ fn decode_raw(raw: &mut Raw) {
     thread_local! {
         static LZW: std::cell::RefCell<LzwDecoder> = std::cell::RefCell::new(LzwDecoder::default());
     }
-    let n = raw.width as usize * raw.height as usize;
+    let n = (raw.width as usize * raw.height as usize)
+        .min(raw.data.len().saturating_mul(LZW_PIXELS_PER_BYTE));
     raw.indices.clear();
     raw.indices.resize(n, 0);
     raw.decoded = LZW.with_borrow_mut(|l| l.decode(raw.min_code, &raw.data, &mut raw.indices));

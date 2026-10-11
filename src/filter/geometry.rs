@@ -1,5 +1,5 @@
 use super::color::{ColorSpec, Range};
-use super::plane::{Sample, check, plane_dims, reshape, samples, samples_mut};
+use super::plane::{Sample, check, plane_dims, reshape, samples, samples_mut, sized};
 use crate::media::{Error, Frame, PixelFormat, Result};
 use rayon::prelude::*;
 
@@ -92,21 +92,33 @@ fn rotate_plane<S: Sample>(
             });
         }
         Rotation::R90 | Rotation::R270 => {
+            let n = 16 / S::BYTES;
             d.par_chunks_mut(ds * TILE)
                 .enumerate()
                 .for_each(|(band, chunk)| {
-                    for x0 in (0..dw).step_by(TILE) {
-                        let x1 = (x0 + TILE).min(dw);
-                        for (r, row) in chunk.chunks_mut(ds).enumerate() {
-                            let y = band * TILE + r;
-                            if rotation == Rotation::R90 {
-                                for (x, o) in row[x0..x1].iter_mut().enumerate() {
-                                    *o = s[(sh - 1 - (x0 + x)) * ss + y];
-                                }
-                            } else {
-                                let col = sw - 1 - y;
-                                for (x, o) in row[x0..x1].iter_mut().enumerate() {
-                                    *o = s[(x0 + x) * ss + col];
+                    let rows = chunk.len().div_ceil(ds).min(dh - band * TILE);
+                    let cell = |y: usize, x: usize| {
+                        if rotation == Rotation::R90 {
+                            s[(sh - 1 - x) * ss + y]
+                        } else {
+                            s[x * ss + sw - 1 - y]
+                        }
+                    };
+                    for x0 in (0..dw).step_by(n) {
+                        for g in (0..rows).step_by(n) {
+                            let y0 = band * TILE + g;
+                            if x0 + n <= dw
+                                && g + n <= rows
+                                && transpose::<S>(s, ss, chunk, ds, sh, sw, rotation, g, y0, x0)
+                            {
+                                continue;
+                            }
+                            for r in g..(g + n).min(rows) {
+                                let end = (x0 + n).min(dw);
+                                for (x, o) in
+                                    chunk[r * ds + x0..r * ds + end].iter_mut().enumerate()
+                                {
+                                    *o = cell(band * TILE + r, x0 + x);
                                 }
                             }
                         }
@@ -117,20 +129,118 @@ fn rotate_plane<S: Sample>(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn transpose<S: Sample>(
+    s: &[S],
+    ss: usize,
+    chunk: &mut [S],
+    ds: usize,
+    sh: usize,
+    sw: usize,
+    rotation: Rotation,
+    g: usize,
+    y0: usize,
+    x0: usize,
+) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let n = 16 / S::BYTES;
+        let mut inp = [std::ptr::null::<u8>(); 16];
+        let mut out = [std::ptr::null_mut::<u8>(); 16];
+        let base = chunk.as_mut_ptr();
+        for k in 0..n {
+            let at = if rotation == Rotation::R90 {
+                (sh - 1 - x0 - k) * ss + y0
+            } else {
+                (x0 + k) * ss + sw - n - y0
+            };
+            inp[k] = s[at..at + n].as_ptr() as *const u8;
+            let r = if rotation == Rotation::R90 {
+                g + k
+            } else {
+                g + n - 1 - k
+            };
+            let at = r * ds + x0;
+            assert!(at + n <= chunk.len());
+            out[k] = unsafe { base.add(at) } as *mut u8;
+        }
+        unsafe {
+            if S::BYTES == 1 {
+                t16(&inp, &out);
+            } else {
+                t8(&inp, &out);
+            }
+        }
+        true
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (s, ss, chunk, ds, sh, sw, rotation, g, y0, x0);
+        false
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn t16(inp: &[*const u8; 16], out: &[*mut u8; 16]) {
+    use std::arch::x86_64::*;
+    let mut x = [_mm_setzero_si128(); 16];
+    for (v, p) in x.iter_mut().zip(inp) {
+        *v = unsafe { _mm_loadu_si128(*p as *const __m128i) };
+    }
+    for _ in 0..4 {
+        let mut y = x;
+        for i in 0..8 {
+            y[2 * i] = _mm_unpacklo_epi8(x[i], x[i + 8]);
+            y[2 * i + 1] = _mm_unpackhi_epi8(x[i], x[i + 8]);
+        }
+        x = y;
+    }
+    for (v, p) in x.iter().zip(out) {
+        unsafe { _mm_storeu_si128(*p as *mut __m128i, *v) };
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn t8(inp: &[*const u8; 16], out: &[*mut u8; 16]) {
+    use std::arch::x86_64::*;
+    let mut x = [_mm_setzero_si128(); 8];
+    for (v, p) in x.iter_mut().zip(inp) {
+        *v = unsafe { _mm_loadu_si128(*p as *const __m128i) };
+    }
+    for _ in 0..3 {
+        let mut y = x;
+        for i in 0..4 {
+            y[2 * i] = _mm_unpacklo_epi16(x[i], x[i + 4]);
+            y[2 * i + 1] = _mm_unpackhi_epi16(x[i], x[i + 4]);
+        }
+        x = y;
+    }
+    for (v, p) in x.iter().zip(out) {
+        unsafe { _mm_storeu_si128(*p as *mut __m128i, *v) };
+    }
+}
+
 pub fn flip_horizontal(frame: &mut Frame) -> Result<()> {
     check(frame)?;
     let bytes = frame.format.bytes_per_sample();
     for i in 0..3 {
-        let (w, _) = plane_dims(frame.width, frame.height, i);
+        let (w, h) = plane_dims(frame.width, frame.height, i);
+        if w == 0 || h == 0 {
+            continue;
+        }
         let p = &mut frame.planes[i];
-        let stride = p.stride;
+        let stride = p.stride / bytes;
+        let end = stride * (h - 1) + w;
         if bytes == 1 {
-            p.data
+            p.data[..end]
                 .par_chunks_mut(stride)
                 .for_each(|row| row[..w].reverse());
         } else {
-            samples_mut::<u16>(p)?
-                .par_chunks_mut(stride / 2)
+            samples_mut::<u16>(p)?[..end]
+                .par_chunks_mut(stride)
                 .for_each(|row| row[..w].reverse());
         }
     }
@@ -142,6 +252,9 @@ pub fn flip_vertical(frame: &mut Frame) -> Result<()> {
     let bytes = frame.format.bytes_per_sample();
     for i in 0..3 {
         let (w, h) = plane_dims(frame.width, frame.height, i);
+        if w == 0 || h < 2 {
+            continue;
+        }
         let p = &mut frame.planes[i];
         let stride = p.stride;
         let (top, bottom) = p.data.split_at_mut(stride * (h / 2));
@@ -155,7 +268,11 @@ pub fn flip_vertical(frame: &mut Frame) -> Result<()> {
 
 pub fn crop(src: &Frame, x: u32, y: u32, width: u32, height: u32, out: &mut Frame) -> Result<()> {
     check(src)?;
-    if width == 0 || height == 0 || x + width > src.width || y + height > src.height {
+    if width == 0
+        || height == 0
+        || x as u64 + width as u64 > src.width as u64
+        || y as u64 + height as u64 > src.height as u64
+    {
         return Err(Error::Invalid(format!(
             "crop {width}x{height} at {x},{y} is outside {}x{}",
             src.width, src.height
@@ -187,7 +304,8 @@ pub fn pad(
     out: &mut Frame,
 ) -> Result<()> {
     check(src)?;
-    if x + src.width > width || y + src.height > height {
+    sized(width, height)?;
+    if x as u64 + src.width as u64 > width as u64 || y as u64 + src.height as u64 > height as u64 {
         return Err(Error::Invalid(format!(
             "{}x{} at {x},{y} does not fit in {width}x{height}",
             src.width, src.height
@@ -223,6 +341,9 @@ fn pad_plane<S: Sample>(
     let ds = out.planes[i].stride / S::BYTES;
     let s = samples::<S>(&src.planes[i])?;
     let d = samples_mut::<S>(&mut out.planes[i])?;
+    if dw == 0 {
+        return Ok(());
+    }
     d.par_chunks_mut(ds).enumerate().for_each(|(r, row)| {
         let row = &mut row[..dw];
         if r < oy || r >= oy + sh {

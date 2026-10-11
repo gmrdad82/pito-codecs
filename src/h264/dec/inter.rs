@@ -351,13 +351,77 @@ pub fn weighted_store_scalar(
     }
 }
 
+pub fn avg_into(dst: &mut [u8], ds: usize, src: &[u8], ss: usize, bw: usize, bh: usize) {
+    for r in 0..bh {
+        let d = &mut dst[r * ds..r * ds + bw];
+        for (d, &s) in d.iter_mut().zip(&src[r * ss..r * ss + bw]) {
+            *d = ((*d as u16 + s as u16 + 1) >> 1) as u8;
+        }
+    }
+}
+
+#[cfg(any(test, not(target_arch = "x86_64")))]
+#[allow(clippy::too_many_arguments)]
+pub fn mc_luma_win_avg_scalar(
+    src: &[u8],
+    ss: usize,
+    fx: u32,
+    fy: u32,
+    bw: usize,
+    bh: usize,
+    out: &mut [u8],
+    os: usize,
+) {
+    let mut t = [0u8; 256];
+    mc_luma_win_scalar(src, ss, fx, fy, bw, bh, &mut t, 16);
+    avg_into(out, os, &t, 16, bw, bh);
+}
+
+#[cfg(any(test, not(target_arch = "x86_64")))]
+#[allow(clippy::too_many_arguments)]
+pub fn mc_chroma_win2_scalar(
+    src: [&[u8]; 2],
+    ss: usize,
+    fx: u32,
+    fy: u32,
+    bw: usize,
+    bh: usize,
+    out: [&mut [u8]; 2],
+    os: usize,
+) {
+    for (s, o) in src.into_iter().zip(out) {
+        mc_chroma_win_scalar(s, ss, fx, fy, bw, bh, o, os);
+    }
+}
+
+#[cfg(any(test, not(target_arch = "x86_64")))]
+#[allow(clippy::too_many_arguments)]
+pub fn mc_chroma_win2_avg_scalar(
+    src: [&[u8]; 2],
+    ss: usize,
+    fx: u32,
+    fy: u32,
+    bw: usize,
+    bh: usize,
+    out: [&mut [u8]; 2],
+    os: usize,
+) {
+    for (s, o) in src.into_iter().zip(out) {
+        let mut t = [0u8; 64];
+        mc_chroma_win_scalar(s, ss, fx, fy, bw, bh, &mut t, 8);
+        avg_into(o, os, &t, 8, bw, bh);
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 pub use crate::h264::dec::simd::{
-    mc_chroma as mc_chroma_win, mc_luma as mc_luma_win, weighted_store,
+    mc_chroma2 as mc_chroma_win2, mc_chroma2_avg as mc_chroma_win2_avg, mc_luma as mc_luma_win,
+    mc_luma_avg as mc_luma_win_avg, weighted_store,
 };
 
 #[cfg(not(target_arch = "x86_64"))]
 pub use self::{
-    mc_chroma_win_scalar as mc_chroma_win, mc_luma_win_scalar as mc_luma_win,
+    mc_chroma_win2_avg_scalar as mc_chroma_win2_avg, mc_chroma_win2_scalar as mc_chroma_win2,
+    mc_luma_win_avg_scalar as mc_luma_win_avg, mc_luma_win_scalar as mc_luma_win,
     weighted_store_scalar as weighted_store,
 };

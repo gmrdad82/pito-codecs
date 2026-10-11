@@ -212,7 +212,7 @@ fn ffmpeg_decodes_ours_exactly() {
             palette,
             ..EncodeOptions::default()
         };
-        let bytes = encode(&src, &delays, opts);
+        let bytes = encode(&src, &delays, opts).unwrap();
         std::fs::write(path(name), &bytes).unwrap();
         let a = ours(name);
         assert_eq!(a.loop_count, Some(0));
@@ -241,15 +241,15 @@ fn batches_do_not_change_the_output() {
             dither,
             ..EncodeOptions::default()
         };
-        let whole = encode(&src, &delays, opts);
-        let chunked = small.install(|| encode(&src, &delays, opts));
+        let whole = encode(&src, &delays, opts).unwrap();
+        let chunked = small.install(|| encode(&src, &delays, opts).unwrap());
         assert!(whole == chunked, "{dither:?}: encode in batches");
         let refs: Vec<&Rgba> = src.iter().collect();
         let palette = Palette::from_frames(&refs, 255);
         let streamed = small.install(|| {
-            let mut e = Encoder::with_palette(160, 120, opts, palette);
+            let mut e = Encoder::with_palette(160, 120, opts, palette).unwrap();
             for (f, &d) in src.iter().zip(&delays) {
-                e.push(f.clone(), d);
+                e.push(f.clone(), d).unwrap();
             }
             e.finish()
         });
@@ -287,7 +287,7 @@ fn transparency_and_still_frames_survive() {
         dither: Dither::None,
         ..EncodeOptions::default()
     };
-    let bytes = encode(&frames, &delays, opts);
+    let bytes = encode(&frames, &delays, opts).unwrap();
     std::fs::write(path("alpha.gif"), &bytes).unwrap();
     let a = ours("alpha.gif");
     assert_eq!(a.frames.len(), 7);
@@ -434,7 +434,7 @@ fn speed_against_ffmpeg() {
             ),
         ] {
             let mut gif = Vec::new();
-            let ours_s = timed(|| gif = encode(&src, &delays, opts));
+            let ours_s = timed(|| gif = encode(&src, &delays, opts).unwrap());
             let ours_name = format!("speed-ours-{w}.gif");
             std::fs::write(path(&ours_name), &gif).unwrap();
             let ff_name = format!("speed-ff-{w}.gif");
@@ -498,6 +498,19 @@ fn speed_against_ffmpeg() {
     }
 }
 
+fn survive(bad: &[u8]) {
+    if let Ok(mut d) = Decoder::new(bad) {
+        let mut n = 0;
+        while let Ok(Some(_)) = d.next_frame() {
+            n += 1;
+            if n > 1000 {
+                break;
+            }
+        }
+    }
+    let _ = decode(bad);
+}
+
 #[test]
 fn damaged_files_never_panic() {
     let mut frames = Vec::new();
@@ -509,8 +522,18 @@ fn damaged_files_never_panic() {
         }
         frames.push(f);
     }
-    let good = encode(&frames, &[5; 4], EncodeOptions::default());
+    let good = encode(&frames, &[5; 4], EncodeOptions::default()).unwrap();
     assert_eq!(decode(&good).unwrap().frames.len(), 4);
+    for cut in (0..300).chain((300..good.len()).step_by(37)) {
+        survive(&good[..cut]);
+    }
+    let images: Vec<usize> = (0..good.len())
+        .filter(|&i| i >= 3 && good[i] == 0x2C && good[i - 3] == 0)
+        .collect();
+    let mut fields: Vec<usize> = (6..13).collect();
+    for &at in &images {
+        fields.extend(at + 1..(at + 11).min(good.len()));
+    }
     let mut seed = 0x9E37_79B9u32;
     let mut next = || {
         seed ^= seed << 13;
@@ -518,23 +541,49 @@ fn damaged_files_never_panic() {
         seed ^= seed << 5;
         seed as usize
     };
-    for round in 0..400 {
+    for round in 0..600 {
         let mut bad = good.clone();
-        for _ in 0..1 + round % 8 {
-            let at = next() % bad.len();
-            bad[at] = next() as u8;
+        for _ in 0..1 + round % 4 {
+            let at = if round % 2 == 0 {
+                fields[next() % fields.len()]
+            } else {
+                next() % bad.len()
+            };
+            bad[at] = match next() % 4 {
+                0 => 0,
+                1 => 0xFF,
+                _ => next() as u8,
+            };
         }
         if round % 5 == 0 {
             bad.truncate(next() % bad.len());
         }
-        if let Ok(mut d) = Decoder::new(&bad) {
-            let mut n = 0;
-            while let Ok(Some(_)) = d.next_frame() {
-                n += 1;
-                if n > 1000 {
-                    break;
-                }
-            }
-        }
+        survive(&bad);
     }
+    let mut tiny = b"GIF89a\xff\xff\xff\xff\x00\x00\x00".to_vec();
+    assert!(Decoder::new(&tiny).is_err());
+    tiny[6..10].copy_from_slice(&[1, 0, 1, 0]);
+    tiny.extend_from_slice(&[
+        0x2C, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0x40, 11, 2, 0xff, 0xff, 0, 0x3B,
+    ]);
+    survive(&tiny);
+}
+
+#[test]
+fn bad_encoder_input_is_an_error() {
+    let opts = EncodeOptions::default();
+    assert!(encode(&[], &[], opts).is_err());
+    let frames = [Rgba::new(8, 8), Rgba::new(8, 9)];
+    assert!(encode(&frames, &[], opts).is_err());
+    let short = Rgba {
+        width: 8,
+        height: 8,
+        data: vec![0; 10],
+    };
+    assert!(encode(std::slice::from_ref(&short), &[], opts).is_err());
+    assert!(encode(&[Rgba::new(0, 4)], &[], opts).is_err());
+    let mut e = Encoder::new(8, 8, opts).unwrap();
+    assert!(e.push(short, 1).is_err());
+    assert!(e.push(Rgba::new(4, 4), 1).is_err());
+    assert!(Palette::new(Vec::new()).is_err());
 }

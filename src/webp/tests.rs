@@ -352,6 +352,18 @@ fn damaged_files_fail_without_panics() {
     ) {
         files.push(f);
     }
+    if let Some(frames) = source("testsrc2", 384, 352, 3) {
+        let mut a = frames[0].clone();
+        for (i, px) in a.data.chunks_exact_mut(4).enumerate() {
+            px[3] = (i % 251) as u8;
+        }
+        files.push(super::encode(&a, &super::Options::lossy(60.0)).unwrap());
+        let mut enc = super::AnimEncoder::new(384, 352, super::Options::lossy(60.0), 0).unwrap();
+        for f in &frames {
+            enc.add(f, 40).unwrap();
+        }
+        files.push(enc.finish().unwrap());
+    }
     let mut seed = 0x2545f4914f6cdd1du64;
     let mut next = || {
         seed ^= seed << 13;
