@@ -10,7 +10,7 @@ Works on Linux x86-64 and arm64, Windows x86-64 and macOS on Apple Silicon; CI t
 
 ## Status
 
-`v1.0.0`: every format below decodes and encodes, on Linux, Windows and macOS, and the API is settled. Opus speech encoding (SILK and hybrid) is marked experimental below: it decodes clean but doesn't sound as good as libopus.
+`v1.0.1`: every format below decodes and encodes, on Linux, Windows and macOS, and the API is settled. Opus speech encoding (SILK and hybrid) is marked experimental below: it decodes clean but doesn't sound as good as libopus.
 
 | Part | Decode | Encode |
 | --- | --- | --- |
@@ -33,21 +33,21 @@ Every number here comes from the one benchmark run that the Speed section descri
 
 Where pito-codecs is faster:
 
-- **Time to first frame:** 8.7× to 19.8× faster at 1440p, CPU or GPU (4.9 ms against 97.6 ms for H.264 on the CPU; ffmpeg's time includes starting its process).
-- **Filmstrip stills:** 8.2× to 11.7× faster.
-- **Smart-cut export against a full re-encode:** 1.6× to 1.7× faster, frame-accurate on both sides.
-- **GPU decode and encode (VA-API):** 1.1× to 1.2× faster on 9 of the 14 GPU rows, about the same on 5.
-- **Scaling:** 1.6× to 2.2× faster.
-- **Loudness (EBU R128):** 5.8× faster.
-- **AAC encode:** 1.7× faster.
+- **Time to first frame:** 7.4× to 21.5× faster at 1440p, CPU or GPU (4.1 ms against 87.4 ms for H.264 on the CPU; ffmpeg's time includes starting its process).
+- **Filmstrip stills:** 7.6× to 12.4× faster.
+- **Smart-cut export against a full re-encode:** 1.7× to 2.9× faster, frame-accurate on both sides.
+- **GPU decode and encode (VA-API):** 1.1× to 1.3× faster on 8 of the 14 GPU rows, about the same on 6.
+- **Scaling:** 1.7× to 2.6× faster.
+- **Loudness (EBU R128):** 5.7× faster.
+- **AAC encode:** 1.8× faster.
 
-Where ffmpeg still wins:
+Where ffmpeg wins:
 
-- **CPU H.264 decode:** ffmpeg is 1.3× to 1.7× faster (2540 against 1942 fps at 1080p, all threads).
-- **CPU HEVC decode:** on one thread about the same at 1080p, ours 1.1× faster at 1440p; on all threads ours 1.1× slower at 1080p, ours 1.5× slower at 1440p.
-- **CPU H.264 encode against x264:** libx264 is 1.5× to 3.3× faster (medium and veryfast presets).
-- **AAC decode:** ffmpeg is 1.7× faster.
-- **Smart-cut export against a stream copy:** ffmpeg's copy is 5.0× to 6.6× faster, but it encodes nothing and cuts only on keyframes, so it isn't frame-accurate.
+- **CPU H.264 decode:** ffmpeg is 1.3× to 1.5× faster (2551 against 1959 fps at 1080p, all threads).
+- **CPU HEVC decode:** about the same on one thread; on all threads ours is 1.1× slower at 1080p and 1.6× slower at 1440p.
+- **CPU H.264 encode against x264:** libx264 is 1.5× to 3.4× faster (medium and veryfast presets).
+- **AAC decode:** ffmpeg is 1.9× faster.
+- **Smart-cut export against a stream copy:** ffmpeg's copy is 5.8× to 6.0× faster, but it encodes nothing and cuts only on keyframes, so it isn't frame-accurate.
 - **Not in this run:** VP9 encode speed and Opus speech (SILK and hybrid) encode quality aren't benchmarked here; Opus speech encode is marked experimental.
 
 ## What it is
@@ -105,7 +105,7 @@ Add it as a git dependency at a tag, with the features you need (all are on by d
 
 ```toml
 [dependencies]
-pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v1.0.0", default-features = false, features = ["h264", "mp4"] }
+pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v1.0.1", default-features = false, features = ["h264", "mp4"] }
 ```
 
 | Feature | What it holds |
@@ -190,13 +190,13 @@ The front tries the GPU first and our own CPU code second, for every decode and 
 
 ## Speed
 
-Each pair below was measured back to back against the system ffmpeg on the same file, in one run on 2026-10-11 at commit `91d2582`:
+Each pair below was measured back to back against the system ffmpeg on the same file, in one run on 2026-10-11 at commit `415391d`:
 
 - **CPU:** AMD Ryzen 9 9950X (16 cores).
 - **GPU:** AMD Radeon RX 9060 XT on Mesa 26.2 radeonsi through VA-API, on Linux.
 - **ffmpeg:** 9.0.1.
 
-The input is 20 s of NASA's public-domain "A Message of Resilience from the International Space Station" (720p60), scaled to 1080p and 1440p and encoded with libx264 at CRF 20 and libx265 at CRF 23; the audio is NASA's public-domain solstice interview. The command is `pgpu run -- cargo run --release --example bench -- --runs 1`, which writes `tmp/bench/results.json` and every chart below; `--charts-only` redraws the charts from that file. The machine's load average was 6.09 at the start, so the absolute numbers are floors.
+The input is 20 s of NASA's public-domain "A Message of Resilience from the International Space Station" (720p60), scaled to 1080p and 1440p and encoded with libx264 at CRF 20 and libx265 at CRF 23; the audio is NASA's public-domain solstice interview. The command is `pgpu run -- cargo run --release --example bench -- --runs 1`, which writes `tmp/bench/results.json` and every chart below; `--charts-only` redraws the charts from that file. The machine was shared with other work (load average 4.5 at the start, up to 18 during the run), so the absolute numbers are floors; 17 rows that another GPU job disturbed (H.264 1080p VA-API encode, the filmstrips, the smart-cut exports and the scales) were measured again right after with `--only` into the same results file.
 
 ![Speed against ffmpeg, per job](docs/images/bench-speedup.png)
 
@@ -212,55 +212,55 @@ The chart above shows each job as times faster or slower than ffmpeg, on a log s
 
 | Job | pito-codecs | ffmpeg | pito-codecs is |
 | --- | --- | --- | --- |
-| H.264 1080p decode, CPU, 1 thread | 327 fps | 567 fps | 1.7× slower |
-| H.264 1080p decode, CPU, all threads | 1942 fps | 2540 fps | 1.3× slower |
-| HEVC 1080p decode, CPU, 1 thread | 456 fps | 435 fps | about the same |
-| HEVC 1080p decode, CPU, all threads | 1546 fps | 1729 fps | 1.1× slower |
-| H.264 1440p decode, CPU, 1 thread | 194 fps | 321 fps | 1.7× slower |
-| H.264 1440p decode, CPU, all threads | 1189 fps | 1609 fps | 1.4× slower |
-| HEVC 1440p decode, CPU, 1 thread | 260 fps | 244 fps | 1.1× faster |
-| HEVC 1440p decode, CPU, all threads | 825 fps | 1250 fps | 1.5× slower |
-| H.264 1080p decode, VA-API, frames stay on the GPU | 1150 fps | 1122 fps | about the same |
-| H.264 1080p decode, VA-API, frames read back | 842 fps | 711 fps | 1.2× faster |
-| HEVC 1080p decode, VA-API, frames stay on the GPU | 1202 fps | 1200 fps | about the same |
-| HEVC 1080p decode, VA-API, frames read back | 804 fps | 689 fps | 1.2× faster |
-| H.264 1440p decode, VA-API, frames stay on the GPU | 1140 fps | 1100 fps | about the same |
-| H.264 1440p decode, VA-API, frames read back | 513 fps | 480 fps | 1.1× faster |
-| HEVC 1440p decode, VA-API, frames stay on the GPU | 1163 fps | 1102 fps | 1.1× faster |
-| HEVC 1440p decode, VA-API, frames read back | 475 fps | 442 fps | 1.1× faster |
-| H.264 1080p encode, CPU, CRF 23, against libx264 medium * | 195 fps | 299 fps | 1.5× slower |
-| H.264 1080p encode, CPU, CRF 23, against libx264 veryfast * | 195 fps | 651 fps | 3.3× slower |
-| H.264 1080p encode, VA-API, QP 23 | 727 fps | 611 fps | 1.2× faster |
-| HEVC 1080p encode, VA-API, QP 23 | 843 fps | 698 fps | 1.2× faster |
-| H.264 1440p encode, CPU, CRF 23, against libx264 medium * | 126 fps | 184 fps | 1.5× slower |
-| H.264 1440p encode, CPU, CRF 23, against libx264 veryfast * | 127 fps | 393 fps | 3.1× slower |
-| H.264 1440p encode, VA-API, QP 23 | 422 fps | 369 fps | 1.1× faster |
-| HEVC 1440p encode, VA-API, QP 23 | 550 fps | 479 fps | 1.1× faster |
-| H.264 1440p GPU transcode, frames stay on the GPU | 316 fps | 305 fps | about the same |
-| HEVC 1440p GPU transcode, frames stay on the GPU | 385 fps | 376 fps | about the same |
-| H.264 1440p time to first frame, CPU (ffmpeg includes starting its process) | 4.9 ms | 97.6 ms | 19.8× faster |
-| H.264 1440p time to first frame, GPU (ffmpeg includes starting its process) | 10.8 ms | 94.1 ms | 8.7× faster |
-| HEVC 1440p time to first frame, CPU (ffmpeg includes starting its process) | 7.3 ms | 103.6 ms | 14.2× faster |
-| HEVC 1440p time to first frame, GPU (ffmpeg includes starting its process) | 10.7 ms | 96.1 ms | 8.9× faster |
-| H.264 1080p filmstrip, 12 stills at 240 px, CPU | 442 stills/s | 51 stills/s | 8.7× faster |
-| H.264 1080p filmstrip, 12 stills at 240 px, GPU first | 480 stills/s | 50 stills/s | 9.6× faster |
-| H.264 1440p filmstrip, 12 stills at 240 px, CPU | 286 stills/s | 35 stills/s | 8.2× faster |
-| H.264 1440p filmstrip, 12 stills at 240 px, GPU first | 317 stills/s | 36 stills/s | 8.9× faster |
-| HEVC 1080p filmstrip, 12 stills at 240 px, CPU | 466 stills/s | 46 stills/s | 10.2× faster |
-| HEVC 1080p filmstrip, 12 stills at 240 px, GPU first | 509 stills/s | 49 stills/s | 10.3× faster |
-| HEVC 1440p filmstrip, 12 stills at 240 px, CPU | 313 stills/s | 31 stills/s | 10.0× faster |
-| HEVC 1440p filmstrip, 12 stills at 240 px, GPU first | 357 stills/s | 30 stills/s | 11.7× faster |
-| Smart-cut export 1080p, 3 cuts, against ffmpeg re-encoding every frame (both frame-accurate) † | 15.2× real time | 9.6× real time | 1.6× faster |
-| Smart-cut export 1080p, 3 cuts, against ffmpeg's stream copy (keyframe cuts only, not frame-accurate) † | 15.2× real time | 75.5× real time | 5.0× slower |
-| Smart-cut export 1440p, 3 cuts, against ffmpeg re-encoding every frame (both frame-accurate) † | 10.2× real time | 5.8× real time | 1.7× faster |
-| Smart-cut export 1440p, 3 cuts, against ffmpeg's stream copy (keyframe cuts only, not frame-accurate) † | 10.2× real time | 66.7× real time | 6.6× slower |
-| Scale 1440p to 1080p, bicubic | 3298 fps | 1766 fps | 1.9× faster |
-| Scale 1440p to 720p, bicubic | 3868 fps | 2416 fps | 1.6× faster |
-| Scale 1080p to 720p, bicubic | 5971 fps | 2670 fps | 2.2× faster |
-| Scale 1080p to 1440p, bicubic | 4192 fps | 2474 fps | 1.7× faster |
-| AAC decode, 48 kHz stereo | 960× real time | 1606× real time | 1.7× slower |
-| AAC encode, 128 kbps stereo | 209× real time | 124× real time | 1.7× faster |
-| EBU R128 loudness, 48 kHz stereo | 2962× real time | 509× real time | 5.8× faster |
+| H.264 1080p decode, CPU, 1 thread | 376 fps | 558 fps | 1.5× slower |
+| H.264 1080p decode, CPU, all threads | 1959 fps | 2551 fps | 1.3× slower |
+| HEVC 1080p decode, CPU, 1 thread | 426 fps | 418 fps | about the same |
+| HEVC 1080p decode, CPU, all threads | 1479 fps | 1687 fps | 1.1× slower |
+| H.264 1440p decode, CPU, 1 thread | 195 fps | 286 fps | 1.5× slower |
+| H.264 1440p decode, CPU, all threads | 1089 fps | 1495 fps | 1.4× slower |
+| HEVC 1440p decode, CPU, 1 thread | 255 fps | 247 fps | about the same |
+| HEVC 1440p decode, CPU, all threads | 789 fps | 1231 fps | 1.6× slower |
+| H.264 1080p decode, VA-API, frames stay on the GPU | 1058 fps | 1023 fps | about the same |
+| H.264 1080p decode, VA-API, frames read back | 814 fps | 694 fps | 1.2× faster |
+| HEVC 1080p decode, VA-API, frames stay on the GPU | 1115 fps | 1068 fps | about the same |
+| HEVC 1080p decode, VA-API, frames read back | 795 fps | 677 fps | 1.2× faster |
+| H.264 1440p decode, VA-API, frames stay on the GPU | 1053 fps | 1011 fps | about the same |
+| H.264 1440p decode, VA-API, frames read back | 507 fps | 465 fps | 1.1× faster |
+| HEVC 1440p decode, VA-API, frames stay on the GPU | 1100 fps | 1049 fps | about the same |
+| HEVC 1440p decode, VA-API, frames read back | 471 fps | 428 fps | 1.1× faster |
+| H.264 1080p encode, CPU, CRF 23, against libx264 medium * | 191 fps | 328 fps | 1.7× slower |
+| H.264 1080p encode, CPU, CRF 23, against libx264 veryfast * | 184 fps | 626 fps | 3.4× slower |
+| H.264 1080p encode, VA-API, QP 23 | 645 fps | 499 fps | 1.3× faster |
+| HEVC 1080p encode, VA-API, QP 23 | 839 fps | 686 fps | 1.2× faster |
+| H.264 1440p encode, CPU, CRF 23, against libx264 medium * | 121 fps | 181 fps | 1.5× slower |
+| H.264 1440p encode, CPU, CRF 23, against libx264 veryfast * | 121 fps | 396 fps | 3.3× slower |
+| H.264 1440p encode, VA-API, QP 23 | 412 fps | 371 fps | 1.1× faster |
+| HEVC 1440p encode, VA-API, QP 23 | 545 fps | 476 fps | 1.1× faster |
+| H.264 1440p GPU transcode, frames stay on the GPU | 309 fps | 300 fps | about the same |
+| HEVC 1440p GPU transcode, frames stay on the GPU | 379 fps | 371 fps | about the same |
+| H.264 1440p time to first frame, CPU (ffmpeg includes starting its process) | 4.1 ms | 87.4 ms | 21.5× faster |
+| H.264 1440p time to first frame, GPU (ffmpeg includes starting its process) | 11.6 ms | 85.7 ms | 7.4× faster |
+| HEVC 1440p time to first frame, CPU (ffmpeg includes starting its process) | 8.1 ms | 106.3 ms | 13.1× faster |
+| HEVC 1440p time to first frame, GPU (ffmpeg includes starting its process) | 12.4 ms | 100.7 ms | 8.1× faster |
+| H.264 1080p filmstrip, 12 stills at 240 px, CPU | 414 stills/s | 46 stills/s | 8.9× faster |
+| H.264 1080p filmstrip, 12 stills at 240 px, GPU first | 407 stills/s | 47 stills/s | 8.7× faster |
+| H.264 1440p filmstrip, 12 stills at 240 px, CPU | 268 stills/s | 29 stills/s | 9.4× faster |
+| H.264 1440p filmstrip, 12 stills at 240 px, GPU first | 263 stills/s | 33 stills/s | 8.0× faster |
+| HEVC 1080p filmstrip, 12 stills at 240 px, CPU | 364 stills/s | 44 stills/s | 8.2× faster |
+| HEVC 1080p filmstrip, 12 stills at 240 px, GPU first | 359 stills/s | 32 stills/s | 11.4× faster |
+| HEVC 1440p filmstrip, 12 stills at 240 px, CPU | 257 stills/s | 21 stills/s | 12.4× faster |
+| HEVC 1440p filmstrip, 12 stills at 240 px, GPU first | 167 stills/s | 22 stills/s | 7.6× faster |
+| Smart-cut export 1080p, 3 cuts, against ffmpeg re-encoding every frame (both frame-accurate) † | 11.9× real time | 7.2× real time | 1.7× faster |
+| Smart-cut export 1080p, 3 cuts, against ffmpeg's stream copy (keyframe cuts only, not frame-accurate) † | 11.9× real time | 69.4× real time | 5.8× slower |
+| Smart-cut export 1440p, 3 cuts, against ffmpeg re-encoding every frame (both frame-accurate) † | 8.7× real time | 3.0× real time | 2.9× faster |
+| Smart-cut export 1440p, 3 cuts, against ffmpeg's stream copy (keyframe cuts only, not frame-accurate) † | 8.7× real time | 52.7× real time | 6.0× slower |
+| Scale 1440p to 1080p, bicubic | 2934 fps | 1430 fps | 2.1× faster |
+| Scale 1440p to 720p, bicubic | 2537 fps | 1221 fps | 2.1× faster |
+| Scale 1080p to 720p, bicubic | 4351 fps | 1695 fps | 2.6× faster |
+| Scale 1080p to 1440p, bicubic | 3459 fps | 2093 fps | 1.7× faster |
+| AAC decode, 48 kHz stereo | 1003× real time | 1861× real time | 1.9× slower |
+| AAC encode, 128 kbps stereo | 228× real time | 130× real time | 1.8× faster |
+| EBU R128 loudness, 48 kHz stereo | 3200× real time | 559× real time | 5.7× faster |
 
 \* libx264 is hand-written assembly; our CPU H.264 encoder has no hand-written SIMD. † Our export copies the middle of each piece and re-encodes only around each cut, so it is frame-accurate; a stream copy encodes nothing and cuts only on keyframes.
 
