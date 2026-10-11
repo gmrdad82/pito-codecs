@@ -32,6 +32,14 @@ fn ffmpeg(args: &[&str]) -> String {
     err
 }
 
+fn zscale_present() -> bool {
+    let ok = has_filter("zscale");
+    if !ok {
+        eprintln!("this ffmpeg has no zscale (built without zimg), skipping");
+    }
+    ok
+}
+
 fn has_filter(name: &str) -> bool {
     Command::new("ffmpeg")
         .args(["-hide_banner", "-filters"])
@@ -278,8 +286,7 @@ fn scale_matches_zscale() {
     if !ffmpeg_present() {
         return;
     }
-    if !has_filter("zscale") {
-        eprintln!("this ffmpeg has no zscale (built without zimg), skipping");
+    if !zscale_present() {
         return;
     }
     let src = &source_1440p();
@@ -604,7 +611,7 @@ fn zscale_rgba(src: &str, chroma: &str) -> String {
 
 #[test]
 fn orders_and_siting_match_ffmpeg() {
-    if !ffmpeg_present() {
+    if !ffmpeg_present() || !zscale_present() {
         return;
     }
     let src = &source_1440p();
