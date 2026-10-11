@@ -31,23 +31,6 @@ impl Plane {
     pub fn idx(&self, x: isize, y: isize) -> usize {
         ((y + self.pad as isize) as usize) * self.stride + (x + self.pad as isize) as usize
     }
-    pub fn extend_edges(&mut self) {
-        let (w, h, pad, stride) = (self.w, self.h, self.pad, self.stride);
-        for y in 0..h {
-            let r = (y + pad) * stride;
-            let l = self.data[r + pad];
-            let rr = self.data[r + pad + w - 1];
-            self.data[r..r + pad].fill(l);
-            self.data[r + pad + w..r + stride].fill(rr);
-        }
-        let first = pad * stride;
-        let last = (pad + h - 1) * stride;
-        for y in 0..pad {
-            self.data.copy_within(first..first + stride, y * stride);
-            self.data
-                .copy_within(last..last + stride, (pad + h + y) * stride);
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -64,11 +47,6 @@ impl Frame {
             u: Plane::new(w / 2, h / 2, CHROMA_PAD),
             v: Plane::new(w / 2, h / 2, CHROMA_PAD),
         }
-    }
-    pub fn extend_edges(&mut self) {
-        self.y.extend_edges();
-        self.u.extend_edges();
-        self.v.extend_edges();
     }
 }
 
@@ -156,8 +134,6 @@ pub struct RefPic<'a> {
     pub v: View<'a>,
     pub hpel: [View<'a>; 3],
     pub mbs: &'a [MbInfo],
-    pub poc: i32,
-    pub id: u32,
     pub lim: isize,
 }
 
@@ -232,7 +208,7 @@ impl Pic {
         (l == DONE || l >= rows).then_some(l)
     }
 
-    pub fn view(&self, need: usize) -> RefPic<'_> {
+    pub fn view<'a>(&'a self, need: usize) -> RefPic<'a> {
         let full = need >= self.h;
         let rows = if full { DONE } else { LUMA_PAD + need + 2 };
         let mut spins = 0u32;
@@ -262,15 +238,19 @@ impl Pic {
         let clen = c.min(self.chroma_rows()) * self.cs;
         let mlen = m.min(self.h / 16) * self.mbw;
         unsafe {
-            let yv = |d: &Shared<u8>| View {
-                data: d.head(ylen),
-                stride: self.ys,
-                pad: LUMA_PAD,
+            let yv = |d: &'a Shared<u8>| -> View<'a> {
+                View {
+                    data: d.head(ylen),
+                    stride: self.ys,
+                    pad: LUMA_PAD,
+                }
             };
-            let cv = |d: &Shared<u8>| View {
-                data: d.head(clen),
-                stride: self.cs,
-                pad: CHROMA_PAD,
+            let cv = |d: &'a Shared<u8>| -> View<'a> {
+                View {
+                    data: d.head(clen),
+                    stride: self.cs,
+                    pad: CHROMA_PAD,
+                }
             };
             RefPic {
                 y: yv(&self.y),
@@ -278,8 +258,6 @@ impl Pic {
                 v: cv(&self.v),
                 hpel: [yv(&self.hp[0]), yv(&self.hp[1]), yv(&self.hp[2])],
                 mbs: self.mbs.head(mlen),
-                poc: self.poc,
-                id: self.id,
                 lim: if full {
                     (self.h + LUMA_PAD - 20) as isize
                 } else {
@@ -304,7 +282,15 @@ impl Pic {
     }
 }
 
-pub fn extend_rows(data: &mut [u8], base: usize, stride: usize, pad: usize, w: usize, r0: usize, r1: usize) {
+pub fn extend_rows(
+    data: &mut [u8],
+    base: usize,
+    stride: usize,
+    pad: usize,
+    w: usize,
+    r0: usize,
+    r1: usize,
+) {
     for r in r0..r1 {
         let o = (r - base) * stride;
         let row = &mut data[o..o + stride];
@@ -315,7 +301,13 @@ pub fn extend_rows(data: &mut [u8], base: usize, stride: usize, pad: usize, w: u
     }
 }
 
-pub fn copy_row(data: &mut [u8], base: usize, stride: usize, from: usize, to: std::ops::Range<usize>) {
+pub fn copy_row(
+    data: &mut [u8],
+    base: usize,
+    stride: usize,
+    from: usize,
+    to: std::ops::Range<usize>,
+) {
     let src = (from - base) * stride;
     for r in to {
         let o = (r - base) * stride;
@@ -323,7 +315,15 @@ pub fn copy_row(data: &mut [u8], base: usize, stride: usize, from: usize, to: st
     }
 }
 
-pub fn hpel_rows(src: &[u8], stride: usize, rows: usize, r0: usize, r1: usize, out: [&mut [u8]; 3], scratch: &mut Vec<i16>) {
+pub fn hpel_rows(
+    src: &[u8],
+    stride: usize,
+    rows: usize,
+    r0: usize,
+    r1: usize,
+    out: [&mut [u8]; 3],
+    scratch: &mut Vec<i16>,
+) {
     let [hout, vout, cout] = out;
     let clampr = |r: isize| r.clamp(0, rows as isize - 1) as usize;
     let nrows = r1 - r0 + 5;
@@ -336,7 +336,8 @@ pub fn hpel_rows(src: &[u8], stride: usize, rows: usize, r0: usize, r1: usize, o
         let at = |x: isize| row[x.clamp(0, stride as isize - 1) as usize] as i16;
         for x in 0..2.min(stride) {
             let xi = x as isize;
-            o[x] = at(xi - 2) + at(xi + 3) - 5 * (at(xi - 1) + at(xi + 2)) + 20 * (at(xi) + at(xi + 1));
+            o[x] = at(xi - 2) + at(xi + 3) - 5 * (at(xi - 1) + at(xi + 2))
+                + 20 * (at(xi) + at(xi + 1));
         }
         for x in 2..stride.saturating_sub(3) {
             let e = &row[x - 2..x + 4];
@@ -345,7 +346,8 @@ pub fn hpel_rows(src: &[u8], stride: usize, rows: usize, r0: usize, r1: usize, o
         }
         for x in stride.saturating_sub(3).max(2)..stride {
             let xi = x as isize;
-            o[x] = at(xi - 2) + at(xi + 3) - 5 * (at(xi - 1) + at(xi + 2)) + 20 * (at(xi) + at(xi + 1));
+            o[x] = at(xi - 2) + at(xi + 3) - 5 * (at(xi - 1) + at(xi + 2))
+                + 20 * (at(xi) + at(xi + 1));
         }
     }
     for r in r0..r1 {

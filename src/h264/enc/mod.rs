@@ -25,10 +25,10 @@ use lookahead::{Complexity, LowRes};
 use nal::{
     NAL_AUD, NAL_IDR, NAL_PPS, NAL_SEI, NAL_SLICE, NAL_SPS, Pps, SliceHeader, SliceType, Sps, Vui,
 };
-use picture::{Frame, Pic};
+use picture::{DONE, Frame, Pic};
 use ratecontrol::RcKind;
 use slice::{EncParams, Lambdas, SliceOut};
-use tables::NUM_CTX;
+
 use transform::QuantTables;
 
 #[derive(Debug)]
@@ -121,7 +121,6 @@ pub struct EncoderConfig {
     pub aq_strength: f32,
     pub sar: (u16, u16),
     pub scenecut: bool,
-    pub slices: usize,
     pub aud: bool,
     pub mastering_display: Option<[u8; 24]>,
     pub content_light: Option<(u16, u16)>,
@@ -146,7 +145,6 @@ impl EncoderConfig {
             aq_strength: 0.6,
             sar: (1, 1),
             scenecut: true,
-            slices: 0,
             mastering_display: None,
             content_light: None,
             aud: true,
@@ -238,6 +236,9 @@ impl Workers {
                         let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             encode_frame(&ctx, &job, &mut scratch)
                         }));
+                        if out.is_err() {
+                            job.pic.publish(DONE, DONE, DONE);
+                        }
                         if tx.send(Done { job, out }).is_err() {
                             return;
                         }

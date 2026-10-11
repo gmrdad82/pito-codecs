@@ -60,9 +60,25 @@ struct Progress {
 fn extend(se: &mut SliceEnc, pic: &Pic, pr: &mut Progress, yfin: usize, cfin: usize) {
     let b = se.band_mut();
     let (ys, cs) = (pic.ys, pic.cs);
-    extend_rows(b.y, b.ybase, ys, LUMA_PAD, pic.w, LUMA_PAD + pr.yext, LUMA_PAD + yfin);
+    extend_rows(
+        b.y,
+        b.ybase,
+        ys,
+        LUMA_PAD,
+        pic.w,
+        LUMA_PAD + pr.yext,
+        LUMA_PAD + yfin,
+    );
     for d in [&mut *b.u, &mut *b.v] {
-        extend_rows(d, b.cbase, cs, CHROMA_PAD, pic.w / 2, CHROMA_PAD + pr.cext, CHROMA_PAD + cfin);
+        extend_rows(
+            d,
+            b.cbase,
+            cs,
+            CHROMA_PAD,
+            pic.w / 2,
+            CHROMA_PAD + pr.cext,
+            CHROMA_PAD + cfin,
+        );
     }
     if pr.yb == 0 {
         copy_row(b.y, b.ybase, ys, LUMA_PAD, 0..LUMA_PAD);
@@ -94,7 +110,15 @@ fn hpel(pic: &Pic, pr: &mut Progress, upto: usize, scratch: &mut Scratch) {
             pic.hp[1].tail(pr.yb * ys),
             pic.hp[2].tail(pr.yb * ys),
         ];
-        hpel_rows(src, ys, pic.luma_rows(), pr.yb, upto, out, &mut scratch.hpel);
+        hpel_rows(
+            src,
+            ys,
+            pic.luma_rows(),
+            pr.yb,
+            upto,
+            out,
+            &mut scratch.hpel,
+        );
     }
     pr.yb = upto;
 }
@@ -144,7 +168,7 @@ pub fn encode_frame(ctx: &Ctx, job: &Job, scratch: &mut Scratch) -> SliceOut {
             extend(&mut se, pic, &mut pr, yfin, cfin);
             se.clear_band();
             hpel(pic, &mut pr, LUMA_PAD + yfin - 3, scratch);
-            pr.cb = CHROMA_PAD + cfin;
+            pr.cb = CHROMA_PAD + cfin - 1;
             mb = my - 1;
             pic.publish(pr.yb, pr.cb, mb);
         }

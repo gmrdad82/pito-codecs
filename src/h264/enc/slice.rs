@@ -1,13 +1,13 @@
 use crate::h264::bits::BitWriter;
 
 use crate::h264::enc::cabac::{BinSink, CabacEncoder, CabacEstimator, Contexts, CostTable};
+use crate::h264::enc::deblock::{BandPlane, DeblockParams, deblock_row};
 use crate::h264::enc::dsp::{sad, sad16, satd, ssd};
 use crate::h264::enc::intra::{
     Edge4, Edge8, filter8, mode_available, pred_chroma, pred4x4, pred8x8, pred16x16,
 };
 use crate::h264::enc::mbinfo::{MbInfo, MbKind, Mv, Part};
 use crate::h264::enc::nal::{SliceHeader, SliceType, nal};
-use crate::h264::enc::deblock::{BandPlane, DeblockParams, deblock_row};
 use crate::h264::enc::picture::{BandMut, CHROMA_PAD, Frame, LUMA_PAD, RefPic, avg_into};
 use crate::h264::enc::syntax::{MbCode, NbCtx};
 use crate::h264::enc::tables::{BLK4_XY, NUM_CTX, RASTER_TO_BLK4, ZIGZAG4, ZIGZAG8, chroma_qp};
@@ -528,7 +528,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
             && x0 >= -m
             && y0 >= -m
             && x0 + w as isize <= pw + m
-            && y0 + h as isize + 1 <= self.vlim
+            && y0 + (h as isize) < self.vlim
     }
 
     fn encode_mb(&mut self, mx: usize, my: usize) {
@@ -1955,7 +1955,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
             let mut y = [0u8; 256];
             let mut u = [0u8; 64];
             let mut v = [0u8; 64];
-            self.pred_block(r, px, py, (0, 0, 16, 16), skip_mv, &mut y, &mut u, &mut v);
+            self.pred_block(&r, px, py, (0, 0, 16, 16), skip_mv, &mut y, &mut u, &mut v);
             let s = sad16(&src.y, 16, &y, 16, 16);
             let qstep_thresh = (f.qt.v4[(qp % 6) as usize][0] << (qp / 6)) as u32 * 16;
             if s < qstep_thresh * 2 {
@@ -1990,7 +1990,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
             cands.push(colo.mv[0][0]);
         }
         let (mv16, mvp16, cost16) = {
-            let (m, p, c) = self.search_part(mx, my, r, Part::P16x16, 0, src, lam, skip_mv);
+            let (m, p, c) = self.search_part(mx, my, &r, Part::P16x16, 0, src, lam, skip_mv);
             (m, p, c)
         };
         let _ = cands;
@@ -2002,7 +2002,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
             let big = cost16 as u64 > (256 * 4) as u64;
             if big {
                 for part in [Part::P16x8, Part::P8x16, Part::P8x8] {
-                    let (m, p, c) = self.search_part(mx, my, r, part, 0, src, lam, mv16[0]);
+                    let (m, p, c) = self.search_part(mx, my, &r, part, 0, src, lam, mv16[0]);
                     let extra = match part {
                         Part::P8x8 => 10,
                         _ => 3,
@@ -2032,7 +2032,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
         } else {
             for p in 0..best_part.count() {
                 self.pred_block(
-                    r,
+                    &r,
                     px,
                     py,
                     best_part.rect(p),
@@ -2167,13 +2167,12 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
         lam: u32,
         seeds: [Mv; 2],
     ) -> Option<Box<Cand>> {
-        let f = self.f;
         let rp = [self.refs[0]?, self.refs[1]?];
         let (px, py) = (mx * 16, my * 16);
         let mut mvs = [[Mv::ZERO; 4]; 2];
         for l in 0..2 {
             mvs[l] = self
-                .search_part(mx, my, rp[l], part, l, src, lam, seeds[l])
+                .search_part(mx, my, &rp[l], part, l, src, lam, seeds[l])
                 .0;
         }
         let mut preds = [
@@ -2183,7 +2182,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
         for l in 0..2 {
             let (a, b, c) = &mut preds[l];
             for pi in 0..2 {
-                self.pred_block(rp[l], px, py, part.rect(pi), mvs[l][pi], a, b, c);
+                self.pred_block(&rp[l], px, py, part.rect(pi), mvs[l][pi], a, b, c);
             }
         }
         let mut bi = preds[0];
@@ -2305,11 +2304,11 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
                 let rect = Part::P8x8.rect(q);
                 let (u0, u1) = (dref[0][q] >= 0, dref[1][q] >= 0);
                 if u0 {
-                    self.pred_block(r0, px, py, rect, dmv[0][q], &mut y, &mut u, &mut v);
+                    self.pred_block(&r0, px, py, rect, dmv[0][q], &mut y, &mut u, &mut v);
                 }
                 if u1 {
                     if u0 {
-                        self.pred_block(r1, px, py, rect, dmv[1][q], &mut ty, &mut tu, &mut tv);
+                        self.pred_block(&r1, px, py, rect, dmv[1][q], &mut ty, &mut tu, &mut tv);
                         let (x, yy, w, h) = rect;
                         for rr in 0..h {
                             avg_into(
@@ -2323,7 +2322,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
                             avg_into(&mut v[o..o + w / 2], &tv[o..o + w / 2]);
                         }
                     } else {
-                        self.pred_block(r1, px, py, rect, dmv[1][q], &mut y, &mut u, &mut v);
+                        self.pred_block(&r1, px, py, rect, dmv[1][q], &mut y, &mut u, &mut v);
                     }
                 }
             }
@@ -2353,7 +2352,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
             let (m, p, c) = self.search_part(
                 mx,
                 my,
-                rp,
+                &rp,
                 Part::P16x16,
                 l,
                 src,
@@ -2368,7 +2367,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
         ];
         for (l, rp) in [(0usize, r0), (1usize, r1)] {
             let (a, b, c) = &mut preds[l];
-            self.pred_block(rp, px, py, (0, 0, 16, 16), res[l].0, a, b, c);
+            self.pred_block(&rp, px, py, (0, 0, 16, 16), res[l].0, a, b, c);
         }
         let mut bi = preds[0];
         avg_into(&mut bi.0, &preds[1].0);
