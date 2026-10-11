@@ -11,6 +11,7 @@ mod mbtree;
 mod nal;
 mod picture;
 mod ratecontrol;
+mod residual;
 mod slice;
 mod syntax;
 mod tables;
