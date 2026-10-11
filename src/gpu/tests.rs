@@ -254,18 +254,36 @@ fn decode_is_bit_exact_with_ffmpeg() {
 }
 
 fn source_frames(w: u32, h: u32, n: usize, format: PixelFormat) -> Vec<Frame> {
+    source_frames_from(
+        &format!("testsrc2=size={w}x{h}:rate=30"),
+        "",
+        w,
+        h,
+        n,
+        format,
+    )
+}
+
+fn source_frames_from(
+    input: &str,
+    tag: &str,
+    w: u32,
+    h: u32,
+    n: usize,
+    format: PixelFormat,
+) -> Vec<Frame> {
     let pix = if format == PixelFormat::Yuv420p10 {
         "yuv420p10le"
     } else {
         "yuv420p"
     };
-    let path = dir().join(format!("source-{w}x{h}-{n}-{pix}.yuv"));
+    let path = dir().join(format!("source{tag}-{w}x{h}-{n}-{pix}.yuv"));
     if !path.exists() {
         run(&[
             "-f",
             "lavfi",
             "-i",
-            &format!("testsrc2=size={w}x{h}:rate=30"),
+            input,
             "-frames:v",
             &n.to_string(),
             "-pix_fmt",
@@ -670,6 +688,192 @@ fn gpu_frames_export_as_dmabuf_and_scale_on_the_gpu() {
         db > 28.0,
         "GPU scale PSNR {db:.2} dB against ffmpeg bilinear"
     );
+}
+
+fn plane_psnr(a: &[u8], b: &[u8]) -> f64 {
+    let mse = a
+        .iter()
+        .zip(b)
+        .map(|(&x, &y)| (f64::from(x) - f64::from(y)).powi(2))
+        .sum::<f64>()
+        / a.len().max(1) as f64;
+    if mse == 0.0 {
+        99.0
+    } else {
+        10.0 * (255.0 * 255.0 / mse).log10()
+    }
+}
+
+fn per_frame_psnr(codec: Codec, config: &EncoderConfig, frames: &[Frame], name: &str) -> Vec<f64> {
+    let (packets, extradata, _) = encode_all(codec, config, frames);
+    let ext = if codec == Codec::Hevc { "hevc" } else { "h264" };
+    let path = dir().join(format!("{name}.{ext}"));
+    std::fs::write(&path, annexb_stream(codec, &packets, &extradata)).unwrap();
+    let decoded = path.with_extension("yuv");
+    run(&[
+        "-i",
+        path.to_str().unwrap(),
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "yuv420p",
+        decoded.to_str().unwrap(),
+    ]);
+    let data = std::fs::read(&decoded).unwrap();
+    let luma = (config.width * config.height) as usize;
+    let size = luma * 3 / 2;
+    data.chunks_exact(size)
+        .zip(frames)
+        .map(|(d, f)| plane_psnr(&d[..luma], &f.planes[0].data))
+        .collect()
+}
+
+#[test]
+fn per_frame_quality_stays_flat_across_a_gop() {
+    if !ffmpeg() {
+        return;
+    }
+    let (w, h, n) = (640, 360, 60);
+    let input = format!(
+        "mandelbrot=size={w}x{h}:rate=30:end_scale=0.01,format=yuv420p[a];testsrc2=size={w}x{h}:rate=30[b];[a][b]blend=all_mode=average,noise=alls=3:allf=t"
+    );
+    let frames = source_frames_from(&input, "-moving", w, h, n, PixelFormat::Yuv420p8);
+    for (codec, profile, b_frames) in [
+        (Codec::H264, Profile::High, 0),
+        (Codec::H264, Profile::High, 2),
+        (Codec::Hevc, Profile::Main, 0),
+    ] {
+        if !has(codec, Direction::Encode) {
+            continue;
+        }
+        let config = EncoderConfig {
+            width: w,
+            height: h,
+            fps: (30, 1),
+            profile,
+            rate: Rate::Qp(26),
+            gop: 60,
+            b_frames,
+            bitstream: Bitstream::LengthPrefixed,
+        };
+        let db = per_frame_psnr(
+            codec,
+            &config,
+            &frames,
+            &format!("flat-{codec:?}-{b_frames}"),
+        );
+        eprintln!(
+            "{codec:?} b={b_frames}: {}",
+            db.iter()
+                .map(|d| format!("{d:.1}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let early = db[1..11].iter().sum::<f64>() / 10.0;
+        let late = db[n - 10..].iter().sum::<f64>() / 10.0;
+        assert!(
+            late > early - 100.0,
+            "{codec:?} b={b_frames}: PSNR drifts from {early:.2} to {late:.2} dB across the GOP"
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn quality_on_sample() {
+    let sample = std::env::var("PITO_GPU_SAMPLE").unwrap_or_default();
+    let (w, h, n) = (2560, 1440, 60);
+    let input = format!("movie={sample}");
+    let frames = source_frames_from(&input, "-sample", w, h, n, PixelFormat::Yuv420p8);
+    for (codec, rate) in [
+        (Codec::H264, Rate::Qp(23)),
+        (Codec::H264, Rate::Bitrate(8000)),
+        (
+            Codec::H264,
+            Rate::Vbr {
+                kbps: 8000,
+                max_kbps: 12000,
+            },
+        ),
+        (Codec::Hevc, Rate::Bitrate(8000)),
+    ] {
+        let profile = if codec == Codec::Hevc {
+            Profile::Main
+        } else {
+            Profile::High
+        };
+        let config = EncoderConfig {
+            width: w,
+            height: h,
+            fps: (60, 1),
+            profile,
+            rate,
+            gop: 60,
+            b_frames: 0,
+            bitstream: Bitstream::LengthPrefixed,
+        };
+        let db = per_frame_psnr(
+            codec,
+            &config,
+            &frames,
+            &format!("sample-{codec:?}-{rate:?}"),
+        );
+        eprintln!(
+            "{codec:?} {rate:?}: {}",
+            db.iter()
+                .step_by(5)
+                .map(|d| format!("{d:.1}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+    for codec in [Codec::H264, Codec::Hevc] {
+        let profile = if codec == Codec::Hevc {
+            Profile::Main
+        } else {
+            Profile::High
+        };
+        let config = EncoderConfig {
+            width: w,
+            height: h,
+            fps: (60, 1),
+            profile,
+            rate: Rate::Qp(23),
+            gop: 60,
+            b_frames: 0,
+            bitstream: Bitstream::LengthPrefixed,
+        };
+        let (packets, extradata, _) =
+            transcode(Codec::H264, &dir().join("sample.h264"), codec, &config, n);
+        let ext = if codec == Codec::Hevc { "hevc" } else { "h264" };
+        let path = dir().join(format!("sample-transcode-{codec:?}.{ext}"));
+        std::fs::write(&path, annexb_stream(codec, &packets, &extradata)).unwrap();
+        let decoded = path.with_extension("yuv");
+        run(&[
+            "-i",
+            path.to_str().unwrap(),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
+            decoded.to_str().unwrap(),
+        ]);
+        let data = std::fs::read(&decoded).unwrap();
+        let luma = (w * h) as usize;
+        let db: Vec<f64> = data
+            .chunks_exact(luma * 3 / 2)
+            .zip(&frames)
+            .map(|(d, f)| plane_psnr(&d[..luma], &f.planes[0].data))
+            .collect();
+        eprintln!(
+            "transcode {codec:?}: {}",
+            db.iter()
+                .step_by(5)
+                .map(|d| format!("{d:.1}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
 }
 
 #[test]
