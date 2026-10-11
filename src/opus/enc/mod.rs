@@ -2,6 +2,7 @@ pub(crate) mod celt;
 mod isa;
 
 use std::io::Write;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::media::{AudioBuffer, Error, Packet, Result};
 use crate::opus::OpusHead;
@@ -16,7 +17,7 @@ const DELAY: usize = 192;
 const CELT_DELAY: usize = 120;
 const MAX_PACKET: usize = 1276;
 const CHUNK: usize = 256;
-const HISTORY: usize = 121;
+const HISTORY: usize = 1032;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Application {
@@ -140,10 +141,21 @@ impl Encoder {
                 audio.rate, audio.channels, self.cfg.rate, self.cfg.channels
             )));
         }
+        if !audio
+            .samples
+            .len()
+            .is_multiple_of(self.cfg.channels as usize)
+        {
+            return Err(Error::Invalid(format!(
+                "{} samples do not split into {} channels",
+                audio.samples.len(),
+                self.cfg.channels
+            )));
+        }
         self.input += audio.frames() as u64;
         self.pending.extend_from_slice(&audio.samples);
         let mut out = Vec::new();
-        self.drain(&mut out);
+        self.drain(&mut out)?;
         Ok(out)
     }
 
@@ -157,12 +169,12 @@ impl Encoder {
                 self.pending
                     .resize(self.pending.len() + (FRAME - have) * c, 0.0);
             }
-            self.drain(&mut out);
+            self.drain(&mut out)?;
         }
         Ok(out)
     }
 
-    fn drain(&mut self, out: &mut Vec<Packet>) {
+    fn drain(&mut self, out: &mut Vec<Packet>) -> Result<()> {
         let c = self.cfg.channels as usize;
         let step = FRAME * c;
         loop {
@@ -172,18 +184,21 @@ impl Encoder {
             }
             let at_chunk = self.frames.is_multiple_of(CHUNK as u64);
             if at_chunk && avail >= 2 * CHUNK && rayon::current_num_threads() > 1 {
-                self.encode_chunks(avail / CHUNK, out);
+                self.encode_chunks(avail / CHUNK, out)?;
                 continue;
             }
             if at_chunk && self.frames > 0 {
-                let h = self.consumed - HISTORY * c;
+                let h = self.consumed.saturating_sub(HISTORY * c);
                 self.celt.prime(&self.pending[h..self.consumed]);
             }
             let start = self.consumed;
             self.consumed += step;
             let pcm = &self.pending[start..start + step];
-            let (pkt, rng) =
-                encode_packet(&self.cfg, &mut self.celt, &mut self.rc, pcm, self.frames);
+            let (cfg, celt, rc, index) = (&self.cfg, &mut self.celt, &mut self.rc, self.frames);
+            let (pkt, rng) = catch_unwind(AssertUnwindSafe(|| {
+                encode_packet(cfg, celt, rc, pcm, index)
+            }))
+            .map_err(|_| crashed())?;
             self.final_range = rng;
             self.frames += 1;
             out.push(pkt);
@@ -193,9 +208,10 @@ impl Encoder {
             self.pending.drain(..self.consumed - keep);
             self.consumed = keep;
         }
+        Ok(())
     }
 
-    fn encode_chunks(&mut self, chunks: usize, out: &mut Vec<Packet>) {
+    fn encode_chunks(&mut self, chunks: usize, out: &mut Vec<Packet>) -> Result<()> {
         use rayon::prelude::*;
         let c = self.cfg.channels as usize;
         let step = FRAME * c;
@@ -203,46 +219,56 @@ impl Encoder {
         let base = self.consumed;
         let first = self.frames;
         let pending = &self.pending;
-        let mut done: Vec<(Vec<Packet>, CeltEncoder, u32)> = (0..chunks)
+        let done: Vec<Option<(Vec<Packet>, CeltEncoder, u32)>> = (0..chunks)
             .into_par_iter()
             .map(|k| {
-                let mut celt = CeltEncoder::new(c);
-                let mut rc = RangeEncoder::new(MAX_PACKET);
-                let start = base + k * CHUNK * step;
-                let f0 = first + (k * CHUNK) as u64;
-                if f0 > 0 {
-                    celt.prime(&pending[start - HISTORY * c..start]);
-                }
-                let mut packets = Vec::with_capacity(CHUNK);
-                let mut rng = 0;
-                for i in 0..CHUNK {
-                    let s = start + i * step;
-                    let (p, r) = encode_packet(
-                        &cfg,
-                        &mut celt,
-                        &mut rc,
-                        &pending[s..s + step],
-                        f0 + i as u64,
-                    );
-                    packets.push(p);
-                    rng = r;
-                }
-                (packets, celt, rng)
+                catch_unwind(|| {
+                    let mut celt = CeltEncoder::new(c);
+                    let mut rc = RangeEncoder::new(MAX_PACKET);
+                    let start = base + k * CHUNK * step;
+                    let f0 = first + (k * CHUNK) as u64;
+                    if f0 > 0 {
+                        celt.prime(&pending[start.saturating_sub(HISTORY * c)..start]);
+                    }
+                    let mut packets = Vec::with_capacity(CHUNK);
+                    let mut rng = 0;
+                    for i in 0..CHUNK {
+                        let s = start + i * step;
+                        let (p, r) = encode_packet(
+                            &cfg,
+                            &mut celt,
+                            &mut rc,
+                            &pending[s..s + step],
+                            f0 + i as u64,
+                        );
+                        packets.push(p);
+                        rng = r;
+                    }
+                    (packets, celt, rng)
+                })
+                .ok()
             })
             .collect();
-        let (_, celt, rng) = done
-            .pop()
-            .map(|(p, e, r)| {
-                out.extend(done.drain(..).flat_map(|d| d.0));
-                out.extend(p);
-                ((), e, r)
-            })
-            .unwrap();
-        self.celt = celt;
-        self.final_range = rng;
+        if done.iter().any(Option::is_none) {
+            return Err(crashed());
+        }
+        let mut last = None;
+        for (packets, celt, rng) in done.into_iter().flatten() {
+            out.extend(packets);
+            last = Some((celt, rng));
+        }
+        if let Some((celt, rng)) = last {
+            self.celt = celt;
+            self.final_range = rng;
+        }
         self.frames += (chunks * CHUNK) as u64;
         self.consumed += chunks * CHUNK * step;
+        Ok(())
     }
+}
+
+fn crashed() -> Error {
+    Error::Backend("Opus encoder failed on this input".into())
 }
 
 fn encode_packet(
@@ -254,7 +280,8 @@ fn encode_packet(
 ) -> (Packet, u32) {
     let c = cfg.channels as usize;
     let end = Bandwidth::Fullband.celt_end_band();
-    let a = celt.analyse(pcm, FRAME, end);
+    let allow_pf = index % CHUNK as u64 != CHUNK as u64 - 1;
+    let a = celt.analyse(pcm, FRAME, end, allow_pf);
     let base = (cfg.bitrate as usize * FRAME) as f32 / (48000.0 * 8.0);
     let total = if cfg.vbr {
         celt.vbr.bytes(base, MAX_PACKET, &a)
