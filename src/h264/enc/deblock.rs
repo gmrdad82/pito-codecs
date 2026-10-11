@@ -214,7 +214,11 @@ pub fn deblock_row<'a>(
                         continue;
                     }
                     let p_mb = if e == 0 {
-                        if dir == 0 { at(mx - 1, my) } else { at(mx, my - 1) }
+                        if dir == 0 {
+                            at(mx - 1, my)
+                        } else {
+                            at(mx, my - 1)
+                        }
                     } else {
                         q
                     };
@@ -264,7 +268,11 @@ pub fn deblock_row<'a>(
                         continue;
                     }
                     let p_mb = if e == 0 {
-                        if dir == 0 { at(mx - 1, my) } else { at(mx, my - 1) }
+                        if dir == 0 {
+                            at(mx - 1, my)
+                        } else {
+                            at(mx, my - 1)
+                        }
                     } else {
                         q
                     };
