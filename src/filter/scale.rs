@@ -1,4 +1,5 @@
-use super::plane::{Sample, check, plane_dims, reshape, samples, samples_mut};
+use super::color::Siting;
+use super::plane::{Sample, Simd, check, plane_dims, reshape, samples, samples_mut, simd};
 use crate::media::{Error, Frame, PixelFormat, Result};
 use rayon::prelude::*;
 
@@ -117,12 +118,30 @@ struct PlaneTaps {
     v: Taps,
 }
 
+impl PlaneTaps {
+    fn new(src: (u32, u32), dst: (u32, u32), i: usize, offset: f64, kernel: Kernel) -> Self {
+        let rx = src.0 as f64 / dst.0 as f64;
+        let ry = src.1 as f64 / dst.1 as f64;
+        let (sub, oy) = if i == 0 { (1.0, 0.0) } else { (2.0, 0.5) };
+        let s = plane_dims(src.0, src.1, i);
+        let d = plane_dims(dst.0, dst.1, i);
+        PlaneTaps {
+            src: s,
+            dst: d,
+            h: Taps::new(s.0, d.0, rx, sub, offset, kernel),
+            v: Taps::new(s.1, d.1, ry, sub, oy, kernel),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Scaler {
     format: PixelFormat,
+    kernel: Kernel,
     src: (u32, u32),
     dst: (u32, u32),
     planes: [PlaneTaps; 2],
+    simd: Simd,
 }
 
 impl Scaler {
@@ -137,24 +156,34 @@ impl Scaler {
         if src_width == 0 || src_height == 0 || dst_width == 0 || dst_height == 0 {
             return Err(Error::Invalid("scale needs non-zero sizes".into()));
         }
-        let rx = src_width as f64 / dst_width as f64;
-        let ry = src_height as f64 / dst_height as f64;
-        let plane = |i: usize, sub: f64, ox: f64, oy: f64| {
-            let src = plane_dims(src_width, src_height, i);
-            let dst = plane_dims(dst_width, dst_height, i);
-            PlaneTaps {
-                src,
-                dst,
-                h: Taps::new(src.0, dst.0, rx, sub, ox, kernel),
-                v: Taps::new(src.1, dst.1, ry, sub, oy, kernel),
-            }
-        };
+        let src = (src_width, src_height);
+        let dst = (dst_width, dst_height);
         Ok(Scaler {
             format,
-            src: (src_width, src_height),
-            dst: (dst_width, dst_height),
-            planes: [plane(0, 1.0, 0.0, 0.0), plane(1, 2.0, 0.0, 0.5)],
+            kernel,
+            src,
+            dst,
+            planes: [
+                PlaneTaps::new(src, dst, 0, 0.0, kernel),
+                PlaneTaps::new(src, dst, 1, 0.0, kernel),
+            ],
+            simd: simd(),
         })
+    }
+
+    pub fn siting(mut self, siting: Siting) -> Self {
+        let offset = match siting {
+            Siting::Left => 0.0,
+            Siting::Centre => 0.5,
+        };
+        self.planes[1] = PlaneTaps::new(self.src, self.dst, 1, offset, self.kernel);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_simd(mut self, simd: Simd) -> Self {
+        self.simd = simd;
+        self
     }
 
     pub fn run(&self, src: &Frame, dst: &mut Frame) -> Result<()> {
@@ -180,11 +209,17 @@ impl Scaler {
             let (ss, ds) = (s.stride, d.stride);
             match self.format {
                 PixelFormat::Yuv420p8 => {
-                    run_plane::<u8>(samples(s)?, ss, samples_mut(d)?, ds, taps, depth)
+                    run_plane::<u8>(samples(s)?, ss, samples_mut(d)?, ds, taps, depth, self.simd)
                 }
-                PixelFormat::Yuv420p10 => {
-                    run_plane::<u16>(samples(s)?, ss / 2, samples_mut(d)?, ds / 2, taps, depth)
-                }
+                PixelFormat::Yuv420p10 => run_plane::<u16>(
+                    samples(s)?,
+                    ss / 2,
+                    samples_mut(d)?,
+                    ds / 2,
+                    taps,
+                    depth,
+                    self.simd,
+                ),
             }
         }
         Ok(())
@@ -212,6 +247,7 @@ fn run_plane<S: Sample>(
     dst_stride: usize,
     taps: &PlaneTaps,
     depth: i32,
+    simd: Simd,
 ) {
     let (sw, sh) = taps.src;
     let (dw, dh) = taps.dst;
@@ -226,7 +262,6 @@ fn run_plane<S: Sample>(
     }
     let rows = rows_per_job(dh, sw + dw);
     let pad = taps.h.blocks * 8 + 16;
-    let avx2 = has_avx2();
     dst.par_chunks_mut(dst_stride * rows)
         .enumerate()
         .for_each_init(
@@ -237,8 +272,8 @@ fn run_plane<S: Sample>(
                     let n = taps.v.n;
                     let coef = &taps.v.coef[y * n..(y + 1) * n];
                     let base = &src[taps.v.start[y] * src_stride..];
-                    vertical(base, src_stride, coef, sw, tmp, depth, avx2);
-                    horizontal(tmp, &taps.h, &mut out[..dw], depth, avx2);
+                    vertical(base, src_stride, coef, sw, tmp, depth, simd);
+                    horizontal(tmp, &taps.h, &mut out[..dw], depth, simd);
                 }
             },
         );
@@ -251,17 +286,6 @@ fn rows_per_job(height: usize, width: usize) -> usize {
     by_threads.max(by_work).clamp(1, height)
 }
 
-fn has_avx2() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        std::arch::is_x86_feature_detected!("avx2")
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        false
-    }
-}
-
 fn vertical<S: Sample>(
     src: &[S],
     stride: usize,
@@ -269,17 +293,18 @@ fn vertical<S: Sample>(
     width: usize,
     tmp: &mut [i16],
     depth: i32,
-    avx2: bool,
+    simd: Simd,
 ) {
     let n = coef.len();
     assert!(src.len() >= (n - 1) * stride + width && tmp.len() >= width);
-    #[cfg(target_arch = "x86_64")]
-    if avx2 {
-        unsafe { x86::vertical(src, stride, coef, width, tmp, depth) };
-        return;
-    }
-    let _ = avx2;
-    vertical_scalar(src, stride, coef, 0, width, tmp, depth);
+    let from = match simd {
+        #[cfg(target_arch = "x86_64")]
+        Simd::Avx2 => unsafe { x86::vertical(src, stride, coef, width, tmp, depth) },
+        #[cfg(target_arch = "aarch64")]
+        Simd::Neon => neon::vertical(src, stride, coef, width, tmp, depth),
+        _ => 0,
+    };
+    vertical_scalar(src, stride, coef, from, width, tmp, depth);
 }
 
 fn vertical_scalar<S: Sample>(
@@ -310,14 +335,17 @@ fn vertical_scalar<S: Sample>(
     }
 }
 
-fn horizontal<S: Sample>(tmp: &[i16], taps: &Taps, out: &mut [S], depth: i32, avx2: bool) {
-    #[cfg(target_arch = "x86_64")]
-    if avx2 {
-        unsafe { x86::horizontal(tmp, taps, out, depth) };
-        return;
-    }
-    let _ = avx2;
-    horizontal_scalar(tmp, taps, out, 0, depth);
+fn horizontal<S: Sample>(tmp: &[i16], taps: &Taps, out: &mut [S], depth: i32, simd: Simd) {
+    let need = taps.start.iter().max().copied().unwrap_or(0) + taps.blocks * 8;
+    assert!(tmp.len() >= need && taps.packed.len() >= out.len().div_ceil(2) * taps.blocks * 16);
+    let from = match simd {
+        #[cfg(target_arch = "x86_64")]
+        Simd::Avx2 => unsafe { x86::horizontal(tmp, taps, out, depth) },
+        #[cfg(target_arch = "aarch64")]
+        Simd::Neon => neon::horizontal(tmp, taps, out, depth),
+        _ => 0,
+    };
+    horizontal_scalar(tmp, taps, out, from, depth);
 }
 
 fn horizontal_scalar<S: Sample>(tmp: &[i16], taps: &Taps, out: &mut [S], from: usize, depth: i32) {
@@ -339,7 +367,7 @@ fn horizontal_scalar<S: Sample>(tmp: &[i16], taps: &Taps, out: &mut [S], from: u
 
 #[cfg(target_arch = "x86_64")]
 mod x86 {
-    use super::{BITS, Sample, Taps, horizontal_scalar, vertical_scalar};
+    use super::{BITS, Sample, Taps};
     use std::arch::x86_64::*;
 
     #[target_feature(enable = "avx2")]
@@ -361,7 +389,7 @@ mod x86 {
         width: usize,
         tmp: &mut [i16],
         depth: i32,
-    ) {
+    ) -> usize {
         let n = coef.len();
         let base = src.as_ptr();
         let round = _mm256_set1_epi32(1 << (depth - 1));
@@ -397,7 +425,7 @@ mod x86 {
             }
             x += 16;
         }
-        vertical_scalar(src, stride, coef, x, width, tmp, depth);
+        x
     }
 
     #[target_feature(enable = "avx2")]
@@ -406,7 +434,7 @@ mod x86 {
         taps: &Taps,
         out: &mut [S],
         depth: i32,
-    ) {
+    ) -> usize {
         let width = out.len();
         let blocks = taps.blocks;
         let shift = 2 * BITS - depth;
@@ -456,6 +484,81 @@ mod x86 {
             }
             x += 8;
         }
-        horizontal_scalar(tmp, taps, out, x, depth);
+        x
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+mod neon {
+    use super::{BITS, Sample, Taps};
+    use std::arch::aarch64::*;
+
+    unsafe fn load8<S: Sample>(p: *const S) -> int16x8_t {
+        unsafe {
+            if S::BYTES == 1 {
+                vreinterpretq_s16_u16(vmovl_u8(vld1_u8(p as *const u8)))
+            } else {
+                vreinterpretq_s16_u16(vld1q_u16(p as *const u16))
+            }
+        }
+    }
+
+    pub(super) fn vertical<S: Sample>(
+        src: &[S],
+        stride: usize,
+        coef: &[i16],
+        width: usize,
+        tmp: &mut [i16],
+        depth: i32,
+    ) -> usize {
+        let base = src.as_ptr();
+        let mut x = 0;
+        while x + 8 <= width {
+            unsafe {
+                let mut lo = vdupq_n_s32(1 << (depth - 1));
+                let mut hi = lo;
+                for (t, &c) in coef.iter().enumerate() {
+                    let row = load8(base.add(t * stride + x));
+                    lo = vmlal_n_s16(lo, vget_low_s16(row), c);
+                    hi = vmlal_high_n_s16(hi, row, c);
+                }
+                let shift = vdupq_n_s32(-depth);
+                let v = vcombine_s16(
+                    vqmovn_s32(vshlq_s32(lo, shift)),
+                    vqmovn_s32(vshlq_s32(hi, shift)),
+                );
+                vst1q_s16(tmp.as_mut_ptr().add(x), v);
+            }
+            x += 8;
+        }
+        x
+    }
+
+    pub(super) fn horizontal<S: Sample>(
+        tmp: &[i16],
+        taps: &Taps,
+        out: &mut [S],
+        depth: i32,
+    ) -> usize {
+        let shift = 2 * BITS - depth;
+        let round = 1 << (shift - 1);
+        let max = (1 << depth) - 1;
+        let blocks = taps.blocks;
+        for (p, o) in out.iter_mut().enumerate() {
+            let s = taps.start[p];
+            let c = &taps.packed[(p / 2 * blocks) * 16 + (p % 2) * 8..];
+            let sum = unsafe {
+                let mut acc = vdupq_n_s32(0);
+                for b in 0..blocks {
+                    let v = vld1q_s16(tmp.as_ptr().add(s + 8 * b));
+                    let w = vld1q_s16(c.as_ptr().add(16 * b));
+                    acc = vmlal_s16(acc, vget_low_s16(v), vget_low_s16(w));
+                    acc = vmlal_high_s16(acc, v, w);
+                }
+                vaddvq_s32(acc)
+            };
+            *o = S::put(((sum + round) >> shift).clamp(0, max));
+        }
+        out.len()
     }
 }
