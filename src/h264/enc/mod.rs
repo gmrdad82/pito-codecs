@@ -3,6 +3,7 @@ mod cabac_mb;
 mod cavlc;
 mod deblock;
 mod dsp;
+mod frame;
 mod intra;
 mod lookahead;
 mod mbinfo;
@@ -14,19 +15,20 @@ mod syntax;
 mod tables;
 mod transform;
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 
 use cabac::CostTable;
-use deblock::{BandPlane, DeblockParams, deblock_band};
+use deblock::{DeblockParams, MAX_REFS};
+use frame::{Ctx, Job, Scratch, encode_frame};
 use lookahead::{Complexity, LowRes};
-use mbinfo::MbInfo;
 use nal::{
     NAL_AUD, NAL_IDR, NAL_PPS, NAL_SEI, NAL_SLICE, NAL_SPS, Pps, SliceHeader, SliceType, Sps, Vui,
 };
-use picture::{CHROMA_PAD, Frame, LUMA_PAD, RefPic, build_hpel};
+use picture::{DONE, Frame, Pic};
 use ratecontrol::RcKind;
-use slice::{Band, EncParams, FrameEnc, Lambdas, SliceEnc, SliceOut};
-use tables::NUM_CTX;
+use slice::{EncParams, Lambdas, SliceOut};
+
 use transform::QuantTables;
 
 #[derive(Debug)]
@@ -119,7 +121,6 @@ pub struct EncoderConfig {
     pub aq_strength: f32,
     pub sar: (u16, u16),
     pub scenecut: bool,
-    pub slices: usize,
     pub aud: bool,
     pub mastering_display: Option<[u8; 24]>,
     pub content_light: Option<(u16, u16)>,
@@ -144,7 +145,6 @@ impl EncoderConfig {
             aq_strength: 0.6,
             sar: (1, 1),
             scenecut: true,
-            slices: 0,
             mastering_display: None,
             content_light: None,
             aud: true,
@@ -191,17 +191,96 @@ impl Pool {
     }
 }
 
+struct Done {
+    job: Job,
+    out: std::thread::Result<SliceOut>,
+}
+
+struct Queue {
+    jobs: Mutex<(VecDeque<Job>, bool)>,
+    cv: Condvar,
+}
+
+struct Workers {
+    queue: Arc<Queue>,
+    done: mpsc::Receiver<Done>,
+    handles: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl Workers {
+    fn new(ctx: Arc<Ctx>, n: usize) -> Self {
+        let queue = Arc::new(Queue {
+            jobs: Mutex::new((VecDeque::new(), false)),
+            cv: Condvar::new(),
+        });
+        let (tx, done) = mpsc::channel();
+        let handles = (0..n)
+            .map(|_| {
+                let (ctx, queue, tx) = (ctx.clone(), queue.clone(), tx.clone());
+                std::thread::spawn(move || {
+                    let mut scratch = Scratch::new();
+                    loop {
+                        let job = {
+                            let mut g = queue.jobs.lock().unwrap_or_else(|e| e.into_inner());
+                            loop {
+                                if let Some(j) = g.0.pop_front() {
+                                    break Some(j);
+                                }
+                                if g.1 {
+                                    break None;
+                                }
+                                g = queue.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+                            }
+                        };
+                        let Some(job) = job else { return };
+                        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            encode_frame(&ctx, &job, &mut scratch)
+                        }));
+                        if out.is_err() {
+                            job.pic.publish(DONE, DONE, DONE);
+                        }
+                        if tx.send(Done { job, out }).is_err() {
+                            return;
+                        }
+                    }
+                })
+            })
+            .collect();
+        Workers {
+            queue,
+            done,
+            handles,
+        }
+    }
+
+    fn push(&self, job: Job) {
+        let mut g = self.queue.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        g.0.push_back(job);
+        self.queue.cv.notify_one();
+    }
+}
+
+impl Drop for Workers {
+    fn drop(&mut self) {
+        {
+            let mut g = self.queue.jobs.lock().unwrap_or_else(|e| e.into_inner());
+            g.1 = true;
+            self.queue.cv.notify_all();
+        }
+        for h in self.handles.drain(..) {
+            let _ = h.join();
+        }
+    }
+}
+
 pub struct Encoder {
     cfg: EncoderConfig,
-    params: EncParams,
+    ctx: Arc<Ctx>,
+    mbw: usize,
+    mbh: usize,
     sps: Sps,
     sps_nal: Vec<u8>,
     pps_nal: Vec<u8>,
-    qt: QuantTables,
-    cost_tab: CostTable,
-    lam: Lambdas,
-    cabac_i: Box<[(i8, i8); NUM_CTX]>,
-    cabac_pb: Box<[(i8, i8); NUM_CTX]>,
     rc: ratecontrol::RateControl,
     pending: VecDeque<Input>,
     prev_lowres: Option<LowRes>,
@@ -209,19 +288,24 @@ pub struct Encoder {
     last_idr: u64,
     idr_count: u32,
     next_frame_num: u32,
-    dpb: Vec<RefPic>,
+    dpb: Vec<Arc<Pic>>,
+    retired: Vec<Arc<Pic>>,
+    pic_pool: Vec<Pic>,
     coded_count: u64,
     display_pts: VecDeque<i64>,
     dts_offset: Option<i64>,
     all_pts: Vec<i64>,
     held: Vec<Packet>,
     frame_pool: Vec<Frame>,
-    hpel_pool: Vec<[picture::Plane; 3]>,
     sei_sent: bool,
-    slices: usize,
     pool: Pool,
     ref_uid: u32,
     max_refs: usize,
+    seq: u64,
+    next_out: u64,
+    finished: BTreeMap<u64, Done>,
+    max_in_flight: usize,
+    workers: Workers,
 }
 
 const LOG2_MAX_FRAME_NUM: u32 = 8;
@@ -270,7 +354,7 @@ impl Encoder {
             self.max_refs,
             u8::from(c.profile != Profile::Baseline),
             u8::from(c.profile == Profile::High),
-            self.slices,
+            1,
             c.aq_strength,
             u8::from(c.scenecut),
         )
@@ -444,11 +528,6 @@ impl Encoder {
         } else {
             cfg.threads
         };
-        let slices = if cfg.slices > 0 {
-            cfg.slices.min(mbh)
-        } else {
-            threads.min(mbh.div_ceil(4)).max(1)
-        };
         let pool = Pool {
             pool: if threads > 1 {
                 rayon::ThreadPoolBuilder::new()
@@ -460,16 +539,23 @@ impl Encoder {
             },
         };
         let rc = ratecontrol::RateControl::new(rc_kind, fps, vbv.0, vbv.1);
-        Ok(Encoder {
-            params,
-            sps,
-            sps_nal,
-            pps_nal,
+        let ctx = Arc::new(Ctx {
+            p: params,
             qt: QuantTables::new(),
             cost_tab: CostTable::new(),
             lam: Lambdas::new(),
             cabac_i: Box::new(tables::cabac_init_i()),
             cabac_pb: Box::new(tables::cabac_init_pb0()),
+        });
+        let frame_threads = threads.clamp(1, 64);
+        let workers = Workers::new(ctx.clone(), frame_threads);
+        Ok(Encoder {
+            ctx,
+            mbw,
+            mbh,
+            sps,
+            sps_nal,
+            pps_nal,
             rc,
             pending: VecDeque::new(),
             prev_lowres: None,
@@ -478,18 +564,23 @@ impl Encoder {
             idr_count: 0,
             next_frame_num: 0,
             dpb: Vec::new(),
+            retired: Vec::new(),
+            pic_pool: Vec::new(),
             coded_count: 0,
             display_pts: VecDeque::new(),
             dts_offset: None,
             all_pts: Vec::new(),
             held: Vec::new(),
             frame_pool: Vec::new(),
-            hpel_pool: Vec::new(),
             sei_sent: false,
-            slices,
             pool,
             ref_uid: 0,
             max_refs,
+            seq: 0,
+            next_out: 0,
+            finished: BTreeMap::new(),
+            max_in_flight: frame_threads + 2,
+            workers,
             cfg,
         })
     }
@@ -515,7 +606,7 @@ impl Encoder {
     pub fn try_encode(&mut self, frame: &YuvFrame, pts: i64) -> Result<Vec<Packet>, Error> {
         let src = self.import(frame)?;
         let use_aq = self.cfg.aq_strength > 0.0 && !matches!(self.cfg.rate, RateControl::Qp(_));
-        let (mbw, mbh, strength) = (self.params.mbw, self.params.mbh, self.cfg.aq_strength);
+        let (mbw, mbh, strength) = (self.mbw, self.mbh, self.cfg.aq_strength);
         let prev = self.prev_lowres.take();
         let (lowres, cplx, aq) = self.pool.install(|| {
             let lowres = LowRes::new(&src);
@@ -553,7 +644,7 @@ impl Encoder {
         if idr {
             self.flush_minigop(&mut out);
             self.last_idr = display;
-            self.encode_batch(vec![(input, SliceType::I, true)], &mut out);
+            self.submit(input, SliceType::I, true, &mut out);
         } else {
             self.pending.push_back(input);
             if self.pending.len() > self.cfg.bframes as usize {
@@ -566,6 +657,7 @@ impl Encoder {
     pub fn flush(&mut self) -> Vec<Packet> {
         let mut out = Vec::new();
         self.flush_minigop(&mut out);
+        self.collect(0, &mut out);
         self.release(out, true)
     }
 
@@ -596,14 +688,10 @@ impl Encoder {
         let Some(p) = self.pending.pop_back() else {
             return;
         };
-        let bs: Vec<(Input, SliceType, bool)> = self
-            .pending
-            .drain(..)
-            .map(|b| (b, SliceType::B, false))
-            .collect();
-        self.encode_batch(vec![(p, SliceType::P, false)], out);
-        if !bs.is_empty() {
-            self.encode_batch(bs, out);
+        let bs: Vec<Input> = self.pending.drain(..).collect();
+        self.submit(p, SliceType::P, false, out);
+        for b in bs {
+            self.submit(b, SliceType::B, false, out);
         }
     }
 
@@ -639,7 +727,7 @@ impl Encoder {
     fn new_frame(&mut self) -> Frame {
         self.frame_pool
             .pop()
-            .unwrap_or_else(|| Frame::new(self.params.mbw * 16, self.params.mbh * 16))
+            .unwrap_or_else(|| Frame::new(self.mbw * 16, self.mbh * 16))
     }
 
     fn recycle(&mut self, f: Frame) {
@@ -648,402 +736,278 @@ impl Encoder {
         }
     }
 
-    fn encode_batch(&mut self, pics: Vec<(Input, SliceType, bool)>, out: &mut Vec<Packet>) {
-        struct Job {
-            input: Input,
-            st: SliceType,
-            idr: bool,
-            qpf: f64,
-            qp: u8,
-            cplx: f64,
-            aq: Vec<i8>,
-            hdr: SliceHeader,
-            nal_ref_idc: u8,
-            l0: Option<usize>,
-            l1: Option<usize>,
-            poc: i32,
-            rec: Option<Frame>,
-            mbs: Vec<MbInfo>,
-            results: Vec<SliceOut>,
+    fn submit(&mut self, input: Input, mut st: SliceType, idr: bool, out: &mut Vec<Packet>) {
+        if idr {
+            let old = std::mem::take(&mut self.dpb);
+            self.retired.extend(old);
+            self.next_frame_num = 0;
         }
-        let mut jobs: Vec<Job> = Vec::with_capacity(pics.len());
-        for (input, mut st, idr) in pics {
-            if idr {
-                let old: Vec<RefPic> = std::mem::take(&mut self.dpb);
-                for r in old {
-                    self.recycle_ref(r);
-                }
-                self.next_frame_num = 0;
-            }
-            let poc = 2 * (input.display as i64 - self.last_idr as i64) as i32;
-            let by_id = self
-                .dpb
-                .iter()
-                .enumerate()
-                .max_by_key(|(_, r)| r.id)
-                .map(|(i, _)| i);
-            let (mut l0, mut l1) = match st {
-                SliceType::I => (None, None),
-                SliceType::P => (by_id, None),
-                SliceType::B => (
-                    self.dpb
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, r)| r.poc < poc)
-                        .max_by_key(|(_, r)| r.poc)
-                        .map(|(i, _)| i),
-                    self.dpb
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, r)| r.poc > poc)
-                        .min_by_key(|(_, r)| r.poc)
-                        .map(|(i, _)| i),
-                ),
-            };
-            if st == SliceType::B && (l0.is_none() || l1.is_none()) {
-                st = SliceType::P;
-                l0 = by_id;
-                l1 = None;
-            }
-            if st == SliceType::P && l0.is_none() {
-                st = SliceType::I;
-            }
-            let is_ref = st != SliceType::B;
-            let cplx = match st {
-                SliceType::I => input.cplx.intra,
-                _ => input.cplx.inter,
-            } as f64;
-            let qpf = self.rc.frame_qp(st, cplx);
-            let qp = qpf.round().clamp(0.0, 51.0) as u8;
-            let aq: Vec<i8> = if input.aq.is_empty() {
-                Vec::new()
-            } else {
-                input
-                    .aq
+        self.reclaim();
+        let poc = 2 * (input.display as i64 - self.last_idr as i64) as i32;
+        let by_id = self
+            .dpb
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, r)| r.id)
+            .map(|(i, _)| i);
+        let (mut l0, mut l1) = match st {
+            SliceType::I => (None, None),
+            SliceType::P => (by_id, None),
+            SliceType::B => (
+                self.dpb
                     .iter()
-                    .map(|&o| ((qpf + o as f64).round().clamp(0.0, 51.0) as i32 - qp as i32) as i8)
-                    .collect()
-            };
-            let nal_ref_idc = if idr {
-                3
-            } else if is_ref {
-                2
-            } else {
-                0
-            };
-            let hdr = SliceHeader {
-                first_mb: 0,
-                slice_type: st,
-                nal_ref_idc,
-                idr,
-                idr_pic_id: self.idr_count % 2,
-                frame_num: self.next_frame_num % (1 << LOG2_MAX_FRAME_NUM),
-                log2_max_frame_num: LOG2_MAX_FRAME_NUM,
-                poc_lsb: (poc as u32) % (1 << LOG2_MAX_POC_LSB),
-                log2_max_poc_lsb: LOG2_MAX_POC_LSB,
-                l0_modification: None,
-                cabac: self.params.cabac,
-                slice_qp: qp as i32,
-                pic_init_qp: 26,
-                disable_deblocking: if self.slices > 1 { 2 } else { 0 },
-                alpha_offset_div2: 0,
-                beta_offset_div2: 0,
-            };
-            let rec = self.new_frame();
-            let mbs = vec![MbInfo::default(); self.params.mbw * self.params.mbh];
-            jobs.push(Job {
-                input,
-                st,
-                idr,
-                qpf,
-                qp,
-                cplx,
-                aq,
-                hdr,
-                nal_ref_idc,
-                l0,
-                l1,
-                poc,
-                rec: Some(rec),
-                mbs,
-                results: Vec::new(),
-            });
+                    .enumerate()
+                    .filter(|(_, r)| r.poc < poc)
+                    .max_by_key(|(_, r)| r.poc)
+                    .map(|(i, _)| i),
+                self.dpb
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| r.poc > poc)
+                    .min_by_key(|(_, r)| r.poc)
+                    .map(|(i, _)| i),
+            ),
+        };
+        if st == SliceType::B && (l0.is_none() || l1.is_none()) {
+            st = SliceType::P;
+            l0 = by_id;
+            l1 = None;
         }
+        if st == SliceType::P && l0.is_none() {
+            st = SliceType::I;
+        }
+        let is_ref = st != SliceType::B;
+        let cplx = match st {
+            SliceType::I => input.cplx.intra,
+            _ => input.cplx.inter,
+        } as f64;
+        let qpf = self.rc.frame_qp(st, cplx);
+        let qp = qpf.round().clamp(0.0, 51.0) as u8;
+        let aq: Vec<i8> = if input.aq.is_empty() {
+            Vec::new()
+        } else {
+            input
+                .aq
+                .iter()
+                .map(|&o| ((qpf + o as f64).round().clamp(0.0, 51.0) as i32 - qp as i32) as i8)
+                .collect()
+        };
+        let nal_ref_idc = if idr {
+            3
+        } else if is_ref {
+            2
+        } else {
+            0
+        };
+        let hdr = SliceHeader {
+            first_mb: 0,
+            slice_type: st,
+            nal_ref_idc,
+            idr,
+            idr_pic_id: self.idr_count % 2,
+            frame_num: self.next_frame_num % (1 << LOG2_MAX_FRAME_NUM),
+            log2_max_frame_num: LOG2_MAX_FRAME_NUM,
+            poc_lsb: (poc as u32) % (1 << LOG2_MAX_POC_LSB),
+            log2_max_poc_lsb: LOG2_MAX_POC_LSB,
+            l0_modification: None,
+            cabac: self.ctx.p.cabac,
+            slice_qp: qp as i32,
+            pic_init_qp: 26,
+            disable_deblocking: 0,
+            alpha_offset_div2: 0,
+            beta_offset_div2: 0,
+        };
+        if idr {
+            self.idr_count += 1;
+        }
+        let refs = [
+            l0.map(|i| self.dpb[i].clone()),
+            l1.map(|i| self.dpb[i].clone()),
+        ];
+        let mut ids = [[-1i32; MAX_REFS]; 2];
+        for (l, r) in refs.iter().enumerate() {
+            if let Some(r) = r {
+                ids[l][0] = r.id as i32;
+            }
+        }
+        let mut pic = self
+            .pic_pool
+            .pop()
+            .unwrap_or_else(|| Pic::new(self.mbw * 16, self.mbh * 16));
+        let id = if is_ref {
+            self.ref_uid += 1;
+            self.ref_uid
+        } else {
+            0
+        };
+        pic.reset(poc, id);
+        let pic = Arc::new(pic);
+        if is_ref {
+            if self.dpb.len() >= self.max_refs
+                && let Some(oldest) = self
+                    .dpb
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, r)| r.id)
+                    .map(|(i, _)| i)
+            {
+                let r = self.dpb.remove(oldest);
+                self.retired.push(r);
+            }
+            self.dpb.push(pic.clone());
+            self.next_frame_num = (self.next_frame_num + 1) % (1 << LOG2_MAX_FRAME_NUM);
+        }
+        let job = Job {
+            seq: self.seq,
+            src: input.frame,
+            pts: input.pts,
+            st,
+            idr,
+            qp,
+            qpf,
+            cplx,
+            aq,
+            hdr,
+            nal_ref_idc,
+            nal_type: if idr { NAL_IDR } else { NAL_SLICE },
+            pic,
+            refs,
+            publish: is_ref,
+            dp: DeblockParams {
+                alpha_offset: 0,
+                beta_offset: 0,
+                chroma_qp_offset: self.ctx.p.chroma_qp_offset,
+                ref_ids: ids,
+            },
+        };
+        self.seq += 1;
+        self.workers.push(job);
+        self.collect(self.max_in_flight, out);
+    }
 
-        let (mbw, mbh) = (self.params.mbw, self.params.mbh);
-        let n = self.slices;
-        let bounds: Vec<(usize, usize)> = (0..n)
-            .map(|s| (s * mbh / n, (s + 1) * mbh / n))
-            .filter(|(a, b)| b > a)
-            .collect();
-        let mut slice_results: Vec<Vec<SliceOut>> = (0..jobs.len()).map(|_| Vec::new()).collect();
-        let mut bufs: Vec<(Frame, Vec<MbInfo>)> = jobs
-            .iter_mut()
-            .filter_map(|j| Some((j.rec.take()?, std::mem::take(&mut j.mbs))))
-            .collect();
-        {
-            let this = &*self;
-            let fencs: Vec<FrameEnc> = jobs
-                .iter()
-                .map(|j| FrameEnc {
-                    p: &this.params,
-                    qt: &this.qt,
-                    cost_tab: &this.cost_tab,
-                    st: j.hdr.slice_type,
-                    src: &j.input.frame,
-                    l0: j.l0.map(|i| &this.dpb[i]),
-                    l1: j.l1.map(|i| &this.dpb[i]),
-                    qp: j.qp,
-                    aq: &j.aq,
-                    hdr: j.hdr.clone(),
-                    nal_ref_idc: j.nal_ref_idc,
-                    nal_type: if j.idr { NAL_IDR } else { NAL_SLICE },
-                    cabac_table: if j.hdr.slice_type == SliceType::I {
-                        &this.cabac_i
-                    } else {
-                        &this.cabac_pb
-                    },
-                    lam: &this.lam,
-                })
-                .collect();
-            let dps: Vec<DeblockParams> = jobs
-                .iter()
-                .map(|j| DeblockParams {
-                    alpha_offset: 0,
-                    beta_offset: 0,
-                    chroma_qp_offset: this.params.chroma_qp_offset,
-                    ref_ids: [
-                        j.l0.map_or(-1, |i| this.dpb[i].id as i32),
-                        j.l1.map_or(-1, |i| this.dpb[i].id as i32),
-                    ],
-                })
-                .collect();
-            let deblock: Vec<bool> = jobs
-                .iter()
-                .map(|j| j.hdr.slice_type != SliceType::B)
-                .collect();
-            type Task<'t> = (
-                usize,
-                usize,
-                usize,
-                usize,
-                &'t mut [u8],
-                &'t mut [u8],
-                &'t mut [u8],
-                &'t mut [MbInfo],
-            );
-            let mut tasks: Vec<Task> = Vec::new();
-            for (pi, (rec, mbs)) in bufs.iter_mut().enumerate() {
-                let ys = rec.y.stride;
-                let cs = rec.u.stride;
-                let mut yrest = &mut rec.y.data[LUMA_PAD * ys..];
-                let mut urest = &mut rec.u.data[CHROMA_PAD * cs..];
-                let mut vrest = &mut rec.v.data[CHROMA_PAD * cs..];
-                let mut mrest = &mut mbs[..];
-                for (k, &(r0, r1)) in bounds.iter().enumerate() {
-                    let rows = r1 - r0;
-                    let (a, b) = std::mem::take(&mut yrest).split_at_mut(rows * 16 * ys);
-                    yrest = b;
-                    let (ua, ub) = std::mem::take(&mut urest).split_at_mut(rows * 8 * cs);
-                    urest = ub;
-                    let (va, vb) = std::mem::take(&mut vrest).split_at_mut(rows * 8 * cs);
-                    vrest = vb;
-                    let (ma, mb) = std::mem::take(&mut mrest).split_at_mut(rows * mbw);
-                    mrest = mb;
-                    tasks.push((pi, k, r0, r1, a, ua, va, ma));
-                }
-            }
-            let ys = jobs_stride_y(mbw);
-            let cs = jobs_stride_c(mbw);
-            let run = |(pi, k, r0, r1, y, u, v, m): Task| -> (usize, usize, SliceOut) {
-                let out = SliceEnc::new(
-                    &fencs[pi],
-                    Band {
-                        y: &mut *y,
-                        u: &mut *u,
-                        v: &mut *v,
-                        ys,
-                        cs,
-                    },
-                    &mut *m,
-                    r0,
-                    r1,
-                    k as u16,
-                )
-                .encode();
-                if deblock[pi] {
-                    let mut by = BandPlane {
-                        data: y,
-                        stride: ys,
-                        pad: LUMA_PAD,
-                    };
-                    let mut bu = BandPlane {
-                        data: u,
-                        stride: cs,
-                        pad: CHROMA_PAD,
-                    };
-                    let mut bv = BandPlane {
-                        data: v,
-                        stride: cs,
-                        pad: CHROMA_PAD,
-                    };
-                    deblock_band(&mut by, &mut bu, &mut bv, m, mbw, r1 - r0, &dps[pi]);
-                }
-                (pi, k, out)
-            };
-            let results: Vec<(usize, usize, SliceOut)> = {
-                use rayon::prelude::*;
-                if tasks.len() > 1 {
-                    this.pool
-                        .install(|| tasks.into_par_iter().map(run).collect())
-                } else {
-                    tasks.into_iter().map(run).collect()
-                }
-            };
-            let mut results = results;
-            results.sort_by_key(|r| (r.0, r.1));
-            for (pi, _, r) in results {
-                slice_results[pi].push(r);
-            }
-        }
-        for ((j, (rec, mbs)), res) in jobs.iter_mut().zip(bufs).zip(slice_results) {
-            j.rec = Some(rec);
-            j.mbs = mbs;
-            j.results = res;
-        }
-
-        for job in jobs {
-            let Job {
-                input,
-                st,
-                idr,
-                qpf,
-                qp: _,
-                cplx,
-                hdr: _,
-                nal_ref_idc: _,
-                l0: _,
-                l1: _,
-                poc,
-                rec,
-                mbs,
-                results,
-                aq: _,
-            } = job;
-            let Some(mut rec) = rec else { continue };
-            let is_ref = st != SliceType::B;
-            let annexb = self.cfg.format == PacketFormat::AnnexB;
-            let mut nals: Vec<Vec<u8>> = Vec::new();
-            if annexb && self.cfg.aud {
-                let t = match st {
-                    SliceType::I => 0,
-                    SliceType::P => 1,
-                    SliceType::B => 2,
-                };
-                nals.push(nal::nal(0, NAL_AUD, &nal::aud_rbsp(t)));
-            }
-            if idr && annexb {
-                nals.push(self.sps_nal.clone());
-                nals.push(self.pps_nal.clone());
-            }
-            if !self.sei_sent {
-                self.sei_sent = true;
-                let text = format!(
-                    "pito-codecs {} - H.264 encoder - options: {}",
-                    env!("CARGO_PKG_VERSION"),
-                    self.options()
-                );
-                nals.push(nal::nal(0, NAL_SEI, &nal::sei_user_data_rbsp(&text)));
-                if self.cfg.mastering_display.is_some() || self.cfg.content_light.is_some() {
-                    nals.push(nal::nal(
-                        0,
-                        NAL_SEI,
-                        &nal::sei_hdr_rbsp(
-                            self.cfg.mastering_display.as_ref(),
-                            self.cfg.content_light,
-                        ),
-                    ));
-                }
-            }
-            for r in results {
-                nals.push(r.nal);
-            }
-            let mut data = Vec::with_capacity(nals.iter().map(|n| n.len() + 4).sum());
-            for n in &nals {
-                if annexb {
-                    data.extend_from_slice(&[0, 0, 0, 1]);
-                } else {
-                    data.extend_from_slice(&(n.len() as u32).to_be_bytes());
-                }
-                data.extend_from_slice(n);
-            }
-            let total_bits = data.len() as u64 * 8;
-            self.rc.update(st, qpf, cplx, total_bits);
-            if is_ref {
-                let hp = self.hpel_pool.pop();
-                let hpel = self.pool.install(|| {
-                    rec.extend_edges();
-                    build_hpel(&rec.y, hp)
-                });
-                self.ref_uid += 1;
-                let rp = RefPic {
-                    frame: rec,
-                    hpel,
-                    mbs,
-                    poc,
-                    id: self.ref_uid,
-                };
-                if self.dpb.len() >= self.max_refs
-                    && let Some(oldest) = self
-                        .dpb
-                        .iter()
-                        .enumerate()
-                        .min_by_key(|(_, r)| r.id)
-                        .map(|(i, _)| i)
+    fn reclaim(&mut self) {
+        let mut i = 0;
+        while i < self.retired.len() {
+            if Arc::strong_count(&self.retired[i]) == 1 {
+                let r = self.retired.swap_remove(i);
+                if let Ok(p) = Arc::try_unwrap(r)
+                    && self.pic_pool.len() < 4
                 {
-                    let r = self.dpb.remove(oldest);
-                    self.recycle_ref(r);
+                    self.pic_pool.push(p);
                 }
-                self.dpb.push(rp);
-                self.next_frame_num = (self.next_frame_num + 1) % (1 << LOG2_MAX_FRAME_NUM);
             } else {
-                self.recycle(rec);
+                i += 1;
             }
-            if idr {
-                self.idr_count += 1;
-            }
-            let pos = self
-                .display_pts
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, p)| **p)
-                .map(|(i, _)| i);
-            let dts_base = pos
-                .and_then(|p| self.display_pts.remove(p))
-                .unwrap_or(input.pts);
-            self.coded_count += 1;
-            self.recycle(input.frame);
-            out.push(Packet {
-                data,
-                pts: input.pts,
-                dts: dts_base,
-                keyframe: idr,
-            });
         }
     }
 
-    fn recycle_ref(&mut self, r: RefPic) {
-        self.recycle(r.frame);
-        if self.hpel_pool.len() < 4 {
-            self.hpel_pool.push(r.hpel);
+    fn collect(&mut self, max_in_flight: usize, out: &mut Vec<Packet>) {
+        loop {
+            let in_flight = (self.seq - self.next_out) as usize;
+            let next = if in_flight > max_in_flight {
+                match self.workers.done.recv() {
+                    Ok(d) => Some(d),
+                    Err(_) => panic!("h264 encoder: frame threads stopped"),
+                }
+            } else {
+                self.workers.done.try_recv().ok()
+            };
+            let Some(d) = next else { break };
+            self.finished.insert(d.job.seq, d);
+            while let Some(d) = self.finished.remove(&self.next_out) {
+                self.next_out += 1;
+                self.finish_frame(d, out);
+            }
         }
+    }
+
+    fn finish_frame(&mut self, d: Done, out: &mut Vec<Packet>) {
+        let res = match d.out {
+            Ok(r) => r,
+            Err(e) => std::panic::resume_unwind(e),
+        };
+        let job = d.job;
+        let st = job.st;
+        let annexb = self.cfg.format == PacketFormat::AnnexB;
+        let mut nals: Vec<Vec<u8>> = Vec::new();
+        if annexb && self.cfg.aud {
+            let t = match st {
+                SliceType::I => 0,
+                SliceType::P => 1,
+                SliceType::B => 2,
+            };
+            nals.push(nal::nal(0, NAL_AUD, &nal::aud_rbsp(t)));
+        }
+        if job.idr && annexb {
+            nals.push(self.sps_nal.clone());
+            nals.push(self.pps_nal.clone());
+        }
+        if !self.sei_sent {
+            self.sei_sent = true;
+            let text = format!(
+                "pito-codecs {} - H.264 encoder - options: {}",
+                env!("CARGO_PKG_VERSION"),
+                self.options()
+            );
+            nals.push(nal::nal(0, NAL_SEI, &nal::sei_user_data_rbsp(&text)));
+            if self.cfg.mastering_display.is_some() || self.cfg.content_light.is_some() {
+                nals.push(nal::nal(
+                    0,
+                    NAL_SEI,
+                    &nal::sei_hdr_rbsp(self.cfg.mastering_display.as_ref(), self.cfg.content_light),
+                ));
+            }
+        }
+        nals.push(res.nal);
+        let mut data = Vec::with_capacity(nals.iter().map(|n| n.len() + 4).sum());
+        for n in &nals {
+            if annexb {
+                data.extend_from_slice(&[0, 0, 0, 1]);
+            } else {
+                data.extend_from_slice(&(n.len() as u32).to_be_bytes());
+            }
+            data.extend_from_slice(n);
+        }
+        self.rc.update(st, job.qpf, job.cplx, data.len() as u64 * 8);
+        let pos = self
+            .display_pts
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, p)| **p)
+            .map(|(i, _)| i);
+        let dts_base = pos
+            .and_then(|p| self.display_pts.remove(p))
+            .unwrap_or(job.pts);
+        self.coded_count += 1;
+        let Job {
+            src,
+            pic,
+            refs,
+            pts,
+            idr,
+            ..
+        } = job;
+        drop(refs);
+        self.recycle(src);
+        if !pic_is_ref(&pic) {
+            if let Ok(p) = Arc::try_unwrap(pic)
+                && self.pic_pool.len() < 4
+            {
+                self.pic_pool.push(p);
+            }
+        } else {
+            drop(pic);
+        }
+        self.reclaim();
+        out.push(Packet {
+            data,
+            pts,
+            dts: dts_base,
+            keyframe: idr,
+        });
     }
 }
 
-fn jobs_stride_y(mbw: usize) -> usize {
-    mbw * 16 + 2 * LUMA_PAD
-}
-
-fn jobs_stride_c(mbw: usize) -> usize {
-    mbw * 8 + 2 * CHROMA_PAD
+fn pic_is_ref(p: &Pic) -> bool {
+    p.id != 0
 }
