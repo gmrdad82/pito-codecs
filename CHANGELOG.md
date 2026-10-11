@@ -1,5 +1,29 @@
 # Changelog
 
+## v1.0.1 — 2026-10-12
+
+H.264, HEVC and VP9 decode speed-ups and MKV and WebM playback, with one benchmark run on this code behind every chart and number in the README.
+
+### Added
+
+- MKV and WebM play through `decode_video` and `decode_video_gpu`, on VA-API or the CPU.
+
+### Changed
+
+- VP9 decode: 8-bit streams decode into 8-bit planes, and motion vector candidates read their neighbours in place.
+- VP9 decode: AVX2 loop filter specialised by width and direction, with its decisions per cell pair shared by U and V.
+- VP9 VA-API decode starts each shown frame's read-back copy early.
+- H.264 decode: inter prediction compiled per ISA, with one row wait per block.
+- H.264 decode: spatial direct reads colocated motion only when it matters.
+- HEVC: 10-bit output rows are copied as bytes on little-endian targets.
+- bench: `--only` takes a full row id.
+- README: every Speed chart comes before the table, and the README, CHANGELOG and SECURITY.md say what the code does today.
+
+### Fixed
+
+- VP9: a failing tile or loop-filter worker becomes an error, never a panic.
+- VP9 lints clean on arm64 targets.
+
 ## v1.0.0 — 2026-10-11
 
 Every format in the README's Status decodes and encodes, on Linux, Windows and macOS. Opus speech encoding (SILK and hybrid) is experimental.
