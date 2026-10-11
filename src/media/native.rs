@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::SystemTime;
 
+use crate::gpu::GpuFrame;
 use crate::mp4::{CodecConfig, Reader, Track};
 
 use super::picture::{Color, rotate, to_rgba_color};
@@ -348,6 +349,7 @@ pub struct Frames {
     next: usize,
     start: i64,
     queue: VecDeque<Frame>,
+    gpu: VecDeque<GpuFrame>,
     flushed: bool,
     buf: Vec<u8>,
 }
@@ -367,6 +369,7 @@ impl Frames {
             next,
             start,
             queue: VecDeque::new(),
+            gpu: VecDeque::new(),
             flushed: false,
             buf: Vec::new(),
         })
@@ -386,32 +389,69 @@ impl Frames {
 
     pub fn next_frame(&mut self) -> Result<Option<Frame>> {
         loop {
-            while let Some(f) = self.queue.pop_front() {
-                if f.pts >= self.start {
-                    return Ok(Some(f));
-                }
+            if let Some(f) = self.next_queued() {
+                return Ok(Some(f));
             }
-            let t = &self.reader.tracks[self.track];
-            if let Some(s) = t.samples.get(self.next).copied() {
-                self.reader
-                    .read_into(self.track, self.next, &mut self.buf)?;
-                let packet = Packet {
-                    data: std::mem::take(&mut self.buf),
-                    pts: s.pts.saturating_add(t.edit_offset),
-                    dts: s.dts.saturating_add(t.edit_offset),
-                    keyframe: s.keyframe,
-                };
-                self.next += 1;
-                let out = self.dec.decode(&packet);
-                self.buf = packet.data;
-                self.queue.extend(out?);
-            } else if !self.flushed {
-                self.flushed = true;
-                self.queue.extend(self.dec.flush()?);
-            } else {
+            if !self.pump(false)? {
                 return Ok(None);
             }
         }
+    }
+
+    pub fn next_gpu(&mut self) -> Result<Option<GpuFrame>> {
+        loop {
+            while let Some(f) = self.gpu.pop_front() {
+                if f.pts() >= self.start {
+                    return Ok(Some(f));
+                }
+            }
+            if let Some(f) = self.next_queued() {
+                return Ok(Some(GpuFrame::cpu(f)));
+            }
+            if !self.pump(true)? {
+                return Ok(None);
+            }
+        }
+    }
+
+    fn next_queued(&mut self) -> Option<Frame> {
+        while let Some(f) = self.queue.pop_front() {
+            if f.pts >= self.start {
+                return Some(f);
+            }
+            self.dec.recycle(f);
+        }
+        None
+    }
+
+    fn pump(&mut self, gpu: bool) -> Result<bool> {
+        let t = &self.reader.tracks[self.track];
+        if let Some(s) = t.samples.get(self.next).copied() {
+            self.reader
+                .read_into(self.track, self.next, &mut self.buf)?;
+            let packet = Packet {
+                data: std::mem::take(&mut self.buf),
+                pts: s.pts.saturating_add(t.edit_offset),
+                dts: s.dts.saturating_add(t.edit_offset),
+                keyframe: s.keyframe,
+            };
+            self.next += 1;
+            let out = match &mut self.dec {
+                Decoder::Gpu(dec) if gpu => dec.decode_gpu(&packet).map(|f| self.gpu.extend(f)),
+                dec => dec.decode(&packet).map(|f| self.queue.extend(f)),
+            };
+            self.buf = packet.data;
+            out?;
+        } else if !self.flushed {
+            self.flushed = true;
+            match &mut self.dec {
+                Decoder::Gpu(dec) if gpu => self.gpu.extend(dec.flush_gpu()?),
+                dec => self.queue.extend(dec.flush()?),
+            }
+        } else {
+            return Ok(false);
+        }
+        Ok(true)
     }
 }
 
