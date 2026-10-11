@@ -14,6 +14,23 @@ pub fn avx2() -> bool {
 }
 
 macro_rules! dispatch {
+    ($(#[$m:meta])* $vis:vis fn $name:ident <$($g:ident: $gb:path),+> ($($a:ident: $t:ty),* $(,)?) $(-> $r:ty)? $body:block) => {
+        $(#[$m])*
+        $vis fn $name<$($g: $gb),+>($($a: $t),*) $(-> $r)? {
+            #[inline(always)]
+            fn body<$($g: $gb),+>($($a: $t),*) $(-> $r)? $body
+            #[cfg(target_arch = "x86_64")]
+            #[target_feature(enable = "avx2,bmi1,bmi2,lzcnt,popcnt,fma")]
+            fn fast<$($g: $gb),+>($($a: $t),*) $(-> $r)? {
+                body::<$($g),+>($($a),*)
+            }
+            #[cfg(target_arch = "x86_64")]
+            if crate::vp9::isa::avx2() {
+                return unsafe { fast::<$($g),+>($($a),*) };
+            }
+            body::<$($g),+>($($a),*)
+        }
+    };
     ($(#[$m:meta])* $vis:vis fn $name:ident ($($a:ident: $t:ty),* $(,)?) $(-> $r:ty)? $body:block) => {
         $(#[$m])*
         $vis fn $name($($a: $t),*) $(-> $r)? {

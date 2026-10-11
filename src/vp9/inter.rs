@@ -1,4 +1,4 @@
-use crate::vp9::frame::Frame;
+use crate::vp9::frame::{Frame, Pixel};
 use crate::vp9::tables::SUBPEL_FILTERS;
 
 #[inline(always)]
@@ -16,13 +16,13 @@ pub struct RefPlane<'a> {
 
 impl RefPlane<'_> {
     #[inline]
-    fn rows(&self, y0: isize, y1: isize) -> (&[u16], usize) {
+    fn rows<P: Pixel>(&self, y0: isize, y1: isize) -> (&[P], usize) {
         let f = self.frame;
         let g = &f.geo[self.plane];
         f.wait_plane_row(self.plane, y1 - 1);
         let start = (g.origin as isize + y0 * g.stride as isize - g.border_x as isize) as usize;
         let len = (y1 - y0) as usize * g.stride;
-        (&f.plane(self.plane)[start..start + len], g.border_x)
+        (&f.plane::<P>(self.plane)[start..start + len], g.border_x)
     }
 
     #[inline]
@@ -32,15 +32,15 @@ impl RefPlane<'_> {
     }
 
     #[inline]
-    fn row(&self, y: i32) -> &[u16] {
+    fn row<P: Pixel>(&self, y: i32) -> &[P] {
         let g = &self.frame.geo[self.plane];
         let start = g.origin + y.clamp(0, self.last_y) as usize * g.stride;
-        &self.frame.plane(self.plane)[start..start + self.last_x as usize + 1]
+        &self.frame.plane::<P>(self.plane)[start..start + self.last_x as usize + 1]
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn predict(
+pub fn predict<P: Pixel>(
     r: &RefPlane,
     x: i32,
     y: i32,
@@ -50,24 +50,31 @@ pub fn predict(
     h: usize,
     filter: u8,
     bit_depth: u8,
-    out: &mut [u16],
+    out: &mut [P],
     os: usize,
     avg: bool,
     tmp: &mut [u16],
-    win: &mut [u16],
-    pred: &mut [u16],
+    win: &mut [P],
+    pred: &mut [P],
 ) {
     #[cfg(target_arch = "x86_64")]
     if step_x == 16 && step_y == 16 && matches!(w, 4 | 8 | 16 | 32 | 64) && crate::vp9::isa::avx2()
     {
         let (src, ss, so) = source(r, x >> 4, y >> 4, w, h, win);
         let (fx, fy) = ((x & 15) as usize, (y & 15) as usize);
-        unsafe {
-            simd::unscaled(
-                src, ss, so, w, h, fx, fy, filter, bit_depth, out, os, avg, tmp,
-            )
-        };
-        return;
+        if let (Some(src), Some(out)) = (P::wide(src), P::wide_mut(&mut *out)) {
+            unsafe {
+                simd::unscaled(
+                    src, ss, so, w, h, fx, fy, filter, bit_depth, out, os, avg, tmp,
+                )
+            };
+            return;
+        }
+        if let (Some(src), Some(out)) = (P::narrow(src), P::narrow_mut(&mut *out))
+            && simd8::unscaled(src, ss, so, w, h, fx, fy, filter, out, os, avg, tmp)
+        {
+            return;
+        }
     }
     if avg {
         predict_portable(
@@ -82,10 +89,10 @@ pub fn predict(
 }
 
 crate::vp9::isa::dispatch! {
-fn average(out: &mut [u16], os: usize, pred: &[u16], w: usize, h: usize) {
+fn average<P: Pixel>(out: &mut [P], os: usize, pred: &[P], w: usize, h: usize) {
     for i in 0..h {
         for (d, &b) in out[i * os..i * os + w].iter_mut().zip(&pred[i * w..i * w + w]) {
-            *d = ((*d as u32 + b as u32 + 1) >> 1) as u16;
+            *d = P::put((d.get() + b.get() + 1) >> 1);
         }
     }
 }
@@ -93,7 +100,7 @@ fn average(out: &mut [u16], os: usize, pred: &[u16], w: usize, h: usize) {
 
 crate::vp9::isa::dispatch! {
 #[allow(clippy::too_many_arguments)]
-fn predict_portable(
+fn predict_portable<P: Pixel>(
     r: &RefPlane,
     x: i32,
     y: i32,
@@ -103,10 +110,10 @@ fn predict_portable(
     h: usize,
     filter: u8,
     bit_depth: u8,
-    out: &mut [u16],
+    out: &mut [P],
     os: usize,
     tmp: &mut [u16],
-    win: &mut [u16],
+    win: &mut [P],
 ) {
     if step_x == 16 && step_y == 16 {
         predict_unscaled(r, x, y, w, h, filter, bit_depth, out, os, tmp, win);
@@ -118,7 +125,14 @@ fn predict_portable(
 }
 }
 
-fn fetch_window(r: &RefPlane, x0: i32, y0: i32, w: usize, h: usize, win: &mut [u16]) -> usize {
+fn fetch_window<P: Pixel>(
+    r: &RefPlane,
+    x0: i32,
+    y0: i32,
+    w: usize,
+    h: usize,
+    win: &mut [P],
+) -> usize {
     let ws = w + 7;
     let xs = x0 - 3;
     let a = (-xs).clamp(0, ws as i32);
@@ -126,7 +140,7 @@ fn fetch_window(r: &RefPlane, x0: i32, y0: i32, w: usize, h: usize, win: &mut [u
     let (a, b) = (a as usize, b.max(a) as usize);
     r.wait_row(y0 + h as i32 + 3);
     for (row, dst) in win[..(h + 7) * ws].chunks_exact_mut(ws).enumerate() {
-        let src = r.row(y0 - 3 + row as i32);
+        let src = r.row::<P>(y0 - 3 + row as i32);
         dst[..a].fill(src[0]);
         if b > a {
             let s = (xs + a as i32) as usize;
@@ -137,14 +151,14 @@ fn fetch_window(r: &RefPlane, x0: i32, y0: i32, w: usize, h: usize, win: &mut [u
     ws
 }
 
-fn source<'a>(
+fn source<'a, P: Pixel>(
     r: &'a RefPlane,
     x0: i32,
     y0: i32,
     w: usize,
     h: usize,
-    win: &'a mut [u16],
-) -> (&'a [u16], usize, usize) {
+    win: &'a mut [P],
+) -> (&'a [P], usize, usize) {
     let g = &r.frame.geo[r.plane];
     let inside = x0 - 3 >= -(g.border_x as i32)
         && y0 - 3 >= -(g.border_y as i32)
@@ -153,7 +167,7 @@ fn source<'a>(
         && r.last_x == g.width as i32 - 1
         && r.last_y == g.height as i32 - 1;
     if inside {
-        let (rows, bx) = r.rows((y0 - 3) as isize, (y0 + h as i32 + 5) as isize);
+        let (rows, bx) = r.rows::<P>((y0 - 3) as isize, (y0 + h as i32 + 5) as isize);
         (rows, g.stride, (bx as i32 + x0 - 3) as usize)
     } else {
         let ws = fetch_window(r, x0, y0, w, h, win);
@@ -162,7 +176,7 @@ fn source<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn predict_unscaled(
+fn predict_unscaled<P: Pixel>(
     r: &RefPlane,
     x: i32,
     y: i32,
@@ -170,10 +184,10 @@ fn predict_unscaled(
     h: usize,
     filter: u8,
     bit_depth: u8,
-    out: &mut [u16],
+    out: &mut [P],
     os: usize,
     tmp: &mut [u16],
-    win: &mut [u16],
+    win: &mut [P],
 ) {
     let (src, ss, so) = source(r, x >> 4, y >> 4, w, h, win);
     let (fx, fy) = ((x & 15) as usize, (y & 15) as usize);
@@ -181,8 +195,8 @@ fn predict_unscaled(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn unscaled_scalar(
-    src: &[u16],
+fn unscaled_scalar<P: Pixel>(
+    src: &[P],
     ss: usize,
     so: usize,
     w: usize,
@@ -191,7 +205,7 @@ fn unscaled_scalar(
     fy: usize,
     filter: u8,
     bit_depth: u8,
-    out: &mut [u16],
+    out: &mut [P],
     os: usize,
     tmp: &mut [u16],
 ) {
@@ -240,24 +254,24 @@ fn unscaled_scalar(
 }
 
 #[inline(always)]
-fn filter_h(s: &[u16], f: &[i16], max: i32, o: &mut [u16]) {
+fn filter_h<S: Pixel, D: Pixel>(s: &[S], f: &[i16], max: i32, o: &mut [D]) {
     match o.len() {
-        4 => filter_h_n::<4>(s, f, max, o),
-        8 => filter_h_n::<8>(s, f, max, o),
-        16 => filter_h_n::<16>(s, f, max, o),
-        32 => filter_h_n::<32>(s, f, max, o),
-        64 => filter_h_n::<64>(s, f, max, o),
+        4 => filter_h_n::<S, D, 4>(s, f, max, o),
+        8 => filter_h_n::<S, D, 8>(s, f, max, o),
+        16 => filter_h_n::<S, D, 16>(s, f, max, o),
+        32 => filter_h_n::<S, D, 32>(s, f, max, o),
+        64 => filter_h_n::<S, D, 64>(s, f, max, o),
         _ => {
             for (j, d) in o.iter_mut().enumerate() {
-                let acc: i32 = (0..8).map(|t| f[t] as i32 * s[j + t] as i32).sum();
-                *d = ((acc + 64) >> 7).clamp(0, max) as u16;
+                let acc: i32 = (0..8).map(|t| f[t] as i32 * s[j + t].get()).sum();
+                *d = D::put(((acc + 64) >> 7).clamp(0, max));
             }
         }
     }
 }
 
 #[inline(always)]
-fn filter_h_n<const W: usize>(s: &[u16], f: &[i16], max: i32, o: &mut [u16]) {
+fn filter_h_n<S: Pixel, D: Pixel, const W: usize>(s: &[S], f: &[i16], max: i32, o: &mut [D]) {
     let Some(o) = o.first_chunk_mut::<W>() else {
         return;
     };
@@ -269,7 +283,7 @@ fn filter_h_n<const W: usize>(s: &[u16], f: &[i16], max: i32, o: &mut [u16]) {
                 return;
             };
             for j in 0..W {
-                acc[j] = acc[j].wrapping_add(c.wrapping_mul(p[j]));
+                acc[j] = acc[j].wrapping_add(c.wrapping_mul(p[j].get() as u16));
             }
         }
         narrow8(&acc, o);
@@ -282,44 +296,50 @@ fn filter_h_n<const W: usize>(s: &[u16], f: &[i16], max: i32, o: &mut [u16]) {
             return;
         };
         for j in 0..W {
-            acc[j] += c * p[j] as i32;
+            acc[j] += c * p[j].get();
         }
     }
     for j in 0..W {
-        o[j] = (acc[j] >> 7).clamp(0, max) as u16;
+        o[j] = D::put((acc[j] >> 7).clamp(0, max));
     }
 }
 
 #[inline(always)]
-fn narrow8<const W: usize>(acc: &[u16; W], o: &mut [u16; W]) {
+fn narrow8<D: Pixel, const W: usize>(acc: &[u16; W], o: &mut [D; W]) {
     for j in 0..W {
-        o[j] = if acc[j] < 0xC000 {
-            (acc[j] >> 7).min(255)
+        o[j] = D::put(if acc[j] < 0xC000 {
+            (acc[j] >> 7).min(255) as i32
         } else {
             0
-        };
+        });
     }
 }
 
 #[inline(always)]
-fn filter_v(s: &[u16], ss: usize, f: &[i16], max: i32, o: &mut [u16]) {
+fn filter_v<S: Pixel, D: Pixel>(s: &[S], ss: usize, f: &[i16], max: i32, o: &mut [D]) {
     match o.len() {
-        4 => filter_v_n::<4>(s, ss, f, max, o),
-        8 => filter_v_n::<8>(s, ss, f, max, o),
-        16 => filter_v_n::<16>(s, ss, f, max, o),
-        32 => filter_v_n::<32>(s, ss, f, max, o),
-        64 => filter_v_n::<64>(s, ss, f, max, o),
+        4 => filter_v_n::<S, D, 4>(s, ss, f, max, o),
+        8 => filter_v_n::<S, D, 8>(s, ss, f, max, o),
+        16 => filter_v_n::<S, D, 16>(s, ss, f, max, o),
+        32 => filter_v_n::<S, D, 32>(s, ss, f, max, o),
+        64 => filter_v_n::<S, D, 64>(s, ss, f, max, o),
         _ => {
             for (j, d) in o.iter_mut().enumerate() {
-                let acc: i32 = (0..8).map(|t| f[t] as i32 * s[j + t * ss] as i32).sum();
-                *d = ((acc + 64) >> 7).clamp(0, max) as u16;
+                let acc: i32 = (0..8).map(|t| f[t] as i32 * s[j + t * ss].get()).sum();
+                *d = D::put(((acc + 64) >> 7).clamp(0, max));
             }
         }
     }
 }
 
 #[inline(always)]
-fn filter_v_n<const W: usize>(s: &[u16], ss: usize, f: &[i16], max: i32, o: &mut [u16]) {
+fn filter_v_n<S: Pixel, D: Pixel, const W: usize>(
+    s: &[S],
+    ss: usize,
+    f: &[i16],
+    max: i32,
+    o: &mut [D],
+) {
     let Some(o) = o.first_chunk_mut::<W>() else {
         return;
     };
@@ -331,7 +351,7 @@ fn filter_v_n<const W: usize>(s: &[u16], ss: usize, f: &[i16], max: i32, o: &mut
                 return;
             };
             for j in 0..W {
-                acc[j] = acc[j].wrapping_add(c.wrapping_mul(p[j]));
+                acc[j] = acc[j].wrapping_add(c.wrapping_mul(p[j].get() as u16));
             }
         }
         narrow8(&acc, o);
@@ -344,16 +364,16 @@ fn filter_v_n<const W: usize>(s: &[u16], ss: usize, f: &[i16], max: i32, o: &mut
             return;
         };
         for j in 0..W {
-            acc[j] += c * p[j] as i32;
+            acc[j] += c * p[j].get();
         }
     }
     for j in 0..W {
-        o[j] = (acc[j] >> 7).clamp(0, max) as u16;
+        o[j] = D::put((acc[j] >> 7).clamp(0, max));
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn predict_scaled(
+fn predict_scaled<P: Pixel>(
     r: &RefPlane,
     x: i32,
     y: i32,
@@ -363,7 +383,7 @@ fn predict_scaled(
     h: usize,
     filter: u8,
     bit_depth: u8,
-    out: &mut [u16],
+    out: &mut [P],
     os: usize,
     tmp: &mut [u16],
 ) {
@@ -371,14 +391,14 @@ fn predict_scaled(
     let ih = ((((h as i32 - 1) * step_y + 15) >> 4) + 8) as usize;
     r.wait_row((y >> 4) + ih as i32 - 4);
     for row in 0..ih {
-        let src = r.row((y >> 4) + row as i32 - 3);
+        let src = r.row::<P>((y >> 4) + row as i32 - 3);
         for c in 0..w {
             let p = x + step_x * c as i32;
             let f = taps(filter, (p & 15) as usize);
             let mut acc = 0i32;
             for t in 0..8 {
                 acc +=
-                    f[t] as i32 * src[((p >> 4) + t as i32 - 3).clamp(0, r.last_x) as usize] as i32;
+                    f[t] as i32 * src[((p >> 4) + t as i32 - 3).clamp(0, r.last_x) as usize].get();
             }
             tmp[row * w + c] = ((acc + 64) >> 7).clamp(0, max) as u16;
         }
@@ -392,7 +412,7 @@ fn predict_scaled(
             for t in 0..8 {
                 acc += f[t] as i32 * tmp[(base + t) * w + c] as i32;
             }
-            out[rr * os + c] = ((acc + 64) >> 7).clamp(0, max) as u16;
+            out[rr * os + c] = P::put(((acc + 64) >> 7).clamp(0, max));
         }
     }
 }
@@ -722,6 +742,324 @@ mod simd {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+mod simd8 {
+    use super::taps;
+    use std::arch::x86_64::*;
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn unscaled(
+        src: &[u8],
+        ss: usize,
+        so: usize,
+        w: usize,
+        h: usize,
+        fx: usize,
+        fy: usize,
+        filter: u8,
+        out: &mut [u8],
+        os: usize,
+        avg: bool,
+        tmp: &mut [u16],
+    ) -> bool {
+        let fits = w.is_power_of_two()
+            && (4..=64).contains(&w)
+            && h > 0
+            && src.len() >= so + (h + 6) * ss + w + 16
+            && out.len() >= (h - 1) * os + w
+            && tmp.len() * 2 >= (h + 7) * w;
+        if !fits {
+            return false;
+        }
+        let k = Kernel {
+            src: unsafe { src.as_ptr().add(so) },
+            ss,
+            h,
+            fx,
+            fy,
+            filter,
+            out: out.as_mut_ptr(),
+            os,
+            tmp: tmp.as_mut_ptr().cast(),
+        };
+        unsafe {
+            match (w, avg) {
+                (4, false) => k.run::<4, false>(),
+                (4, true) => k.run::<4, true>(),
+                (8, false) => k.run::<8, false>(),
+                (8, true) => k.run::<8, true>(),
+                (16, false) => k.run::<16, false>(),
+                (16, true) => k.run::<16, true>(),
+                (32, false) => k.run::<32, false>(),
+                (32, true) => k.run::<32, true>(),
+                (64, false) => k.run::<64, false>(),
+                _ => k.run::<64, true>(),
+            }
+        }
+        true
+    }
+
+    struct Kernel {
+        src: *const u8,
+        ss: usize,
+        h: usize,
+        fx: usize,
+        fy: usize,
+        filter: u8,
+        out: *mut u8,
+        os: usize,
+        tmp: *mut u8,
+    }
+
+    impl Kernel {
+        #[target_feature(enable = "avx2")]
+        unsafe fn run<const W: usize, const AVG: bool>(&self) {
+            let (s, ss, h, o, os) = (self.src, self.ss, self.h, self.out, self.os);
+            unsafe {
+                match (self.fx, self.fy) {
+                    (0, 0) => copy::<W, AVG>(s.add(3 * ss + 3), ss, h, o, os),
+                    (fx, 0) => {
+                        hpass::<W, AVG>(s.add(3 * ss), ss, h, coefs(taps(self.filter, fx)), o, os)
+                    }
+                    (0, fy) => {
+                        vpass::<W, AVG>(s.add(3), ss, h, coefs(taps(self.filter, fy)), o, os)
+                    }
+                    (fx, fy) => {
+                        hpass::<W, false>(s, ss, h + 7, coefs(taps(self.filter, fx)), self.tmp, W);
+                        vpass::<W, AVG>(self.tmp, W, h, coefs(taps(self.filter, fy)), o, os);
+                    }
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn coefs(f: &[i16]) -> [i16; 4] {
+        std::array::from_fn(|k| {
+            ((f[2 * k] as i8 as u8 as u16) | ((f[2 * k + 1] as i8 as u8 as u16) << 8)) as i16
+        })
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn sum(x: [__m256i; 4]) -> __m256i {
+        let s = _mm256_adds_epi16(x[0], x[3]);
+        let s = _mm256_adds_epi16(s, _mm256_min_epi16(x[1], x[2]));
+        let s = _mm256_adds_epi16(s, _mm256_max_epi16(x[1], x[2]));
+        _mm256_srai_epi16::<7>(_mm256_adds_epi16(s, _mm256_set1_epi16(64)))
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn sum128(x: [__m128i; 4]) -> __m128i {
+        let s = _mm_adds_epi16(x[0], x[3]);
+        let s = _mm_adds_epi16(s, _mm_min_epi16(x[1], x[2]));
+        let s = _mm_adds_epi16(s, _mm_max_epi16(x[1], x[2]));
+        _mm_srai_epi16::<7>(_mm_adds_epi16(s, _mm_set1_epi16(64)))
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn put<const N: usize, const AVG: bool>(d: *mut u8, v: __m128i) {
+        unsafe {
+            match N {
+                4 => {
+                    let mut v = v;
+                    if AVG {
+                        v = _mm_avg_epu8(v, _mm_cvtsi32_si128(d.cast::<i32>().read_unaligned()));
+                    }
+                    d.cast::<i32>().write_unaligned(_mm_cvtsi128_si32(v));
+                }
+                8 => {
+                    let mut v = v;
+                    if AVG {
+                        v = _mm_avg_epu8(v, _mm_loadl_epi64(d.cast()));
+                    }
+                    _mm_storel_epi64(d.cast(), v);
+                }
+                _ => {
+                    let mut v = v;
+                    if AVG {
+                        v = _mm_avg_epu8(v, _mm_loadu_si128(d.cast()));
+                    }
+                    _mm_storeu_si128(d.cast(), v);
+                }
+            }
+        }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn copy<const W: usize, const AVG: bool>(
+        s: *const u8,
+        ss: usize,
+        h: usize,
+        o: *mut u8,
+        os: usize,
+    ) {
+        unsafe {
+            for i in 0..h {
+                let (p, d) = (s.add(i * ss), o.add(i * os));
+                if W >= 32 {
+                    for j in (0..W).step_by(32) {
+                        let mut v = _mm256_loadu_si256(p.add(j).cast());
+                        if AVG {
+                            v = _mm256_avg_epu8(v, _mm256_loadu_si256(d.add(j).cast()));
+                        }
+                        _mm256_storeu_si256(d.add(j).cast(), v);
+                    }
+                } else {
+                    let v = match W {
+                        4 => _mm_cvtsi32_si128(p.cast::<i32>().read_unaligned()),
+                        8 => _mm_loadl_epi64(p.cast()),
+                        _ => _mm_loadu_si128(p.cast()),
+                    };
+                    put::<W, AVG>(d, v);
+                }
+            }
+        }
+    }
+
+    const SHUF: [[i8; 16]; 4] = {
+        let mut m = [[0i8; 16]; 4];
+        let mut k = 0;
+        while k < 4 {
+            let mut j = 0;
+            while j < 8 {
+                m[k][2 * j] = (2 * k + j) as i8;
+                m[k][2 * j + 1] = (2 * k + j + 1) as i8;
+                j += 1;
+            }
+            k += 1;
+        }
+        m
+    };
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn hpass<const W: usize, const AVG: bool>(
+        s: *const u8,
+        ss: usize,
+        rows: usize,
+        c: [i16; 4],
+        o: *mut u8,
+        os: usize,
+    ) {
+        unsafe {
+            if W >= 16 {
+                let sh: [__m256i; 4] = std::array::from_fn(|k| {
+                    _mm256_broadcastsi128_si256(_mm_loadu_si128(SHUF[k].as_ptr().cast()))
+                });
+                let cv: [__m256i; 4] = std::array::from_fn(|k| _mm256_set1_epi16(c[k]));
+                for i in 0..rows {
+                    let (p, d) = (s.add(i * ss), o.add(i * os));
+                    let mut j = 0;
+                    while j < W {
+                        let a = _mm256_loadu2_m128i(p.add(j + 8).cast(), p.add(j).cast());
+                        let x = sum(std::array::from_fn(|k| {
+                            _mm256_maddubs_epi16(_mm256_shuffle_epi8(a, sh[k]), cv[k])
+                        }));
+                        if W == 16 {
+                            let v = _mm256_packus_epi16(x, x);
+                            let v = _mm256_castsi256_si128(_mm256_permute4x64_epi64::<0b1000>(v));
+                            put::<16, AVG>(d.add(j), v);
+                            j += 16;
+                            continue;
+                        }
+                        let b = _mm256_loadu2_m128i(p.add(j + 24).cast(), p.add(j + 16).cast());
+                        let y = sum(std::array::from_fn(|k| {
+                            _mm256_maddubs_epi16(_mm256_shuffle_epi8(b, sh[k]), cv[k])
+                        }));
+                        let v = _mm256_permute4x64_epi64::<0b11011000>(_mm256_packus_epi16(x, y));
+                        let mut v = v;
+                        if AVG {
+                            v = _mm256_avg_epu8(v, _mm256_loadu_si256(d.add(j).cast()));
+                        }
+                        _mm256_storeu_si256(d.add(j).cast(), v);
+                        j += 32;
+                    }
+                }
+            } else {
+                let sh: [__m128i; 4] =
+                    std::array::from_fn(|k| _mm_loadu_si128(SHUF[k].as_ptr().cast()));
+                let cv: [__m128i; 4] = std::array::from_fn(|k| _mm_set1_epi16(c[k]));
+                for i in 0..rows {
+                    let (p, d) = (s.add(i * ss), o.add(i * os));
+                    let a = _mm_loadu_si128(p.cast());
+                    let x = sum128(std::array::from_fn(|k| {
+                        _mm_maddubs_epi16(_mm_shuffle_epi8(a, sh[k]), cv[k])
+                    }));
+                    put::<W, AVG>(d, _mm_packus_epi16(x, x));
+                }
+            }
+        }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn vpass<const W: usize, const AVG: bool>(
+        s: *const u8,
+        ss: usize,
+        rows: usize,
+        c: [i16; 4],
+        o: *mut u8,
+        os: usize,
+    ) {
+        unsafe {
+            if W >= 32 {
+                let cv: [__m256i; 4] = std::array::from_fn(|k| _mm256_set1_epi16(c[k]));
+                for j in (0..W).step_by(32) {
+                    for i in 0..rows {
+                        let r: [__m256i; 8] = std::array::from_fn(|t| {
+                            _mm256_loadu_si256(s.add((i + t) * ss + j).cast())
+                        });
+                        let lo = sum(std::array::from_fn(|k| {
+                            _mm256_maddubs_epi16(
+                                _mm256_unpacklo_epi8(r[2 * k], r[2 * k + 1]),
+                                cv[k],
+                            )
+                        }));
+                        let hi = sum(std::array::from_fn(|k| {
+                            _mm256_maddubs_epi16(
+                                _mm256_unpackhi_epi8(r[2 * k], r[2 * k + 1]),
+                                cv[k],
+                            )
+                        }));
+                        let mut v = _mm256_packus_epi16(lo, hi);
+                        let d = o.add(i * os + j);
+                        if AVG {
+                            v = _mm256_avg_epu8(v, _mm256_loadu_si256(d.cast()));
+                        }
+                        _mm256_storeu_si256(d.cast(), v);
+                    }
+                }
+            } else {
+                let cv: [__m128i; 4] = std::array::from_fn(|k| _mm_set1_epi16(c[k]));
+                let ld = |r: usize| match W {
+                    4 => _mm_cvtsi32_si128(s.add(r * ss).cast::<i32>().read_unaligned()),
+                    8 => _mm_loadl_epi64(s.add(r * ss).cast()),
+                    _ => _mm_loadu_si128(s.add(r * ss).cast()),
+                };
+                for i in 0..rows {
+                    let r: [__m128i; 8] = std::array::from_fn(|t| ld(i + t));
+                    let lo = sum128(std::array::from_fn(|k| {
+                        _mm_maddubs_epi16(_mm_unpacklo_epi8(r[2 * k], r[2 * k + 1]), cv[k])
+                    }));
+                    let v = if W == 16 {
+                        let hi = sum128(std::array::from_fn(|k| {
+                            _mm_maddubs_epi16(_mm_unpackhi_epi8(r[2 * k], r[2 * k + 1]), cv[k])
+                        }));
+                        _mm_packus_epi16(lo, hi)
+                    } else {
+                        _mm_packus_epi16(lo, lo)
+                    };
+                    put::<W, AVG>(o.add(i * os), v);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -729,8 +1067,8 @@ mod tests {
     #[test]
     fn scaled_path_with_unit_step_matches_unscaled() {
         let (w, h) = (40usize, 30usize);
-        let data: Vec<u16> = (0..w * h)
-            .map(|i| ((i * 37 + (i / w) * 11) % 256) as u16)
+        let data: Vec<u8> = (0..w * h)
+            .map(|i| ((i * 37 + (i / w) * 11) % 256) as u8)
             .collect();
         let info = crate::vp9::frame::FrameInfo {
             width: w as u32,
@@ -745,7 +1083,7 @@ mod tests {
             key: true,
             intra_only: false,
         };
-        let chroma = vec![0u16; w.div_ceil(2) * h.div_ceil(2)];
+        let chroma = vec![0u8; w.div_ceil(2) * h.div_ceil(2)];
         let frame = Frame::from_planes(info, [&data, &chroma, &chroma]);
         let r = RefPlane {
             frame: &frame,
@@ -764,8 +1102,8 @@ mod tests {
                 (16 * 10, 16 * 10 + 8),
             ] {
                 for &(bw, bh) in &[(4usize, 4usize), (8, 8), (16, 8)] {
-                    let mut a = vec![0u16; bw * bh];
-                    let mut b = vec![0u16; bw * bh];
+                    let mut a = vec![0u8; bw * bh];
+                    let mut b = vec![0u8; bw * bh];
                     predict_unscaled(
                         &r,
                         x,
@@ -777,7 +1115,7 @@ mod tests {
                         &mut a,
                         bw,
                         &mut tmp,
-                        &mut [0u16; 71 * 71],
+                        &mut [0u8; 71 * 71],
                     );
                     predict_scaled(&r, x, y, 16, 16, bw, bh, filter, 8, &mut b, bw, &mut tmp);
                     assert_eq!(a, b, "filter {filter} pos ({x},{y}) {bw}x{bh}");
@@ -842,6 +1180,62 @@ mod tests {
                             )
                         };
                         assert_eq!(a, b, "bd {bd} {w}x{h} f{filter} ({fx},{fy}) avg {avg}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn simd8_unscaled_matches_scalar() {
+        if !crate::vp9::isa::avx2() {
+            return;
+        }
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let ss = 100usize;
+        let mut tmp = vec![0u16; 64 * 71];
+        let src: Vec<u8> = (0..ss * 90)
+            .map(|_| {
+                let v = rnd();
+                if v & 3 == 0 {
+                    ((v >> 8) & 1) as u8 * 255
+                } else {
+                    (v >> 8) as u8
+                }
+            })
+            .collect();
+        for w in [4usize, 8, 16, 32, 64] {
+            for h in [4usize, 8, 16, 32, 64] {
+                for filter in 0..4u8 {
+                    for _ in 0..12 {
+                        let r = rnd();
+                        let (fx, fy) = ((r & 15) as usize, ((r >> 4) & 15) as usize);
+                        let so = ((r >> 10) % (ss as u64 - 80)) as usize;
+                        let avg = (r >> 20) & 1 == 1;
+                        let os = 70;
+                        let base: Vec<u8> = (0..os * h).map(|_| rnd() as u8).collect();
+                        let mut a = base.clone();
+                        let mut b = base.clone();
+                        let mut p = vec![0u8; w * h];
+                        unscaled_scalar(&src, ss, so, w, h, fx, fy, filter, 8, &mut p, w, &mut tmp);
+                        if avg {
+                            average(&mut a, os, &p, w, h);
+                        } else {
+                            for i in 0..h {
+                                a[i * os..i * os + w].copy_from_slice(&p[i * w..i * w + w]);
+                            }
+                        }
+                        assert!(simd8::unscaled(
+                            &src, ss, so, w, h, fx, fy, filter, &mut b, os, avg, &mut tmp
+                        ));
+                        assert_eq!(a, b, "{w}x{h} f{filter} ({fx},{fy}) avg {avg}");
                     }
                 }
             }

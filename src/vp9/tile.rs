@@ -1,5 +1,5 @@
 use crate::vp9::boolcoder::BoolDecoder;
-use crate::vp9::frame::{Frame, MiGrid, MiInfo, Mv, RowSync};
+use crate::vp9::frame::{Frame, MiGrid, MiInfo, Mv, Pixel, RowSync};
 use crate::vp9::header::{FrameHeader, Segmentation};
 use crate::vp9::probs::{Counts, FrameContext};
 use crate::vp9::tables::*;
@@ -64,13 +64,13 @@ struct Blk {
     eob_total: u32,
 }
 
-pub struct TileDecoder<'a> {
+pub struct TileDecoder<'a, P> {
     s: &'a FrameShared<'a>,
     h: &'a FrameHeader,
     fc: &'a FrameContext,
     pub strip: Strip,
-    planes: [&'a mut [u16]; 3],
-    above_lines: [Vec<u16>; 3],
+    planes: [&'a mut [P]; 3],
+    above_lines: [Vec<P>; 3],
     strides: [usize; 3],
     mi_cols: usize,
     mi_rows: usize,
@@ -91,13 +91,13 @@ pub struct TileDecoder<'a> {
     best_mv: [Mv; 2],
     coefs: Vec<i32>,
     token_cache: Vec<u8>,
-    pred2: Vec<u16>,
+    pred2: Vec<P>,
     mc_tmp: Vec<u16>,
-    mc_win: Vec<u16>,
+    mc_win: Vec<P>,
     pub error: Option<crate::vp9::error::Error>,
 }
 
-impl<'a> TileDecoder<'a> {
+impl<'a, P: Pixel> TileDecoder<'a, P> {
     pub fn new(s: &'a FrameShared<'a>, mi_col_start: usize, mi_col_end: usize) -> Self {
         let h = s.h;
         let (mi_cols, mi_rows) = (h.mi_cols as usize, h.mi_rows as usize);
@@ -124,7 +124,7 @@ impl<'a> TileDecoder<'a> {
             fc: s.fc,
             strip,
             planes: unsafe { s.dst.planes_mut() },
-            above_lines: s.dst.geo.map(|g| vec![0; g.stride]),
+            above_lines: s.dst.geo.map(|g| vec![P::default(); g.stride]),
             strides: s.dst.geo.map(|g| g.stride),
             mi_cols,
             mi_rows,
@@ -145,7 +145,7 @@ impl<'a> TileDecoder<'a> {
             best_mv: [Mv::ZERO; 2],
             coefs: vec![0; 1024],
             token_cache: vec![0; 1024],
-            pred2: vec![0; 64 * 64],
+            pred2: vec![P::default(); 64 * 64],
             mc_tmp: vec![
                 0;
                 if s.refs
@@ -158,7 +158,7 @@ impl<'a> TileDecoder<'a> {
                     64 * 71
                 }
             ],
-            mc_win: vec![0; 71 * 71],
+            mc_win: vec![P::default(); 71 * 71 + 64],
             error: None,
         }
     }
@@ -1095,10 +1095,11 @@ impl<'a> TileDecoder<'a> {
         let mut context_counter = 0usize;
         let search = &MV_REF_BLOCKS[b.size as usize * 16..b.size as usize * 16 + 16];
         let (r, c) = (b.r as isize, b.c as isize);
+        let mi: &'a MiGrid = self.s.mi;
         for i in 0..2 {
             let (cr, cc) = (r + search[i * 2] as isize, c + search[i * 2 + 1] as isize);
             if self.is_inside(cr, cc) {
-                let m = *self.mi_at(cr as usize, cc as usize);
+                let m = mi.at(cr as usize, cc as usize);
                 different_ref_found = true;
                 context_counter += MODE_2_COUNTER[m.y_mode as usize] as usize;
                 for j in 0..2 {
@@ -1120,24 +1121,24 @@ impl<'a> TileDecoder<'a> {
             let (cr, cc) = (r + search[i * 2] as isize, c + search[i * 2 + 1] as isize);
             if self.is_inside(cr, cc) {
                 different_ref_found = true;
-                let m = *self.mi_at(cr as usize, cc as usize);
-                self.if_same_ref_frame_add(&m, ref_frame);
+                let m = mi.at(cr as usize, cc as usize);
+                self.if_same_ref_frame_add(m, ref_frame);
             }
         }
-        let prev = self.s.prev_mi.map(|g| *g.at(b.r, b.c));
-        if let Some(p) = &prev {
+        let prev: Option<&'a MiInfo> = self.s.prev_mi.map(|g| g.at(b.r, b.c));
+        if let Some(p) = prev {
             self.if_same_ref_frame_add(p, ref_frame);
         }
         if different_ref_found {
             for i in 0..8 {
                 let (cr, cc) = (r + search[i * 2] as isize, c + search[i * 2 + 1] as isize);
                 if self.is_inside(cr, cc) {
-                    let m = *self.mi_at(cr as usize, cc as usize);
-                    self.if_diff_ref_frame_add(&m, ref_frame);
+                    let m = mi.at(cr as usize, cc as usize);
+                    self.if_diff_ref_frame_add(m, ref_frame);
                 }
             }
         }
-        if let Some(p) = &prev {
+        if let Some(p) = prev {
             self.if_diff_ref_frame_add(p, ref_frame);
         }
         self.mode_context[ref_frame as usize] = COUNTER_TO_CONTEXT[context_counter.min(18)];

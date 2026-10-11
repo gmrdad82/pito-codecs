@@ -1,7 +1,7 @@
 use super::{Blk, TileDecoder};
 use crate::vp9::boolcoder::BoolDecoder;
 use crate::vp9::error::Error;
-use crate::vp9::frame::Mv;
+use crate::vp9::frame::{Mv, Pixel};
 use crate::vp9::inter::{self, RefPlane};
 use crate::vp9::intra::{self, IntraEdge};
 use crate::vp9::tables::*;
@@ -14,7 +14,7 @@ fn round_q4(v: i32) -> i32 {
     (if v < 0 { v - 2 } else { v + 2 }) / 4
 }
 
-impl<'a> TileDecoder<'a> {
+impl<'a, P: Pixel> TileDecoder<'a, P> {
     pub(super) fn residual(&mut self, bd: &mut BoolDecoder, b: &mut Blk) {
         let bsize = b.size.max(BLOCK_8X8) as usize;
         let (ssx, ssy) = (self.ss_x, self.ss_y);
@@ -298,7 +298,7 @@ impl<'a> TileDecoder<'a> {
                 for i in 0..h {
                     let o = (y + i) * stride + x;
                     for d in &mut self.planes[plane][o..o + w] {
-                        *d = if rl == 0 { v } else { (*d + v + 1) >> 1 };
+                        *d = P::put(if rl == 0 { v } else { (d.get() + v + 1) >> 1 });
                     }
                 }
                 continue;

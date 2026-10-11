@@ -199,21 +199,90 @@ pub struct Geometry {
     pub len: usize,
 }
 
-#[derive(Clone, Copy)]
-pub struct PlaneMut<'a> {
-    ptr: *mut u16,
+pub trait Pixel: Copy + Default + Send + Sync + PartialEq + std::fmt::Debug + 'static {
+    const WIDE: bool;
+    fn get(self) -> i32;
+    fn put(v: i32) -> Self;
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    fn wide(s: &[Self]) -> Option<&[u16]>;
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    fn wide_mut(s: &mut [Self]) -> Option<&mut [u16]>;
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    fn narrow(s: &[Self]) -> Option<&[u8]>;
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    fn narrow_mut(s: &mut [Self]) -> Option<&mut [u8]>;
+}
+
+impl Pixel for u8 {
+    const WIDE: bool = false;
+    #[inline(always)]
+    fn get(self) -> i32 {
+        self as i32
+    }
+    #[inline(always)]
+    fn put(v: i32) -> Self {
+        v as u8
+    }
+    fn wide(_: &[u8]) -> Option<&[u16]> {
+        None
+    }
+    fn wide_mut(_: &mut [u8]) -> Option<&mut [u16]> {
+        None
+    }
+    fn narrow(s: &[u8]) -> Option<&[u8]> {
+        Some(s)
+    }
+    fn narrow_mut(s: &mut [u8]) -> Option<&mut [u8]> {
+        Some(s)
+    }
+}
+
+impl Pixel for u16 {
+    const WIDE: bool = true;
+    #[inline(always)]
+    fn get(self) -> i32 {
+        self as i32
+    }
+    #[inline(always)]
+    fn put(v: i32) -> Self {
+        v as u16
+    }
+    fn wide(s: &[u16]) -> Option<&[u16]> {
+        Some(s)
+    }
+    fn wide_mut(s: &mut [u16]) -> Option<&mut [u16]> {
+        Some(s)
+    }
+    fn narrow(_: &[u16]) -> Option<&[u8]> {
+        None
+    }
+    fn narrow_mut(_: &mut [u16]) -> Option<&mut [u8]> {
+        None
+    }
+}
+
+pub struct PlaneMut<'a, P> {
+    ptr: *mut P,
     pub stride: usize,
     frame: std::marker::PhantomData<&'a Frame>,
 }
 
-impl<'a> PlaneMut<'a> {
+impl<P> Clone for PlaneMut<'_, P> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<P> Copy for PlaneMut<'_, P> {}
+
+impl<'a, P> PlaneMut<'a, P> {
     #[inline(always)]
-    pub fn at(&self, x: usize, y: usize) -> *mut u16 {
+    pub fn at(&self, x: usize, y: usize) -> *mut P {
         self.ptr.wrapping_add(y * self.stride + x)
     }
 
     #[inline(always)]
-    pub fn row(&self, x: usize, y: usize, n: usize) -> &'a mut [u16] {
+    pub fn row(&self, x: usize, y: usize, n: usize) -> &'a mut [P] {
         unsafe { std::slice::from_raw_parts_mut(self.at(x, y), n) }
     }
 }
@@ -222,7 +291,8 @@ pub struct Frame {
     pub info: FrameInfo,
     pub geo: [Geometry; 3],
     data: [Vec<u16>; 3],
-    ptrs: [*mut u16; 3],
+    ptrs: [*mut u8; 3],
+    wide: bool,
     sb_rows: usize,
     progress: AtomicUsize,
     lock: Mutex<()>,
@@ -236,13 +306,19 @@ unsafe impl Sync for Frame {}
 impl Frame {
     pub fn new(info: FrameInfo, pools: Arc<Pools>) -> Frame {
         let geo = plane_geometry(info.width, info.height, info.ss_x, info.ss_y);
-        let mut data = geo.map(|g| pools.planes.take_any(g.len, 0));
-        let ptrs = std::array::from_fn(|p| data[p].as_mut_ptr());
+        let wide = info.bit_depth > 8;
+        let mut data = geo.map(|g| {
+            pools
+                .planes
+                .take_any(if wide { g.len } else { g.len.div_ceil(2) }, 0)
+        });
+        let ptrs = std::array::from_fn(|p| data[p].as_mut_ptr().cast());
         Frame {
             info,
             geo,
             data,
             ptrs,
+            wide,
             sb_rows: (info.height as usize).div_ceil(64),
             progress: AtomicUsize::new(0),
             lock: Mutex::new(()),
@@ -255,19 +331,31 @@ impl Frame {
         self.sb_rows
     }
 
-    pub fn plane_mut(&self, p: usize) -> PlaneMut<'_> {
+    pub fn wide(&self) -> bool {
+        self.wide
+    }
+
+    #[inline(always)]
+    fn base<P: Pixel>(&self, p: usize) -> *mut P {
+        assert!(P::WIDE == self.wide);
+        self.ptrs[p].cast()
+    }
+
+    pub fn plane_mut<P: Pixel>(&self, p: usize) -> PlaneMut<'_, P> {
         PlaneMut {
-            ptr: self.ptrs[p].wrapping_add(self.geo[p].origin),
+            ptr: self.base::<P>(p).wrapping_add(self.geo[p].origin),
             stride: self.geo[p].stride,
             frame: std::marker::PhantomData,
         }
     }
 
     #[allow(clippy::mut_from_ref)]
-    pub unsafe fn planes_mut(&self) -> [&mut [u16]; 3] {
+    pub unsafe fn planes_mut<P: Pixel>(&self) -> [&mut [P]; 3] {
         std::array::from_fn(|p| {
             let g = &self.geo[p];
-            unsafe { std::slice::from_raw_parts_mut(self.ptrs[p].add(g.origin), g.len - g.origin) }
+            unsafe {
+                std::slice::from_raw_parts_mut(self.base::<P>(p).add(g.origin), g.len - g.origin)
+            }
         })
     }
 
@@ -310,14 +398,22 @@ impl Frame {
     }
 
     #[inline]
-    pub fn plane(&self, p: usize) -> &[u16] {
-        unsafe { std::slice::from_raw_parts(self.ptrs[p], self.geo[p].len) }
+    pub fn plane<P: Pixel>(&self, p: usize) -> &[P] {
+        unsafe { std::slice::from_raw_parts(self.base::<P>(p), self.geo[p].len) }
     }
 
     pub fn finish_rows(&self, r: usize) {
+        if self.wide {
+            self.extend_rows::<u16>(r);
+        } else {
+            self.extend_rows::<u8>(r);
+        }
+    }
+
+    fn extend_rows<P: Pixel>(&self, r: usize) {
         for p in 0..3 {
             let g = self.geo[p];
-            let pm = self.plane_mut(p);
+            let pm = self.plane_mut::<P>(p);
             let y0 = r * g.band_h;
             let y1 = ((r + 1) * g.band_h).min(g.height);
             let bx = g.border_x;
@@ -353,11 +449,11 @@ impl Frame {
     }
 
     #[cfg(test)]
-    pub fn from_planes(info: FrameInfo, planes: [&[u16]; 3]) -> Frame {
+    pub fn from_planes<P: Pixel>(info: FrameInfo, planes: [&[P]; 3]) -> Frame {
         let f = Frame::new(info, Default::default());
         for p in 0..3 {
             let g = f.geo[p];
-            let pm = f.plane_mut(p);
+            let pm = f.plane_mut::<P>(p);
             for y in 0..g.height {
                 pm.row(0, y, g.width)
                     .copy_from_slice(&planes[p][y * g.width..y * g.width + g.width]);

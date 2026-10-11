@@ -1,4 +1,4 @@
-use crate::vp9::frame::{MiGrid, MiInfo};
+use crate::vp9::frame::{MiGrid, MiInfo, Pixel};
 use crate::vp9::header::{LoopFilterParams, Segmentation};
 use crate::vp9::tables::*;
 
@@ -90,25 +90,56 @@ impl LfFrame {
     }
 }
 
-pub struct PlaneView<'a> {
-    pub data: &'a mut [u16],
+pub struct PlaneView<'a, P> {
+    pub data: &'a mut [P],
     pub stride: usize,
     pub ox: usize,
     pub oy: usize,
 }
 
-pub fn filter_superblock(
-    views: &mut [PlaneView; 3],
+pub fn filter_superblock<P: Pixel>(
+    views: &mut [PlaneView<P>; 3],
     mi: &MiGrid,
     f: &LfFrame,
     row: usize,
     col: usize,
 ) {
-    for (plane, view) in views.iter_mut().enumerate() {
-        for pass in 0..2 {
-            filter_sb_plane(view, mi, f, plane, pass, row, col);
+    let mut cells = [Cell::default(); 64];
+    let rows = (f.mi_rows - row).min(8);
+    let cols = (f.mi_cols - col).min(8);
+    for r in 0..rows {
+        for c in 0..cols {
+            let m = mi.at(row + r, col + c);
+            let tx_uv = if m.sb_size < BLOCK_8X8 {
+                0
+            } else {
+                m.tx_size.min(
+                    MAX_TXSIZE[SS_SIZE_LOOKUP[m.sb_size as usize][f.ss_x][f.ss_y].min(12) as usize],
+                )
+            };
+            cells[r * 8 + c] = Cell {
+                lvl: f.level(m),
+                tx: [m.tx_size, tx_uv],
+                sb: m.sb_size,
+                coded: m.ref_frame[0] <= INTRA_FRAME || !m.skip,
+            };
         }
     }
+    let (luma, chroma) = views.split_at_mut(1);
+    for pass in 0..2 {
+        filter_sb_planes(luma, &cells, f, false, pass, row, col);
+    }
+    for pass in 0..2 {
+        filter_sb_planes(chroma, &cells, f, true, pass, row, col);
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct Cell {
+    lvl: u8,
+    tx: [u8; 2],
+    sb: u8,
+    coded: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -118,164 +149,149 @@ pub(crate) struct Group {
     pub apply: u8,
 }
 
-fn filter_sb_plane(
-    v: &mut PlaneView,
-    mi: &MiGrid,
+fn filter_sb_planes<P: Pixel>(
+    views: &mut [PlaneView<P>],
+    cells: &[Cell; 64],
     f: &LfFrame,
-    plane: usize,
+    chroma: bool,
     pass: usize,
     row: usize,
     col: usize,
 ) {
-    let (sub_x, sub_y) = if plane > 0 { (f.ss_x, f.ss_y) } else { (0, 0) };
-    let (sub, edge_len) = if pass == 0 {
-        (sub_x, 64 >> sub_y)
-    } else {
-        (sub_y, 64 >> sub_x)
-    };
+    let (sub_x, sub_y) = if chroma { (f.ss_x, f.ss_y) } else { (0, 0) };
     let (mi_rows, mi_cols) = (f.mi_rows, f.mi_cols);
-    let across = if pass == 0 { 1usize } else { v.stride };
-    let along = if pass == 0 { v.stride } else { 1 };
-    let groups_n = edge_len / 8;
-    for edge in 0..(16 >> sub) {
-        let mut groups = [Group::default(); 8];
-        let mut any = false;
-        let mut first = None;
-        for (gi, g) in groups.iter_mut().enumerate().take(groups_n) {
-            let i = gi * 8;
-            let (x, y) = if pass == 0 {
-                (col * 8 + edge * (4 << sub_x), row * 8 + (i << sub_y))
+    let ci = chroma as usize;
+    let (sub, sub_along, edge_len) = if pass == 0 {
+        (sub_x, sub_y, 64 >> sub_y)
+    } else {
+        (sub_y, sub_x, 64 >> sub_x)
+    };
+    let (base_across, base_along, end_across, end_along) = if pass == 0 {
+        (col * 8, row * 8, 8 * mi_cols, 8 * mi_rows)
+    } else {
+        (row * 8, col * 8, 8 * mi_rows, 8 * mi_cols)
+    };
+    let groups_all = edge_len / 8;
+    let groups_n = groups_all.min((end_along - base_along).div_ceil(8 << sub_along));
+    let mut full = [0u8; 8];
+    let mut odd = [0u8; 8];
+    let odd_last = pass == 1 && sub_x == 1 && mi_cols & 1 == 1;
+    for (gi, (fl, od)) in full
+        .iter_mut()
+        .zip(odd.iter_mut())
+        .enumerate()
+        .take(groups_n)
+    {
+        let at = base_along + ((gi * 8) << sub_along);
+        let n = (end_along - at).div_ceil(1 << sub_along).min(LANES);
+        *fl = ((1u32 << n) - 1) as u8;
+        *od = if odd_last {
+            let k = (mi_cols * 8)
+                .saturating_sub(at + 8)
+                .div_ceil(1 << sub_x)
+                .min(n);
+            ((1u32 << k) - 1) as u8
+        } else {
+            *fl
+        };
+    }
+    let sizes: [u8; 13] = std::array::from_fn(|b| {
+        let b = if sub == 0 {
+            b as u8
+        } else {
+            (b as u8).max(BLOCK_16X16)
+        } as usize;
+        let n8 = if pass == 0 {
+            NUM_8X8_WIDE[b]
+        } else {
+            NUM_8X8_HIGH[b]
+        };
+        8 * n8 - 1
+    });
+    for a in 0..(8 >> sub) {
+        let at = base_across + (a << (3 + sub));
+        if at >= end_across {
+            break;
+        }
+        let cap = if sub == 1 && (at >> 3) == (end_across >> 3) - 1 {
+            TX_8X8
+        } else {
+            TX_16X16
+        };
+        let is32 = (a & 3 == 0) as u8;
+        let edge_bit = (2 * a) as u8;
+        let cell_across = a << sub;
+        let mut even = [Group::default(); 8];
+        let mut odds = [Group::default(); 8];
+        let (mut any_even, mut any_odd) = (0u8, 0u8);
+        for gi in 0..groups_n {
+            let along = gi << sub_along;
+            let m = if pass == 0 {
+                cells[along * 8 + cell_across]
             } else {
-                (col * 8 + (i << sub_x), row * 8 + edge * (4 << sub_y))
+                cells[cell_across * 8 + along]
             };
-            if x >= 8 * mi_cols
-                || y >= 8 * mi_rows
-                || (pass == 0 && x == 0)
-                || (pass == 1 && y == 0)
-            {
+            let tx = m.tx[ci];
+            let live = m.coded & (m.lvl != 0);
+            let block = (at & sizes[m.sb as usize] as usize) == 0;
+            let tx_ok = m.coded & (edge_bit & ((1u8 << tx) - 1) == 0);
+            let on = 0u8.wrapping_sub(((block | tx_ok) & (m.lvl != 0)) as u8);
+            let size = tx.min(TX_16X16).max(is32 & (tx == TX_4X4) as u8).min(cap);
+            let apply = on & full[gi];
+            even[gi] = Group {
+                size: size & on,
+                lvl: m.lvl & on,
+                apply,
+            };
+            any_even |= apply;
+            let on4 = 0u8.wrapping_sub((live & (tx == TX_4X4)) as u8);
+            let apply4 = on4 & odd[gi];
+            odds[gi] = Group {
+                size: TX_4X4,
+                lvl: m.lvl & on4,
+                apply: apply4,
+            };
+            any_odd |= apply4;
+        }
+        if at == 0 {
+            any_even = 0;
+        }
+        if at + (4 << sub) >= end_across {
+            any_odd = 0;
+        }
+        for (groups, any, shift) in [(&even, any_even, 0usize), (&odds, any_odd, 4usize << sub)] {
+            if any == 0 {
                 continue;
             }
-            if first.is_none() {
-                first = Some((gi, x, y));
+            let (x0, y0) = if pass == 0 {
+                (at + shift, base_along)
+            } else {
+                (base_along, at + shift)
+            };
+            for v in views.iter_mut() {
+                let (across, along) = if pass == 0 {
+                    (1, v.stride)
+                } else {
+                    (v.stride, 1)
+                };
+                let pos = ((y0 >> sub_y) - v.oy) * v.stride + (x0 >> sub_x) - v.ox;
+                filter_edge(
+                    v.data,
+                    pos,
+                    along,
+                    across,
+                    &groups[..groups_all],
+                    f,
+                    pass == 1,
+                );
             }
-            *g = decide(mi, f, plane, pass, edge, x, y, sub_x, sub_y, edge_len - i);
-            any |= g.apply != 0;
         }
-        let Some((g0, x, y)) = first else {
-            continue;
-        };
-        if !any {
-            continue;
-        }
-        let i0 = g0 * 8;
-        let (x0, y0) = if pass == 0 {
-            (x, y - (i0 << sub_y))
-        } else {
-            (x - (i0 << sub_x), y)
-        };
-        let px = x0 >> sub_x;
-        let py = y0 >> sub_y;
-        let pos = (py - v.oy) * v.stride + px - v.ox;
-        filter_edge(
-            v.data,
-            pos,
-            along,
-            across,
-            &groups[..groups_n],
-            f,
-            pass == 1,
-        );
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-#[inline(always)]
-fn decide(
-    mi: &MiGrid,
-    f: &LfFrame,
-    plane: usize,
-    pass: usize,
-    edge: usize,
-    x: usize,
-    y: usize,
-    sub_x: usize,
-    sub_y: usize,
-    remaining: usize,
-) -> Group {
-    let (mi_rows, mi_cols) = (f.mi_rows, f.mi_cols);
-    let sub = if pass == 0 { sub_x } else { sub_y };
-    let loop_col = ((x >> 3) >> sub_x) << sub_x;
-    let loop_row = ((y >> 3) >> sub_y) << sub_y;
-    let m = mi.at(loop_row, loop_col);
-    let tx_sz = if plane > 0 {
-        if m.sb_size < BLOCK_8X8 {
-            0
-        } else {
-            m.tx_size.min(
-                MAX_TXSIZE[SS_SIZE_LOOKUP[m.sb_size as usize][f.ss_x][f.ss_y].min(12) as usize],
-            )
-        }
-    } else {
-        m.tx_size
-    };
-    let sb_size = if sub == 0 {
-        m.sb_size
-    } else {
-        m.sb_size.max(BLOCK_16X16)
-    } as usize;
-    let is_intra = m.ref_frame[0] <= INTRA_FRAME;
-    let is_block_edge = if pass == 0 {
-        x & (8 * NUM_8X8_WIDE[sb_size] as usize - 1) == 0
-    } else {
-        y & (8 * NUM_8X8_HIGH[sb_size] as usize - 1) == 0
-    };
-    let tx_ok = edge & ((1 << tx_sz) - 1) == 0 && (is_intra || !m.skip);
-    if !is_block_edge && !tx_ok {
-        return Group::default();
-    }
-    let lvl = f.level(m);
-    if lvl == 0 {
-        return Group::default();
-    }
-    let is32 = edge.is_multiple_of(8);
-    let base_size = if tx_sz == TX_4X4 && is32 {
-        TX_8X8
-    } else {
-        tx_sz.min(TX_16X16)
-    };
-    let filter_size = if base_size == TX_16X16
-        && ((pass == 0 && sub_x == 1 && (x >> 3) == mi_cols - 1)
-            || (pass == 1 && sub_y == 1 && (y >> 3) == mi_rows - 1))
-    {
-        TX_8X8
-    } else {
-        base_size
-    };
-    let n = if pass == 0 {
-        (8 * mi_rows - y).div_ceil(1 << sub_y)
-    } else {
-        (8 * mi_cols - x).div_ceil(1 << sub_x)
-    }
-    .min(LANES)
-    .min(remaining);
-    let odd_last = pass == 1 && sub_x == 1 && mi_cols & 1 == 1 && edge & 1 == 1;
-    let mut apply = 0u8;
-    for l in 0..n {
-        let is_tx_edge = tx_ok && !(odd_last && x + (l << sub_x) + 8 >= mi_cols * 8);
-        if is_block_edge || is_tx_edge {
-            apply |= 1 << l;
-        }
-    }
-    Group {
-        size: filter_size,
-        lvl,
-        apply,
     }
 }
 
 crate::vp9::isa::dispatch! {
-fn filter_edge(
-    d: &mut [u16],
+fn filter_edge<P: Pixel>(
+    d: &mut [P],
     pos: usize,
     along: usize,
     across: usize,
@@ -311,14 +327,14 @@ fn filter_edge(
         let p = pos + k * 8 * along;
         let wide = g.size == TX_16X16;
         match (f.bit_depth <= 10, wide, rows) {
-            (true, false, false) => lanes16::filter_group::<4, false>(d, p, along, across, &lim),
-            (true, false, true) => lanes16::filter_group::<4, true>(d, p, along, across, &lim),
-            (true, true, false) => lanes16::filter_group::<8, false>(d, p, along, across, &lim),
-            (true, true, true) => lanes16::filter_group::<8, true>(d, p, along, across, &lim),
-            (false, false, false) => lanes32::filter_group::<4, false>(d, p, along, across, &lim),
-            (false, false, true) => lanes32::filter_group::<4, true>(d, p, along, across, &lim),
-            (false, true, false) => lanes32::filter_group::<8, false>(d, p, along, across, &lim),
-            (false, true, true) => lanes32::filter_group::<8, true>(d, p, along, across, &lim),
+            (true, false, false) => lanes16::filter_group::<P, 4, false>(d, p, along, across, &lim),
+            (true, false, true) => lanes16::filter_group::<P, 4, true>(d, p, along, across, &lim),
+            (true, true, false) => lanes16::filter_group::<P, 8, false>(d, p, along, across, &lim),
+            (true, true, true) => lanes16::filter_group::<P, 8, true>(d, p, along, across, &lim),
+            (false, false, false) => lanes32::filter_group::<P, 4, false>(d, p, along, across, &lim),
+            (false, false, true) => lanes32::filter_group::<P, 4, true>(d, p, along, across, &lim),
+            (false, true, false) => lanes32::filter_group::<P, 8, false>(d, p, along, across, &lim),
+            (false, true, true) => lanes32::filter_group::<P, 8, true>(d, p, along, across, &lim),
         }
     }
 }
@@ -339,12 +355,13 @@ macro_rules! group_filter {
     ($m:ident, $t:ty) => {
         mod $m {
             use super::{LANES, Limits};
+            use crate::vp9::frame::Pixel;
             use crate::vp9::tables::*;
             type T = $t;
 
             #[inline(always)]
-            pub(super) fn filter_group<const R: usize, const ROWS: bool>(
-                d: &mut [u16],
+            pub(super) fn filter_group<P: Pixel, const R: usize, const ROWS: bool>(
+                d: &mut [P],
                 pos: usize,
                 along: usize,
                 step: usize,
@@ -363,17 +380,17 @@ macro_rules! group_filter {
                 let start = pos - R * step;
                 if ROWS {
                     for k in 0..2 * R {
-                        let row: &[u16; LANES] = d[start + k * step..start + k * step + LANES]
+                        let row: &[P; LANES] = d[start + k * step..start + k * step + LANES]
                             .try_into()
                             .expect("lanes");
-                        v[8 - R + k] = std::array::from_fn(|l| row[l] as T);
+                        v[8 - R + k] = std::array::from_fn(|l| row[l].get() as T);
                     }
                 } else {
                     for l in 0..LANES {
                         let s = start + l * along;
-                        let line: &[u16] = &d[s..s + 2 * R];
+                        let line: &[P] = &d[s..s + 2 * R];
                         for k in 0..2 * R {
-                            v[8 - R + k][l] = line[k] as T;
+                            v[8 - R + k][l] = line[k].get() as T;
                         }
                     }
                 }
@@ -482,18 +499,18 @@ macro_rules! group_filter {
                 if ROWS {
                     for k in lo..hi {
                         let o = start + (k + R - 8) * step;
-                        let row: &mut [u16; LANES] =
+                        let row: &mut [P; LANES] =
                             (&mut d[o..o + LANES]).try_into().expect("lanes");
                         for l in 0..LANES {
-                            row[l] = out[k][l] as u16;
+                            row[l] = P::put(out[k][l] as i32);
                         }
                     }
                 } else {
                     for l in 0..LANES {
                         let s = start + l * along;
-                        let line: &mut [u16] = &mut d[s..s + 2 * R];
+                        let line: &mut [P] = &mut d[s..s + 2 * R];
                         for k in 0..2 * R {
-                            line[k] = out[8 - R + k][l] as u16;
+                            line[k] = P::put(out[8 - R + k][l] as i32);
                         }
                     }
                 }

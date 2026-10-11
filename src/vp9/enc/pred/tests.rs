@@ -134,9 +134,8 @@ fn inter_matches_decoder() {
         key: true,
         intra_only: false,
     };
-    let full: Vec<u16> = src.iter().map(|&v| v as u16).collect();
-    let chroma = vec![0u16; 64 * 64];
-    let frame = Frame::from_planes(info, [&full, &chroma, &chroma]);
+    let chroma = vec![0u8; 64 * 64];
+    let frame = Frame::from_planes(info, [&src, &chroma, &chroma]);
     let r = crate::vp9::inter::RefPlane {
         frame: &frame,
         plane: 0,
@@ -146,15 +145,15 @@ fn inter_matches_decoder() {
     let padded = Padded::new(&src, w, h, 96);
     let bare = Padded::new(&src, w, h, 0);
     let mut tmp = vec![0u16; 80 * 80];
-    let mut win = vec![0u16; 80 * 80];
-    let mut pred = vec![0u16; 64 * 64];
+    let mut win = vec![0u8; 80 * 80];
+    let mut pred = vec![0u8; 64 * 64];
     for _ in 0..600 {
         let bw = 4usize << rng.below(5);
         let bh = 4usize << rng.below(5);
         let x16 = rng.below((w + 160) * 16) as i32 - 80 * 16;
         let y16 = rng.below((h + 160) * 16) as i32 - 80 * 16;
         let filter = rng.below(4) as u8;
-        let mut theirs = vec![0u16; bw * bh];
+        let mut theirs = vec![0u8; bw * bh];
         crate::vp9::inter::predict(
             &r,
             x16,
@@ -184,7 +183,6 @@ fn inter_matches_decoder() {
                 &mut ours,
                 bw,
             );
-            let ours: Vec<u16> = ours.iter().map(|&v| v as u16).collect();
             assert_eq!(
                 ours, theirs,
                 "{bw}x{bh} at ({x16},{y16})/16 filter {filter} border {}",
