@@ -6,8 +6,9 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use libloading::Library;
 
-use super::Accel;
 use super::ffi::{self, VAConfigAttrib, VAImage, VAImageFormat, VASurfaceID};
+use super::host::HostBuffer;
+use super::{Accel, LAG};
 use crate::gpu::biplanar::{self, Biplanar, Geometry};
 use crate::media::Frame;
 
@@ -262,6 +263,54 @@ impl Display {
         };
         self.check(st, "vaCreateSurfaces")?;
         Ok(surfaces)
+    }
+
+    fn import(
+        &self,
+        rt_format: c_uint,
+        size: (u32, u32),
+        descriptor: &mut ffi::VADRMPRIMESurfaceDescriptor,
+    ) -> Result<VASurfaceID, String> {
+        let attribute = |type_, value| ffi::VASurfaceAttrib {
+            type_,
+            flags: ffi::VA_SURFACE_ATTRIB_SETTABLE,
+            value,
+        };
+        let mut attributes = [
+            attribute(
+                ffi::VASurfaceAttribMemoryType,
+                ffi::VAGenericValue {
+                    type_: ffi::VAGenericValueTypeInteger,
+                    value: ffi::VAGenericValueUnion {
+                        i: ffi::VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2 as c_int,
+                    },
+                },
+            ),
+            attribute(
+                ffi::VASurfaceAttribExternalBufferDescriptor,
+                ffi::VAGenericValue {
+                    type_: ffi::VAGenericValueTypePointer,
+                    value: ffi::VAGenericValueUnion {
+                        p: (descriptor as *mut ffi::VADRMPRIMESurfaceDescriptor).cast(),
+                    },
+                },
+            ),
+        ];
+        let mut surface = ffi::VA_INVALID_SURFACE;
+        let st = unsafe {
+            (self.api.create_surfaces)(
+                self.dpy,
+                rt_format,
+                size.0,
+                size.1,
+                &mut surface,
+                1,
+                attributes.as_mut_ptr().cast(),
+                attributes.len() as c_uint,
+            )
+        };
+        self.check(st, "vaCreateSurfaces (import)")?;
+        Ok(surface)
     }
 
     fn create_context(
@@ -744,7 +793,151 @@ pub struct Session {
     size: (u32, u32),
     geometry: Geometry,
     derive: bool,
+    staging: Option<Staging>,
+    staged: bool,
     pub gpu: bool,
+}
+
+struct Staged {
+    surface: VASurfaceID,
+    buffer: HostBuffer,
+    holds: Option<usize>,
+    order: u64,
+}
+
+struct Staging {
+    vpp: Vpp,
+    slots: Vec<Staged>,
+    pitch: usize,
+    chroma: usize,
+    size: (u32, u32),
+    bits: u32,
+    order: u64,
+}
+
+impl Staging {
+    fn new(display: Arc<Display>, geometry: Geometry, count: usize) -> Result<Self, String> {
+        let (rt_format, _, _) = formats(geometry.bits)?;
+        let drm_format = if geometry.bits > 8 {
+            ffi::DRM_FORMAT_P010
+        } else {
+            ffi::DRM_FORMAT_NV12
+        };
+        let bps = if geometry.bits > 8 { 2 } else { 1 };
+        let (w, h) = (
+            geometry.crop.2.next_multiple_of(2),
+            geometry.crop.3.next_multiple_of(2),
+        );
+        let pitch = (w as usize * bps).next_multiple_of(256);
+        let chroma = pitch * h as usize;
+        let len = chroma + pitch * (h as usize / 2);
+        let vpp = Vpp::new(display.clone())?;
+        let mut staging = Self {
+            vpp,
+            slots: Vec::with_capacity(count),
+            pitch,
+            chroma,
+            size: (w, h),
+            bits: geometry.bits,
+            order: 0,
+        };
+        for _ in 0..count {
+            let buffer = HostBuffer::new(len)?;
+            let pitch = u32::try_from(pitch).map_err(|_| "picture too wide")?;
+            let mut layer = ffi::VADRMPRIMELayer {
+                drm_format,
+                num_planes: 2,
+                ..Default::default()
+            };
+            layer.offset[1] = u32::try_from(chroma).map_err(|_| "picture too large")?;
+            layer.pitch = [pitch, pitch, 0, 0];
+            let mut descriptor = ffi::VADRMPRIMESurfaceDescriptor {
+                fourcc: if geometry.bits > 8 {
+                    ffi::VA_FOURCC_P010
+                } else {
+                    ffi::VA_FOURCC_NV12
+                },
+                width: w,
+                height: h,
+                num_objects: 1,
+                num_layers: 1,
+                ..Default::default()
+            };
+            descriptor.objects[0] = ffi::VADRMPRIMEObject {
+                fd: buffer.fd(),
+                size: u32::try_from(buffer.len()).map_err(|_| "picture too large")?,
+                drm_format_modifier: ffi::DRM_FORMAT_MOD_LINEAR,
+            };
+            descriptor.layers[0] = layer;
+            let surface = display.import(rt_format, (w, h), &mut descriptor)?;
+            staging.slots.push(Staged {
+                surface,
+                buffer,
+                holds: None,
+                order: 0,
+            });
+        }
+        Ok(staging)
+    }
+
+    fn copy(
+        &mut self,
+        src: VASurfaceID,
+        index: usize,
+        crop: (u32, u32, u32, u32),
+    ) -> Result<(), String> {
+        for slot in &mut self.slots {
+            if slot.holds == Some(index) {
+                slot.holds = None;
+            }
+        }
+        let Some(slot) = self
+            .slots
+            .iter_mut()
+            .min_by_key(|s| (s.holds.is_some(), s.order))
+        else {
+            return Err("no staging surfaces".into());
+        };
+        slot.holds = None;
+        self.vpp.copy(src, crop, slot.surface, self.size)?;
+        self.order += 1;
+        slot.holds = Some(index);
+        slot.order = self.order;
+        Ok(())
+    }
+
+    fn read(&mut self, index: usize, crop: (u32, u32, u32, u32)) -> Option<Result<Frame, String>> {
+        let slot = self.slots.iter_mut().find(|s| s.holds == Some(index))?;
+        slot.holds = None;
+        let display = &self.vpp.display;
+        if let Err(e) = display.sync(slot.surface) {
+            return Some(Err(e));
+        }
+        let data = slot.buffer.data();
+        let (Some(luma), Some(chroma)) = (data.get(..self.chroma), data.get(self.chroma..)) else {
+            return Some(Err("staging buffer too small".into()));
+        };
+        let view = Biplanar {
+            luma,
+            chroma,
+            stride: self.pitch,
+            rows: self.size.1 as usize,
+        };
+        let geometry = Geometry {
+            crop: (0, 0, crop.2, crop.3),
+            bits: self.bits,
+        };
+        Some(biplanar::to_frame(&view, &geometry))
+    }
+}
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        let mut ids: Vec<VASurfaceID> = self.slots.iter().map(|s| s.surface).collect();
+        self.vpp
+            .display
+            .release(None, ffi::VA_INVALID_ID, &mut ids, ffi::VA_INVALID_ID);
+    }
 }
 
 impl Session {
@@ -815,6 +1008,8 @@ impl Session {
             size,
             geometry,
             derive: std::env::var_os("PITO_VA_NO_DERIVE").is_none(),
+            staging: None,
+            staged: std::env::var_os("PITO_VA_NO_STAGING").is_none(),
             gpu: false,
         };
         let mut targets = s.pool.ids.clone();
@@ -895,6 +1090,17 @@ impl Session {
     }
 
     fn read_cpu(&mut self, index: usize) -> Result<Frame, String> {
+        if let Some(staging) = &mut self.staging
+            && let Some(frame) = staging.read(index, self.geometry.crop)
+        {
+            match frame {
+                Ok(frame) => return Ok(frame),
+                Err(_) => {
+                    self.staging = None;
+                    self.staged = false;
+                }
+            }
+        }
         if self.derive {
             let surface = self.surface(index)?;
             match self.display.derive(surface) {
@@ -950,6 +1156,30 @@ impl Accel for Session {
         slices: &[(ffi::VASliceParameterBufferHEVC, Vec<u8>)],
     ) -> Result<(), String> {
         self.decode_picture(target, pic, iq, slices)
+    }
+
+    fn prefetch(&mut self, index: usize) {
+        if self.gpu || !self.staged {
+            return;
+        }
+        let Ok(surface) = self.surface(index) else {
+            return;
+        };
+        if self.staging.is_none() {
+            match Staging::new(self.display.clone(), self.geometry, LAG + 2) {
+                Ok(s) => self.staging = Some(s),
+                Err(_) => {
+                    self.staged = false;
+                    return;
+                }
+            }
+        }
+        if let Some(staging) = &mut self.staging
+            && staging.copy(surface, index, self.geometry.crop).is_err()
+        {
+            self.staging = None;
+            self.staged = false;
+        }
     }
 
     fn read(&mut self, index: usize) -> Result<Picture, String> {
@@ -1017,7 +1247,17 @@ impl Vpp {
     }
 
     fn blit(&self, src: &GpuSurface, dst: VASurfaceID, size: (u32, u32)) -> Result<(), String> {
-        let (x, y, w, h) = src.geometry.crop;
+        self.copy(src.id()?, src.geometry.crop, dst, size)
+    }
+
+    fn copy(
+        &self,
+        src: VASurfaceID,
+        crop: (u32, u32, u32, u32),
+        dst: VASurfaceID,
+        size: (u32, u32),
+    ) -> Result<(), String> {
+        let (x, y, w, h) = crop;
         let narrow = |v: u32| u16::try_from(v).map_err(|_| "picture too large".to_string());
         let wide = |v: u32| i16::try_from(v).map_err(|_| "picture too large".to_string());
         let from = ffi::VARectangle {
@@ -1033,7 +1273,7 @@ impl Vpp {
             height: narrow(size.1)?,
         };
         let params = ffi::VAProcPipelineParameterBuffer {
-            surface: src.id()?,
+            surface: src,
             surface_region: &from,
             surface_color_standard: ffi::VAProcColorStandardBT709,
             output_region: &to,
