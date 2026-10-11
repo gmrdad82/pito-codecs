@@ -169,7 +169,8 @@ fn seg_snr(a: &[f32], b: &[f32], c: usize) -> f32 {
 #[ignore]
 fn measure_against_libopus() {
     let dir = tmp_dir();
-    for name in ["resilience", "solstice", "music"] {
+    let names = std::env::var("PITO_CLIPS").unwrap_or("resilience,solstice,music".into());
+    for name in names.split(',') {
         let src = dir.join(format!("{name}.f32"));
         let Some(pcm) = read_f32(&src) else {
             continue;
@@ -312,6 +313,10 @@ fn extremes_stay_in_sync() {
                 }
             }
             assert!(out.iter().all(|v| v.is_finite()));
+            if c == 2 {
+                buf.samples = vec![0.0; 3];
+                assert!(enc.encode(&buf).is_err());
+            }
         }
     }
 }

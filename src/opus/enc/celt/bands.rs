@@ -54,7 +54,7 @@ fn exp_rotation_forward(x: &mut [f32], len: usize, stride: usize, k: usize, spre
     }
 }
 
-fn haar1(x: &mut [f32], n0: usize, stride: usize) {
+pub(super) fn haar1(x: &mut [f32], n0: usize, stride: usize) {
     let n0 = n0 >> 1;
     const S: f32 = std::f32::consts::FRAC_1_SQRT_2;
     for i in 0..stride {
