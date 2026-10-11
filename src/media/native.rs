@@ -14,6 +14,14 @@ use super::types::{
     AudioBuffer, Codec, Direction, Error, Frame, Packet, Result, Rgba, Route, TimeBase,
 };
 
+const NO_GPU: &str = if cfg!(target_os = "macos") {
+    "no VideoToolbox hardware decoder or encoder"
+} else if cfg!(target_os = "windows") {
+    "no Media Foundation hardware decoder or NVENC encoder"
+} else {
+    "no VA-API device or driver"
+};
+
 pub fn gpu() -> (Vec<(Codec, Direction)>, Option<String>) {
     static GPU: OnceLock<Vec<(Codec, Direction)>> = OnceLock::new();
     let found = GPU
@@ -34,7 +42,7 @@ pub fn gpu() -> (Vec<(Codec, Direction)>, Option<String>) {
         .clone();
     let why = found
         .is_empty()
-        .then(|| "no VA-API device or driver".to_string());
+        .then(|| NO_GPU.to_string());
     (found, why)
 }
 
@@ -56,7 +64,7 @@ fn readers() -> &'static Mutex<HashMap<Key, Arc<Reader>>> {
 }
 
 pub fn reader(path: &Path) -> Result<Arc<Reader>> {
-    let meta = std::fs::metadata(path)?;
+    let meta = std::fs::metadata(path).map_err(|e| Error::at(path, e))?;
     let key = (path.to_path_buf(), meta.len(), meta.modified().ok());
     if let Some(r) = readers()
         .lock()
@@ -78,14 +86,15 @@ pub fn rational(fps: f64) -> (u32, u32) {
     if !fps.is_finite() || fps <= 0.0 {
         return (30, 1);
     }
-    if (fps - fps.round()).abs() < 0.01 {
+    let fps = fps.clamp(0.001, 1000.0);
+    if fps.round() >= 1.0 && (fps - fps.round()).abs() < 0.01 {
         return (fps.round() as u32, 1);
     }
     let ntsc = fps * 1.001;
-    if (ntsc - ntsc.round()).abs() < 0.01 {
-        return (ntsc.round() as u32 * 1000, 1001);
+    if ntsc.round() >= 1.0 && (ntsc - ntsc.round()).abs() < 0.01 {
+        return ((ntsc.round() as u32).saturating_mul(1000), 1001);
     }
-    ((fps * 1000.0).round() as u32, 1000)
+    (((fps * 1000.0).round() as u32).max(1), 1000)
 }
 
 fn video_track(r: &Reader) -> Result<(usize, &Track)> {
