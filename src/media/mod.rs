@@ -39,5 +39,5 @@ front! {
     pub use probe::{AudioTrack, Probe, keyframes, probe};
     pub use route::{Caps, Choice, Fallback, Picked, Prefs, UserFfmpeg, pick_decode, pick_encode};
     pub use still::{first_frame, frames_at};
-    pub use video::{Video, decode_video};
+    pub use video::{GpuVideo, IN_FLIGHT, Video, VideoFrame, decode_video, decode_video_gpu};
 }

@@ -1,7 +1,7 @@
 use std::ffi::{CStr, c_int, c_uint, c_void};
 use std::fs::{File, OpenOptions};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use libloading::Library;
@@ -557,9 +557,11 @@ fn biplanar_view<'a>(image: &VAImage, data: &'a [u8]) -> Result<Biplanar<'a>, St
 
 pub struct Pool {
     display: Arc<Display>,
+    id: u64,
     ids: Vec<VASurfaceID>,
     held: Vec<AtomicBool>,
     size: (u32, u32),
+    bound: Mutex<(ffi::VAContextID, ffi::VAConfigID)>,
 }
 
 impl Pool {
@@ -569,13 +571,20 @@ impl Pool {
         size: (u32, u32),
         count: usize,
     ) -> Result<Arc<Self>, String> {
+        static POOLS: AtomicU64 = AtomicU64::new(1);
         let ids = display.create_surfaces(rt_format, size, count)?;
         Ok(Arc::new(Pool {
             held: ids.iter().map(|_| AtomicBool::new(false)).collect(),
             display,
+            id: POOLS.fetch_add(1, Ordering::Relaxed),
             ids,
             size,
+            bound: Mutex::new((ffi::VA_INVALID_ID, ffi::VA_INVALID_ID)),
         }))
+    }
+
+    fn bind(&self, context: ffi::VAContextID, config: ffi::VAConfigID) {
+        *self.bound.lock().unwrap_or_else(PoisonError::into_inner) = (context, config);
     }
 
     fn take(self: &Arc<Self>, geometry: Geometry) -> Option<GpuSurface> {
@@ -594,8 +603,8 @@ impl Pool {
 
 impl Drop for Pool {
     fn drop(&mut self) {
-        self.display
-            .release(None, ffi::VA_INVALID_ID, &mut self.ids, ffi::VA_INVALID_ID);
+        let (context, config) = *self.bound.get_mut().unwrap_or_else(PoisonError::into_inner);
+        self.display.release(None, context, &mut self.ids, config);
     }
 }
 
@@ -629,6 +638,14 @@ impl GpuSurface {
             .get(self.index)
             .copied()
             .ok_or_else(|| "surface out of range".to_string())
+    }
+
+    pub fn key(&self) -> (u64, u32) {
+        (self.pool.id, self.index as u32)
+    }
+
+    pub fn sync(&self) -> Result<(), String> {
+        self.pool.display.sync(self.id()?)
     }
 
     pub fn dmabuf(&self, separate: bool) -> Result<DmaBuf, String> {
@@ -806,6 +823,7 @@ impl Session {
                 return Err(e);
             }
         };
+        pool.bind(ffi::VA_INVALID_ID, config);
         let mut s = Self {
             display,
             config,
@@ -819,6 +837,7 @@ impl Session {
         };
         let mut targets = s.pool.ids.clone();
         s.context = s.display.create_context(s.config, size, &mut targets)?;
+        s.pool.bind(s.context, s.config);
         Ok(s)
     }
 
@@ -992,8 +1011,12 @@ impl Accel for Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        self.display
-            .release(self.image.take(), self.context, &mut [], self.config);
+        self.display.release(
+            self.image.take(),
+            ffi::VA_INVALID_ID,
+            &mut [],
+            ffi::VA_INVALID_ID,
+        );
     }
 }
 
@@ -1001,6 +1024,7 @@ pub struct Vpp {
     display: Arc<Display>,
     config: ffi::VAConfigID,
     context: ffi::VAContextID,
+    owned: bool,
 }
 
 impl Vpp {
@@ -1011,6 +1035,7 @@ impl Vpp {
             display,
             config,
             context: ffi::VA_INVALID_ID,
+            owned: true,
         };
         vpp.context = vpp.display.create_context(vpp.config, (0, 0), &mut [])?;
         Ok(vpp)
@@ -1083,8 +1108,10 @@ impl Scaler {
     pub fn new(size: (u32, u32), bits: u32, count: usize) -> Result<Self, String> {
         let display = shared()?;
         let (rt_format, _, _) = formats(bits)?;
-        let vpp = Vpp::new(display.clone())?;
+        let mut vpp = Vpp::new(display.clone())?;
         let pool = Pool::new(display, rt_format, size, count.max(1))?;
+        pool.bind(vpp.context, vpp.config);
+        vpp.owned = false;
         Ok(Self {
             vpp,
             pool,
@@ -1113,6 +1140,9 @@ impl Scaler {
 
 impl Drop for Vpp {
     fn drop(&mut self) {
+        if !self.owned {
+            return;
+        }
         self.display
             .release(None, self.context, &mut [], self.config);
     }
