@@ -288,7 +288,7 @@ pub(crate) fn parse_block_elem<S: ByteSource + ?Sized>(
             Ok(Some(BlockRef {
                 track,
                 offset: h.pos,
-                ts: cluster_ts + rel as i64,
+                ts: cluster_ts.saturating_add(rel as i64),
                 duration: None,
                 keyframe: flags & 0x80 != 0,
             }))
@@ -319,7 +319,7 @@ pub(crate) fn parse_block_elem<S: ByteSource + ?Sized>(
             Ok(Some(BlockRef {
                 track,
                 offset: h.pos,
-                ts: cluster_ts + rel as i64,
+                ts: cluster_ts.saturating_add(rel as i64),
                 duration,
                 keyframe: !has_ref,
             }))
@@ -348,7 +348,8 @@ pub(crate) fn expand(
             (ns + scale / 2) / scale
         } else {
             (ns - scale / 2) / scale
-        }) as i64
+        })
+        .clamp(i64::MIN as i128, i64::MAX as i128) as i64
     };
     let delay = ticks(t.codec_delay as i128);
     let base = b.ts as i128 * scale;
@@ -360,12 +361,16 @@ pub(crate) fn expand(
             ),
             None => (0, None),
         };
-        let duration = end.map_or(0, |e| (ticks(e) - ticks(start)).clamp(0, u32::MAX as i64));
+        let duration = end.map_or(0, |e| {
+            ticks(e)
+                .saturating_sub(ticks(start))
+                .clamp(0, u32::MAX as i64)
+        });
         out(FrameRef {
             track: b.track,
             offset,
             size,
-            pts: ticks(base + start) - delay,
+            pts: ticks(base + start).saturating_sub(delay),
             duration: duration as u32,
             keyframe: b.keyframe,
             block: b.offset,
@@ -468,11 +473,13 @@ struct Head {
 
 impl Reader<File> {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::new(File::open(path)?)
+        let path = path.as_ref();
+        Self::new(File::open(path).map_err(|e| Error::at(path, e))?)
     }
 
     pub fn open_with(path: impl AsRef<Path>, options: Options) -> Result<Self> {
-        Self::with_options(File::open(path)?, options)
+        let path = path.as_ref();
+        Self::with_options(File::open(path).map_err(|e| Error::at(path, e))?, options)
     }
 }
 
@@ -683,7 +690,10 @@ fn fill_durations(t: &mut Track) {
             continue;
         }
         let d = match order.get(w + 1) {
-            Some(&j) => (t.samples[j].pts - t.samples[i].pts).clamp(0, u32::MAX as i64) as u32,
+            Some(&j) => t.samples[j]
+                .pts
+                .saturating_sub(t.samples[i].pts)
+                .clamp(0, u32::MAX as i64) as u32,
             None => last,
         };
         t.samples[i].duration = d;

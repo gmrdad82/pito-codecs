@@ -362,7 +362,9 @@ pub struct PcmConfig {
 
 impl PcmConfig {
     pub fn bytes_per_frame(&self) -> u32 {
-        (self.bits as u32).div_ceil(8) * self.channels.max(1)
+        (self.bits as u32)
+            .div_ceil(8)
+            .saturating_mul(self.channels.max(1))
     }
 }
 

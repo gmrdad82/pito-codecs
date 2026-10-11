@@ -185,9 +185,9 @@ impl TrackConfig {
 
 fn round_ticks(ns: i64) -> i64 {
     if ns >= 0 {
-        (ns + SCALE / 2) / SCALE
+        ns.saturating_add(SCALE / 2) / SCALE
     } else {
-        (ns - SCALE / 2) / SCALE
+        ns.saturating_sub(SCALE / 2) / SCALE
     }
 }
 
@@ -307,7 +307,9 @@ impl Writer<File> {
     }
 
     pub fn create_with(path: impl AsRef<Path>, options: Options) -> Result<Self> {
-        Ok(Self::new(File::create(path)?, options))
+        let path = path.as_ref();
+        let f = File::create(path).map_err(|e| Error::at(path, e))?;
+        Ok(Self::new(f, options))
     }
 }
 
@@ -451,19 +453,19 @@ impl<W: Write + Seek> Writer<W> {
         if let Some(last) = t.last_ns
             && pts_ns > last
         {
-            t.delta_ns = pts_ns - last;
+            t.delta_ns = pts_ns.saturating_sub(last);
         }
         t.last_ns = Some(t.last_ns.map_or(pts_ns, |l| l.max(pts_ns)));
         let length = duration_ns
             .or(t.cfg.default_duration.map(|d| d as i64))
             .unwrap_or(t.delta_ns);
-        self.end_ns = self.end_ns.max(pts_ns + length);
+        self.end_ns = self.end_ns.max(pts_ns.saturating_add(length));
         let video = t.cfg.kind == TrackKind::Video;
         let explicit = duration_ns.filter(|&d| Some(d as u64) != t.cfg.default_duration);
         let start_new = match self.cluster_ts {
             None => true,
             Some(cts) => {
-                let age = (ts - cts) * SCALE;
+                let age = (ts - cts).saturating_mul(SCALE);
                 let limit = (self.options.cluster_seconds * 1e9) as i64;
                 let rel = ts - cts;
                 !(-32768..=32767).contains(&rel)
@@ -496,7 +498,11 @@ impl<W: Write + Seek> Writer<W> {
             }
             Some(d) => {
                 let mut tail = Vec::with_capacity(16);
-                el_uint(&mut tail, BLOCK_DURATION, ((d + SCALE / 2) / SCALE) as u64);
+                el_uint(
+                    &mut tail,
+                    BLOCK_DURATION,
+                    (d.saturating_add(SCALE / 2) / SCALE) as u64,
+                );
                 if !keyframe {
                     el(&mut tail, REFERENCE_BLOCK, &[0xFF]);
                 }

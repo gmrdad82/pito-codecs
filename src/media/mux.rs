@@ -407,7 +407,7 @@ pub(super) fn run(
         mux.w.push(a, p)?;
     }
     mux.w.finish_faststart()?;
-    std::fs::rename(&part, out)?;
+    std::fs::rename(&part, out).map_err(|e| Error::at(out, e))?;
     if !progress(&Progress {
         stage: Stage::Joining,
         done: 1.0,

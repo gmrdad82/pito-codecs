@@ -126,8 +126,7 @@ impl Track {
             .edits
             .iter()
             .filter(|e| e.media_time >= 0)
-            .map(|e| e.segment_duration)
-            .sum();
+            .fold(0u64, |a, e| a.saturating_add(e.segment_duration));
         let media = self.seconds(self.duration.min(i64::MAX as u64) as i64);
         if edited == 0 {
             media
@@ -231,7 +230,8 @@ pub struct Reader<S: ByteSource = File> {
 
 impl Reader<File> {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::new(File::open(path)?)
+        let path = path.as_ref();
+        Self::new(File::open(path).map_err(|e| Error::at(path, e))?)
     }
 }
 
@@ -354,7 +354,7 @@ fn open<S: ByteSource>(src: S) -> Result<Reader<S>> {
     let mut ftyp: Option<Vec<u8>> = None;
     let mut moov: Option<(u64, Vec<u8>)> = None;
     let mut moofs: Vec<(u64, Vec<u8>)> = Vec::new();
-    while offset + 8 <= len {
+    while len.saturating_sub(offset) >= 8 {
         let n = (len - offset).min(32) as usize;
         let mut hb = [0u8; 32];
         src.read_at(offset, &mut hb[..n])?;
@@ -447,7 +447,7 @@ fn open<S: ByteSource>(src: S) -> Result<Reader<S>> {
         .map(|t| {
             t.samples
                 .last()
-                .map(|s| s.dts + s.duration as i64)
+                .map(|s| s.dts.saturating_add(s.duration as i64))
                 .unwrap_or(0)
         })
         .collect();
@@ -861,7 +861,7 @@ fn parse_stbl(stbl: &[u8], t: &mut Track, is_qt: bool, file_len: u64) -> Result<
                 let size = if const_size != 0 {
                     const_size
                 } else {
-                    sizes[sidx]
+                    *sizes.get(sidx).ok_or_else(|| truncated("stsz"))?
                 };
                 let duration = stts_c.next_value();
                 let cts = ctts_c.next_value() as i32 as i64;
@@ -960,7 +960,9 @@ fn parse_moof(
             let n = c.u32()? as usize;
             if per > 0 {
                 c.check_count(n, per)?;
-            } else if (n as u64).saturating_mul(def_size.max(1) as u64) > file_len {
+            } else if ((tracks[ti].samples.len() + n) as u64).saturating_mul(def_size.max(1) as u64)
+                > file_len
+            {
                 return Err(too_large("trun sample count"));
             }
             if tracks[ti].samples.len() + n > MAX_SAMPLES {

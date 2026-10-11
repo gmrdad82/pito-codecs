@@ -54,7 +54,11 @@ const VP9: &[&str] = &[
 fn generate(name: &str, args: &[&str]) -> PathBuf {
     let path = dir().join(name);
     if !path.exists() {
-        let tmp = dir().join(format!(".{}-{name}", std::process::id()));
+        let tmp = dir().join(format!(
+            ".{}-{:?}-{name}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let st = Command::new("ffmpeg")
             .args(["-v", "error", "-y"])
             .args(sources(6))
@@ -80,7 +84,11 @@ fn streamed(name: &str) -> PathBuf {
             .output()
             .unwrap();
         assert!(out.status.success());
-        let tmp = dir().join(format!(".{}-{name}", std::process::id()));
+        let tmp = dir().join(format!(
+            ".{}-{:?}-{name}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         std::fs::write(&tmp, out.stdout).unwrap();
         std::fs::rename(&tmp, &path).unwrap();
     }

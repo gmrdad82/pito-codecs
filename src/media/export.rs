@@ -256,9 +256,9 @@ pub fn export(
     let smart = smart && (ffmpeg.is_some() || sources.iter().all(|s| s.reader.is_some()));
     let work = std::path::absolute(out.with_extension("parts"))?;
     if work.exists() {
-        std::fs::remove_dir_all(&work)?;
+        std::fs::remove_dir_all(&work).map_err(|e| Error::at(&work, e))?;
     }
-    std::fs::create_dir_all(&work)?;
+    std::fs::create_dir_all(&work).map_err(|e| Error::at(&work, e))?;
     let mut job = Job {
         pieces,
         sources,
@@ -460,7 +460,7 @@ fn join(
 ) -> Result<()> {
     job.tell(progress, Stage::Joining)?;
     let list_path = job.work.join("pieces.txt");
-    std::fs::write(&list_path, list)?;
+    std::fs::write(&list_path, list).map_err(|e| Error::at(&list_path, e))?;
     let part = job.work.join("joined.mp4");
     let mut join: Vec<String> = vec![
         "-f".into(),
@@ -496,7 +496,7 @@ fn join(
         part.display().to_string(),
     ]);
     f.run_args(&join)?;
-    std::fs::rename(&part, out)?;
+    std::fs::rename(&part, out).map_err(|e| Error::at(out, e))?;
     if !progress(&Progress {
         stage: Stage::Joining,
         done: 1.0,
