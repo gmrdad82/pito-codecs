@@ -343,7 +343,6 @@ pub fn threads() -> usize {
         .min(16)
 }
 
-const BEHIND: usize = 3;
 
 pub struct Frames {
     pub reason: Option<String>,

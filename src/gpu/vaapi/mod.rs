@@ -36,7 +36,7 @@ pub use encode::VaEncoder;
 
 pub const LAG: usize = 3;
 
-pub const HELD: usize = 8;
+pub const HELD: usize = 12;
 
 const HEADER_BYTES: usize = 512;
 
