@@ -725,8 +725,32 @@ fn sao_ctb<P: Pel>(
         Some(P::from_i32((v + by_sum[(2 + sum) as usize]).clamp(0, max)))
     };
     let (mx, my) = ((hp[0] != 0) as usize, (vp[0] != 0) as usize);
+    let vert_ok = |yn: i32| -> bool {
+        if yn < 0 || yn >= h as i32 {
+            return false;
+        }
+        let yn = yn as usize;
+        (y0..y1).contains(&yn) || cross_ok(pic, x0 + mx, yn)
+    };
+    let edge_rows =
+        [y0, y1 - 1].map(|y| my == 0 || (vert_ok(y as i32 + vp[0]) && vert_ok(y as i32 + vp[1])));
     for y in ly0..ly1 {
-        let inner_row = !any_nofilter && y >= y0 + my && y + my < y1 && x1 - x0 > 2 * mx;
+        let inner_row = !any_nofilter && x1 - x0 > 2 * mx;
+        let run_ok = if y == y0 {
+            edge_rows[0]
+        } else if y == y1 - 1 {
+            edge_rows[1]
+        } else {
+            true
+        };
+        if inner_row && !run_ok {
+            for x in (x0..x0 + mx).chain(x1 - mx..x1) {
+                if let Some(v) = general(x, y) {
+                    dst[(y - ly0) * ds + x] = v;
+                }
+            }
+            continue;
+        }
         if !inner_row {
             for x in x0..x1 {
                 if let Some(v) = general(x, y) {

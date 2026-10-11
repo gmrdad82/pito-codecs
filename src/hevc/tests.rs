@@ -527,6 +527,9 @@ fn decode_speed() {
     };
     if let Ok(file) = std::env::var("HEVC_FILE") {
         let data = std::fs::read(&file).unwrap();
+        if std::env::var_os("HEVC_CHECK").is_some() {
+            check_file(&file, &data);
+        }
         time_units(&file, &data, &threads);
         return;
     }
@@ -575,4 +578,46 @@ fn time_units(name: &str, data: &[u8], threads: &[usize]) {
             frames as f64 / best
         );
     }
+}
+
+fn check_file(file: &str, data: &[u8]) {
+    let units: Vec<Vec<u8>> = access_units(data).into_iter().map(<[u8]>::to_vec).collect();
+    let frames = decode_units(&mut Decoder::new(), &units);
+    let Some(first) = frames.first() else {
+        panic!("{file}: no frames");
+    };
+    let pix = if first.format == PixelFormat::Yuv420p10 {
+        "yuv420p10le"
+    } else {
+        "yuv420p"
+    };
+    let out = Command::new("ffmpeg")
+        .args([
+            "-v", "error", "-i", file, "-f", "rawvideo", "-pix_fmt", pix, "-",
+        ])
+        .output()
+        .unwrap();
+    let mut at = 0;
+    for (i, f) in frames.iter().enumerate() {
+        for p in &f.planes {
+            let n = p.width * p.height * if pix == "yuv420p" { 1 } else { 2 };
+            let ours: Vec<u8> = p
+                .data
+                .chunks(p.stride)
+                .flat_map(|r| &r[..n / p.height])
+                .copied()
+                .collect();
+            assert!(
+                out.stdout.get(at..at + n) == Some(&ours[..]),
+                "{file}: frame {i} differs from ffmpeg"
+            );
+            at += n;
+        }
+    }
+    assert_eq!(
+        at,
+        out.stdout.len(),
+        "{file}: frame count differs from ffmpeg"
+    );
+    println!("{file}: {} frames bit-exact against ffmpeg", frames.len());
 }
