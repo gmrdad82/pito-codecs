@@ -5,7 +5,7 @@ mod cabac;
 mod decoder;
 mod dpb;
 mod error;
-mod filter;
+pub(crate) mod filter;
 mod grid;
 mod hvcc;
 mod inter;

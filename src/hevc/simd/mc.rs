@@ -4,7 +4,7 @@ use crate::hevc::pel::Pel;
 const WIN: usize = 71;
 
 pub(crate) fn interp<const T: usize, P: Pel>(
-    lines: &[&[P]],
+    (src, stride): (&[P], usize),
     tmp: &mut [i16],
     (fx, fy): (usize, usize),
     (hf, vf): (&[i8; T], &[i8; T]),
@@ -18,15 +18,17 @@ pub(crate) fn interp<const T: usize, P: Pel>(
         && w.is_multiple_of(2)
         && (2..=64).contains(&w)
         && h <= 64
-        && lines.len() >= h + T - 1
+        && stride >= w + T - 1
         && out.len() >= w * h
         && tmp.len() >= (h + T - 1) * WIN
-        && lines[..h + T - 1].iter().all(|l| l.len() >= w + T - 1)
+        && src.len() >= (h + T - 2) * stride + w + T - 1
     {
-        unsafe { x86::interp::<T, P>(lines, tmp, fx, fy, hf, vf, shift1, shift3, w, h, out) };
+        let bytes = P::BYTES == 1 && shift1 == 0 && src.len() >= (h + T - 2) * stride + w + T + 15;
+        let src = (src.as_ptr(), stride);
+        unsafe { x86::interp::<T, P>(src, tmp, fx, fy, hf, vf, shift1, shift3, w, h, out, bytes) };
         return true;
     }
-    let _ = (lines, tmp, fx, fy, hf, vf, shift1, shift3, w, h, out);
+    let _ = (src, stride, tmp, fx, fy, hf, vf, shift1, shift3, w, h, out);
     false
 }
 
@@ -134,6 +136,7 @@ mod x86 {
     use super::WIN;
     use crate::hevc::pel::Pel;
     use std::arch::x86_64::*;
+    use std::ptr::read_unaligned;
 
     macro_rules! by_width {
         ($n:expr, $f:ident :: <$($g:ty),*> ($($a:expr),*)) => {
@@ -146,8 +149,303 @@ mod x86 {
         };
     }
 
+    macro_rules! by_bytes {
+        ($n:expr, $f:ident :: <$($g:ty),*> ($($a:expr),*)) => {
+            match $n {
+                16 => $f::<$($g,)* 16>($($a),*),
+                8 => $f::<$($g,)* 8>($($a),*),
+                _ => $f::<$($g,)* 4>($($a),*),
+            }
+        };
+    }
+
     const fn pack(a: i32, b: i32) -> i32 {
         ((a as u16 as u32) | ((b as u16 as u32) << 16)) as i32
+    }
+
+    const fn pair(a: i8, b: i8) -> i16 {
+        ((a as u8 as u16) | ((b as u8 as u16) << 8)) as i16
+    }
+
+    const fn mask(t: usize, n: usize, i: usize) -> [u8; 32] {
+        let mut m = [0u8; 32];
+        let mut b = 0;
+        while b < 32 {
+            let j = (b % 16) / 2;
+            let e = b % 2;
+            let at = if n == 4 {
+                j / 2 + 2 * i + e + if j % 2 == 1 { t / 2 } else { 0 }
+            } else {
+                j + 2 * i + e + if n == 16 && b >= 16 { 9 - t } else { 0 }
+            };
+            m[b] = at as u8;
+            b += 1;
+        }
+        m
+    }
+
+    struct Masks<const T: usize, const N: usize>;
+
+    impl<const T: usize, const N: usize> Masks<T, N> {
+        const M: [[u8; 32]; 4] = [mask(T, N, 0), mask(T, N, 1), mask(T, N, 2), mask(T, N, 3)];
+    }
+
+    #[inline(always)]
+    unsafe fn mul(a: __m256i, k: __m256i) -> __m256i {
+        unsafe { _mm256_maddubs_epi16(a, k) }
+    }
+
+    #[inline(always)]
+    unsafe fn add(a: __m256i, b: __m256i) -> __m256i {
+        unsafe { _mm256_add_epi16(a, b) }
+    }
+
+    #[inline(always)]
+    unsafe fn taps<const T: usize>(c: &[i8; T], i: usize, quad: bool) -> __m256i {
+        unsafe {
+            if quad && 2 * i + T / 2 + 1 < T {
+                let a = pair(c[2 * i], c[2 * i + 1]) as i32;
+                let b = pair(c[2 * i + T / 2], c[2 * i + T / 2 + 1]) as i32;
+                _mm256_set1_epi32(pack(a, b))
+            } else if !quad && 2 * i + 1 < T {
+                _mm256_set1_epi16(pair(c[2 * i], c[2 * i + 1]))
+            } else {
+                _mm256_setzero_si256()
+            }
+        }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn h8<const T: usize, const N: usize>(
+        rows: usize,
+        src: &impl Fn(usize) -> *const u8,
+        c: &[i8; T],
+        dst: &impl Fn(usize) -> *mut i16,
+    ) {
+        unsafe {
+            let m = &Masks::<T, N>::M;
+            let ms = |i: usize| _mm256_loadu_si256(m[i].as_ptr() as *const __m256i);
+            let (s0, s1, s2, s3) = (ms(0), ms(1), ms(2), ms(3));
+            let q = N == 4;
+            let (k0, k1, k2, k3) = (taps(c, 0, q), taps(c, 1, q), taps(c, 2, q), taps(c, 3, q));
+            let sum = |v: __m256i| {
+                let x = mul(_mm256_shuffle_epi8(v, s0), k0);
+                if N == 4 {
+                    if T == 4 {
+                        return x;
+                    }
+                    return add(x, mul(_mm256_shuffle_epi8(v, s1), k1));
+                }
+                let x = add(x, mul(_mm256_shuffle_epi8(v, s1), k1));
+                if T == 4 {
+                    return x;
+                }
+                let y = add(
+                    mul(_mm256_shuffle_epi8(v, s2), k2),
+                    mul(_mm256_shuffle_epi8(v, s3), k3),
+                );
+                add(x, y)
+            };
+            let ld = |p: *const u8| _mm_loadu_si128(p as *const __m128i);
+            let last = rows - 1;
+            match N {
+                16 => {
+                    for r in 0..rows {
+                        let p = src(r);
+                        let v = _mm256_set_m128i(ld(p.add(T - 1)), ld(p));
+                        _mm256_storeu_si256(dst(r) as *mut __m256i, sum(v));
+                    }
+                }
+                8 => {
+                    for r in (0..rows).step_by(2) {
+                        let v = _mm256_set_m128i(ld(src((r + 1).min(last))), ld(src(r)));
+                        let s = sum(v);
+                        _mm_storeu_si128(dst(r) as *mut __m128i, _mm256_castsi256_si128(s));
+                        if r < last {
+                            let hi = _mm256_extracti128_si256::<1>(s);
+                            _mm_storeu_si128(dst(r + 1) as *mut __m128i, hi);
+                        }
+                    }
+                }
+                _ => {
+                    for r in (0..rows).step_by(4) {
+                        let at = |i: usize| ld(src((r + i).min(last)));
+                        let a = sum(_mm256_set_m128i(at(1), at(0)));
+                        let b = sum(_mm256_set_m128i(at(3), at(2)));
+                        let s = _mm256_hadd_epi16(a, b);
+                        let lo = _mm256_castsi256_si128(s);
+                        let hi = _mm256_extracti128_si256::<1>(s);
+                        _mm_storel_epi64(dst(r) as *mut __m128i, lo);
+                        if r + 1 < rows {
+                            _mm_storel_epi64(dst(r + 1) as *mut __m128i, hi);
+                        }
+                        if r + 2 < rows {
+                            _mm_storel_epi64(
+                                dst(r + 2) as *mut __m128i,
+                                _mm_unpackhi_epi64(lo, lo),
+                            );
+                        }
+                        if r + 3 < rows {
+                            _mm_storel_epi64(
+                                dst(r + 3) as *mut __m128i,
+                                _mm_unpackhi_epi64(hi, hi),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn v8<const T: usize, const N: usize>(
+        rows: usize,
+        src: &impl Fn(usize) -> *const u8,
+        c: &[i8; T],
+        dst: &impl Fn(usize) -> *mut i16,
+    ) {
+        unsafe {
+            let (k0, k1, k2, k3) = (
+                taps(c, 0, false),
+                taps(c, 1, false),
+                taps(c, 2, false),
+                taps(c, 3, false),
+            );
+            let last = rows + T - 2;
+            let row = |r: usize| src(r.min(last));
+            let z = _mm256_setzero_si256();
+            match N {
+                16 => {
+                    let ld = |r: usize| _mm_loadu_si128(row(r) as *const __m128i);
+                    let mk = |a: __m128i, b: __m128i| {
+                        _mm256_set_m128i(_mm_unpackhi_epi8(a, b), _mm_unpacklo_epi8(a, b))
+                    };
+                    let (r0, r1, r2) = (ld(0), ld(1), ld(2));
+                    let (mut a0, mut a1) = (mk(r0, r1), mk(r1, r2));
+                    let (mut a2, mut a3, mut a4, mut a5) = (z, z, z, z);
+                    let mut prev = r2;
+                    if T == 8 {
+                        let (r3, r4, r5, r6) = (ld(3), ld(4), ld(5), ld(6));
+                        (a2, a3, a4, a5) = (mk(r2, r3), mk(r3, r4), mk(r4, r5), mk(r5, r6));
+                        prev = r6;
+                    }
+                    for r in 0..rows {
+                        let next = ld(r + T - 1);
+                        let n = mk(prev, next);
+                        prev = next;
+                        let s = if T == 8 {
+                            let s =
+                                add(add(mul(a0, k0), mul(a2, k1)), add(mul(a4, k2), mul(n, k3)));
+                            (a0, a1, a2, a3, a4, a5) = (a1, a2, a3, a4, a5, n);
+                            s
+                        } else {
+                            let s = add(mul(a0, k0), mul(n, k1));
+                            (a0, a1) = (a1, n);
+                            s
+                        };
+                        _mm256_storeu_si256(dst(r) as *mut __m256i, s);
+                    }
+                }
+                8 => {
+                    let ld = |r: usize| _mm_loadl_epi64(row(r) as *const __m128i);
+                    let d = |a: __m128i, b: __m128i| _mm_unpacklo_epi8(a, b);
+                    let (r0, r1, r2) = (ld(0), ld(1), ld(2));
+                    let mut e0 = _mm256_set_m128i(d(r1, r2), d(r0, r1));
+                    let (mut e1, mut e2) = (z, z);
+                    let mut prev = r2;
+                    if T == 8 {
+                        let (r3, r4, r5, r6) = (ld(3), ld(4), ld(5), ld(6));
+                        e1 = _mm256_set_m128i(d(r3, r4), d(r2, r3));
+                        e2 = _mm256_set_m128i(d(r5, r6), d(r4, r5));
+                        prev = r6;
+                    }
+                    for r in (0..rows).step_by(2) {
+                        let a = ld(r + T - 1);
+                        let b = ld(r + T);
+                        let n = _mm256_set_m128i(d(a, b), d(prev, a));
+                        prev = b;
+                        let s = if T == 8 {
+                            let s =
+                                add(add(mul(e0, k0), mul(e1, k1)), add(mul(e2, k2), mul(n, k3)));
+                            (e0, e1, e2) = (e1, e2, n);
+                            s
+                        } else {
+                            let s = add(mul(e0, k0), mul(n, k1));
+                            e0 = n;
+                            s
+                        };
+                        _mm_storeu_si128(dst(r) as *mut __m128i, _mm256_castsi256_si128(s));
+                        if r + 1 < rows {
+                            let hi = _mm256_extracti128_si256::<1>(s);
+                            _mm_storeu_si128(dst(r + 1) as *mut __m128i, hi);
+                        }
+                    }
+                }
+                _ => {
+                    let ld = |r: usize| _mm_cvtsi32_si128(read_unaligned(row(r) as *const i32));
+                    let d = |a: __m128i, b: __m128i| _mm_unpacklo_epi8(a, b);
+                    let f = |a: __m128i, b: __m128i, c: __m128i, e: __m128i, g: __m128i| {
+                        let (x, y, u, v) = (d(a, b), d(b, c), d(c, e), d(e, g));
+                        _mm256_set_m128i(_mm_unpacklo_epi64(u, v), _mm_unpacklo_epi64(x, y))
+                    };
+                    let (mut r0, mut r1, mut r2) = (ld(0), ld(1), ld(2));
+                    let (mut r3, mut r4, mut r5, mut r6) = (ld(3), z0(), z0(), z0());
+                    if T == 8 {
+                        (r4, r5, r6) = (ld(4), ld(5), ld(6));
+                    }
+                    for r in (0..rows).step_by(4) {
+                        let s = if T == 8 {
+                            let (r7, r8, r9, r10) = (ld(r + 7), ld(r + 8), ld(r + 9), ld(r + 10));
+                            let s = add(
+                                add(
+                                    mul(f(r0, r1, r2, r3, r4), k0),
+                                    mul(f(r2, r3, r4, r5, r6), k1),
+                                ),
+                                add(
+                                    mul(f(r4, r5, r6, r7, r8), k2),
+                                    mul(f(r6, r7, r8, r9, r10), k3),
+                                ),
+                            );
+                            (r0, r1, r2, r3, r4, r5, r6) = (r4, r5, r6, r7, r8, r9, r10);
+                            s
+                        } else {
+                            let (r4, r5, r6) = (ld(r + 4), ld(r + 5), ld(r + 6));
+                            let s = add(
+                                mul(f(r0, r1, r2, r3, r4), k0),
+                                mul(f(r2, r3, r4, r5, r6), k1),
+                            );
+                            (r0, r1, r2, r3) = (r4, r5, r6, ld(r + 7));
+                            s
+                        };
+                        let lo = _mm256_castsi256_si128(s);
+                        let hi = _mm256_extracti128_si256::<1>(s);
+                        _mm_storel_epi64(dst(r) as *mut __m128i, lo);
+                        if r + 1 < rows {
+                            _mm_storel_epi64(
+                                dst(r + 1) as *mut __m128i,
+                                _mm_unpackhi_epi64(lo, lo),
+                            );
+                        }
+                        if r + 2 < rows {
+                            _mm_storel_epi64(dst(r + 2) as *mut __m128i, hi);
+                        }
+                        if r + 3 < rows {
+                            _mm_storel_epi64(
+                                dst(r + 3) as *mut __m128i,
+                                _mm_unpackhi_epi64(hi, hi),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn z0() -> __m128i {
+        unsafe { _mm_setzero_si128() }
     }
 
     #[inline]
@@ -224,7 +522,7 @@ mod x86 {
 
     #[target_feature(enable = "avx2")]
     pub unsafe fn interp<const T: usize, P: Pel>(
-        lines: &[&[P]],
+        (base, stride): (*const P, usize),
         tmp: &mut [i16],
         fx: usize,
         fy: usize,
@@ -235,37 +533,47 @@ mod x86 {
         w: usize,
         h: usize,
         out: &mut [i16],
+        bytes: bool,
     ) {
         unsafe {
             let m = T / 2 - 1;
-            let mut lp = [std::ptr::null::<P>(); WIN];
-            for (p, l) in lp.iter_mut().zip(&lines[..h + T - 1]) {
-                *p = l.as_ptr();
-            }
+            let lp = |r: usize| base.add(r * stride);
             let o = out.as_mut_ptr();
             let t = tmp.as_mut_ptr();
             if fx == 0 && fy == 0 {
                 chunks(w, |j, n| {
-                    let src = |r: usize| lp[r + m].add(m + j);
+                    let src = |r: usize| lp(r + m).add(m + j);
                     let dst = |r: usize| o.add(r * w + j);
                     by_width!(n, copy::<P>(h, &src, shift3, &dst));
                 });
             } else if fy == 0 {
                 chunks(w, |j, n| {
-                    let src = |r: usize, k: usize| lp[r + m].add(j + k);
                     let dst = |r: usize| o.add(r * w + j);
+                    if bytes && n > 2 {
+                        let src = |r: usize| lp(r + m).add(j) as *const u8;
+                        return by_bytes!(n, h8::<T>(h, &src, hf, &dst));
+                    }
+                    let src = |r: usize, k: usize| lp(r + m).add(j + k);
                     by_width!(n, filt::<P, T>(h, &src, hf, shift1, &dst));
                 });
             } else if fx == 0 {
                 chunks(w, |j, n| {
-                    let src = |r: usize, k: usize| lp[r + k].add(m + j);
                     let dst = |r: usize| o.add(r * w + j);
+                    if bytes && n > 2 {
+                        let src = |r: usize| lp(r).add(m + j) as *const u8;
+                        return by_bytes!(n, v8::<T>(h, &src, vf, &dst));
+                    }
+                    let src = |r: usize, k: usize| lp(r + k).add(m + j);
                     by_width!(n, filt::<P, T>(h, &src, vf, shift1, &dst));
                 });
             } else {
                 chunks(w, |j, n| {
-                    let src = |r: usize, k: usize| lp[r].add(j + k);
                     let dst = |r: usize| t.add(r * WIN + j);
+                    if bytes && n > 2 {
+                        let src = |r: usize| lp(r).add(j) as *const u8;
+                        return by_bytes!(n, h8::<T>(h + T - 1, &src, hf, &dst));
+                    }
+                    let src = |r: usize, k: usize| lp(r).add(j + k);
                     by_width!(n, filt::<P, T>(h + T - 1, &src, hf, shift1, &dst));
                 });
                 let tc = t as *const u16;
