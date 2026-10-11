@@ -231,7 +231,10 @@ pub struct Reader<S: ByteSource = File> {
 impl Reader<File> {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        Self::new(File::open(path).map_err(|e| Error::at(path, e))?)
+        File::open(path)
+            .map_err(Error::from)
+            .and_then(Self::new)
+            .map_err(|e| e.in_file(path))
     }
 }
 

@@ -215,6 +215,24 @@ impl Error {
             format!("{}: {cause}", path.display()),
         ))
     }
+
+    pub fn in_file(self, path: &std::path::Path) -> Self {
+        let shown = path.display().to_string();
+        let named = |s: String| {
+            if s.contains(&shown) {
+                s
+            } else {
+                format!("{shown}: {s}")
+            }
+        };
+        match self {
+            Error::Unsupported(s) => Error::Unsupported(named(s)),
+            Error::Invalid(s) => Error::Invalid(named(s)),
+            Error::Backend(s) => Error::Backend(named(s)),
+            Error::Io(e) if !e.to_string().contains(&shown) => Error::at(path, e),
+            e => e,
+        }
+    }
 }
 
 impl std::error::Error for Error {
