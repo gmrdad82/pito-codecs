@@ -1,7 +1,7 @@
 use std::f64::consts::PI;
 
 pub(crate) const MAX_ORDER: usize = 16;
-const MAX_SEG: usize = 512;
+const MAX_SEG: usize = 1024;
 const MIN_INV_GAIN: f64 = 1.0 / 10000.0;
 
 pub(crate) fn burg(x: &[f32], order: usize, a: &mut [f32]) -> f64 {
@@ -300,7 +300,9 @@ pub(crate) fn ltp_search(
     hist_scale: f32,
     bits_per_log2: f32,
 ) -> Ltp {
-    use crate::opus::silk::tables::{LTP_FILTER, LTP_PERIODICITY, LTP_TAPS_0, LTP_TAPS_1, LTP_TAPS_2};
+    use crate::opus::silk::tables::{
+        LTP_FILTER, LTP_PERIODICITY, LTP_TAPS_0, LTP_TAPS_1, LTP_TAPS_2,
+    };
     let mut rr = [[[0f32; 5]; 5]; 4];
     let mut rx = [[0f32; 5]; 4];
     let mut en = [0f32; 4];

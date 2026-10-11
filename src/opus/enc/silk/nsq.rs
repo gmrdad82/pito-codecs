@@ -30,8 +30,7 @@ pub(crate) struct DecState {
     pub prev_nlsf_q15: [i32; MAX_LPC_ORDER],
     pub ec_prev_signal_type: usize,
     pub ec_prev_lag_index: i32,
-    pub shp: [f32; SHAPE_ORDER],
-    pub shw: [f32; SHAPE_ORDER],
+    pub shv: [f32; SHAPE_ORDER],
     pub harm: [f32; HARM_BUF],
     pub harm_pos: usize,
 }
@@ -53,8 +52,7 @@ impl DecState {
             prev_nlsf_q15: [0; MAX_LPC_ORDER],
             ec_prev_signal_type: 0,
             ec_prev_lag_index: 0,
-            shp: [0.0; SHAPE_ORDER],
-            shw: [0.0; SHAPE_ORDER],
+            shv: [0.0; SHAPE_ORDER],
             harm: [0.0; HARM_BUF],
             harm_pos: 0,
         }
@@ -71,8 +69,7 @@ impl DecState {
             self.last_gain_index = 10;
             self.out_buf = [0; OUT_BUF];
             self.s_lpc_q14 = [0; MAX_LPC_ORDER];
-            self.shp = [0.0; SHAPE_ORDER];
-            self.shw = [0.0; SHAPE_ORDER];
+            self.shv = [0.0; SHAPE_ORDER];
             self.harm = [0.0; HARM_BUF];
         }
         self.fs_khz = fs_khz;
@@ -224,10 +221,9 @@ fn lpc_analysis_filter(out: &mut [i16], input: &[i16], b: &[i32], d: usize) {
 }
 
 pub(crate) struct Shaping {
-    pub ar: [[f32; SHAPE_ORDER]; 4],
-    pub ma: [[f32; SHAPE_ORDER]; 4],
+    pub syn: [[f32; SHAPE_ORDER]; 4],
     pub harm: [f32; 4],
-    pub tilt: [f32; 4],
+    pub lag: [usize; 4],
     pub lambda: f32,
 }
 
@@ -303,11 +299,9 @@ pub(crate) fn nsq(
             }
         }
         let scale = 16_777_216.0 / gain_q10.max(1) as f32;
-        let ar = &shaping.ar[k];
-        let ma = &shaping.ma[k];
+        let syn = &shaping.syn[k];
         let harm = shaping.harm[k];
-        let tilt = shaping.tilt[k];
-        let hl = lag as usize;
+        let hl = shaping.lag[k].clamp(2, HARM_BUF - 2);
         for i in 0..sub {
             let n = k * sub + i;
             seed = seed.wrapping_mul(196_314_165).wrapping_add(907_633_515);
@@ -335,15 +329,16 @@ pub(crate) fn nsq(
             }
             let mut fb = 0f32;
             for j in 0..SHAPE_ORDER {
-                fb += ar[j] * st.shp[j] - ma[j] * st.shw[j];
+                fb += syn[j] * st.shv[j];
             }
-            fb += tilt * st.shp[0];
+            let mut lt = 0f32;
             if harm != 0.0 {
                 let hp = (st.harm_pos + HARM_BUF - hl) % HARM_BUF;
                 let hm = (hp + HARM_BUF - 1) % HARM_BUF;
                 let hn = (hp + 1) % HARM_BUF;
-                fb += harm * (0.5 * st.harm[hp] + 0.25 * (st.harm[hm] + st.harm[hn]));
+                lt = harm * (0.5 * st.harm[hp] + 0.25 * (st.harm[hm] + st.harm[hn]));
             }
+            fb += lt;
             let target = x[n] + fb;
             let mut u = target * scale
                 - lpc_pred.saturating_mul(16) as f32
@@ -371,10 +366,6 @@ pub(crate) fn nsq(
                 }
             }
             let q = best_q.clamp(-1024, 1024);
-            #[cfg(test)]
-            if std::env::var("NSQ_DEBUG").is_ok() && q.abs() > 20 {
-                eprintln!("n {n} x {} fb {fb:.1} lpc {lpc_pred} ltp {ltp_pred} gain_q10 {gain_q10} u {u:.2} q {q}", x[n]);
-            }
             let mut e = q << 14;
             if e > 0 {
                 e -= 80 << 4;
@@ -399,12 +390,10 @@ pub(crate) fn nsq(
             s_lpc[MAX_LPC_ORDER + i] = v;
             let y = sat16(rshift_round(smulww(v, gain_q10), 8)) as i16;
             xq[n] = y;
-            let dn = y as f32 - x[n];
-            st.shp.copy_within(0..SHAPE_ORDER - 1, 1);
-            st.shp[0] = dn;
-            st.shw.copy_within(0..SHAPE_ORDER - 1, 1);
-            st.shw[0] = dn - fb;
-            st.harm[st.harm_pos] = dn;
+            let yf = y as f32;
+            st.shv.copy_within(0..SHAPE_ORDER - 1, 1);
+            st.shv[0] = yf - lt;
+            st.harm[st.harm_pos] = yf;
             st.harm_pos = (st.harm_pos + 1) % HARM_BUF;
         }
         s_lpc.copy_within(sub..sub + MAX_LPC_ORDER, 0);

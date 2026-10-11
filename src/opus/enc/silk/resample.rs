@@ -1,5 +1,4 @@
 const TAPS: usize = 193;
-pub(crate) const DELAY_48K: usize = (TAPS - 1) / 2;
 
 pub(crate) struct Downsampler {
     factor: usize,
@@ -51,10 +50,6 @@ impl Downsampler {
             taps,
             buf: vec![0.0; TAPS - 1],
         }
-    }
-
-    pub(crate) fn factor(&self) -> usize {
-        self.factor
     }
 
     pub(crate) fn process(&mut self, input: impl Iterator<Item = f32>, out: &mut [f32]) {

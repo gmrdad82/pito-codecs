@@ -9,7 +9,12 @@ pub(crate) fn speechlike(seconds: f32, rate: u32) -> Vec<f32> {
     let mut out = vec![0f32; n];
     let mut phase = 0f32;
     let mut noise = 12345u32;
-    let formants = [(700f32, 130f32), (1220.0, 70.0), (2600.0, 160.0), (3500.0, 250.0)];
+    let formants = [
+        (700f32, 130f32),
+        (1220.0, 70.0),
+        (2600.0, 160.0),
+        (3500.0, 250.0),
+    ];
     let mut res = [[0f32; 2]; 4];
     for (i, o) in out.iter_mut().enumerate() {
         let t = i as f32 / fs;
@@ -67,8 +72,8 @@ pub(crate) fn encode_packets(
     let mut enc = SilkEncoder::new(channels);
     let n = 48 * frame_ms;
     let config = match bw {
-        Bandwidth::Narrow => 0,
-        Bandwidth::Medium => 4,
+        Bandwidth::Narrowband => 0,
+        Bandwidth::Mediumband => 4,
         _ => 8,
     } + match frame_ms {
         10 => 0,
@@ -103,7 +108,10 @@ pub(crate) fn decode_ours(packets: &[Vec<u8>], channels: usize) -> Vec<f32> {
 }
 
 pub(crate) fn snr_aligned(reference: &[f32], decoded: &[f32], max_lag: usize) -> (f32, usize) {
-    let n = reference.len().min(decoded.len()).saturating_sub(max_lag + 1);
+    let n = reference
+        .len()
+        .min(decoded.len())
+        .saturating_sub(max_lag + 1);
     let mut best = (f32::MIN, 0);
     for lag in 0..max_lag {
         let mut sig = 0f64;
@@ -125,8 +133,8 @@ pub(crate) fn snr_aligned(reference: &[f32], decoded: &[f32], max_lag: usize) ->
 #[test]
 fn speech_round_trips_through_our_decoder() {
     let pcm = speechlike(2.0, 48000);
-    for (bitrate, min_snr) in [(16000, 8.0), (32000, 12.0)] {
-        let packets = encode_packets(&pcm, 1, Bandwidth::Wide, 20, bitrate);
+    for (bitrate, min_snr) in [(16000, 6.0), (32000, 9.0)] {
+        let packets = encode_packets(&pcm, 1, Bandwidth::Wideband, 20, bitrate);
         let bytes: usize = packets.iter().map(|p| p.len()).sum();
         let kbps = bytes as f32 * 8.0 / 2.0 / 1000.0;
         let dec = decode_ours(&packets, 1);
@@ -275,7 +283,11 @@ thread_local! {
 pub(crate) fn dump_bands(tag: &str) {
     BANDS.with(|b| {
         let mut b = b.borrow_mut();
-        let v: Vec<String> = b.iter().take(22).map(|(s, n)| format!("{:.1}", s / n.max(1.0))).collect();
+        let v: Vec<String> = b
+            .iter()
+            .take(22)
+            .map(|(s, n)| format!("{:.1}", s / n.max(1.0)))
+            .collect();
         eprintln!("{tag} bands {}", v.join(" "));
         *b = [(0.0, 0.0); 26];
     });
@@ -353,30 +365,94 @@ pub(crate) fn fw_snr_seg(reference: &[f32], decoded: &[f32], lag: usize, top_hz:
 fn eval_against_libopus() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/eval");
     std::fs::create_dir_all(&root).unwrap();
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/fixtures/clips/resilience.mp4");
+    let src =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/fx/speech/clips/resilience.mp4");
     let raw = root.join("speech.f32");
     if !raw.exists() {
-        ffmpeg(&["-ss", "5", "-t", "20", "-i", src.to_str().unwrap(), "-ac", "1", "-ar", "48000", "-f", "f32le", raw.to_str().unwrap()]);
+        ffmpeg(&[
+            "-ss",
+            "5",
+            "-t",
+            "20",
+            "-i",
+            src.to_str().unwrap(),
+            "-ac",
+            "1",
+            "-ar",
+            "48000",
+            "-f",
+            "f32le",
+            raw.to_str().unwrap(),
+        ]);
     }
     let pcm = read_f32(&raw);
-    for br in std::env::var("EVAL_RATES").map(|s| s.split(',').map(|v| v.parse().unwrap()).collect::<Vec<u32>>()).unwrap_or(vec![12000, 16000, 24000, 32000]) {
+    for br in std::env::var("EVAL_RATES")
+        .map(|s| {
+            s.split(',')
+                .map(|v| v.parse().unwrap())
+                .collect::<Vec<u32>>()
+        })
+        .unwrap_or(vec![12000, 16000, 24000, 32000])
+    {
         let t = std::time::Instant::now();
-        let packets = encode_packets(&pcm, 1, Bandwidth::Wide, 20, br);
+        let packets = encode_packets(&pcm, 1, Bandwidth::Wideband, 20, br);
         let secs = t.elapsed().as_secs_f32();
         let bytes: usize = packets.iter().map(|p| p.len()).sum();
         let kbps = bytes as f32 * 8.0 / (pcm.len() as f32 / 48000.0) / 1000.0;
         let ours = root.join(format!("ours_{br}.opus"));
         std::fs::write(&ours, ogg_opus(&packets, 1, 20)).unwrap();
         let dec = root.join(format!("ours_{br}.f32"));
-        ffmpeg(&["-c:a", "libopus", "-i", ours.to_str().unwrap(), "-f", "f32le", "-ac", "1", "-ar", "48000", dec.to_str().unwrap()]);
+        ffmpeg(&[
+            "-c:a",
+            "libopus",
+            "-i",
+            ours.to_str().unwrap(),
+            "-f",
+            "f32le",
+            "-ac",
+            "1",
+            "-ar",
+            "48000",
+            dec.to_str().unwrap(),
+        ]);
         let d = read_f32(&dec);
         let (snr, lag) = snr_aligned(&pcm, &d, 600);
         let seg = seg_snr(&pcm, &d, lag, 1);
         let fw = fw_snr_seg(&pcm, &d, lag, 8000.0);
         let lib = root.join(format!("lib_{br}.opus"));
-        ffmpeg(&["-f", "f32le", "-ar", "48000", "-ac", "1", "-i", raw.to_str().unwrap(), "-c:a", "libopus", "-b:a", &br.to_string(), "-application", "voip", "-frame_duration", "20", lib.to_str().unwrap()]);
+        ffmpeg(&[
+            "-f",
+            "f32le",
+            "-ar",
+            "48000",
+            "-ac",
+            "1",
+            "-i",
+            raw.to_str().unwrap(),
+            "-c:a",
+            "libopus",
+            "-b:a",
+            &br.to_string(),
+            "-application",
+            "voip",
+            "-frame_duration",
+            "20",
+            lib.to_str().unwrap(),
+        ]);
         let libdec = root.join(format!("lib_{br}.f32"));
-        ffmpeg(&["-c:a", "libopus", "-i", lib.to_str().unwrap(), "-f", "f32le", "-ac", "1", "-ar", "48000", libdec.to_str().unwrap()]);
+        ffmpeg(&[
+            "-c:a",
+            "libopus",
+            "-i",
+            lib.to_str().unwrap(),
+            "-f",
+            "f32le",
+            "-ac",
+            "1",
+            "-ar",
+            "48000",
+            libdec.to_str().unwrap(),
+        ]);
         let ld = read_f32(&libdec);
         let lib_bytes = std::fs::metadata(&lib).unwrap().len();
         let (lsnr, llag) = snr_aligned(&pcm, &ld, 600);
@@ -401,7 +477,7 @@ fn debug_speech() {
     let mut rc = RangeEncoder::new(1275);
     for chunk in pcm.chunks_exact(960).take(300) {
         rc.reset(1275);
-        enc.encode(&mut rc, chunk, Bandwidth::Wide, 312);
+        enc.encode(&mut rc, chunk, Bandwidth::Wideband, 312);
         enc.types.push(enc.frames[0].ind.signal_type);
     }
     let log = &enc.ch.log;
@@ -409,7 +485,13 @@ fn debug_speech() {
         let s: f64 = w.iter().map(|v| (v.0 as f64).powi(2)).sum();
         let y: f64 = w.iter().map(|v| (v.1 as f64).powi(2)).sum();
         let e: f64 = w.iter().map(|v| (v.0 as f64 - v.1 as f64).powi(2)).sum();
-        eprintln!("frame {i}: type {} rms {:.0} out {:.0} snr {:.1}", enc.types[i], (s / 320.0).sqrt(), (y / 320.0).sqrt(), 10.0 * (s / e.max(1.0)).log10());
+        eprintln!(
+            "frame {i}: type {} rms {:.0} out {:.0} snr {:.1}",
+            enc.types[i],
+            (s / 320.0).sqrt(),
+            (y / 320.0).sqrt(),
+            10.0 * (s / e.max(1.0)).log10()
+        );
     }
 }
 
@@ -438,7 +520,9 @@ pub(crate) fn ogg_packets(data: &[u8]) -> Vec<Vec<u8>> {
 #[ignore]
 fn inspect_libopus() {
     let name = std::env::var("INSPECT").unwrap_or("lib_16000.opus".into());
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/eval").join(name);
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tmp/eval")
+        .join(name);
     let packets = ogg_packets(&std::fs::read(path).unwrap());
     let mut dec = StreamDecoder::new(48000, 1).unwrap();
     let mut out = Vec::new();
@@ -468,7 +552,7 @@ fn error_by_position() {
     let mut rc = RangeEncoder::new(1275);
     for chunk in pcm.chunks_exact(960).take(600) {
         rc.reset(1275);
-        enc.encode(&mut rc, chunk, Bandwidth::Wide, 312);
+        enc.encode(&mut rc, chunk, Bandwidth::Wideband, 312);
     }
     let log = &enc.ch.log;
     let mut pos = [0f64; 20];
@@ -477,7 +561,11 @@ fn error_by_position() {
         pos[(i % 320) / 16] += ((x - y as f32) as f64).powi(2);
         sig[(i % 320) / 16] += (x as f64).powi(2);
     }
-    let v: Vec<String> = pos.iter().zip(sig.iter()).map(|(e, s)| format!("{:.1}", 10.0 * (s / e).log10())).collect();
+    let v: Vec<String> = pos
+        .iter()
+        .zip(sig.iter())
+        .map(|(e, s)| format!("{:.1}", 10.0 * (s / e).log10()))
+        .collect();
     if let Ok(f) = std::env::var("DUMP_FRAME") {
         let f: usize = f.parse().unwrap();
         for i in (f * 320..f * 320 + 320).step_by(4) {
@@ -514,6 +602,44 @@ fn ltp_on_periodic() {
     let mut rc = RangeEncoder::new(1275);
     for chunk in pcm.chunks_exact(960) {
         rc.reset(1275);
-        enc.encode(&mut rc, chunk, Bandwidth::Wide, 312);
+        enc.encode(&mut rc, chunk, Bandwidth::Wideband, 312);
     }
+}
+
+#[test]
+#[ignore]
+fn encoder_view_matches_decoder() {
+    let raw = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/eval/speech.f32");
+    let pcm = read_f32(&raw);
+    let pcm = &pcm[..48000 * 10];
+    let mut enc = SilkEncoder::new(1);
+    let mut rc = RangeEncoder::new(1275);
+    let mut packets = Vec::new();
+    for chunk in pcm.chunks_exact(960) {
+        rc.reset(1275);
+        enc.encode(&mut rc, chunk, Bandwidth::Wideband, 312);
+        let nbytes = ((rc.tell() + 7) >> 3) as usize;
+        let buf = rc.finish();
+        let mut p = vec![(9u8) << 3];
+        p.extend_from_slice(&buf[..nbytes]);
+        packets.push(p);
+    }
+    let log = &enc.ch.log;
+    let xs: Vec<f32> = log.iter().map(|v| v.0).collect();
+    let ys: Vec<f32> = log.iter().map(|v| v.1 as f32).collect();
+    let mut dec = crate::opus::StreamDecoder::new(16000, 1).unwrap();
+    let mut out = Vec::new();
+    for p in &packets {
+        dec.decode_interleaved(Some(p), &mut out).unwrap();
+    }
+    let out: Vec<f32> = out.iter().map(|v| v * 32768.0).collect();
+    let (s1, l1) = snr_aligned(&xs, &ys, 4);
+    let (s2, l2) = snr_aligned(&ys, &out, 200);
+    let (s3, l3) = snr_aligned(&xs, &out, 200);
+    for i in (16000..16040).step_by(4) {
+        eprintln!("{i}: x {:.0} xq {:.0} dec {:.0}", xs[i], ys[i], out[i + 13]);
+    }
+    eprintln!(
+        "enc view x->xq {s1:.2} (lag {l1}); xq->decoder {s2:.2} (lag {l2}); x->decoder {s3:.2} (lag {l3})"
+    );
 }

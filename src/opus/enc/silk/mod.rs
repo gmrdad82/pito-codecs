@@ -8,8 +8,12 @@ use super::Bandwidth;
 use crate::opus::range::RangeEncoder;
 use crate::opus::silk::lpc::nlsf2a;
 use crate::opus::silk::tables::{MID_ONLY, STEREO_PRED_JOINT, UNIFORM3, UNIFORM5};
-use analysis::{MAX_ORDER, a_q12_to_f32, a2nlsf, burg, lpc_residual, ltp_search, nlsf_weights, pitch_search};
-use code::{Cond, Ctx, Indices, gains_bits, indices_bits, pulses_bits, write_indices, write_pulses};
+use analysis::{
+    MAX_ORDER, a_q12_to_f32, a2nlsf, burg, lpc_residual, ltp_search, nlsf_weights, pitch_search,
+};
+use code::{
+    Cond, Ctx, Indices, gains_bits, indices_bits, pulses_bits, write_indices, write_pulses,
+};
 use nsq::{DecState, MAX_FRAME, SHAPE_ORDER, Shaping, decode_params, nsq, quantize_gains};
 use resample::Downsampler;
 
@@ -17,11 +21,13 @@ const X_HIST: usize = 320;
 const X_BUF: usize = X_HIST + MAX_FRAME;
 const PULSE_BUF: usize = MAX_FRAME + 16;
 const MAX_FRAMES: usize = 3;
-const SHAPE_POLE: f32 = 0.8;
-const SHAPE_ZERO: f32 = 0.0;
-const SHAPE_TILT: f32 = 0.0;
-const SHAPE_HARM: f32 = 0.0;
 const NSQ_LAMBDA: f32 = 0.7;
+const SHAPE_ANA: f32 = 0.8;
+const SHAPE_SYN: f32 = 0.88;
+const HARM_ANA: f32 = 0.0;
+const HARM_SYN: f32 = 0.0;
+const TILT: f32 = 0.0;
+const LPC_HISTORY: f32 = 0.0;
 const NLSF_LAMBDA: f32 = 0.0025;
 const VOICED_CORR: f32 = 0.45;
 const LTP_MIN_GAIN: f32 = 0.8;
@@ -34,11 +40,11 @@ const OFFSET_INACTIVE: f32 = 3.0;
 const QUALITY_STEP: f32 = 0.1;
 
 struct Trial {
-    dlt: i32,
     bits: f32,
     st: DecState,
     syms: [i32; 4],
     pulses: [i32; PULSE_BUF],
+    #[cfg(test)]
     xq: [i16; MAX_FRAME],
 }
 
@@ -127,6 +133,7 @@ struct Channel {
     hp: Highpass,
     vad: Vad,
     prev_lag: i32,
+    coding: f32,
     #[cfg(test)]
     log: Vec<(f32, i16)>,
 }
@@ -143,12 +150,21 @@ impl Channel {
                 hang: 0,
             },
             prev_lag: 0,
+            coding: 0.5,
             #[cfg(test)]
             log: Vec::new(),
         }
     }
 
-    fn encode_frame(&mut self, cond: Cond, seed: i32, quality: f32, lambda: f32, cap: f32, out: &mut FrameOut) -> f32 {
+    fn encode_frame(
+        &mut self,
+        cond: Cond,
+        seed: i32,
+        quality: f32,
+        lambda: f32,
+        cap: f32,
+        out: &mut FrameOut,
+    ) -> f32 {
         let fs = self.st.fs_khz;
         let l = self.st.frame_length;
         let sub = self.st.subfr_length;
@@ -162,7 +178,7 @@ impl Channel {
         let vad = self.vad.update(db);
 
         let mut a = [0f32; MAX_ORDER];
-        let seg = (4 * sub).min(start);
+        let seg = ((tune("SILK_SEG", LPC_HISTORY) * sub as f32) as usize).min(start);
         burg(&self.x[start - seg..end], d, &mut a[..d]);
         let mut g = 0.999f32;
         for v in a[..d].iter_mut() {
@@ -179,7 +195,14 @@ impl Channel {
         lpc_residual(&self.x, &a[..d], r0, &mut self.e[r0..end]);
         let mut ncorr = [[0f32; 280]; 4];
         let pitch = if vad {
-            Some(pitch_search(&self.e, start, fs, nb, self.prev_lag, &mut ncorr))
+            Some(pitch_search(
+                &self.e,
+                start,
+                fs,
+                nb,
+                self.prev_lag,
+                &mut ncorr,
+            ))
         } else {
             None
         };
@@ -193,7 +216,13 @@ impl Channel {
         let mut aq = [0f32; MAX_ORDER];
         let mut ltp = None;
         loop {
-            nlsf::quantize(&target[..d], &w[..d], signal_type, NLSF_LAMBDA, &mut ind.nlsf);
+            nlsf::quantize(
+                &target[..d],
+                &w[..d],
+                signal_type,
+                NLSF_LAMBDA,
+                &mut ind.nlsf,
+            );
             let nq = crate::opus::silk::lpc::nlsf_decode(&ind.nlsf, d == 16);
             let a_q12 = nlsf2a(&nq[..d]);
             a_q12_to_f32(&a_q12[..d], &mut aq[..d]);
@@ -205,11 +234,6 @@ impl Channel {
             let r = ltp_search(&self.e, start, sub, nb, &p, 0.95, 0.5 * sub as f32 / 2.0);
             let err: f32 = r.err[..nb].iter().sum();
             let en: f32 = r.energy[..nb].iter().sum();
-            #[cfg(test)]
-            if std::env::var("LTP_DEBUG").is_ok() {
-                let p = pitch.as_ref().unwrap();
-                eprintln!("ltp corr {:.2} lags {:?} gain {:.1} dB per {} idx {:?}", p.corr, &p.lags[..nb], 10.0 * (en / err.max(1.0)).log10(), r.per_index, &r.ltp_index[..nb]);
-            }
             if err > tune("SILK_LTPMIN", LTP_MIN_GAIN) * en {
                 signal_type = 1;
                 continue;
@@ -255,34 +279,80 @@ impl Channel {
         };
         let fixed = indices_bits(&ind, &ctx);
 
-        let mut shaping = Shaping {
-            ar: [[0.0; SHAPE_ORDER]; 4],
-            ma: [[0.0; SHAPE_ORDER]; 4],
-            harm: [0.0; 4],
-            tilt: [0.0; 4],
-            lambda: lambda * if signal_type == 2 { 1.0 } else { tune("SILK_LAMU", 1.0) },
-        };
-        let (pole, zero) = tune_shape();
-        let mut gp = pole;
-        let mut gz = zero;
+        let coding = self.coding;
+        let g_ana = tune("SILK_GANA", SHAPE_ANA) - tune("SILK_GANAC", 0.0) * coding;
+        let g_syn = tune("SILK_GSYN", SHAPE_SYN) + tune("SILK_GSYNC", 0.0) * coding;
+        let mut a_ana = [0f32; MAX_ORDER];
+        let mut a_syn = [0f32; MAX_ORDER];
+        let (mut pa, mut ps) = (g_ana, g_syn);
         for j in 0..d {
+            a_ana[j] = a[j] * pa;
+            a_syn[j] = a[j] * ps;
+            pa *= g_ana;
+            ps *= g_syn;
+        }
+        let comp = tune("SILK_GMUL", 1.0) * pred_gain(&a_ana[..d]) / pred_gain(&a_syn[..d]);
+        let voiced = signal_type == 2;
+        let corr = pitch.as_ref().map(|p| p.corr).unwrap_or(0.0);
+        let (f_ana, f_syn) = if voiced {
+            (
+                tune("SILK_FANA", HARM_ANA) * corr,
+                tune("SILK_FSYN", HARM_SYN) * corr,
+            )
+        } else {
+            (0.0, 0.0)
+        };
+        let tilt = tune("SILK_TILTM", TILT)
+            * if voiced {
+                0.25 + 0.2625 * tune("SILK_V", 1.0)
+            } else {
+                0.25
+            };
+        let mut lags = [0usize; 4];
+        if voiced && let Some(p) = &pitch {
             for k in 0..nb {
-                shaping.ar[k][j] = a[j] * gp;
-                shaping.ma[k][j] = a[j] * gz;
+                lags[k] = (p.lags[k].max(2) as usize).min(start - d - 4);
             }
-            gp *= pole;
-            gz *= zero;
         }
-        let tilt = tune("SILK_TILT", SHAPE_TILT);
-        for k in 0..nb {
-            shaping.ma[k][0] += tilt;
+        let lmax = lags[..nb].iter().copied().max().unwrap_or(0);
+        let s0 = start - lmax - 3;
+        let mut sh = [0f32; X_BUF];
+        for n in s0..end {
+            let mut p = 0f32;
+            for j in 0..d {
+                p += a_ana[j] * self.x[n - 1 - j];
+            }
+            sh[n] = self.x[n] - p;
         }
-        if signal_type == 2 {
-            shaping.harm = [tune("SILK_HARM", SHAPE_HARM); 4];
-        }
-
         let mut xin = [0f32; MAX_FRAME];
-        xin[..l].copy_from_slice(&self.x[start..end]);
+        let wl = |n: usize, k: usize| -> f32 {
+            let lag = lags[k];
+            if f_ana == 0.0 || lag == 0 {
+                sh[n]
+            } else {
+                sh[n] - f_ana * (0.5 * sh[n - lag] + 0.25 * (sh[n - lag - 1] + sh[n - lag + 1]))
+            }
+        };
+        let mut wp = wl(start - 1, 0);
+        for i in 0..l {
+            let w = wl(start + i, i / sub);
+            xin[i] = comp * (w - tilt * wp);
+            wp = w;
+        }
+        let mut syn = [0f32; SHAPE_ORDER];
+        syn[..d].copy_from_slice(&a_syn[..d]);
+        let shaping = Shaping {
+            syn: [syn; 4],
+            harm: [f_syn; 4],
+            lag: lags,
+            lambda: lambda
+                * if signal_type == 2 {
+                    1.0
+                } else {
+                    tune("SILK_LAMU", 1.0)
+                },
+        };
+
         let run = |dlt: i32| -> Trial {
             let mut want = [0f32; 4];
             for k in 0..nb {
@@ -309,11 +379,11 @@ impl Channel {
             );
             let bits = fixed + gains_bits(&trial, &ctx) + pulses_bits(&pulses, l, signal_type);
             Trial {
-                dlt,
                 bits,
                 st,
                 syms,
                 pulses,
+                #[cfg(test)]
                 xq,
             }
         };
@@ -324,33 +394,13 @@ impl Channel {
             _ => tune("SILK_OFFI", OFFSET_INACTIVE),
         };
         let mut dlt = ((quality + off).round() as i32).clamp(DELTA_MIN, DELTA_MAX);
-        let mut fit: Option<Trial> = None;
-        let mut over: Option<Trial> = None;
-        let mut lo = dlt - 1;
-        let mut hi = DELTA_MAX + 1;
-        for _ in 0..6 {
-            let t = run(dlt);
-            let bits = t.bits;
-            if bits <= cap {
-                hi = dlt;
-                fit = Some(t);
-                break;
-            }
-            lo = dlt;
-            over = Some(t);
-            if hi - lo <= 1 || dlt >= DELTA_MAX {
-                break;
-            }
-            let step = (((bits - cap) / 40.0).ceil() as i32).max(1);
+        let mut t = run(dlt);
+        let mut tries = 1;
+        while t.bits > cap && dlt < DELTA_MAX && tries < 6 {
+            let step = (((t.bits - cap) / 40.0).ceil() as i32).max(1);
             dlt = (dlt + step).min(DELTA_MAX);
-        }
-        let _ = (lo, hi);
-        let t = fit.or(over).expect("one trial ran");
-        #[cfg(test)]
-        if std::env::var("SILK_DEBUG").is_ok() {
-            let nz = t.pulses[..l].iter().filter(|v| **v != 0).count();
-            let ab: i32 = t.pulses[..l].iter().map(|v| v.abs()).sum();
-            eprintln!("type {signal_type} q {quality:.1} dlt {} base {:?} syms {:?} bits {:.0} nz {nz} sumabs {ab} lambda {:.2}", t.dlt, &base[..nb], &t.syms[..nb], t.bits, shaping.lambda);
+            t = run(dlt);
+            tries += 1;
         }
         self.st = t.st;
         ind.gains = t.syms;
@@ -367,7 +417,7 @@ impl Channel {
         out.pulses = t.pulses;
         #[cfg(test)]
         for i in 0..l {
-            self.log.push((xin[i], t.xq[i]));
+            self.log.push((self.x[start + i], t.xq[i]));
         }
         self.x.copy_within(l..l + X_HIST, 0);
         t.bits
@@ -383,8 +433,20 @@ fn tune(name: &str, v: f32) -> f32 {
     v
 }
 
-fn tune_shape() -> (f32, f32) {
-    (tune("SILK_POLE", SHAPE_POLE), tune("SILK_ZERO", SHAPE_ZERO))
+fn pred_gain(a: &[f32]) -> f32 {
+    let d = a.len();
+    let mut h = [0f32; 256];
+    h[0] = 1.0;
+    let mut e = 1.0f32;
+    for n in 1..256 {
+        let mut v = 0f32;
+        for j in 0..d.min(n) {
+            v += a[j] * h[n - 1 - j];
+        }
+        h[n] = v;
+        e += v * v;
+    }
+    e.sqrt()
 }
 
 const LTP_TAPS_HALF: usize = 2 + 2;
@@ -434,8 +496,8 @@ impl SilkEncoder {
         target_bits: u32,
     ) {
         let fs = match bw {
-            Bandwidth::Narrow => 8,
-            Bandwidth::Medium => 12,
+            Bandwidth::Narrowband => 8,
+            Bandwidth::Mediumband => 12,
             _ => 16,
         };
         if fs != self.fs_khz {
@@ -449,8 +511,10 @@ impl SilkEncoder {
         let nb = if ms == 10 { 2 } else { 4 };
         let nframes = (ms / 20).max(1);
         let n = n48 / (48 / fs);
-        let down = self.down.as_mut().expect("downsampler set");
-        let it = pcm.chunks_exact(nch).map(|f| f.iter().sum::<f32>() * 32768.0 / nch as f32);
+        let down = self.down.get_or_insert_with(|| Downsampler::new(fs));
+        let it = pcm
+            .chunks_exact(nch)
+            .map(|f| f.iter().sum::<f32>() * 32768.0 / nch as f32);
         down.process(it, &mut self.buf[..n]);
         self.ch.hp.run(&mut self.buf[..n]);
         self.ch.st.set_fs(fs, nb);
@@ -458,6 +522,7 @@ impl SilkEncoder {
         let stereo = if nch == 2 { 9.0 } else { 0.0 };
         let per = (target_bits as f32 - header as f32) / nframes as f32 - stereo;
         let l = self.ch.st.frame_length;
+        self.ch.coding = ((per * 20.0 / ms.max(10) as f32 - 200.0) / 400.0).clamp(0.0, 1.0);
         for f in 0..nframes {
             self.ch.x[X_HIST..X_HIST + l].copy_from_slice(&self.buf[f * l..(f + 1) * l]);
             let cond = if f == 0 {
@@ -467,11 +532,22 @@ impl SilkEncoder {
             };
             let seed = (self.counter & 3) as i32;
             self.counter = self.counter.wrapping_add(1);
-            let lambda = tune("SILK_LAMBDA", NSQ_LAMBDA) * (self.quality - DELTA_MAX as f32).max(0.0).exp2();
-            let used = self.ch.encode_frame(cond, seed, self.quality, lambda, 3.0 * per, &mut self.frames[f]);
+            let lambda =
+                tune("SILK_LAMBDA", NSQ_LAMBDA) * (self.quality - DELTA_MAX as f32).max(0.0).exp2();
+            let used = self.ch.encode_frame(
+                cond,
+                seed,
+                self.quality,
+                lambda,
+                3.0 * per,
+                &mut self.frames[f],
+            );
             self.reservoir = (self.reservoir + per - used).clamp(-20.0 * per, 20.0 * per);
-            self.quality += tune("SILK_QSTEP", QUALITY_STEP) * (used.max(1.0) / per).log2() / 0.2 - 0.01 * self.reservoir / per;
-            self.quality = self.quality.clamp(DELTA_MIN as f32 - 4.0, DELTA_MAX as f32 + 8.0);
+            self.quality += tune("SILK_QSTEP", QUALITY_STEP) * (used.max(1.0) / per).log2() / 0.2
+                - 0.01 * self.reservoir / per;
+            self.quality = self
+                .quality
+                .clamp(DELTA_MIN as f32 - 4.0, DELTA_MAX as f32 + 8.0);
         }
         for f in 0..nframes {
             rc.bit_logp(self.frames[f].ctx.vad, 1);
@@ -494,10 +570,16 @@ impl SilkEncoder {
             }
             let fo = &self.frames[f];
             write_indices(rc, &fo.ind, &fo.ctx);
-            write_pulses(rc, &fo.pulses, l, fo.ind.signal_type, fo.ind.quant_offset_type);
+            write_pulses(
+                rc,
+                &fo.pulses,
+                l,
+                fo.ind.signal_type,
+                fo.ind.quant_offset_type,
+            );
         }
     }
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
