@@ -207,6 +207,42 @@ fn ffmpeg_decodes_our_stream_bit_exact() {
 }
 
 #[test]
+fn odd_sizes_encode_without_failing() {
+    for (w, h) in [(1, 1), (2, 3), (9, 7), (65, 33), (130, 66), (200, 8)] {
+        for threads in [1, 4] {
+            let mut enc = Encoder::new(EncoderConfig {
+                width: w,
+                height: h,
+                rate: Rate::Crf(30),
+                gop: 3,
+                threads,
+                ..EncoderConfig::default()
+            })
+            .unwrap();
+            for i in 0..5u32 {
+                let mut f = Frame::new(PixelFormat::Yuv420p8, w, h, i as i64, TimeBase::new(1, 25));
+                for p in &mut f.planes {
+                    for (k, v) in p.data.iter_mut().enumerate() {
+                        *v = ((k as u32 * 7 + i * 13) ^ (k as u32 >> 3)) as u8;
+                    }
+                }
+                let out = enc.encode(&f).unwrap();
+                assert!(!out.is_empty() && !out[0].data.is_empty(), "{w}x{h}");
+            }
+        }
+    }
+    let mut enc = Encoder::new(EncoderConfig {
+        width: 64,
+        height: 64,
+        ..EncoderConfig::default()
+    })
+    .unwrap();
+    let mut f = Frame::new(PixelFormat::Yuv420p8, 64, 64, 0, TimeBase::new(1, 25));
+    f.planes[1].data.truncate(10);
+    assert!(enc.encode(&f).is_err());
+}
+
+#[test]
 #[ignore]
 fn bench_encoder() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -240,17 +276,27 @@ fn bench_encoder() {
         width: w,
         height: h,
         fps: (30, 1),
-        rate: Rate::Crf(crf),
-        gop: 240,
+        rate: std::env::var("VP9_Q")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .map_or(Rate::Crf(crf), Rate::Q),
+        gop: std::env::var("VP9_GOP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(240),
         threads,
-        aq: std::env::var("VP9_AQ").map_or(true, |v| v != "0"),
+        aq: std::env::var("VP9_AQ").is_ok_and(|v| v != "0"),
     })
     .unwrap();
     let t = std::time::Instant::now();
     let mut packets = Vec::new();
+    let mut recon = Vec::new();
     for f in &frames {
         for p in enc.encode(f).unwrap() {
             packets.push(p.data);
+        }
+        if std::env::var("VP9_RECON").is_ok() {
+            recon.extend(crop(enc.recon().unwrap()));
         }
     }
     let secs = t.elapsed().as_secs_f64();
@@ -259,6 +305,14 @@ fn bench_encoder() {
     std::fs::write(&out, ivf(w, h, &packets)).unwrap();
     let dec = ffmpeg_decode(&out, false);
     let p = psnr(&data[..dec.len()], &dec);
+    if !recon.is_empty() {
+        let first = recon.iter().zip(&dec).position(|(a, b)| a != b);
+        eprintln!(
+            "recon against ffmpeg: first difference at {first:?} of {}, PSNR {:.2} dB",
+            dec.len(),
+            psnr(&recon, &dec)
+        );
+    }
     let kbps = bytes as f64 * 8.0 / (frames.len() as f64 / 30.0) / 1000.0;
     eprintln!(
         "vp9enc crf {crf}: {} frames {:.1} fps, {kbps:.0} kbps, PSNR {p:.2} dB",

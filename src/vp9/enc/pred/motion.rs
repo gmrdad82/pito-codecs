@@ -1,4 +1,5 @@
 use super::dist;
+use super::halfpel::HalfPel;
 use super::inter::{self, MvLimits};
 use super::mvcost::MvCost;
 use super::*;
@@ -32,6 +33,7 @@ pub struct Search<'a> {
     pub range: i32,
     pub subpel: Subpel,
     pub filter: u8,
+    pub half: Option<&'a HalfPel>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,7 +43,7 @@ pub struct MotionResult {
     pub rate: u32,
 }
 
-const HEX: [(i32, i32); 6] = [(-1, -2), (1, -2), (-2, 0), (2, 0), (-1, 2), (1, 2)];
+const HEX: [(i32, i32); 6] = [(-2, 0), (-1, -2), (1, -2), (2, 0), (1, 2), (-1, 2)];
 const DIAMOND: [(i32, i32); 4] = [(0, -1), (-1, 0), (1, 0), (0, 1)];
 const SQUARE: [(i32, i32); 8] = [
     (-1, -1),
@@ -130,22 +132,29 @@ impl Search<'_> {
                 && (r - cr).abs() <= self.range
                 && (c - cc).abs() <= self.range
         };
-        let mut steps = 0;
-        loop {
+        let mut dir = usize::MAX;
+        for step in 0..=self.range {
             let (pr, pc) = (br, bc);
-            for &(dc, dr) in &HEX {
+            let mut moved = usize::MAX;
+            let ks: &[usize] = if dir == usize::MAX {
+                &[0, 1, 2, 3, 4, 5]
+            } else {
+                &[(dir + 5) % 6, dir, (dir + 1) % 6]
+            };
+            for &k in ks {
+                let (dc, dr) = HEX[k];
                 let (r, c) = (pr + dr, pc + dc);
                 if inside(r, c) {
                     let v = cost(r, c);
                     if v < best {
-                        (best, br, bc) = (v, r, c);
+                        (best, br, bc, moved) = (v, r, c, k);
                     }
                 }
             }
-            steps += 1;
-            if (br, bc) == (pr, pc) || steps > self.range {
+            if moved == usize::MAX || step == self.range {
                 break;
             }
+            dir = moved;
         }
         loop {
             let (pr, pc) = (br, bc);
@@ -178,6 +187,13 @@ impl Search<'_> {
     fn subpel_cost(&self, mv: Mv, pred: &mut [u8; 64 * 64]) -> u32 {
         let x16 = ((self.x as isize) << 4) + 2 * mv.col as isize;
         let y16 = ((self.y as isize) << 4) + 2 * mv.row as isize;
+        if let Some(hp) = self.half
+            && hp.filter() == self.filter
+            && hp.covers(x16 >> 4, y16 >> 4, self.w, self.h)
+            && let Some((p, ps)) = hp.at(x16, y16)
+        {
+            return dist::satd(self.src, self.src_stride, p, ps, self.w, self.h) + self.penalty(mv);
+        }
         inter::mc(
             &self.reference,
             x16,
@@ -192,10 +208,13 @@ impl Search<'_> {
     }
 
     pub fn run(&self, candidates: &[Mv]) -> MotionResult {
+        self.run_with(candidates, &mut [0u8; 64 * 64])
+    }
+
+    pub fn run_with(&self, candidates: &[Mv], pred: &mut [u8; 64 * 64]) -> MotionResult {
         let (r, c, _) = self.full_pel(candidates);
         let mut best_mv = Mv::new((r * 8) as i16, (c * 8) as i16);
-        let mut pred = [0u8; 64 * 64];
-        let mut best = self.subpel_cost(best_mv, &mut pred);
+        let mut best = self.subpel_cost(best_mv, pred);
         let mut steps: &[i16] = match self.subpel {
             Subpel::None => &[],
             Subpel::Half => &[4],
@@ -213,7 +232,7 @@ impl Search<'_> {
                 if !self.limits.contains(m) {
                     continue;
                 }
-                let v = self.subpel_cost(m, &mut pred);
+                let v = self.subpel_cost(m, pred);
                 cross[k] = v;
                 if v < best {
                     (best, best_mv) = (v, m);
@@ -223,7 +242,7 @@ impl Search<'_> {
             let dc = if cross[1] < cross[2] { -s } else { s };
             let m = Mv::new(center.row + dr, center.col + dc);
             if self.limits.contains(m) {
-                let v = self.subpel_cost(m, &mut pred);
+                let v = self.subpel_cost(m, pred);
                 if v < best {
                     (best, best_mv) = (v, m);
                 }

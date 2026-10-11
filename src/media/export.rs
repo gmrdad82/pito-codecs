@@ -17,6 +17,9 @@ pub struct Piece {
     pub to: f64,
 }
 
+const MAX_SECONDS: f64 = 1e7;
+const MAX_FPS: u32 = 1000;
+
 pub type Overlay = Box<dyn FnMut(f64, u32, u32) -> Option<Arc<Rgba>> + Send>;
 
 pub struct ExportOptions {
@@ -172,7 +175,10 @@ pub fn export(
     let mut by_path: HashMap<PathBuf, usize> = HashMap::new();
     let mut index = Vec::new();
     for p in pieces {
-        if p.to.partial_cmp(&p.from) != Some(std::cmp::Ordering::Greater) || !p.to.is_finite() {
+        if p.to.partial_cmp(&p.from) != Some(std::cmp::Ordering::Greater)
+            || !(-MAX_SECONDS..=MAX_SECONDS).contains(&p.from)
+            || !(-MAX_SECONDS..=MAX_SECONDS).contains(&p.to)
+        {
             return Err(Error::Invalid(format!(
                 "a piece from {} to {}",
                 p.from, p.to
@@ -192,7 +198,16 @@ pub fn export(
     let mut video = pick_encode(opts.video, &opts.prefs, &caps)?;
     let first = &sources[index[0]].probe;
     let fps = first.fps;
+    if fps.0 == 0 || fps.1 == 0 || fps.0 / fps.1 > MAX_FPS {
+        return Err(Error::Invalid(format!("a frame rate of {}/{}", fps.0, fps.1)));
+    }
     let size = (first.width & !1, first.height & !1);
+    if size.0 == 0 || size.1 == 0 {
+        return Err(Error::Invalid(format!(
+            "a picture of {}x{}",
+            first.width, first.height
+        )));
+    }
     let format = if first.bit_depth > 8 && video.codec == Codec::Hevc {
         PixelFormat::Yuv420p10
     } else {
@@ -241,9 +256,9 @@ pub fn export(
     let smart = smart && (ffmpeg.is_some() || sources.iter().all(|s| s.reader.is_some()));
     let work = std::path::absolute(out.with_extension("parts"))?;
     if work.exists() {
-        std::fs::remove_dir_all(&work)?;
+        std::fs::remove_dir_all(&work).map_err(|e| Error::at(&work, e))?;
     }
-    std::fs::create_dir_all(&work)?;
+    std::fs::create_dir_all(&work).map_err(|e| Error::at(&work, e))?;
     let mut job = Job {
         pieces,
         sources,
@@ -445,7 +460,7 @@ fn join(
 ) -> Result<()> {
     job.tell(progress, Stage::Joining)?;
     let list_path = job.work.join("pieces.txt");
-    std::fs::write(&list_path, list)?;
+    std::fs::write(&list_path, list).map_err(|e| Error::at(&list_path, e))?;
     let part = job.work.join("joined.mp4");
     let mut join: Vec<String> = vec![
         "-f".into(),
@@ -481,7 +496,7 @@ fn join(
         part.display().to_string(),
     ]);
     f.run_args(&join)?;
-    std::fs::rename(&part, out)?;
+    std::fs::rename(&part, out).map_err(|e| Error::at(out, e))?;
     if !progress(&Progress {
         stage: Stage::Joining,
         done: 1.0,

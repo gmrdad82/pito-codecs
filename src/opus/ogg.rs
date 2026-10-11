@@ -108,7 +108,7 @@ impl OggOpus {
             let page_serial = u32::from_le_bytes([page[14], page[15], page[16], page[17]]);
             pos = page_end;
             match serial {
-                None if flags & 0x02 != 0 && page[lacing_end..].starts_with(b"OpusHead") => {
+                None if flags & 0x02 != 0 && src[lacing_end..page_end].starts_with(b"OpusHead") => {
                     serial = Some(page_serial)
                 }
                 Some(s) if s == page_serial => {}
