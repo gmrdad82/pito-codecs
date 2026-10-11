@@ -344,6 +344,8 @@ pub fn threads() -> usize {
 }
 
 
+const BEHIND: usize = 6;
+
 pub struct Frames {
     pub reason: Option<String>,
     reader: Arc<Reader>,
