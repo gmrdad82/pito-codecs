@@ -34,7 +34,7 @@ fn clip() -> &'static Path {
         if out.exists() {
             return out;
         }
-        let part = dir().join(format!("{}.two-tracks-bt709.mp4", std::process::id()));
+        let part = dir().join(format!("two-tracks-bt709.{}.part.mp4", std::process::id()));
         let ok = Command::new("ffmpeg")
             .args(["-v", "error", "-y"])
             .args(["-f", "lavfi", "-i", "testsrc2=s=1280x720:r=60:d=6"])
