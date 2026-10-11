@@ -29,6 +29,8 @@ pub struct CeltEncoder {
     last_coded: usize,
     consec_transient: u32,
     force_intra: bool,
+    analysed: (bool, usize),
+    pub vbr: Vbr,
     pub disable_inv: bool,
     inbuf: Vec<f32>,
     freq: Vec<f32>,
@@ -38,6 +40,61 @@ pub struct CeltEncoder {
     mdct_work: MdctScratch,
     pvq: Pvq,
     tmp: Vec<f32>,
+}
+
+#[derive(Default)]
+pub struct Vbr {
+    drift: f32,
+    avg: f32,
+    frames: u32,
+}
+
+impl Vbr {
+    pub fn bytes(&mut self, base: f32, max: usize, a: &Analysis) -> usize {
+        if a.silent {
+            return 3;
+        }
+        self.avg = if self.frames == 0 {
+            a.demand
+        } else {
+            0.95 * self.avg + 0.05 * a.demand
+        };
+        self.frames += 1;
+        let mut factor = ((a.demand + 1.0) / (self.avg + 1.0)).sqrt().clamp(0.4, 1.8);
+        if a.transient {
+            factor *= 1.2;
+        }
+        let target = base * factor - self.drift / 24.0;
+        let lo = (base * 0.3).max(8.0);
+        let hi = (base * 2.5).min(max as f32);
+        let bytes = target.round().clamp(lo, hi.max(lo));
+        self.drift = (self.drift + bytes - base).clamp(-8.0 * base, 8.0 * base);
+        bytes as usize
+    }
+}
+
+pub struct Analysis {
+    pub silent: bool,
+    pub transient: bool,
+    pub demand: f32,
+}
+
+#[inline]
+fn clean(x: f32) -> f32 {
+    if x.is_finite() {
+        x.clamp(-64.0, 64.0)
+    } else {
+        0.0
+    }
+}
+
+fn lm_of(n: usize) -> usize {
+    match n {
+        120 => 0,
+        240 => 1,
+        480 => 2,
+        _ => 3,
+    }
 }
 
 pub struct FrameParams {
@@ -65,6 +122,8 @@ impl CeltEncoder {
             last_coded: 0,
             consec_transient: 0,
             force_intra: true,
+            analysed: (false, 0),
+            vbr: Vbr::default(),
             disable_inv: channels == 1,
             inbuf: Vec::new(),
             freq: Vec::new(),
@@ -85,6 +144,25 @@ impl CeltEncoder {
         self.last_coded = 0;
         self.consec_transient = 0;
         self.force_intra = true;
+        self.vbr = Vbr::default();
+    }
+
+    pub fn prime(&mut self, history: &[f32]) {
+        self.reset();
+        let c = self.channels;
+        let n = history.len() / c;
+        for ch in 0..c {
+            let mut mem = 0f32;
+            for j in 0..n {
+                let s = clean(history[j * c + ch]) * 32768.0;
+                let v = s - mem;
+                mem = PREEMPH * s;
+                if j + OVERLAP >= n {
+                    self.in_mem[ch * OVERLAP + j + OVERLAP - n] = v;
+                }
+            }
+            self.preemph[ch] = mem;
+        }
     }
 
     fn load_input(&mut self, pcm: &[f32], n: usize) -> bool {
@@ -98,7 +176,7 @@ impl CeltEncoder {
             buf[..OVERLAP].copy_from_slice(&self.in_mem[ch * OVERLAP..(ch + 1) * OVERLAP]);
             let mut mem = self.preemph[ch];
             for (j, o) in buf[OVERLAP..].iter_mut().enumerate() {
-                let x = pcm[j * c + ch];
+                let x = clean(pcm[j * c + ch]);
                 silent &= x == 0.0;
                 let s = x * 32768.0;
                 *o = s - mem;
@@ -180,21 +258,123 @@ impl CeltEncoder {
         }
     }
 
-    pub fn encode_frame(&mut self, pcm: &[f32], n: usize, p: &FrameParams, enc: &mut RangeEncoder) {
+    fn dual_stereo(&self, n: usize, lm: usize, end: usize) -> bool {
+        if self.channels != 2 {
+            return false;
+        }
+        let top = (13.min(end), 1usize << lm);
+        let (mut lr, mut ms) = (1e-15f32, 1e-15f32);
+        for i in 0..top.0 {
+            let (al, ar) = (self.band_amp[i], self.band_amp[NB_EBANDS + i]);
+            let lo = top.1 * EBANDS[i] as usize;
+            let hi = top.1 * EBANDS[i + 1] as usize;
+            for j in lo..hi {
+                let l = self.freq[j] * al;
+                let r = self.freq[n + j] * ar;
+                lr += l.abs() + r.abs();
+                ms += (l + r).abs() + (l - r).abs();
+            }
+        }
+        let ratio = ms * std::f32::consts::FRAC_1_SQRT_2 / lr;
+        ratio > 0.95
+    }
+
+    fn dynalloc(&self, start: usize, end: usize, lm: usize, nbytes: usize) -> [i32; NB_EBANDS] {
+        let mut want = [0i32; NB_EBANDS];
+        let c = self.channels;
+        if nbytes < 30 * c || end - start < 3 {
+            return want;
+        }
+        let mut e = [0f32; NB_EBANDS];
+        let mut f = [0f32; NB_EBANDS];
+        for i in start..end {
+            e[i] = self.band_log[i].max(if c == 2 {
+                self.band_log[NB_EBANDS + i]
+            } else {
+                -28.0
+            });
+        }
+        f[start] = e[start];
+        for i in start + 1..end {
+            f[i] = (f[i - 1] + 1.5).min(e[i]);
+        }
+        for i in (start..end - 1).rev() {
+            f[i] = f[i].min(f[i + 1] + 2.0);
+        }
+        let mut budget = (nbytes as i32 * 8) / 6;
+        for i in start..end {
+            let d = e[i] - f[i] - 0.5;
+            if d <= 0.0 {
+                continue;
+            }
+            let width = (c as i32 * (EBANDS[i + 1] - EBANDS[i])) << lm;
+            let quanta = width.min(6.max(width >> BITRES));
+            let n = ((d * 2.0) as i32).min(budget / quanta.max(1));
+            if n > 0 {
+                want[i] = n;
+                budget -= n * quanta;
+            }
+        }
+        want
+    }
+
+    fn alloc_trim(&self, start: usize, end: usize) -> usize {
+        let c = self.channels;
+        let nb = (end - start) as f32;
+        if nb < 2.0 {
+            return 5;
+        }
+        let mid = (start + end - 1) as f32 * 0.5;
+        let (mut num, mut den) = (0f32, 0f32);
+        for ch in 0..c {
+            for i in start..end {
+                let d = i as f32 - mid;
+                num += d * self.band_log[ch * NB_EBANDS + i].max(-14.0);
+                den += d * d;
+            }
+        }
+        let slope = num / den;
+        let trim = 5.0 - (12.0 * slope + 0.15).clamp(-2.0, 2.0);
+        (trim.round() as i32).clamp(0, 10) as usize
+    }
+
+    pub fn analyse(&mut self, pcm: &[f32], n: usize, end: usize) -> Analysis {
+        let lm = lm_of(n);
+        let silent = self.load_input(pcm, n);
+        let transient = lm > 0 && self.transient_analysis(n);
+        self.analyse_bands(n, lm, transient, end);
+        self.analysed = (transient, end);
+        let mut demand = 0f32;
+        for ch in 0..self.channels {
+            for i in 0..end {
+                let w = ((EBANDS[i + 1] - EBANDS[i]) << lm) as f32;
+                demand +=
+                    w * (self.band_amp[ch * NB_EBANDS + i].max(1e-9).log2() - 2.0).clamp(0.0, 16.0);
+            }
+        }
+        Analysis {
+            silent,
+            transient,
+            demand,
+        }
+    }
+
+    pub fn encode_frame(
+        &mut self,
+        n: usize,
+        p: &FrameParams,
+        a: &Analysis,
+        enc: &mut RangeEncoder,
+    ) {
         let c = self.channels;
         let m = self.m;
-        let lm = match n {
-            120 => 0,
-            240 => 1,
-            480 => 2,
-            _ => 3,
-        };
+        let lm = lm_of(n);
         let mm = 1usize << lm;
         let (start, end) = (p.start, p.end);
         let nbytes = p.nbytes;
         let total_bits = nbytes as i32 * 8;
-        let silent = self.load_input(pcm, n);
-        let transient = lm > 0 && self.transient_analysis(n);
+        let silent = a.silent;
+        let transient = a.transient;
 
         let mut tell = enc.tell();
         let silence = if tell >= total_bits {
@@ -223,7 +403,9 @@ impl CeltEncoder {
         } else {
             false
         };
-        self.analyse_bands(n, lm, short_blocks, end);
+        if self.analysed != (short_blocks, end) {
+            self.analyse_bands(n, lm, short_blocks, end);
+        }
         let intra = if tell + 3 <= total_bits {
             let v = self.force_intra;
             enc.bit_logp(v, 3);
@@ -256,6 +438,7 @@ impl CeltEncoder {
         };
 
         let cap = m.init_caps(lm, c);
+        let wants = self.dynalloc(start, end, lm, nbytes);
         let mut offsets = [0i32; NB_EBANDS];
         let mut dynalloc_logp = 6;
         let mut total_frac = total_bits << BITRES;
@@ -265,7 +448,7 @@ impl CeltEncoder {
             let quanta = (width << BITRES).min((6 << BITRES).max(width));
             let mut loop_logp = dynalloc_logp;
             let mut boost = 0;
-            let want = 0;
+            let want = wants[i];
             let mut j = 0;
             while tellf + (loop_logp << BITRES) < total_frac && boost < cap[i] {
                 let flag = j < want;
@@ -284,7 +467,7 @@ impl CeltEncoder {
                 dynalloc_logp = 2.max(dynalloc_logp - 1);
             }
         }
-        let alloc_trim = 5;
+        let alloc_trim = self.alloc_trim(start, end);
         if tellf + (6 << BITRES) <= total_frac {
             enc.icdf(alloc_trim, &TRIM_ICDF, 7);
         }
@@ -299,7 +482,7 @@ impl CeltEncoder {
             prev_coded: self.last_coded,
             signal_bandwidth: end - 1,
             intensity: p.intensity,
-            dual_stereo: false,
+            dual_stereo: self.dual_stereo(n, lm, end),
         };
         let alloc = compute_allocation_enc(
             m,
