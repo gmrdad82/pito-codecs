@@ -200,6 +200,16 @@ The input is 20 s of NASA's public-domain "A Message of Resilience from the Inte
 
 ![Speed against ffmpeg, per job](docs/images/bench-speedup.png)
 
+The chart above shows each job as times faster or slower than ffmpeg, on a log scale centred on the same speed, so 2× slower is as long as 2× faster. The charts below hold the measured values, one chart per unit, pito-codecs and ffmpeg side by side on one axis from zero. Rows marked * or † are not like for like, and each chart says why under it.
+
+![Decode, frames per second](docs/images/bench-decode.png)
+![Encode, frames per second](docs/images/bench-encode.png)
+![Time to first frame, milliseconds](docs/images/bench-first-frame.png)
+![Filmstrip, stills per second](docs/images/bench-filmstrip.png)
+![Smart-cut export, times real time](docs/images/bench-export.png)
+![Scale, frames per second](docs/images/bench-scale.png)
+![Audio, times real time](docs/images/bench-audio.png)
+
 | Job | pito-codecs | ffmpeg | pito-codecs is |
 | --- | --- | --- | --- |
 | H.264 1080p decode, CPU, 1 thread | 327 fps | 567 fps | 1.7× slower |
@@ -253,16 +263,6 @@ The input is 20 s of NASA's public-domain "A Message of Resilience from the Inte
 | EBU R128 loudness, 48 kHz stereo | 2962× real time | 509× real time | 5.8× faster |
 
 \* libx264 is hand-written assembly; our CPU H.264 encoder has no hand-written SIMD yet. † Our export copies the middle of each piece and re-encodes only around each cut, so it is frame-accurate; a stream copy encodes nothing and cuts only on keyframes.
-
-The chart above shows each job as times faster or slower than ffmpeg, on a log scale centred on the same speed, so 2× slower is as long as 2× faster. The charts below hold the measured values, one chart per unit, pito-codecs and ffmpeg side by side on one axis from zero. Rows marked * or † are not like for like, and each chart says why under it.
-
-![Decode, frames per second](docs/images/bench-decode.png)
-![Encode, frames per second](docs/images/bench-encode.png)
-![Time to first frame, milliseconds](docs/images/bench-first-frame.png)
-![Filmstrip, stills per second](docs/images/bench-filmstrip.png)
-![Smart-cut export, times real time](docs/images/bench-export.png)
-![Scale, frames per second](docs/images/bench-scale.png)
-![Audio, times real time](docs/images/bench-audio.png)
 
 ## Roadmap
 
