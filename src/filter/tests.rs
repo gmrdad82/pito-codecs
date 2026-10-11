@@ -804,6 +804,35 @@ fn resample_round_trip_keeps_the_band_and_drops_aliases() {
         .collect();
     let snr = rms_db(&want[edge..40000]) - rms_db(&err);
     assert!(snr > 60.0, "48000 to 47999 SNR {snr:.1} dB");
+
+    for (from, to, ch) in [(44100, 48000, 2u16), (48000, 16000, 1), (48000, 47999, 2)] {
+        let input = AudioBuffer {
+            samples: (0..from as usize * ch as usize / 3)
+                .map(|i| ((i * 7919) % 2003) as f32 / 1001.0 - 1.0)
+                .collect(),
+            rate: from,
+            channels: ch,
+        };
+        let mut rs = Resampler::new(from, to, ch).unwrap();
+        let mut streamed = AudioBuffer::new(to, ch);
+        let mut part = AudioBuffer::new(to, ch);
+        for c in input.samples.chunks(999 * ch as usize) {
+            let piece = AudioBuffer {
+                samples: c.to_vec(),
+                rate: from,
+                channels: ch,
+            };
+            rs.process(&piece, &mut part).unwrap();
+            streamed.samples.extend_from_slice(&part.samples);
+        }
+        rs.flush(&mut part);
+        streamed.samples.extend_from_slice(&part.samples);
+        assert_eq!(
+            resample(&input, to).unwrap().samples,
+            streamed.samples,
+            "{from} to {to}"
+        );
+    }
 }
 
 #[test]
@@ -863,6 +892,44 @@ fn fps_change_drops_and_repeats_by_pts() {
             "{from:?} to {to:?}: gaps"
         );
         assert_eq!(out[0].time_base, conv.time_base());
+    }
+}
+
+#[test]
+fn rotation_matches_a_plain_transpose_at_odd_sizes() {
+    for format in [PixelFormat::Yuv420p8, PixelFormat::Yuv420p10] {
+        let (w, h) = (150usize, 86usize);
+        let mut f = Frame::new(format, w as u32, h as u32, 0, TimeBase::new(1, 30));
+        for p in f.planes.iter_mut() {
+            for (i, v) in p.data.iter_mut().enumerate() {
+                *v = (i * 31 + i / 7) as u8;
+            }
+        }
+        let b = format.bytes_per_sample();
+        for rotation in [Rotation::R90, Rotation::R270] {
+            let mut r = Frame::new(format, 0, 0, 0, f.time_base);
+            rotate(&f, rotation, &mut r).unwrap();
+            for i in 0..3 {
+                let (pw, ph) = if i == 0 { (w, h) } else { (w / 2, h / 2) };
+                let (s, d) = (&f.planes[i], &r.planes[i]);
+                for y in 0..pw {
+                    for x in 0..ph {
+                        let (sy, sx) = match rotation {
+                            Rotation::R90 => (ph - 1 - x, y),
+                            _ => (x, pw - 1 - y),
+                        };
+                        let at = |p: &crate::media::Plane, row: usize, col: usize| {
+                            p.data[row * p.stride + col * b..row * p.stride + col * b + b].to_vec()
+                        };
+                        assert_eq!(
+                            at(d, y, x),
+                            at(s, sy, sx),
+                            "{format:?} {rotation:?} plane {i} at {x},{y}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
