@@ -8,27 +8,47 @@ pito-codecs is a pure Rust library of fast video, audio and image codecs and con
 
 ## Status
 
-`v0.1.0` is the first release. The H.264, H.265, AAC, MP4 and filter parts and the app front are its stable core. The newer formats work and are tested, and they get faster and fuller in each minor release up to `1.0.0`.
+`v1.0.0`: every planned format decodes and encodes, on Linux, Windows and macOS, and the API is settled. Opus speech encoding (SILK and hybrid) is marked experimental below: it decodes clean but doesn't yet sound as good as libopus. It becomes a port of libopus's encoder in `v1.1.0`.
 
 | Part | Decode | Encode |
 | --- | --- | --- |
 | H.264 | CPU: Baseline, Main and High, progressive 8-bit 4:2:0, CAVLC and CABAC, bit-exact with ffmpeg. GPU: VA-API and VideoToolbox for the same profiles, bit-exact. | CPU: Baseline, Main and High with CABAC and B-frames; CRF, QP, CBR and VBR. GPU: VA-API High; VideoToolbox Main and High. |
 | H.265 | CPU: Main and Main 10, tiles and WPP, bit-exact with ffmpeg. GPU: VA-API and VideoToolbox, Main and Main 10, bit-exact. | GPU only: VA-API Main; VideoToolbox Main and Main 10. Without a GPU HEVC encoder it falls back to H.264 and says why. |
-| VP9 | CPU: profiles 0 to 3 (8, 10 and 12-bit; 4:2:0, 4:2:2 and 4:4:4), tiles, bit-exact with ffmpeg and libvpx. | CPU: profile 0, with motion search, trellis, rate control, AQ and tile threads. ffmpeg and libvpx decode it bit-exact to our reconstruction. Still slow. |
+| VP9 | CPU: profiles 0 to 3 (8, 10 and 12-bit; 4:2:0, 4:2:2 and 4:4:4), tiles, bit-exact with ffmpeg and libvpx. | CPU: profile 0, with motion search, trellis, rate control, AQ and tile threads. ffmpeg and libvpx decode it bit-exact to our reconstruction. 59 to 75 fps at 1080p on 32 threads (Ryzen 9 9950X), as fast as libvpx at `good` speed 4 on the same file, at 6.4 % more bits for the same PSNR. |
 | AAC | AAC-LC, mono to 7.1. | AAC-LC, CBR and VBR. |
-| Opus | SILK, CELT, hybrid and multistream; the RFC 8251 conformance vectors decode to the reference's final range on every packet. | CELT, VBR and CBR, 6 to 510 kbps, decoded clean by libopus. SILK and hybrid are in progress. |
+| Opus | SILK, CELT, hybrid and multistream; the RFC 8251 conformance vectors decode to the reference's final range on every packet. | CELT, VBR and CBR, 6 to 510 kbps, decoded clean by libopus, as good as libopus or better at 64 to 128 kbps. **Experimental:** SILK and hybrid for speech decode clean in libopus but sound worse than libopus at low rates until `v1.1.0` ports its SILK encoder. |
 | MP4 and MOV | Tracks, sample tables, rotation, edit lists, fragmented files. | MP4 or MOV, faststart or fragmented; remux of a time range without re-encoding. |
 | MKV and WebM | Tracks, lacing, Cues, seeking. | H.264, HEVC, VP9, Opus and AAC; WebM's codec rules enforced; remux. |
 | GIF | GIF87a and 89a, interlace, disposal, transparency, loops. | Oklab palettes, ordered or Floyd-Steinberg dither, frame differencing. |
-| WebP | Lossless VP8L and lossy VP8, alpha, animation; bit-exact with libwebp. | In progress (lossless first). |
+| WebP | Lossless VP8L and lossy VP8, alpha, animation; bit-exact with libwebp. | Lossless VP8L and lossy VP8, alpha, animation; faster than libwebp at the same quality. |
 | Filters | | Scale (bilinear, bicubic, Lanczos), BT.601/709/2020 colour, rotate, flip, crop, pad, fps change, RGBA overlay, resample, downmix, gain, EBU R128 loudness, true-peak limiter, normalise. |
 
 The GPU route is tested on Linux with VA-API, on an AMD Radeon RX 9060 XT with Mesa's radeonsi driver, and on macOS with VideoToolbox on GitHub's Apple Silicon runners, where CI checks its decode bit-exact with ffmpeg and decodes its encodes back on every push. NVENC (Linux and Windows) and Media Foundation (Windows) compile for their targets and pass their unit tests, but CI's runners have no GPU, so they stay untested until they run on their hardware.
 
-Known gaps in `v0.1.0`, being worked on now:
+## Against ffmpeg
 
-- **CPU decode speed.** Our H.264 and H.265 decoders run at 0.3 to 0.7 times ffmpeg's speed on the CPU; the GPU route is faster than ffmpeg's.
-- **CPU H.264 encode quality and speed.** Our CPU H.264 encoder trails libx264 on both.
+Every number below was measured back to back against the system ffmpeg on the same public clip (the Speed section has the machine, the clip and the command). The charts and the table there show the same results.
+
+Where pito-codecs is faster:
+
+- **Time to first frame:** 8 ms against 150 ms for H.264 1440p on the CPU, about 19× (ffmpeg's time includes starting its process).
+- **Filmstrip stills:** 205 against 26 stills per second, about 7.9×.
+- **Smart-cut export against a full re-encode:** 7.2× against 4.9× real time, about 1.5×, frame-accurate on both sides.
+- **GPU decode (VA-API):** H.264 1.2× (frames on the GPU) and 1.6× (read back), HEVC 1.4×.
+- **GPU encode (VA-API, QP 23, 1440p):** H.264 1.2×, HEVC 1.8×; a GPU transcode 1.1×.
+- **Scaling:** 1440p to 1080p bicubic, about 2.2×.
+- **Loudness:** EBU R128, about 6.0×.
+- **AAC encode:** 128 kbps stereo, about 1.8×.
+
+Where ffmpeg still wins:
+
+- **CPU H.264 decode:** about 1.8× faster than ours (971 against 545 fps at 1080p, all threads).
+- **CPU HEVC decode:** about 2.3× faster (897 against 384 fps at 1080p, all threads).
+- **CPU H.264 encode against x264:** libx264 medium is about 2.3× faster (189 against 83 fps at 1080p), and our encoder needs 35 to 67 % more bits for the same quality.
+- **AAC decode:** about 2.1× faster (1357× against 633× real time).
+- **Smart-cut export against a stream copy:** ffmpeg's copy is about 7.5× faster (54.3× against 7.2× real time), but it cuts only on keyframes, so it isn't frame-accurate.
+- **VP9 encode:** about as fast as libvpx at `good` speed 4 (59 to 75 against 60 to 64 fps at 1080p), but ours needs 6.4 % more bits for the same PSNR.
+- **Opus speech encode (SILK and hybrid, experimental):** it decodes clean but sounds worse than libopus at low rates.
 
 ## What it is
 
@@ -46,7 +66,7 @@ Add it as a git dependency at a tag, with the features you need (all are on by d
 
 ```toml
 [dependencies]
-pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v0.1.2", default-features = false, features = ["h264", "mp4"] }
+pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v1.0.0", default-features = false, features = ["h264", "mp4"] }
 ```
 
 | Feature | What it holds |
@@ -175,14 +195,13 @@ The chart above shows each job as times faster or slower than ffmpeg, on a log s
 
 ## Roadmap
 
-Each minor release up to `1.0.0` lands as its group is finished and measured:
+After `1.0.0`, each of these is a port of a permissively licensed project, proven bit-exact or quality-equal against it, then made faster:
 
-- CPU decode at or past ffmpeg's speed for H.264, H.265 and VP9, with hand-written AVX2 kernels.
-- The CPU H.264 encoder at libx264's quality per bit.
-- VP9 decode through VA-API, and a faster VP9 encoder.
-- Opus SILK and hybrid encode for speech.
-- WebP lossless and lossy encode.
-- `1.0.0` comes when every format here decodes and encodes, the API is settled and these numbers are current.
+- **Opus encoders** from libopus 1.6.1: SILK, CELT and hybrid, so speech matches libopus.
+- **VP9 encoder speed** from libvpx 1.17.0: its realtime mode decision, partitioning, motion search, transforms and rate control.
+- **H.264** from openh264: its decoder's IDCT and intra-prediction SIMD, and its encoder.
+- **HEVC on the CPU** from Kvazaar: an encoder, so H.265 no longer needs a GPU to encode.
+- **VP9 decode** with libvpx's SIMD loop filter, and **HEVC decode** threading after dav1d's patterns.
 
 ## Build and test
 
