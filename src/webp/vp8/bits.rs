@@ -183,38 +183,11 @@ impl BoolEncoder {
         }
     }
 
-    pub fn tree(&mut self, tree: &[i8], probs: &[u8], value: u8) {
-        let mut path = [(0usize, false); 16];
-        let mut len = 0;
-        if !Self::find(tree, 0, value, &mut path, &mut len) {
-            return;
+    #[inline(always)]
+    pub fn code(&mut self, c: &Code, probs: &[u8]) {
+        for k in 0..c.len as usize {
+            self.put((c.bits >> k) & 1 != 0, probs[c.nodes[k] as usize]);
         }
-        for &(i, b) in &path[..len] {
-            self.put(b, probs[i >> 1]);
-        }
-    }
-
-    fn find(
-        tree: &[i8],
-        i: usize,
-        value: u8,
-        path: &mut [(usize, bool); 16],
-        len: &mut usize,
-    ) -> bool {
-        for b in 0..2 {
-            let next = tree[i + b];
-            path[*len] = (i, b == 1);
-            *len += 1;
-            if next <= 0 {
-                if (-next) as u8 == value {
-                    return true;
-                }
-            } else if Self::find(tree, next as usize, value, path, len) {
-                return true;
-            }
-            *len -= 1;
-        }
-        false
     }
 
     pub fn finish(mut self) -> Vec<u8> {
@@ -223,4 +196,65 @@ impl BoolEncoder {
         }
         self.buf
     }
+}
+
+#[derive(Clone, Copy)]
+pub struct Code {
+    pub nodes: [u8; 10],
+    pub bits: u16,
+    pub len: u8,
+}
+
+impl Code {
+    pub fn cost(&self, probs: &[u8]) -> u32 {
+        (0..self.len as usize)
+            .map(|k| {
+                super::tokens::bit_cost((self.bits >> k) & 1 != 0, probs[self.nodes[k] as usize])
+            })
+            .sum()
+    }
+}
+
+pub const fn codes<const N: usize>(tree: &[i8]) -> [Code; N] {
+    let mut out = [Code {
+        nodes: [0; 10],
+        bits: 0,
+        len: 0,
+    }; N];
+    let mut parent = [0usize; 32];
+    let mut k = 0;
+    while k < tree.len() {
+        if tree[k] > 0 {
+            parent[tree[k] as usize] = k;
+        }
+        k += 1;
+    }
+    k = 0;
+    while k < tree.len() {
+        if tree[k] <= 0 {
+            let mut up = [0usize; 10];
+            let mut n = 0;
+            let mut p = k;
+            loop {
+                up[n] = p;
+                n += 1;
+                let node = p & !1;
+                if node == 0 {
+                    break;
+                }
+                p = parent[node];
+            }
+            let c = &mut out[(-tree[k]) as usize];
+            c.len = n as u8;
+            let mut j = 0;
+            while j < n {
+                let q = up[n - 1 - j];
+                c.nodes[j] = (q >> 1) as u8;
+                c.bits |= ((q & 1) as u16) << j;
+                j += 1;
+            }
+        }
+        k += 1;
+    }
+    out
 }
