@@ -98,5 +98,9 @@ jobs:
           tool: nextest
       - run: ffmpeg -hide_banner -version | head -1
       - run: cargo nextest run --cargo-profile ci --all-targets --no-fail-fast
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld
       - run: cargo test --profile ci --doc
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld
       - run: cargo build --release
