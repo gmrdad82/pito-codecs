@@ -1539,7 +1539,7 @@ fn mark(id: &str) -> &'static str {
     }
 }
 
-const X264_NOTE: &str = "* NOT LIKE FOR LIKE: LIBX264 RUNS HAND-WRITTEN ASSEMBLY, WHILE OUR CPU H.264 ENCODER IS PLAIN RUST WITH NO SIMD YET.";
+const X264_NOTE: &str = "* NOT LIKE FOR LIKE: LIBX264 RUNS HAND-WRITTEN ASSEMBLY, WHILE OUR CPU H.264 ENCODER IS RUST WITH NO HAND-WRITTEN SIMD YET.";
 const CUT_NOTE: &str = "† NOT LIKE FOR LIKE: OUR EXPORT IS FRAME-ACCURATE; IT COPIES THE MIDDLE OF EACH PIECE AND RE-ENCODES THE FRAMES BETWEEN EACH CUT AND ITS NEAREST KEYFRAME (540 OF 780 FRAMES AT 1080P HERE). FFMPEG'S STREAM COPY ENCODES NOTHING AND CUTS ON KEYFRAMES, SO IT IS NOT FRAME-ACCURATE. FFMPEG'S RE-ENCODE IS FRAME-ACCURATE AND RE-ENCODES EVERY FRAME WITH LIBX264 VERYFAST, CRF 18.";
 
 fn strip(label: &str, word: &str) -> String {
@@ -1660,9 +1660,6 @@ fn charts(rows: &[Row], images: &Path, machine: &Machine, date: &str) -> Res<()>
         .iter()
         .filter(|r| r.ours.is_some() && r.ffmpeg.is_some() && r.speedup.is_some())
         .collect();
-    for old in ["bench-pipeline.png"] {
-        let _ = fs::remove_file(images.join(old));
-    }
     for spec in &specs {
         let mut picked: Vec<&Row> = done
             .iter()

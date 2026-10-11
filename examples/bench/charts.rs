@@ -149,7 +149,7 @@ type Res = Result<(), Box<dyn std::error::Error>>;
 const WIDTH: i64 = 1080;
 const LEFT: i64 = 40;
 const ROW: i64 = 124;
-const RATIO_ROW: i64 = 72;
+const RATIO_ROW: i64 = 66;
 const GROUP: i64 = 50;
 const NOTE: i64 = 30;
 
@@ -404,6 +404,9 @@ pub fn ratios(
             let r = t.powf(side);
             let gx = x(r);
             grid.push((gx, t == 1.0));
+            if !(t <= 2.0 || t == bound || t.log10().fract() == 0.0) {
+                continue;
+            }
             let (a, b) = if t == 1.0 {
                 ("1×".to_string(), "SAME")
             } else {
@@ -433,16 +436,16 @@ pub fn ratios(
         for &(gx, one) in &grid {
             c.rect(
                 gx,
-                y + 26,
+                y + 24,
                 if one { 2 } else { 1 },
-                30,
+                28,
                 if one { DIM } else { GRID },
             );
         }
         c.text(LEFT, y, &e.label, 3, TEXT);
         let (x0, x1) = (x(1.0), x(e.speedup));
         let colour = if e.speedup >= 1.0 { FASTER } else { SLOWER };
-        c.rect(x0.min(x1), y + 30, (x1 - x0).abs().max(2), 22, colour);
+        c.rect(x0.min(x1), y + 27, (x1 - x0).abs().max(2), 22, colour);
         let tag = format!("{}×", number(e.speedup.max(1.0 / e.speedup)));
         let tw = Canvas::text_width(&tag, 3);
         let tx = if e.speedup >= 1.0 {
@@ -450,7 +453,7 @@ pub fn ratios(
         } else {
             x1.min(x0) - 10 - tw
         };
-        c.text(tx, y + 31, &tag, 3, TEXT);
+        c.text(tx, y + 28, &tag, 3, TEXT);
     }
     for (i, line) in notes.iter().enumerate() {
         c.text(LEFT, bottom + 30 + i as i64 * NOTE, line, 3, DIM);
