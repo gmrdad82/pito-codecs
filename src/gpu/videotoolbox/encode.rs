@@ -17,7 +17,7 @@ use objc2_core_video::{
     kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey,
 };
 use objc2_video_toolbox::{
-    VTCompressionSession, VTEncodeInfoFlags, VTSessionSetProperty,
+    VTCompressionSession, VTEncodeInfoFlags, VTPixelTransferSession, VTSessionSetProperty,
     kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AllowOpenGOP,
     kVTCompressionPropertyKey_AverageBitRate, kVTCompressionPropertyKey_DataRateLimits,
     kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
@@ -30,7 +30,7 @@ use objc2_video_toolbox::{
 
 use super::{Locked, NV12_VIDEO, P010_VIDEO, codec_type, label, planes};
 use crate::gpu::nal;
-use crate::gpu::{Bitstream, EncoderConfig, Profile, Rate};
+use crate::gpu::{Bitstream, EncoderConfig, GpuFrame, Profile, Rate};
 use crate::media::{Codec, Error, Frame, Packet, PixelFormat, Result, TimeBase};
 
 enum Output {
@@ -414,7 +414,60 @@ pub struct VtEncoder {
     extradata: Option<Vec<u8>>,
     time_base: Option<TimeBase>,
     queued: VecDeque<i64>,
+    scaler: Option<Scaler>,
     submitted: u64,
+}
+
+struct Scaler {
+    session: CFRetained<VTPixelTransferSession>,
+    source: CFRetained<CVImageBuffer>,
+    size: (u32, u32),
+}
+
+impl Scaler {
+    fn new(size: (u32, u32), pixel_format: u32) -> Result<Self> {
+        let mut raw: *mut VTPixelTransferSession = std::ptr::null_mut();
+        let status = unsafe { VTPixelTransferSession::create(None, NonNull::from(&mut raw)) };
+        let session = NonNull::new(raw).filter(|_| status == 0).ok_or_else(|| {
+            Error::Backend(format!("cannot open a VideoToolbox scaler ({status})"))
+        })?;
+        let session = unsafe { CFRetained::from_raw(session) };
+        let pf = CFNumber::new_i32(pixel_format as i32);
+        let io = CFDictionary::<CFString, CFType>::from_slices(&[], &[]);
+        let keys: [&CFString; 2] = unsafe {
+            [
+                kCVPixelBufferPixelFormatTypeKey,
+                kCVPixelBufferIOSurfacePropertiesKey,
+            ]
+        };
+        let attrs =
+            CFDictionary::<CFString, CFType>::from_slices(&keys, &[pf.as_ref(), io.as_ref()]);
+        let mut raw: *mut CVImageBuffer = std::ptr::null_mut();
+        let status = unsafe {
+            CVPixelBufferCreate(
+                None,
+                size.0 as usize,
+                size.1 as usize,
+                pixel_format,
+                Some(attrs.as_ref()),
+                NonNull::from(&mut raw),
+            )
+        };
+        let source = NonNull::new(raw).filter(|_| status == 0).ok_or_else(|| {
+            Error::Backend(format!("cannot allocate a scaler input buffer ({status})"))
+        })?;
+        Ok(Self {
+            session,
+            source: unsafe { CFRetained::from_raw(source) },
+            size,
+        })
+    }
+}
+
+impl Drop for Scaler {
+    fn drop(&mut self) {
+        unsafe { self.session.invalidate() };
+    }
 }
 
 unsafe impl Send for VtEncoder {}
@@ -539,6 +592,7 @@ impl VtEncoder {
             extradata: None,
             time_base: None,
             queued: VecDeque::new(),
+            scaler: None,
             submitted: 0,
         })
     }
@@ -587,6 +641,44 @@ impl VtEncoder {
                 self.width, self.height, self.format, frame.width, frame.height, frame.format
             )));
         }
+        self.submit(frame)
+    }
+
+    pub fn encode_gpu(&mut self, frame: &GpuFrame) -> Result<Vec<Packet>> {
+        let frame = frame.download()?;
+        if frame.format != self.format {
+            return Err(Error::Invalid(format!(
+                "the encoder takes {:?} frames, not {:?}",
+                self.format, frame.format
+            )));
+        }
+        self.submit(&frame)
+    }
+
+    fn scale(&mut self, frame: &Frame, target: &CVImageBuffer) -> Result<()> {
+        let size = (frame.width, frame.height);
+        if self.scaler.as_ref().is_none_or(|s| s.size != size) {
+            self.scaler = Some(Scaler::new(size, self.pixel_format)?);
+        }
+        let Some(scaler) = self.scaler.as_ref() else {
+            return Err(Error::Backend("no VideoToolbox scaler".into()));
+        };
+        {
+            let mut lock = Locked::new(&scaler.source, CVPixelBufferLockFlags(0))?;
+            let (luma, chroma) = lock.planes_mut()?;
+            planes::from_planar(frame, luma, chroma).map_err(Error::Backend)?;
+        }
+        let status = unsafe { scaler.session.transfer_image(&scaler.source, target) };
+        if status != 0 {
+            return Err(Error::Backend(format!(
+                "VideoToolbox could not scale {}x{} to {}x{} ({status})",
+                size.0, size.1, self.width, self.height
+            )));
+        }
+        Ok(())
+    }
+
+    fn submit(&mut self, frame: &Frame) -> Result<Vec<Packet>> {
         let tb = *self.time_base.get_or_insert(frame.time_base);
         let timescale = i32::try_from(tb.den)
             .ok()
@@ -598,10 +690,12 @@ impl VtEncoder {
             .ok_or_else(|| Error::Invalid(format!("pts {} out of range", frame.pts)))?;
         let pts = valid_time(value, timescale);
         let buffer = self.buffer()?;
-        {
+        if (frame.width, frame.height) == (self.width, self.height) {
             let mut lock = Locked::new(&buffer, CVPixelBufferLockFlags(0))?;
             let (luma, chroma) = lock.planes_mut()?;
             planes::from_planar(frame, luma, chroma).map_err(Error::Backend)?;
+        } else {
+            self.scale(frame, &buffer)?;
         }
         let refcon = std::ptr::without_provenance_mut::<c_void>(frame.pts as isize as usize);
         let status = unsafe {

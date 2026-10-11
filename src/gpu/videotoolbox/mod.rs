@@ -10,7 +10,7 @@ use objc2_core_video::{
     CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
 };
 
-use crate::gpu::{Backend, DecoderBackend, Direction, EncoderBackend, EncoderConfig};
+use crate::gpu::{Backend, DecoderBackend, Direction, EncoderBackend, EncoderConfig, GpuFrame};
 use crate::media::{Codec, Error, Frame, Packet, Result};
 
 use decode::VtDecoder;
@@ -153,6 +153,10 @@ impl EncoderBackend for VtEncoder {
 
     fn encode(&mut self, frame: &Frame) -> Result<Vec<Packet>> {
         VtEncoder::encode(self, frame)
+    }
+
+    fn encode_gpu(&mut self, frame: &GpuFrame) -> Result<Vec<Packet>> {
+        VtEncoder::encode_gpu(self, frame)
     }
 
     fn flush(&mut self) -> Result<Vec<Packet>> {
