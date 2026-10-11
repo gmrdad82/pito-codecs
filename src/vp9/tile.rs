@@ -1095,10 +1095,11 @@ impl<'a, P: Pixel> TileDecoder<'a, P> {
         let mut context_counter = 0usize;
         let search = &MV_REF_BLOCKS[b.size as usize * 16..b.size as usize * 16 + 16];
         let (r, c) = (b.r as isize, b.c as isize);
+        let mi: &'a MiGrid = self.s.mi;
         for i in 0..2 {
             let (cr, cc) = (r + search[i * 2] as isize, c + search[i * 2 + 1] as isize);
             if self.is_inside(cr, cc) {
-                let m = *self.mi_at(cr as usize, cc as usize);
+                let m = mi.at(cr as usize, cc as usize);
                 different_ref_found = true;
                 context_counter += MODE_2_COUNTER[m.y_mode as usize] as usize;
                 for j in 0..2 {
@@ -1120,24 +1121,24 @@ impl<'a, P: Pixel> TileDecoder<'a, P> {
             let (cr, cc) = (r + search[i * 2] as isize, c + search[i * 2 + 1] as isize);
             if self.is_inside(cr, cc) {
                 different_ref_found = true;
-                let m = *self.mi_at(cr as usize, cc as usize);
-                self.if_same_ref_frame_add(&m, ref_frame);
+                let m = mi.at(cr as usize, cc as usize);
+                self.if_same_ref_frame_add(m, ref_frame);
             }
         }
-        let prev = self.s.prev_mi.map(|g| *g.at(b.r, b.c));
-        if let Some(p) = &prev {
+        let prev: Option<&'a MiInfo> = self.s.prev_mi.map(|g| g.at(b.r, b.c));
+        if let Some(p) = prev {
             self.if_same_ref_frame_add(p, ref_frame);
         }
         if different_ref_found {
             for i in 0..8 {
                 let (cr, cc) = (r + search[i * 2] as isize, c + search[i * 2 + 1] as isize);
                 if self.is_inside(cr, cc) {
-                    let m = *self.mi_at(cr as usize, cc as usize);
-                    self.if_diff_ref_frame_add(&m, ref_frame);
+                    let m = mi.at(cr as usize, cc as usize);
+                    self.if_diff_ref_frame_add(m, ref_frame);
                 }
             }
         }
-        if let Some(p) = &prev {
+        if let Some(p) = prev {
             self.if_diff_ref_frame_add(p, ref_frame);
         }
         self.mode_context[ref_frame as usize] = COUNTER_TO_CONTEXT[context_counter.min(18)];
