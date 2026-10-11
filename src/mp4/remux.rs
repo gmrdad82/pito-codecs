@@ -1,6 +1,7 @@
 use crate::media::{Error, Result};
 use crate::mp4::reader::{Edit, Reader, Track, TrackKind};
 use crate::mp4::source::ByteSource;
+use crate::mp4::truncated;
 use crate::mp4::writer::{Brand, Options, TrackConfig, Writer};
 use std::io::{self, Seek, SeekFrom, Write};
 use std::ops::Range;
@@ -33,7 +34,7 @@ fn presentation(t: &Track, i: usize) -> i64 {
 
 fn track_end(t: &Track) -> i64 {
     (0..t.samples.len())
-        .map(|i| presentation(t, i) + t.samples[i].duration as i64)
+        .map(|i| presentation(t, i).saturating_add(t.samples[i].duration as i64))
         .max()
         .unwrap_or(0)
 }
@@ -68,7 +69,7 @@ fn video_range(t: &Track, from: f64, to: f64, snap: Snap) -> Result<(Range<usize
                 .map_or(n, |j| keys[j]);
             let a = keys[ja];
             let copied_end = (a..b)
-                .map(|i| presentation(t, i) + t.samples[i].duration as i64)
+                .map(|i| presentation(t, i).saturating_add(t.samples[i].duration as i64))
                 .max()
                 .unwrap_or(0);
             Ok((a..b, from_t.max(presentation(t, a)), to_t.min(copied_end)))
@@ -99,7 +100,7 @@ fn audio_range(t: &Track, start: f64, end: f64) -> Range<usize> {
     let (s, e) = (t.ticks(start), t.ticks(end));
     let n = t.samples.len();
     let first = (0..n)
-        .position(|i| presentation(t, i) + t.samples[i].duration as i64 > s)
+        .position(|i| presentation(t, i).saturating_add(t.samples[i].duration as i64) > s)
         .unwrap_or(n);
     let first = if first < n && presentation(t, first) < s {
         first.saturating_sub(1)
@@ -169,6 +170,7 @@ fn copy_run<S: ByteSource, W: Write + Seek>(
         .samples
         .get(range.clone())
         .ok_or_else(|| Error::Invalid(format!("no samples {range:?} in track {track}")))?;
+    let len = reader.source().len();
     let mut entry = None;
     let mut i = 0;
     while i < samples.len() {
@@ -179,7 +181,10 @@ fn copy_run<S: ByteSource, W: Write + Seek>(
             && samples[j].offset == end
             && (j == i || end - start + samples[j].size as u64 <= RUN)
         {
-            end += samples[j].size as u64;
+            end = end
+                .checked_add(samples[j].size as u64)
+                .filter(|&e| e <= len)
+                .ok_or_else(|| truncated("sample data"))?;
             j += 1;
         }
         buf.resize((end - start) as usize, 0);
@@ -196,8 +201,8 @@ fn copy_run<S: ByteSource, W: Write + Seek>(
             writer.push_sample(
                 dst,
                 &buf[at..at + size],
-                s.pts + shift,
-                s.dts + shift,
+                s.pts.saturating_add(shift),
+                s.dts.saturating_add(shift),
                 s.duration,
                 s.keyframe,
             )?;
@@ -251,7 +256,10 @@ fn feed<S: ByteSource, W: Write + Seek>(
         }
         let mut cfg = TrackConfig::from_track(t)?;
         let origin = t.samples[range.start].dts;
-        let start = t.ticks(cut.span.start) - t.edit_offset - origin;
+        let start = t
+            .ticks(cut.span.start)
+            .saturating_sub(t.edit_offset)
+            .saturating_sub(origin);
         cfg.edits = vec![Edit {
             segment_duration: segment,
             media_time: start.max(0),
@@ -267,10 +275,11 @@ fn feed<S: ByteSource, W: Write + Seek>(
     let mut window = INTERLEAVE;
     loop {
         let mut left = false;
+        let mut ahead = f64::INFINITY;
         for (ti, range, dst, origin, next) in &mut lanes {
             let t = &reader.tracks[*ti];
             let stop = (*next..range.end)
-                .find(|&i| t.seconds(t.samples[i].dts - *origin) >= window)
+                .find(|&i| t.seconds(t.samples[i].dts.saturating_sub(*origin)) >= window)
                 .unwrap_or(range.end);
             if stop > *next {
                 copy_run(
@@ -285,12 +294,15 @@ fn feed<S: ByteSource, W: Write + Seek>(
                 )?;
                 *next = stop;
             }
-            left |= *next < range.end;
+            if *next < range.end {
+                left = true;
+                ahead = ahead.min(t.seconds(t.samples[*next].dts.saturating_sub(*origin)));
+            }
         }
         if !left {
             return Ok(());
         }
-        window += INTERLEAVE;
+        window = (window + INTERLEAVE).max(ahead);
     }
 }
 

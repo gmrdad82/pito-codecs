@@ -22,7 +22,11 @@ fn generate(name: &str, seconds: u32, video: &[&str]) -> PathBuf {
     if path.exists() {
         return path;
     }
-    let tmp = dir().join(format!(".{}-{name}", std::process::id()));
+    let tmp = dir().join(format!(
+        ".{}-{:?}-{name}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
     let st = Command::new("ffmpeg")
         .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
         .arg(format!("testsrc2=size=320x240:rate=30:duration={seconds}"))

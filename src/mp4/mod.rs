@@ -26,4 +26,6 @@ pub(crate) fn too_large(what: &str) -> Error {
 }
 
 #[cfg(test)]
+mod malformed;
+#[cfg(test)]
 mod tests;

@@ -75,6 +75,7 @@ pub struct MbState {
     pub cbf_dc: u8,
     pub nz_mask: u16,
     pub ref_idx: [[i8; 4]; 2],
+    pub ids: [[u32; 4]; 2],
     pub mv: [[[i16; 2]; 16]; 2],
     pub mvd: [[[u8; 2]; 16]; 2],
     pub direct8x8: u8,
@@ -103,6 +104,7 @@ impl Default for MbState {
             cbf_dc: 0,
             nz_mask: 0,
             ref_idx: [[-1; 4]; 2],
+            ids: [[u32::MAX; 4]; 2],
             mv: [[[0; 2]; 16]; 2],
             mvd: [[[0; 2]; 16]; 2],
             direct8x8: 0,
@@ -110,11 +112,62 @@ impl Default for MbState {
     }
 }
 
-pub struct FrameRow {
-    pub mv: [Box<[[i16; 2]]>; 2],
-    pub ref_idx: [Box<[i8]>; 2],
-    pub ref_id: [Box<[u32]>; 2],
-    pub intra: Box<[bool]>,
+#[derive(Clone, Copy)]
+pub struct ColMb {
+    pub mv: [[[i16; 2]; 16]; 2],
+    pub ref_id: [[u32; 4]; 2],
+    pub ref_idx: [[i8; 4]; 2],
+    pub intra: bool,
+}
+
+const COL_INTRA: ColMb = ColMb {
+    mv: [[[0; 2]; 16]; 2],
+    ref_id: [[u32::MAX; 4]; 2],
+    ref_idx: [[-1; 4]; 2],
+    intra: true,
+};
+
+struct Motion {
+    ptr: *mut ColMb,
+    len: usize,
+    cap: usize,
+}
+
+unsafe impl Send for Motion {}
+
+unsafe impl Sync for Motion {}
+
+impl Motion {
+    fn from_vec(v: Vec<ColMb>) -> Self {
+        let mut v = std::mem::ManuallyDrop::new(v);
+        Motion {
+            ptr: v.as_mut_ptr(),
+            len: v.len(),
+            cap: v.capacity(),
+        }
+    }
+
+    fn into_vec(self) -> Vec<ColMb> {
+        let v = unsafe { Vec::from_raw_parts(self.ptr, self.len, self.cap) };
+        std::mem::forget(self);
+        v
+    }
+
+    unsafe fn set(&self, at: usize, v: ColMb) {
+        assert!(at < self.len);
+        unsafe { self.ptr.add(at).write(v) }
+    }
+
+    unsafe fn get(&self, at: usize) -> &ColMb {
+        assert!(at < self.len);
+        unsafe { &*self.ptr.add(at) }
+    }
+}
+
+impl Drop for Motion {
+    fn drop(&mut self) {
+        drop(unsafe { Vec::from_raw_parts(self.ptr, self.len, self.cap) });
+    }
 }
 
 pub struct Frame {
@@ -128,7 +181,8 @@ pub struct Frame {
     y: SharedPlane,
     cb: SharedPlane,
     cr: SharedPlane,
-    rows: Box<[OnceLock<FrameRow>]>,
+    rows: Box<[OnceLock<()>]>,
+    motion: Motion,
     pool: Option<Arc<FramePool>>,
     output: Mutex<Option<Output3>>,
     has_output: AtomicBool,
@@ -136,20 +190,25 @@ pub struct Frame {
 }
 
 #[derive(Default)]
-pub struct FramePool(Mutex<Vec<[SharedPlane; 3]>>);
+pub struct FramePool(Mutex<Vec<([SharedPlane; 3], Vec<ColMb>)>>);
 
 impl FramePool {
-    fn take(&self, luma: usize) -> [SharedPlane; 3] {
+    fn take(&self, luma: usize, mbs: usize) -> ([SharedPlane; 3], Vec<ColMb>) {
         let reused = self.0.lock().ok().and_then(|mut v| {
-            let i = v.iter().position(|p| p[0].len == luma)?;
+            let i = v
+                .iter()
+                .position(|p| p.0[0].len == luma && p.1.len() == mbs)?;
             Some(v.swap_remove(i))
         });
         reused.unwrap_or_else(|| {
-            [
-                SharedPlane::new(luma),
-                SharedPlane::new(luma / 4),
-                SharedPlane::new(luma / 4),
-            ]
+            (
+                [
+                    SharedPlane::new(luma),
+                    SharedPlane::new(luma / 4),
+                    SharedPlane::new(luma / 4),
+                ],
+                vec![COL_INTRA; mbs],
+            )
         })
     }
 }
@@ -160,16 +219,21 @@ impl Drop for Frame {
             .iter_mut()
             .all(|p| !*p.taken.get_mut() && p.len > 0);
         if whole
+            && self.motion.len > 0
             && let Some(pool) = self.pool.take()
             && let Ok(mut v) = pool.0.lock()
             && v.len() < 64
         {
             let empty = || SharedPlane::from_vec(Vec::new());
-            v.push([
-                std::mem::replace(&mut self.y, empty()),
-                std::mem::replace(&mut self.cb, empty()),
-                std::mem::replace(&mut self.cr, empty()),
-            ]);
+            let motion = std::mem::replace(&mut self.motion, Motion::from_vec(Vec::new()));
+            v.push((
+                [
+                    std::mem::replace(&mut self.y, empty()),
+                    std::mem::replace(&mut self.cb, empty()),
+                    std::mem::replace(&mut self.cr, empty()),
+                ],
+                motion.into_vec(),
+            ));
         }
     }
 }
@@ -318,14 +382,21 @@ impl SharedPlane {
     }
 
     #[inline(always)]
-    fn prefetch(&self, at: usize) {
+    fn prefetch_rows(&self, at: usize, stride: usize, rows: usize, span: usize) {
         #[cfg(target_arch = "x86_64")]
-        if at < self.len {
+        if rows > 0 && at + (rows - 1) * stride + span <= self.len {
             use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
-            unsafe { _mm_prefetch::<_MM_HINT_T0>(self.ptr.add(at).cast_const().cast()) };
+            let mut p = unsafe { self.ptr.add(at) }.cast_const();
+            for _ in 0..rows {
+                unsafe { _mm_prefetch::<_MM_HINT_T0>(p.cast()) };
+                if (p as usize & 63) + span > 64 {
+                    unsafe { _mm_prefetch::<_MM_HINT_T0>(p.add(span - 1).cast()) };
+                }
+                p = p.wrapping_add(stride);
+            }
         }
         #[cfg(not(target_arch = "x86_64"))]
-        let _ = at;
+        let _ = (at, stride, rows, span);
     }
 
     fn writer(&self) -> PlaneMut {
@@ -359,9 +430,9 @@ impl Frame {
         pool: &Arc<FramePool>,
         bufs: Option<[Vec<u8>; 3]>,
     ) -> Self {
-        let [y, cb, cr] = match bufs {
-            Some(b) => b.map(SharedPlane::from_vec),
-            None => pool.take(mb_w * 16 * mb_h * 16),
+        let ([y, cb, cr], motion) = match bufs {
+            Some(b) => (b.map(SharedPlane::from_vec), Vec::new()),
+            None => pool.take(mb_w * 16 * mb_h * 16, mb_w * mb_h),
         };
         Frame {
             id,
@@ -375,6 +446,7 @@ impl Frame {
             cb,
             cr,
             rows: (0..mb_h).map(|_| OnceLock::new()).collect(),
+            motion: Motion::from_vec(motion),
             pool: Some(pool.clone()),
             output: Mutex::new(None),
             has_output: AtomicBool::new(false),
@@ -418,11 +490,23 @@ impl Frame {
         }
     }
 
-    pub fn publish(&self, r: usize, row: FrameRow) {
-        let _ = self.rows[r].set(row);
+    pub fn publish(&self, r: usize, mbs: Option<&[MbState]>) {
+        if self.rows[r].get().is_some() {
+            return;
+        }
+        if self.motion.len > 0 {
+            for x in 0..self.mb_w {
+                let v = match mbs.and_then(|m| m.get(x)) {
+                    Some(st) => col_mb(st),
+                    None => COL_INTRA,
+                };
+                unsafe { self.motion.set(r * self.mb_w + x, v) };
+            }
+        }
+        let _ = self.rows[r].set(());
     }
 
-    pub fn fill(&self, r: usize, planes: &Planes, row: FrameRow) {
+    pub fn fill(&self, r: usize, planes: &Planes) {
         if self.rows[r].get().is_some() {
             return;
         }
@@ -433,7 +517,7 @@ impl Frame {
             self.cb.write(co, &planes.cb[co..co + 8 * cw]);
             self.cr.write(co, &planes.cr[co..co + 8 * cw]);
         }
-        let _ = self.rows[r].set(row);
+        self.publish(r, None);
     }
 
     #[inline]
@@ -458,72 +542,31 @@ impl Frame {
     }
 
     #[inline]
-    pub fn row(&self, r: usize) -> &FrameRow {
-        self.rows[r].wait()
+    pub fn col_mb(&self, r: usize, mb: usize) -> Option<&ColMb> {
+        if self.motion.len == 0 || mb >= self.mb_w {
+            return None;
+        }
+        self.rows.get(r)?.wait();
+        Some(unsafe { self.motion.get(r * self.mb_w + mb) })
     }
 
     pub fn prefetch_motion(&self, r: usize, mb: usize) {
-        let Some(m) = self.rows.get(r).and_then(|row| row.get()) else {
+        if self.motion.len == 0
+            || mb >= self.mb_w
+            || self.rows.get(r).and_then(|row| row.get()).is_none()
+        {
             return;
-        };
-        prefetch_ptr(m.intra.get(mb));
-        for l in 0..2 {
-            prefetch_ptr(m.mv[l].get(mb * 16));
-            prefetch_ptr(m.ref_idx[l].get(mb * 4));
-            prefetch_ptr(m.ref_id[l].get(mb * 4));
+        }
+        let m = unsafe { self.motion.get(r * self.mb_w + mb) };
+        let p = (m as *const ColMb).cast::<u8>();
+        for k in 0..3 {
+            prefetch_ptr(Some(unsafe { &*p.add(k * 64) }));
         }
     }
 
     pub fn wait_complete(&self) {
-        for r in 0..self.rows.len() {
-            self.row(r);
-        }
-    }
-
-    pub fn empty_row() -> FrameRow {
-        FrameRow {
-            mv: [Box::new([]), Box::new([])],
-            ref_idx: [Box::new([]), Box::new([])],
-            ref_id: [Box::new([]), Box::new([])],
-            intra: Box::new([]),
-        }
-    }
-
-    pub fn make_row(
-        mb_w: usize,
-        r: usize,
-        mbs: &[MbState],
-        ref_ids: &dyn Fn(&MbState, usize, i8) -> u32,
-    ) -> FrameRow {
-        let row_mbs = &mbs[r * mb_w..(r + 1) * mb_w];
-        let mut mv = [vec![[0i16; 2]; mb_w * 16], vec![[0i16; 2]; mb_w * 16]];
-        let mut ref_idx = [vec![-1i8; mb_w * 4], vec![-1i8; mb_w * 4]];
-        let mut ref_id = [vec![u32::MAX; mb_w * 4], vec![u32::MAX; mb_w * 4]];
-        let mut intra = vec![true; mb_w];
-        for (x, st) in row_mbs.iter().enumerate() {
-            if st.slice_num == u32::MAX {
-                continue;
-            }
-            intra[x] = st.kind.is_intra();
-            for l in 0..2 {
-                mv[l][x * 16..x * 16 + 16].copy_from_slice(&st.mv[l]);
-                for b in 0..4 {
-                    let ri = st.ref_idx[l][b];
-                    ref_idx[l][x * 4 + b] = ri;
-                    if ri >= 0 {
-                        ref_id[l][x * 4 + b] = ref_ids(st, l, ri);
-                    }
-                }
-            }
-        }
-        let [mv0, mv1] = mv;
-        let [ri0, ri1] = ref_idx;
-        let [id0, id1] = ref_id;
-        FrameRow {
-            mv: [mv0.into(), mv1.into()],
-            ref_idx: [ri0.into(), ri1.into()],
-            ref_id: [id0.into(), id1.into()],
-            intra: intra.into(),
+        for r in self.rows.iter() {
+            r.wait();
         }
     }
 
@@ -531,32 +574,26 @@ impl Frame {
         let (mb_w, mb_h) = (planes.width / 16, planes.height / 16);
         let mut f = Frame::new(id, poc, mb_w, mb_h, pool, None);
         f.job_output = false;
-        let blank = vec![MbState::default(); mb_w * mb_h];
         for r in 0..mb_h {
-            f.fill(
-                r,
-                planes,
-                Frame::make_row(mb_w, r, &blank, &|_, _, _| u32::MAX),
-            );
+            f.fill(r, planes);
         }
         f
     }
 
     pub fn prefetch(&self, x0: i32, y0: i32) {
         let (width, height) = (self.width as i32, self.height as i32);
-        let x = (x0 - 2).clamp(0, width - 1) as usize;
-        for r in 0..21 {
-            let o = (y0 - 2 + r).clamp(0, height - 1) as usize * self.width + x;
-            self.y.prefetch(o);
-            self.y.prefetch(o + 20);
+        if width < 21 || height < 21 {
+            return;
         }
+        let x = (x0 - 2).clamp(0, width - 21) as usize;
+        let y = (y0 - 2).clamp(0, height - 21) as usize;
+        self.y.prefetch_rows(y * self.width + x, self.width, 21, 21);
         let (cw, ch) = (self.cwidth as i32, self.cheight as i32);
-        let cx = (x0 >> 1).clamp(0, cw - 1) as usize;
-        for r in 0..9 {
-            let o = ((y0 >> 1) + r).clamp(0, ch - 1) as usize * self.cwidth + cx;
-            self.cb.prefetch(o);
-            self.cr.prefetch(o);
-        }
+        let cx = (x0 >> 1).clamp(0, cw - 9) as usize;
+        let cy = (y0 >> 1).clamp(0, ch - 9) as usize;
+        let o = cy * self.cwidth + cx;
+        self.cb.prefetch_rows(o, self.cwidth, 9, 9);
+        self.cr.prefetch_rows(o, self.cwidth, 9, 9);
     }
 
     #[inline]
@@ -621,6 +658,30 @@ impl Frame {
             }
         }
         (y, u, v)
+    }
+}
+
+#[inline(always)]
+pub fn mv_bits(m: [i16; 2]) -> u32 {
+    m[0] as u16 as u32 | (m[1] as u16 as u32) << 16
+}
+
+#[inline(always)]
+pub fn uniform_mv(mv: &[[i16; 2]; 16]) -> bool {
+    let first = mv_bits(mv[0]);
+    mv.iter().fold(true, |ok, &m| ok & (mv_bits(m) == first))
+}
+
+#[inline(always)]
+fn col_mb(st: &MbState) -> ColMb {
+    if st.slice_num == u32::MAX || st.kind.is_intra() {
+        return COL_INTRA;
+    }
+    ColMb {
+        mv: st.mv,
+        ref_id: st.ids,
+        ref_idx: st.ref_idx,
+        intra: false,
     }
 }
 
