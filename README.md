@@ -46,7 +46,7 @@ Known gaps in `v0.1.0`, being worked on now:
 
 ### pcod, the command line
 
-Each [GitHub Release](https://github.com/gmrdad82/pito-codecs/releases/latest) carries pcod for Linux x86-64, Windows x86-64 and macOS on Apple Silicon. Each archive holds the binary, `LICENSE` and `README.md`, and `SHA256SUMS` lists every archive's checksum. Set `v` to the latest release's tag, then download, unpack and put pcod on your `PATH`.
+Each [GitHub Release](https://github.com/gmrdad82/pito-codecs/releases/latest) carries pcod for Linux x86-64, Windows x86-64 and macOS on Apple Silicon. Each archive holds the binary, `LICENSE`, `README.md` and `NOTICE`, and `SHA256SUMS` lists every archive's checksum. Set `v` to the latest release's tag, then download, unpack and put pcod on your `PATH`.
 
 Linux x86-64:
 

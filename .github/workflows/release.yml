@@ -61,13 +61,13 @@ jobs:
           mkdir -p stage dist
           bin=pcod
           if [ "$RUNNER_OS" = "Windows" ]; then bin=pcod.exe; fi
-          cp "target/$TARGET/release/$bin" LICENSE README.md stage/
+          cp "target/$TARGET/release/$bin" LICENSE README.md NOTICE stage/
           "stage/$bin" --version
       - if: matrix.archive == 'tar.gz'
-        run: tar -czf "dist/$ASSET" -C stage pcod LICENSE README.md
+        run: tar -czf "dist/$ASSET" -C stage pcod LICENSE README.md NOTICE
       - if: matrix.archive == 'zip'
         shell: pwsh
-        run: Compress-Archive -Path stage/pcod.exe, stage/LICENSE, stage/README.md -DestinationPath "dist/$env:ASSET"
+        run: Compress-Archive -Path stage/pcod.exe, stage/LICENSE, stage/README.md, stage/NOTICE -DestinationPath "dist/$env:ASSET"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: ${{ env.ASSET }}
