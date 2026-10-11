@@ -44,6 +44,66 @@ fn kernels_match_scalar() {
     mc::<u16>(&mut rng, 10);
     put::<u8>(&mut rng, 8);
     put::<u16>(&mut rng, 10);
+    deblock::<u8>(&mut rng, 8);
+    deblock::<u16>(&mut rng, 10);
+}
+
+fn deblock<P: Pel>(rng: &mut Rng, bd: u32) {
+    use super::dbk::{self, Edge4};
+    let max = (1i32 << bd) - 1;
+    for _ in 0..20000 {
+        let vertical = rng.below(2) == 0;
+        let stride = 24 + rng.below(8);
+        let base = rng.below(max as usize + 1) as i32;
+        let lim = rng.pick(&[2, 8, 40, 200]);
+        let step = rng.i16(lim) as i32;
+        let noise = rng.pick(&[0, 1, 3, 12]);
+        let plane: Vec<P> = (0..stride * 24)
+            .map(|i| {
+                let (x, y) = (i % stride, i / stride);
+                let side = if vertical { x >= 8 } else { y >= 8 };
+                let v = base + if side { step } else { 0 } + rng.i16(noise) as i32;
+                P::from_i32(v.clamp(0, max))
+            })
+            .collect();
+        let mut e = Edge4::default();
+        for k in 0..4 {
+            if rng.below(5) > 0 {
+                let q = rng.below(52) as i32;
+                let bs = 1 + rng.below(2) as i32;
+                let qt = (q + 2 * (bs - 1)).clamp(0, 53) as usize;
+                e.tc[k] = ((crate::hevc::spec_tables::TC_TABLE[qt] as i32) << (bd - 8)) as i16;
+                e.beta[k] =
+                    ((crate::hevc::spec_tables::BETA_TABLE[q as usize] as i32) << (bd - 8)) as i16;
+                e.nfp[k] = rng.below(8) == 0;
+                e.nfq[k] = rng.below(8) == 0;
+            }
+        }
+        let o = 8 * stride + 8;
+        let (a, b) = both(|| {
+            let mut s = plane.clone();
+            let ok = if vertical {
+                dbk::luma_v(&mut s, o, stride, &e, bd)
+            } else {
+                dbk::luma_h(&mut s, o, stride, &e, bd)
+            };
+            if !ok {
+                for k in 0..4 {
+                    let (at, st, al) = if vertical {
+                        (o + 4 * k * stride, 1, stride)
+                    } else {
+                        (o + 4 * k, stride, 1)
+                    };
+                    let (tc, beta) = (e.tc[k] as i32, e.beta[k] as i32);
+                    crate::hevc::filter::filter_luma(
+                        &mut s, at, st, al, tc, beta, e.nfp[k], e.nfq[k], bd,
+                    );
+                }
+            }
+            s
+        });
+        assert_eq!(a, b, "deblock vertical={vertical} bd={bd}");
+    }
 }
 
 fn transforms(rng: &mut Rng) {
@@ -60,7 +120,28 @@ fn transforms(rng: &mut Rng) {
                 }
             }
         }
-        let bd_shift = 20 - rng.pick(&[8, 10]);
+        let bd = rng.pick(&[8u32, 10]);
+        let qp = rng.below(52 + 6 * (bd as usize - 8)) as i32;
+        let scale = ([40i64, 45, 51, 57, 64, 72][(qp % 6) as usize]) << (qp / 6);
+        let m: Option<Vec<u8>> =
+            (rng.below(2) == 0).then(|| (0..n * n).map(|_| 1 + rng.below(255) as u8).collect());
+        let qshift = bd + n.trailing_zeros() - 5;
+        let (a, b) = both(|| {
+            let mut c = c.clone();
+            transform::dequant(
+                &mut c,
+                n,
+                mx,
+                my,
+                m.as_deref(),
+                scale,
+                1 << (qshift - 1),
+                qshift,
+            );
+            c
+        });
+        assert_eq!(a, b, "dequant {n}x{n} qp={qp} m={}", m.is_some());
+        let bd_shift = 20 - bd;
         let (a, b) = both(|| {
             let mut c = c.clone();
             transform::inverse_transform(&mut c, n, dst, mx, my, bd_shift);
@@ -278,6 +359,69 @@ fn kernel_speed() {
         race(&format!("chroma {w}x{h} f=(3,5)"), || {
             for _ in 0..64 {
                 chroma(&lines, &mut tmp, &taps, w, h, &mut out);
+            }
+        });
+    }
+    {
+        use super::dbk::{self, Edge4};
+        let stride = 64;
+        let base: Vec<u8> = (0..stride * 24)
+            .map(|i| (100 + (i % stride >= 8) as usize * 6 + rng.below(3)) as u8)
+            .collect();
+        let e = Edge4 {
+            tc: [4; 4],
+            beta: [30; 4],
+            nfp: [false; 4],
+            nfq: [false; 4],
+        };
+        let mut s = base.clone();
+        race("deblock_v 4 segs", || {
+            for _ in 0..256 {
+                s.copy_from_slice(&base);
+                if !dbk::luma_v(&mut s, 8 * stride + 8, stride, &e, 8) {
+                    for k in 0..4 {
+                        crate::hevc::filter::filter_luma(
+                            &mut s,
+                            8 * stride + 8 + 4 * k * stride,
+                            1,
+                            stride,
+                            4,
+                            30,
+                            false,
+                            false,
+                            8,
+                        );
+                    }
+                }
+            }
+        });
+        let base: Vec<u8> = (0..stride * 24)
+            .map(|i| (100 + (i / stride >= 8) as usize * 6 + rng.below(3)) as u8)
+            .collect();
+        race("deblock_h 4 segs", || {
+            for _ in 0..256 {
+                s.copy_from_slice(&base);
+                if !dbk::luma_h(&mut s, 8 * stride + 8, stride, &e, 8) {
+                    for k in 0..4 {
+                        crate::hevc::filter::filter_luma(
+                            &mut s,
+                            8 * stride + 8 + 4 * k,
+                            stride,
+                            1,
+                            4,
+                            30,
+                            false,
+                            false,
+                            8,
+                        );
+                    }
+                }
+            }
+        });
+        let mut s = base.clone();
+        race("copy only", || {
+            for _ in 0..256 {
+                s.copy_from_slice(&base);
             }
         });
     }

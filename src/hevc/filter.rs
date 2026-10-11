@@ -1,5 +1,6 @@
 use crate::hevc::pel::Pel;
 use crate::hevc::picture::{ColMv, FrameRow};
+use crate::hevc::simd;
 use crate::hevc::slicedec::Progress;
 use crate::hevc::slicedec::{
     E_PU_H, E_PU_V, E_TU_H, E_TU_V, F_CBF, F_CODED, F_INTRA, F_NOFILTER, MvField, PicState,
@@ -101,7 +102,13 @@ fn tc_beta(q: i32, bs: i32, tc_off: i32, beta_off: i32, bd: u32) -> (i32, i32) {
     )
 }
 
-fn boundary_strength<P: Pel>(pic: &PicState<P>, pi: usize, qi: usize, tu_edge: bool) -> i32 {
+fn boundary_strength<P: Pel>(
+    pic: &PicState<P>,
+    pi: usize,
+    qi: usize,
+    tu_edge: bool,
+    (ps, qs): (u32, u32),
+) -> i32 {
     let (p, q) = (pic.blk.get(pi), pic.blk.get(qi));
     if (p.flags | q.flags) & F_INTRA != 0 {
         return 2;
@@ -110,13 +117,10 @@ fn boundary_strength<P: Pel>(pic: &PicState<P>, pi: usize, qi: usize, tu_edge: b
         return 1;
     }
     let (mp, mq) = (pic.mvf.get(pi), pic.mvf.get(qi));
-    motion_bs(pic, pi, &mp, qi, &mq)
+    motion_bs(pic, ps, &mp, qs, &mq)
 }
 
-fn ref_id<P: Pel>(pic: &PicState<P>, blk: usize, f: &MvField, l: usize) -> u32 {
-    let (x, y) = ((blk % pic.w4) * 4, (blk / pic.w4) * 4);
-    let ctb = (y >> pic.log2_ctb) * pic.wctb + (x >> pic.log2_ctb);
-    let s = pic.ctb_slice.get(ctb);
+fn ref_id<P: Pel>(pic: &PicState<P>, s: u32, f: &MvField, l: usize) -> u32 {
     if s == u32::MAX {
         return u32::MAX;
     }
@@ -126,7 +130,7 @@ fn ref_id<P: Pel>(pic: &PicState<P>, blk: usize, f: &MvField, l: usize) -> u32 {
         .unwrap_or(u32::MAX - 1)
 }
 
-fn motion_bs<P: Pel>(pic: &PicState<P>, pi: usize, p: &MvField, qi: usize, q: &MvField) -> i32 {
+fn motion_bs<P: Pel>(pic: &PicState<P>, ps: u32, p: &MvField, qs: u32, q: &MvField) -> i32 {
     let np = p.pred(0) as u32 + p.pred(1) as u32;
     let nq = q.pred(0) as u32 + q.pred(1) as u32;
     if np != nq {
@@ -138,13 +142,13 @@ fn motion_bs<P: Pel>(pic: &PicState<P>, pi: usize, p: &MvField, qi: usize, q: &M
     if np == 1 {
         let lp = if p.pred(0) { 0 } else { 1 };
         let lq = if q.pred(0) { 0 } else { 1 };
-        if ref_id(pic, pi, p, lp) != ref_id(pic, qi, q, lq) {
+        if ref_id(pic, ps, p, lp) != ref_id(pic, qs, q, lq) {
             return 1;
         }
         return far(p.mv[lp], q.mv[lq]) as i32;
     }
-    let (p0, p1) = (ref_id(pic, pi, p, 0), ref_id(pic, pi, p, 1));
-    let (q0, q1) = (ref_id(pic, qi, q, 0), ref_id(pic, qi, q, 1));
+    let (p0, p1) = (ref_id(pic, ps, p, 0), ref_id(pic, ps, p, 1));
+    let (q0, q1) = (ref_id(pic, qs, q, 0), ref_id(pic, qs, q, 1));
     if !((p0 == q0 && p1 == q1) || (p0 == q1 && p1 == q0)) {
         return 1;
     }
@@ -192,6 +196,71 @@ fn edge_params<P: Pel>(
     Some((sq.tc_offset, sq.beta_offset))
 }
 
+#[derive(Clone, Copy, Default)]
+struct Seg {
+    on: bool,
+    tc: i32,
+    beta: i32,
+    nfp: bool,
+    nfq: bool,
+}
+
+impl Seg {
+    fn new(tc: i32, beta: i32, pf: u8, qf: u8) -> Self {
+        Seg {
+            on: true,
+            tc,
+            beta,
+            nfp: pf & F_NOFILTER != 0,
+            nfq: qf & F_NOFILTER != 0,
+        }
+    }
+}
+
+#[inline(always)]
+fn luma_edges<P: Pel>(
+    s: &mut [P],
+    segs: &[Seg],
+    at: impl Fn(usize) -> usize,
+    step: usize,
+    along: usize,
+    bd: u32,
+    mut batch: impl FnMut(&mut [P], usize, &simd::dbk::Edge4) -> bool,
+) {
+    let full = segs.len() / 4 * 4;
+    for (c, four) in segs[..full].chunks_exact(4).enumerate() {
+        if !four.iter().any(|g| g.on) {
+            continue;
+        }
+        let mut e = simd::dbk::Edge4::default();
+        for (k, g) in four.iter().enumerate().filter(|(_, g)| g.on) {
+            e.tc[k] = g.tc as i16;
+            e.beta[k] = g.beta as i16;
+            e.nfp[k] = g.nfp;
+            e.nfq[k] = g.nfq;
+        }
+        if batch(s, at(4 * c), &e) {
+            continue;
+        }
+        for (k, g) in four.iter().enumerate().filter(|(_, g)| g.on) {
+            filter_luma(
+                s,
+                at(4 * c + k),
+                step,
+                along,
+                g.tc,
+                g.beta,
+                g.nfp,
+                g.nfq,
+                bd,
+            );
+        }
+    }
+    for (i, g) in segs.iter().enumerate().skip(full).filter(|(_, g)| g.on) {
+        filter_luma(s, at(i), step, along, g.tc, g.beta, g.nfp, g.nfq, bd);
+    }
+}
+
 crate::hevc::isa::dispatch! {
 fn deblock_row<P: Pel>(pic: &PicState<P>, r: usize) {
     if !pic.deblocking_enabled_anywhere || pic.draft {
@@ -211,30 +280,49 @@ fn deblock_row<P: Pel>(pic: &PicState<P>, r: usize) {
     let (w, w4) = (pic.width, pic.w4);
     let (bd, bdc) = (pic.bd_y, pic.bd_c);
     let (cb_off, cr_off) = (pic.pps.cb_qp_offset, pic.pps.cr_qp_offset);
-    let mut bs_v = vec![0i8; w4 * ((y1 - y0) / 4)];
-    for by in y0 / 4..y1 / 4 {
-        for bx in (2..w4).step_by(2) {
+    let ctb_params: Vec<Option<(i32, i32)>> = (0..pic.wctb)
+        .map(|cx| edge_params(pic, cx << pic.log2_ctb, y0, cx << pic.log2_ctb, y0))
+        .collect();
+    let rows4 = (y1 - y0) / 4;
+    let ry = r;
+    let mut segs = vec![Seg::default(); w4.max(rows4)];
+    let mut bs_v = vec![0i8; w4 * rows4];
+    for bx in (2..w4).step_by(2) {
+        let x = bx * 4;
+        for (i, by) in (y0 / 4..y1 / 4).enumerate() {
+            segs[i].on = false;
             let qi = by * w4 + bx;
             let qb = pic.blk.get(qi);
             let e = qb.edges;
             if e & (E_TU_V | E_PU_V) == 0 || qb.flags & F_CODED == 0 {
                 continue;
             }
-            let (x, y) = (bx * 4, by * 4);
-            let Some((tc_off, beta_off)) = edge_params(pic, x - 1, y, x, y) else {
+            let y = by * 4;
+            let params = if x & (ctb - 1) != 0 {
+                ctb_params[x >> pic.log2_ctb]
+            } else {
+                edge_params(pic, x - 1, y, x, y)
+            };
+            let Some((tc_off, beta_off)) = params else {
                 continue;
             };
-            let bs = boundary_strength(pic, qi - 1, qi, e & E_TU_V != 0);
-            bs_v[(by - y0 / 4) * w4 + bx] = bs as i8;
+            let cq = ry * pic.wctb + (x >> pic.log2_ctb);
+            let cp = ry * pic.wctb + ((x - 1) >> pic.log2_ctb);
+            let sl = (pic.ctb_slice.get(cp), pic.ctb_slice.get(cq));
+            let bs = boundary_strength(pic, qi - 1, qi, e & E_TU_V != 0, sl);
+            bs_v[i * w4 + bx] = bs as i8;
             if bs == 0 {
                 continue;
             }
             let (p, q) = (pic.blk.get(qi - 1), qb);
             let qpl = (p.qp as i32 + q.qp as i32 + 1) >> 1;
             let (tc, beta) = tc_beta(qpl, bs, tc_off, beta_off, bd);
-            let (nfp, nfq) = (p.flags & F_NOFILTER != 0, q.flags & F_NOFILTER != 0);
-            filter_luma(luma, y * w + x - lbase, 1, w, tc, beta, nfp, nfq, bd);
+            segs[i] = Seg::new(tc, beta, p.flags, q.flags);
         }
+        let at = |i: usize| (y0 + 4 * i) * w + x - lbase;
+        luma_edges(luma, &segs[..rows4], at, 1, w, bd, |s, o, e| {
+            simd::dbk::luma_v(s, o, w, e, bd)
+        });
     }
     let cw = pic.cwidth;
     for by in (y0 / 4..y1 / 4).step_by(2) {
@@ -266,21 +354,31 @@ fn deblock_row<P: Pel>(pic: &PicState<P>, r: usize) {
             }
         }
     }
-    let mut bs_h = vec![0i8; w4 * ((y1 - y0) / 4)];
+    let mut bs_h = vec![0i8; w4 * rows4];
     for by in (y0 / 4..y1 / 4).filter(|b| b % 2 == 0 && *b > 0) {
+        let y = by * 4;
         for bx in 0..w4 {
+            segs[bx].on = false;
             let qi = by * w4 + bx;
             let qb = pic.blk.get(qi);
             let e = qb.edges;
             if e & (E_TU_H | E_PU_H) == 0 || qb.flags & F_CODED == 0 {
                 continue;
             }
-            let (x, y) = (bx * 4, by * 4);
-            let Some((tc_off, beta_off)) = edge_params(pic, x, y - 1, x, y) else {
+            let x = bx * 4;
+            let params = if y & (ctb - 1) != 0 {
+                ctb_params[x >> pic.log2_ctb]
+            } else {
+                edge_params(pic, x, y - 1, x, y)
+            };
+            let Some((tc_off, beta_off)) = params else {
                 continue;
             };
             let pi = qi - w4;
-            let bs = boundary_strength(pic, pi, qi, e & E_TU_H != 0);
+            let cq = (y >> pic.log2_ctb) * pic.wctb + (x >> pic.log2_ctb);
+            let cp = ((y - 1) >> pic.log2_ctb) * pic.wctb + (x >> pic.log2_ctb);
+            let sl = (pic.ctb_slice.get(cp), pic.ctb_slice.get(cq));
+            let bs = boundary_strength(pic, pi, qi, e & E_TU_H != 0, sl);
             bs_h[(by - y0 / 4) * w4 + bx] = bs as i8;
             if bs == 0 {
                 continue;
@@ -288,9 +386,12 @@ fn deblock_row<P: Pel>(pic: &PicState<P>, r: usize) {
             let (p, q) = (pic.blk.get(pi), qb);
             let qpl = (p.qp as i32 + q.qp as i32 + 1) >> 1;
             let (tc, beta) = tc_beta(qpl, bs, tc_off, beta_off, bd);
-            let (nfp, nfq) = (p.flags & F_NOFILTER != 0, q.flags & F_NOFILTER != 0);
-            filter_luma(luma, y * w + x - lbase, w, 1, tc, beta, nfp, nfq, bd);
+            segs[bx] = Seg::new(tc, beta, p.flags, q.flags);
         }
+        let at = |i: usize| y * w + 4 * i - lbase;
+        luma_edges(luma, &segs[..w4], at, w, 1, bd, |s, o, e| {
+            simd::dbk::luma_h(s, o, w, e, bd)
+        });
     }
     for by in (y0 / 4..y1 / 4).filter(|b| b % 4 == 0 && *b > 0) {
         for bx in (0..w4).step_by(2) {
@@ -326,7 +427,7 @@ fn deblock_row<P: Pel>(pic: &PicState<P>, r: usize) {
 
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn filter_luma<P: Pel>(
+pub(crate) fn filter_luma<P: Pel>(
     s: &mut [P],
     o: usize,
     step: usize,
