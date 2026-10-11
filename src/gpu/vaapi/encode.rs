@@ -267,7 +267,9 @@ impl VaEncoder {
         }
         config.b_frames = config.b_frames.min(3);
         if config.gop == 0 {
-            config.gop = (config.fps_num / config.fps_den).max(1) * 2;
+            config.gop = (config.fps_num / config.fps_den.max(1))
+                .max(1)
+                .saturating_mul(2);
         }
         let blocks = if supported(entry[6]) && codec == Codec::Hevc {
             let v = entry[6];

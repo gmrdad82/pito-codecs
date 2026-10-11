@@ -135,6 +135,7 @@ impl<A: Accel> Front<A> {
 
     fn read_out(&mut self, outs: Vec<Output<Surface>>, frames: &mut Vec<Picture>) -> Result<()> {
         for o in outs {
+            self.accel.prefetch(o.frame.index);
             self.ready.push_back((o.frame.index, o.meta.pts));
         }
         self.drain(super::LAG, frames)
