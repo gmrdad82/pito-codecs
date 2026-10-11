@@ -2,7 +2,7 @@ pub mod deblock;
 mod mc;
 mod mc_avx2;
 
-pub use mc::{mc_chroma, mc_chroma2, mc_chroma2_avg, mc_luma, mc_luma_avg, weighted_store};
+pub use mc::{mc_chroma2, mc_chroma2_avg, mc_luma, mc_luma_avg, weighted_store};
 
 pub fn avx2() -> bool {
     use std::sync::LazyLock;
