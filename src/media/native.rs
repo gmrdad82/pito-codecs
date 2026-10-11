@@ -343,6 +343,8 @@ pub fn threads() -> usize {
         .min(16)
 }
 
+const BEHIND: usize = 3;
+
 pub struct Frames {
     pub reason: Option<String>,
     reader: Arc<Reader>,
@@ -402,7 +404,8 @@ impl Frames {
 
     pub fn next_gpu(&mut self) -> Result<Option<GpuFrame>> {
         loop {
-            while let Some(f) = self.gpu.pop_front() {
+            while self.gpu.len() > BEHIND || (self.flushed && !self.gpu.is_empty()) {
+                let Some(f) = self.gpu.pop_front() else { break };
                 if f.pts() >= self.start {
                     return Ok(Some(f));
                 }
