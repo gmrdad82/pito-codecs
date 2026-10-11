@@ -202,12 +202,6 @@ pub fn mc_luma<const AVG: bool>(
         return mc_luma::<AVG>(&pad, 32, fx, fy, bw, bh, out, os);
     }
     assert!(bw <= 16 && bh <= 16 && out.len() >= (bh - 1) * os + bw);
-    if (fx, fy) == (0, 0) && !AVG {
-        for r in 0..bh {
-            out[r * os..r * os + bw].copy_from_slice(&src[(r + 2) * ss + 2..(r + 2) * ss + 2 + bw]);
-        }
-        return;
-    }
     let u = Unit {
         a: src.as_ptr(),
         d: if wide { 8 } else { ss },

@@ -317,3 +317,126 @@ pub fn chroma_horizontal(
         }
     }
 }
+
+#[derive(Clone, Copy)]
+pub struct BsMb<'a> {
+    pub ids: &'a [[u32; 4]; 2],
+    pub mv: &'a [[[i16; 2]; 16]; 2],
+}
+
+struct BsLanes {
+    id: [[__m256i; 2]; 2],
+    mv: [[__m256i; 2]; 2],
+}
+
+#[inline]
+#[target_feature(enable = "avx2")]
+fn bs_lanes(m: BsMb) -> BsLanes {
+    let lo = _mm256_setr_epi32(0, 0, 1, 1, 0, 0, 1, 1);
+    let hi = _mm256_setr_epi32(2, 2, 3, 3, 2, 2, 3, 3);
+    let none = _mm256_set1_epi32(-1);
+    let mut out = BsLanes {
+        id: [[_mm256_setzero_si256(); 2]; 2],
+        mv: [[_mm256_setzero_si256(); 2]; 2],
+    };
+    for l in 0..2 {
+        let v = _mm256_castsi128_si256(unsafe { _mm_loadu_si128(m.ids[l].as_ptr().cast()) });
+        let base = m.mv[l].as_ptr().cast::<u8>();
+        for (h, idx) in [lo, hi].into_iter().enumerate() {
+            let id = _mm256_permutevar8x32_epi32(v, idx);
+            let mv = unsafe { _mm256_loadu_si256(base.add(h * 32).cast()) };
+            out.id[l][h] = id;
+            out.mv[l][h] = _mm256_andnot_si256(_mm256_cmpeq_epi32(id, none), mv);
+        }
+    }
+    out
+}
+
+#[inline]
+#[target_feature(enable = "avx2")]
+fn near(a: __m256i, b: __m256i) -> __m256i {
+    let d = _mm256_subs_epi16(a, b);
+    let ok = _mm256_and_si256(
+        _mm256_cmpgt_epi16(d, _mm256_set1_epi16(-4)),
+        _mm256_cmpgt_epi16(_mm256_set1_epi16(4), d),
+    );
+    _mm256_cmpeq_epi32(ok, _mm256_set1_epi32(-1))
+}
+
+#[inline]
+#[target_feature(enable = "avx2")]
+fn motion_bits(p: &BsLanes, q: &BsLanes) -> u16 {
+    let and = _mm256_and_si256;
+    let eq = _mm256_cmpeq_epi32;
+    let mut bits = 0u16;
+    for h in 0..2 {
+        let same = and(
+            and(eq(p.id[0][h], q.id[0][h]), eq(p.id[1][h], q.id[1][h])),
+            and(near(p.mv[0][h], q.mv[0][h]), near(p.mv[1][h], q.mv[1][h])),
+        );
+        let cross = and(
+            and(eq(p.id[0][h], q.id[1][h]), eq(p.id[1][h], q.id[0][h])),
+            and(near(p.mv[0][h], q.mv[1][h]), near(p.mv[1][h], q.mv[0][h])),
+        );
+        let ok = _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_or_si256(same, cross))) as u16;
+        bits |= (!ok & 0xff) << (8 * h);
+    }
+    bits
+}
+
+#[target_feature(enable = "avx2")]
+pub fn motion_masks(q: BsMb, left: BsMb, top: BsMb) -> [u16; 2] {
+    let q = bs_lanes(q);
+    let left = bs_lanes(left);
+    let top = bs_lanes(top);
+    let shift = |a: &[[__m256i; 2]; 2], n: &[[__m256i; 2]; 2]| {
+        std::array::from_fn(|l| {
+            std::array::from_fn(|h| {
+                _mm256_blend_epi32::<0x11>(
+                    _mm256_slli_si256::<4>(a[l][h]),
+                    _mm256_srli_si256::<12>(n[l][h]),
+                )
+            })
+        })
+    };
+    let vert = BsLanes {
+        id: shift(&q.id, &left.id),
+        mv: shift(&q.mv, &left.mv),
+    };
+    let up = |a: &[[__m256i; 2]; 2], n: &[[__m256i; 2]; 2]| {
+        std::array::from_fn(|l| {
+            [
+                _mm256_permute2x128_si256::<0x21>(n[l][1], a[l][0]),
+                _mm256_permute2x128_si256::<0x21>(a[l][0], a[l][1]),
+            ]
+        })
+    };
+    let horiz = BsLanes {
+        id: up(&q.id, &top.id),
+        mv: up(&q.mv, &top.mv),
+    };
+    [motion_bits(&vert, &q), motion_bits(&horiz, &q)]
+}
+
+#[target_feature(enable = "avx2")]
+pub fn bs_bytes(nz: [u16; 2], mot: [u16; 2], keep: [u16; 2]) -> [[[u8; 4]; 4]; 2] {
+    let bits = |m: u16| {
+        let v = _mm_shuffle_epi8(
+            _mm_set1_epi16(m as i16),
+            _mm_setr_epi8(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1),
+        );
+        let sel = _mm_setr_epi8(1, 2, 4, 8, 16, 32, 64, -128, 1, 2, 4, 8, 16, 32, 64, -128);
+        _mm_cmpeq_epi8(_mm_and_si128(v, sel), sel)
+    };
+    let tr = _mm_setr_epi8(0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15);
+    let mut out = [[[0u8; 4]; 4]; 2];
+    for (dir, o) in out.iter_mut().enumerate() {
+        let k = bits(keep[dir]);
+        let n = _mm_and_si128(_mm_and_si128(bits(nz[dir]), k), _mm_set1_epi8(2));
+        let m = _mm_and_si128(_mm_and_si128(bits(mot[dir]), k), _mm_set1_epi8(1));
+        let v = _mm_max_epu8(n, m);
+        let v = if dir == 0 { _mm_shuffle_epi8(v, tr) } else { v };
+        unsafe { _mm_storeu_si128(o.as_mut_ptr().cast(), v) };
+    }
+    out
+}

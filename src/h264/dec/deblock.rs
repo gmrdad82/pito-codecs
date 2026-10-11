@@ -1,4 +1,4 @@
-use crate::h264::dec::picture::{MbKind, MbState, uniform_mv};
+use crate::h264::dec::picture::{MbKind, MbState};
 use crate::h264::dec::slicedec::{PicState, SliceInfo};
 use crate::h264::dec::tables::{ALPHA, BETA, TC0};
 
@@ -58,18 +58,69 @@ fn motion_bs(p: Blk, q: Blk) -> u8 {
     !(same | cross) as u8
 }
 
-#[inline(always)]
-fn pair_bs(p: &MbState, pids: &Ids, rp: usize, q: &MbState, qids: &Ids, rq: usize) -> u8 {
-    let nz = (((p.nz_mask >> rp) | (q.nz_mask >> rq)) & 1) as u8;
-    motion_bs(blk(p, pids, rp), blk(q, qids, rq)).max(nz << 1)
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+fn bs_bytes_scalar(nz: [u16; 2], mot: [u16; 2], keep: [u16; 2]) -> [[[u8; 4]; 4]; 2] {
+    let mut bs = [[[0u8; 4]; 4]; 2];
+    for dir in 0..2 {
+        for e in 0..4 {
+            for k in 0..4 {
+                let r = if dir == 0 { k * 4 + e } else { e * 4 + k };
+                let bit = |m: u16| (m >> r) & (keep[dir] >> r) & 1;
+                bs[dir][e][k] = if bit(nz[dir]) != 0 {
+                    2
+                } else {
+                    bit(mot[dir]) as u8
+                };
+            }
+        }
+    }
+    bs
 }
 
 #[inline(always)]
-fn uniform(st: &MbState) -> bool {
-    (0..2).all(|l| {
-        let r = st.ref_idx[l];
-        r[1] == r[0] && r[2] == r[0] && r[3] == r[0] && uniform_mv(&st.mv[l])
-    })
+fn bs_bytes(nz: [u16; 2], mot: [u16; 2], keep: [u16; 2]) -> [[[u8; 4]; 4]; 2] {
+    #[cfg(target_arch = "x86_64")]
+    if crate::h264::dec::simd::avx2() {
+        return unsafe { crate::h264::dec::simd::deblock::bs_bytes(nz, mot, keep) };
+    }
+    bs_bytes_scalar(nz, mot, keep)
+}
+
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+fn motion_lanes_scalar(q: &MbState, ext: &[Option<&MbState>; 2]) -> [u16; 2] {
+    let mut out = [0u16; 2];
+    for (dir, o) in out.iter_mut().enumerate() {
+        for r in 0..16 {
+            let (first, rp) = if dir == 0 {
+                (r & 3 == 0, if r & 3 == 0 { r + 3 } else { r - 1 })
+            } else {
+                (r < 4, (r + 12) % 16)
+            };
+            let p = match (first, ext[dir]) {
+                (true, Some(p)) => p,
+                (true, None) => continue,
+                (false, _) => q,
+            };
+            *o |= (motion_bs(blk(p, &p.ids, rp), blk(q, &q.ids, r)) as u16) << r;
+        }
+    }
+    out
+}
+
+#[inline(always)]
+fn motion_lanes(q: &MbState, ext: &[Option<&MbState>; 2]) -> [u16; 2] {
+    #[cfg(target_arch = "x86_64")]
+    if crate::h264::dec::simd::avx2() {
+        use crate::h264::dec::simd::deblock::{BsMb, motion_masks};
+        fn mb(p: &MbState) -> BsMb<'_> {
+            BsMb {
+                ids: &p.ids,
+                mv: &p.mv,
+            }
+        }
+        return unsafe { motion_masks(mb(q), mb(ext[0].unwrap_or(q)), mb(ext[1].unwrap_or(q))) };
+    }
+    motion_lanes_scalar(q, ext)
 }
 
 struct EdgeParams {
@@ -249,11 +300,12 @@ fn filter_horizontal<const N: usize>(
 
 #[allow(clippy::needless_range_loop)]
 pub fn deblock_mb(pic: &mut PicState, addr: usize, mb_w: usize) {
-    let q = &pic.mbs[addr];
-    if q.slice_num == u32::MAX {
+    let sn = pic.mbs[addr].slice_num;
+    let Some(sq) = pic.slices.get(sn as usize) else {
         return;
-    }
-    let sq = &pic.slices[q.slice_num as usize];
+    };
+    pic.mbs[addr].ids = ref_ids8(&pic.mbs[addr], sq);
+    let q = &pic.mbs[addr];
     if sq.disable_deblocking_filter_idc == 1 {
         return;
     }
@@ -286,45 +338,34 @@ pub fn deblock_mb(pic: &mut PicState, addr: usize, mb_w: usize) {
             }
         }
     } else {
-        let qids = ref_ids8(q, sq);
+        let mut ext: [Option<&MbState>; 2] = [None, None];
+        let mut intra_nb = [false; 2];
         for dir in 0..2 {
             let Some(n) = nbs[dir] else {
                 continue;
             };
             let p = &pic.mbs[n];
             if p.kind.is_intra() {
-                bs[dir][0] = [4; 4];
-                continue;
-            }
-            let pids = if p.slice_num == q.slice_num {
-                ref_ids8(p, sq)
+                intra_nb[dir] = true;
             } else {
-                ref_ids8(p, &pic.slices[p.slice_num as usize])
-            };
-            for k in 0..4 {
-                let (rq, rp) = if dir == 0 {
-                    (k * 4, k * 4 + 3)
-                } else {
-                    (k, 12 + k)
-                };
-                bs[dir][0][k] = pair_bs(p, &pids, rp, q, &qids, rq);
+                ext[dir] = Some(p);
             }
         }
-        if q.nz_mask != 0 || !uniform(q) {
-            for dir in 0..2 {
-                for e in 1..4 {
-                    if t8 && e % 2 == 1 {
-                        continue;
-                    }
-                    for k in 0..4 {
-                        let (rq, rp) = if dir == 0 {
-                            (k * 4 + e, k * 4 + e - 1)
-                        } else {
-                            (e * 4 + k, e * 4 + k - 4)
-                        };
-                        bs[dir][e][k] = pair_bs(q, &qids, rp, q, &qids, rq);
-                    }
-                }
+        let mot = motion_lanes(q, &ext);
+        let nzq = q.nz_mask;
+        let nz = [
+            nzq | ((nzq << 1) & 0xeeee) | ext[0].map_or(0, |p| (p.nz_mask >> 3) & 0x1111),
+            nzq | (nzq << 4) | ext[1].map_or(0, |p| p.nz_mask >> 12),
+        ];
+        let odd = if t8 { [0xaaaa, 0xf0f0] } else { [0, 0] };
+        let keep = [
+            !odd[0] & if ext[0].is_none() { !0x1111 } else { 0xffff },
+            !odd[1] & if ext[1].is_none() { !0x000f } else { 0xffff },
+        ];
+        bs = bs_bytes(nz, mot, keep);
+        for dir in 0..2 {
+            if intra_nb[dir] {
+                bs[dir][0] = [4; 4];
             }
         }
     }
@@ -504,6 +545,49 @@ mod tests {
             }),
             alpha: ALPHA[ia] as i32,
             beta: BETA[ib] as i32,
+        }
+    }
+
+    #[test]
+    fn avx2_boundary_strength_matches_scalar() {
+        if !simd::avx2() {
+            return;
+        }
+        let mut r = Rng(0x9e37_79b9_7f4a_7c15);
+        let mb = |r: &mut Rng| {
+            let mut st = MbState::default();
+            for l in 0..2 {
+                for b in 0..4 {
+                    match r.next(4) {
+                        0 => {}
+                        k => {
+                            st.ref_idx[l][b] = k as i8;
+                            st.ids[l][b] = 7 + r.next(3);
+                        }
+                    }
+                }
+                let spread = [2, 8, 40000][r.next(3) as usize];
+                let base = [r.next(64) as i16 - 32, r.next(64) as i16 - 32];
+                for m in st.mv[l].iter_mut() {
+                    *m = if r.next(3) == 0 {
+                        base
+                    } else {
+                        [0, 1].map(|c| {
+                            (base[c] as i32 + r.next(spread) as i32 - spread as i32 / 2) as i16
+                        })
+                    };
+                }
+            }
+            st
+        };
+        for _ in 0..20000 {
+            let q = mb(&mut r);
+            let (left, top) = (mb(&mut r), mb(&mut r));
+            let ext = [Some(&left), Some(&top)];
+            assert_eq!(motion_lanes(&q, &ext), motion_lanes_scalar(&q, &ext));
+            let m = |r: &mut Rng| [r.next(65536) as u16, r.next(65536) as u16];
+            let (nz, mot, keep) = (m(&mut r), m(&mut r), m(&mut r));
+            assert_eq!(bs_bytes(nz, mot, keep), bs_bytes_scalar(nz, mot, keep));
         }
     }
 

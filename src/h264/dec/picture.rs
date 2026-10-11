@@ -75,6 +75,7 @@ pub struct MbState {
     pub cbf_dc: u8,
     pub nz_mask: u16,
     pub ref_idx: [[i8; 4]; 2],
+    pub ids: [[u32; 4]; 2],
     pub mv: [[[i16; 2]; 16]; 2],
     pub mvd: [[[u8; 2]; 16]; 2],
     pub direct8x8: u8,
@@ -103,6 +104,7 @@ impl Default for MbState {
             cbf_dc: 0,
             nz_mask: 0,
             ref_idx: [[-1; 4]; 2],
+            ids: [[u32::MAX; 4]; 2],
             mv: [[[0; 2]; 16]; 2],
             mvd: [[[0; 2]; 16]; 2],
             direct8x8: 0,
@@ -488,19 +490,14 @@ impl Frame {
         }
     }
 
-    pub fn publish(
-        &self,
-        r: usize,
-        mbs: Option<&[MbState]>,
-        ref_ids: &dyn Fn(&MbState, usize, i8) -> u32,
-    ) {
+    pub fn publish(&self, r: usize, mbs: Option<&[MbState]>) {
         if self.rows[r].get().is_some() {
             return;
         }
         if self.motion.len > 0 {
             for x in 0..self.mb_w {
                 let v = match mbs.and_then(|m| m.get(x)) {
-                    Some(st) => col_mb(st, ref_ids),
+                    Some(st) => col_mb(st),
                     None => COL_INTRA,
                 };
                 unsafe { self.motion.set(r * self.mb_w + x, v) };
@@ -520,7 +517,7 @@ impl Frame {
             self.cb.write(co, &planes.cb[co..co + 8 * cw]);
             self.cr.write(co, &planes.cr[co..co + 8 * cw]);
         }
-        self.publish(r, None, &|_, _, _| u32::MAX);
+        self.publish(r, None);
     }
 
     #[inline]
@@ -676,22 +673,13 @@ pub fn uniform_mv(mv: &[[i16; 2]; 16]) -> bool {
 }
 
 #[inline(always)]
-fn col_mb(st: &MbState, ref_ids: &dyn Fn(&MbState, usize, i8) -> u32) -> ColMb {
+fn col_mb(st: &MbState) -> ColMb {
     if st.slice_num == u32::MAX || st.kind.is_intra() {
         return COL_INTRA;
     }
-    let mut ref_id = [[u32::MAX; 4]; 2];
-    for (l, ids) in ref_id.iter_mut().enumerate() {
-        for (b, id) in ids.iter_mut().enumerate() {
-            let ri = st.ref_idx[l][b];
-            if ri >= 0 {
-                *id = ref_ids(st, l, ri);
-            }
-        }
-    }
     ColMb {
         mv: st.mv,
-        ref_id,
+        ref_id: st.ids,
         ref_idx: st.ref_idx,
         intra: false,
     }

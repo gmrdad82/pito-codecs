@@ -205,14 +205,7 @@ impl PicState {
         };
         while self.rows_published < publish_limit {
             let r = self.rows_published;
-            let slices = &self.slices;
-            let ids = |st: &MbState, l: usize, ri: i8| {
-                slices
-                    .get(st.slice_num as usize)
-                    .and_then(|s| s.ref_ids[l].get(ri as usize).copied())
-                    .unwrap_or(u32::MAX)
-            };
-            self.frame.publish(r, Some(self.mbs.row(r)), &ids);
+            self.frame.publish(r, Some(self.mbs.row(r)));
             self.rows_published += 1;
             self.planes.published_rows(self.rows_published);
         }
