@@ -1,13 +1,13 @@
-use std::path::Path;
 use std::panic::AssertUnwindSafe;
+use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::native;
 use super::probe::keyframes;
 use super::route::Prefs;
-use super::types::{Error, Result, Rgba, Route};
 use super::video::{Source, source};
+use crate::media::{Error, Result, Rgba, Route};
 
 pub fn first_frame(path: &Path, height: u32, prefs: &Prefs) -> Result<Rgba> {
     frames_at(path, &[0.0], height, prefs)?
@@ -47,16 +47,15 @@ pub fn frames_at(path: &Path, times: &[f64], height: u32, prefs: &Prefs) -> Resu
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(&t) = times.get(i) else { break };
                     let repeat = times.get(..i).is_some_and(|b| b.contains(&t));
-                    let got = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                        match (repeat, &mut dec) {
+                    let got =
+                        std::panic::catch_unwind(AssertUnwindSafe(|| match (repeat, &mut dec) {
                             (true, _) => None,
                             (false, Some(d)) => Some(match &src.reader {
                                 Some(r) => native::still(r, d, t, height),
                                 None => Err(src.native()),
                             }),
                             (false, None) => Some(still(src, t, height)),
-                        }
-                    }));
+                        }));
                     let got = got.unwrap_or_else(|_| {
                         dec = None;
                         Some(Err(Error::Backend(format!(

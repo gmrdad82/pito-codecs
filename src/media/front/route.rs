@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use super::ffmpeg::Ffmpeg;
 use super::native;
-use super::types::{Codec, Direction, Error, Result, Route};
+use crate::media::{Codec, Direction, Error, Result, Route};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Choice {

@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use crate::h264::{Encoder, EncoderConfig};
 use crate::mp4::{AvcConfig, SampleEntry, TrackConfig, Writer};
 
-use super::types::{Frame, PixelFormat, TimeBase};
 use super::route::Choice;
 use super::{Prefs, audio_pcm, decode_video, first_frame, keyframes, probe};
+use crate::media::{Frame, PixelFormat, TimeBase};
 
 fn dir() -> PathBuf {
     let d = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/test/media-malformed");
@@ -62,7 +62,11 @@ fn damaged_files_are_errors_not_crashes() {
         seed as usize
     };
     let mut files: Vec<Vec<u8>> = vec![Vec::new(), b"garbage, not a container".to_vec()];
-    files.extend((0..good.len()).step_by(good.len() / 40 + 1).map(|n| good[..n].to_vec()));
+    files.extend(
+        (0..good.len())
+            .step_by(good.len() / 40 + 1)
+            .map(|n| good[..n].to_vec()),
+    );
     for _ in 0..40 {
         let mut bad = good.clone();
         for _ in 0..4 {

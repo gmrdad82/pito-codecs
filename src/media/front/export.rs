@@ -7,8 +7,8 @@ use super::ffmpeg::{Child, Ffmpeg};
 use super::picture::Blender;
 use super::probe::keyframes;
 use super::route::{Caps, Picked, Prefs, pick_encode};
-use super::types::{Codec, Error, Frame, PixelFormat, Result, Rgba, Route};
 use super::video::{Source, open, source};
+use crate::media::{Codec, Error, Frame, PixelFormat, Result, Rgba, Route};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Piece {
@@ -199,7 +199,10 @@ pub fn export(
     let first = &sources[index[0]].probe;
     let fps = first.fps;
     if fps.0 == 0 || fps.1 == 0 || fps.0 / fps.1 > MAX_FPS {
-        return Err(Error::Invalid(format!("a frame rate of {}/{}", fps.0, fps.1)));
+        return Err(Error::Invalid(format!(
+            "a frame rate of {}/{}",
+            fps.0, fps.1
+        )));
     }
     let size = (first.width & !1, first.height & !1);
     if size.0 == 0 || size.1 == 0 {

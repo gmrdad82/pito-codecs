@@ -5,7 +5,7 @@ use std::process::{ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread::JoinHandle;
 
-use super::types::{Codec, Direction, Error, Result};
+use crate::media::{Codec, Direction, Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listed {
@@ -305,7 +305,10 @@ fn output(mut c: Command, what: &str) -> Result<Vec<u8>> {
         .output()
         .map_err(|e| Error::Backend(format!("{what}: {e}")))?;
     if !out.status.success() {
-        return Err(Error::Backend(format!("{what}: {}", last_line(&out.stderr))));
+        return Err(Error::Backend(format!(
+            "{what}: {}",
+            last_line(&out.stderr)
+        )));
     }
     Ok(out.stdout)
 }

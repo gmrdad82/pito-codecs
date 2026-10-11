@@ -4,7 +4,7 @@ use rayon::prelude::*;
 
 use super::probe::{container_ffmpeg, probe};
 use super::route::{Caps, Prefs, pick_decode};
-use super::types::{AudioBuffer, Codec, Error, Result, Route};
+use crate::media::{AudioBuffer, Codec, Error, Result, Route};
 
 pub fn audio_pcm(
     path: &Path,

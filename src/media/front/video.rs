@@ -5,13 +5,13 @@ use std::sync::Arc;
 use crate::gpu::{GpuFrame, GpuScaler};
 use crate::mp4::Reader;
 
-use super::ffmpeg::{Child, Ffmpeg};
 use super::demux::Demux;
+use super::ffmpeg::{Child, Ffmpeg};
 use super::native;
 use super::picture::{Color, resize};
 use super::probe::{Probe, probe};
 use super::route::{Caps, Choice, Prefs, pick_decode};
-use super::types::{Error, Frame, PixelFormat, Result, Route, TimeBase};
+use crate::media::{Error, Frame, PixelFormat, Result, Route, TimeBase};
 
 #[derive(Clone)]
 pub struct Source {
@@ -175,9 +175,7 @@ pub fn open(
     };
     let (width, out_height) = size.unwrap_or((p.width, p.height));
     if width == 0 || out_height == 0 {
-        return Err(Error::Invalid(format!(
-            "a picture of {width}x{out_height}"
-        )));
+        return Err(Error::Invalid(format!("a picture of {width}x{out_height}")));
     }
     let fps = fps.unwrap_or(p.fps);
     let mut args: Vec<String> = f.decoder_args(src.ffmpeg_codec.as_deref());
@@ -402,7 +400,8 @@ pub fn open_gpu(
         PixelFormat::Yuv420p10
     };
     if src.route == Route::Gpu {
-        let frames = native::Frames::open(src.demux()?.clone(), from, native::threads(), Route::Gpu)?;
+        let frames =
+            native::Frames::open(src.demux()?.clone(), from, native::threads(), Route::Gpu)?;
         let mut reasons = src.reasons.clone();
         reasons.extend(frames.reason.clone());
         if frames.route() == Route::Gpu {
@@ -416,9 +415,7 @@ pub fn open_gpu(
                     None
                 }
                 Err(e) => {
-                    reasons.push(format!(
-                        "no GPU scaler ({e}); frames are scaled on the CPU"
-                    ));
+                    reasons.push(format!("no GPU scaler ({e}); frames are scaled on the CPU"));
                     None
                 }
             };

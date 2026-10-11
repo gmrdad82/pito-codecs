@@ -9,7 +9,7 @@ use crate::mp4::{AvcConfig, CodecConfig, HevcConfig, Reader};
 
 use super::native::{self, rational};
 use super::probe::{AudioTrack, Probe};
-use super::types::{Codec, Error, Result, TimeBase};
+use crate::media::{Codec, Error, Result, TimeBase};
 
 #[derive(Clone)]
 pub enum Demux {

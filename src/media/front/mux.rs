@@ -16,7 +16,7 @@ use super::ffmpeg::Ffmpeg;
 use super::native::{decode_audio, threads};
 use super::probe::keyframes;
 use super::route::Picked;
-use super::types::{AudioBuffer, Codec, Error, Frame, Packet, PixelFormat, Result, Route};
+use crate::media::{AudioBuffer, Codec, Error, Frame, Packet, PixelFormat, Result, Route};
 
 const RATE: u32 = 48_000;
 
@@ -382,7 +382,15 @@ pub(super) fn run(
         let (aj, gains, stop_ref, aac) = (&audio_job, &gains, &stop, &mut aac);
         let audio = s.spawn(move || mix(aj, gains, ffmpeg, aac, stop_ref));
         let video = if smart {
-            smart_video(job, video, opts.crf, (timescale, fd), &part, progress, &stop)
+            smart_video(
+                job,
+                video,
+                opts.crf,
+                (timescale, fd),
+                &part,
+                progress,
+                &stop,
+            )
         } else {
             whole_video(job, video, opts, timescale, fd, &part, progress)
         };

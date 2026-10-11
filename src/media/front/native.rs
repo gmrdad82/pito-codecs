@@ -12,9 +12,7 @@ use super::demux::{self, Demux, Stream};
 
 use super::picture::{Color, rotate, to_rgba_color};
 use super::probe::{AudioTrack, Probe};
-use super::types::{
-    AudioBuffer, Codec, Direction, Error, Frame, Packet, Result, Rgba, Route,
-};
+use crate::media::{AudioBuffer, Codec, Direction, Error, Frame, Packet, Result, Rgba, Route};
 
 const NO_GPU: &str = if cfg!(target_os = "macos") {
     "no VideoToolbox hardware decoder or encoder"
@@ -42,9 +40,7 @@ pub fn gpu() -> (Vec<(Codec, Direction)>, Option<String>) {
                 .collect()
         })
         .clone();
-    let why = found
-        .is_empty()
-        .then(|| NO_GPU.to_string());
+    let why = found.is_empty().then(|| NO_GPU.to_string());
     (found, why)
 }
 
@@ -349,7 +345,6 @@ pub fn threads() -> usize {
         .min(16)
 }
 
-
 const BEHIND: usize = 6;
 
 pub struct Frames {
@@ -436,8 +431,7 @@ impl Frames {
 
     fn pump(&mut self, gpu: bool) -> Result<bool> {
         if let Some((pts, dts, keyframe)) = self.demux.sample(self.track, self.next) {
-            self.demux
-                .read_into(self.track, self.next, &mut self.buf)?;
+            self.demux.read_into(self.track, self.next, &mut self.buf)?;
             let packet = Packet {
                 data: std::mem::take(&mut self.buf),
                 pts,

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::filter::{self, ColorSpec, Kernel, Matrix, Range};
 
-use super::types::{Frame, Rgba};
+use crate::media::{Frame, Rgba};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Color {
@@ -140,9 +140,7 @@ impl Blender {
 
     pub fn draw(&mut self, frame: &mut Frame, layer: &Arc<Rgba>) {
         let fresh = match &self.layer {
-            Some((held, o)) => {
-                !Arc::ptr_eq(held, layer) || o.size() != (frame.width, frame.height)
-            }
+            Some((held, o)) => !Arc::ptr_eq(held, layer) || o.size() != (frame.width, frame.height),
             None => true,
         };
         if fresh {
@@ -158,9 +156,10 @@ impl Blender {
                 height: image.height,
                 data: image.data.clone(),
             };
-            self.layer = filter::Overlay::new(&img, spec(Color::default(), frame.height), frame.format)
-                .ok()
-                .map(|o| (layer.clone(), o));
+            self.layer =
+                filter::Overlay::new(&img, spec(Color::default(), frame.height), frame.format)
+                    .ok()
+                    .map(|o| (layer.clone(), o));
         }
         if let Some((_, o)) = &self.layer {
             let _ = o.draw(frame, 0, 0);

@@ -5,7 +5,7 @@ use std::time::SystemTime;
 
 use super::ffmpeg::{Ffmpeg, codec_of};
 use super::route::Prefs;
-use super::types::{Codec, Error, Result};
+use crate::media::{Codec, Error, Result};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Probe {
