@@ -9,6 +9,7 @@ use crate::h264::enc::intra::{
 use crate::h264::enc::mbinfo::{MbInfo, MbKind, Mv, Part};
 use crate::h264::enc::nal::{SliceHeader, SliceType, nal};
 use crate::h264::enc::picture::{BandMut, CHROMA_PAD, Frame, LUMA_PAD, RefPic, avg_into};
+use crate::h264::enc::residual;
 use crate::h264::enc::syntax::{MbCode, NbCtx};
 use crate::h264::enc::tables::{BLK4_XY, NUM_CTX, RASTER_TO_BLK4, ZIGZAG4, ZIGZAG8, chroma_qp};
 use crate::h264::enc::transform::{
@@ -855,31 +856,30 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
         c: &mut Cand,
     ) -> u8 {
         let qt = self.f.qt;
-        let mut coefs = [[0i32; 16]; 16];
+        let qbits = 15 + (qp / 6) as u32;
+        let lim = if self.f.p.cavlc_clamp {
+            cavlc::MAX_LEVEL
+        } else {
+            i32::MAX
+        };
+        let mut coefs = residual::luma4_fwd(
+            src,
+            pred,
+            &qt.mf4[(qp % 6) as usize],
+            (((1i64 << qbits) * dz.f256) >> 8) as i32,
+            qbits,
+            lim,
+        );
         let mut score8 = [0u32; 4];
         for blk in 0..16 {
             let (bx, by) = BLK4_XY[blk];
-            let mut d = [0i32; 16];
-            for y in 0..4 {
-                for x in 0..4 {
-                    let i = (by * 4 + y) * 16 + bx * 4 + x;
-                    d[y * 4 + x] = src[i] as i32 - pred[i] as i32;
-                }
-            }
-            let mut t = fdct4(&d);
-            quant4(&mut t, qt, qp, dz, false);
-            if self.f.p.cavlc_clamp {
-                for v in t.iter_mut() {
-                    *v = (*v).clamp(-cavlc::MAX_LEVEL, cavlc::MAX_LEVEL);
-                }
-            }
+            let rb = by * 4 + bx;
             let mut scan = [0i16; 16];
             for k in 0..16 {
-                scan[k] = t[ZIGZAG4[k]] as i16;
+                scan[k] = coefs[ZIGZAG4[k]][rb];
             }
             score8[blk / 4] += decimate_score(&scan);
             c.code.luma4[blk] = scan;
-            coefs[blk] = t;
         }
         let mut cbp = 0u8;
         let total: u32 = score8.iter().sum();
@@ -889,7 +889,10 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
                 let blk = b8 * 4 + i;
                 if kill {
                     c.code.luma4[blk] = [0; 16];
-                    coefs[blk] = [0; 16];
+                    let (bx, by) = BLK4_XY[blk];
+                    for row in coefs.iter_mut() {
+                        row[by * 4 + bx] = 0;
+                    }
                 }
                 if c.code.luma4[blk].iter().any(|&v| v != 0) {
                     cbp |= 1 << b8;
@@ -898,26 +901,15 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
         }
         for blk in 0..16 {
             let (bx, by) = BLK4_XY[blk];
-            let nz = c.code.luma4[blk].iter().filter(|&&v| v != 0).count() as u8;
-            c.info.nnz[by * 4 + bx] = nz;
-            let off = by * 4 * 16 + bx * 4;
-            if nz == 0 {
-                for y in 0..4 {
-                    c.ry[off + y * 16..off + y * 16 + 4]
-                        .copy_from_slice(&pred[off + y * 16..off + y * 16 + 4]);
-                }
-            } else {
-                let mut t = coefs[blk];
-                dequant4(&mut t, qt, qp, false);
-                let r = idct4(&t);
-                for y in 0..4 {
-                    for x in 0..4 {
-                        let i = off + y * 16 + x;
-                        c.ry[i] = (pred[i] as i32 + r[y * 4 + x]).clamp(0, 255) as u8;
-                    }
-                }
-            }
+            c.info.nnz[by * 4 + bx] = c.code.luma4[blk].iter().filter(|&&v| v != 0).count() as u8;
         }
+        residual::luma4_rec(
+            &coefs,
+            &qt.v4[(qp % 6) as usize],
+            (qp / 6) as u32,
+            pred,
+            &mut c.ry,
+        );
         cbp
     }
 
@@ -934,16 +926,15 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
         let mut coefs = [[0i32; 64]; 4];
         let mut score = [0u32; 4];
         for b8 in 0..4 {
-            let (ox, oy) = ((b8 & 1) * 8, (b8 >> 1) * 8);
-            let mut d = [0i32; 64];
-            for y in 0..8 {
-                for x in 0..8 {
-                    let i = (oy + y) * 16 + ox + x;
-                    d[y * 8 + x] = src[i] as i32 - pred[i] as i32;
-                }
-            }
-            let mut t = fdct8(&d);
-            quant8(&mut t, qt, qp, dz);
+            let qbits = 22 + (qp / 6) as u32;
+            let t = residual::luma8_fwd(
+                src,
+                pred,
+                b8,
+                &qt.mf8[(qp % 6) as usize],
+                ((1i64 << qbits) * dz.f256) >> 8,
+                qbits,
+            );
             let mut scan = [0i16; 64];
             for k in 0..64 {
                 scan[k] = t[ZIGZAG8[k]] as i16;
@@ -973,15 +964,14 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
                 continue;
             }
             cbp |= 1 << b8;
-            let mut t = coefs[b8];
-            dequant8(&mut t, qt, qp);
-            let r = idct8(&t);
-            for y in 0..8 {
-                for x in 0..8 {
-                    let i = (oy + y) * 16 + ox + x;
-                    c.ry[i] = (pred[i] as i32 + r[y * 8 + x]).clamp(0, 255) as u8;
-                }
-            }
+            residual::luma8_rec(
+                &coefs[b8],
+                &qt.v8[(qp % 6) as usize],
+                qp,
+                pred,
+                b8,
+                &mut c.ry,
+            );
         }
         cbp
     }
@@ -995,65 +985,50 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
         qp: u8,
         c: &mut Cand,
     ) {
-        let t8_allowed = self.f.p.t8x8;
-        let use8 = if t8_allowed {
-            if self.f.p.adaptive_t8 {
-                let mut c4 = c.clone();
-                let cbp4 =
-                    self.code_luma4(&src.y, py, qp, Deadzone::INTER, self.f.p.decimate, &mut c4);
-                let mut c8 = c.clone();
-                let cbp8 =
-                    self.code_luma8(&src.y, py, qp, Deadzone::INTER, self.f.p.decimate, &mut c8);
-                let lam = self.f.lam.ssd[qp as usize];
-                let cost = |cc: &Cand, cbp: u8, eight: bool| {
-                    let d = ssd(&src.y, 16, &cc.ry, 16, 16, 16) as f64;
-                    let mut bits = 0f64;
-                    if eight {
-                        for b in 0..4 {
-                            if (cbp >> b) & 1 != 0 {
-                                bits += cc.code.luma8[b]
-                                    .iter()
-                                    .map(|&v| {
-                                        if v == 0 {
-                                            0.4
-                                        } else {
-                                            3.0 + 2.0 * (v.unsigned_abs() as f64).log2()
-                                        }
-                                    })
-                                    .sum::<f64>();
-                            }
-                        }
-                    } else {
-                        for b in 0..16 {
-                            if (cbp >> (b / 4)) & 1 != 0 {
-                                bits += 1.0
-                                    + cc.code.luma4[b]
-                                        .iter()
-                                        .map(|&v| {
-                                            if v == 0 {
-                                                0.4
-                                            } else {
-                                                3.0 + 2.0 * (v.unsigned_abs() as f64).log2()
-                                            }
-                                        })
-                                        .sum::<f64>();
-                            }
-                        }
-                    }
-                    d + lam * bits
-                };
-                let _ = (cbp4, cbp8);
-                cost(&c8, cbp8, true) <= cost(&c4, cbp4, false)
-            } else {
-                true
+        let dec = self.f.p.decimate;
+        let (use8, cbpl) = if !self.f.p.t8x8 {
+            (
+                false,
+                self.code_luma4(&src.y, py, qp, Deadzone::INTER, dec, c),
+            )
+        } else if !self.f.p.adaptive_t8 {
+            (
+                true,
+                self.code_luma8(&src.y, py, qp, Deadzone::INTER, dec, c),
+            )
+        } else {
+            let cbp8 = self.code_luma8(&src.y, py, qp, Deadzone::INTER, dec, c);
+            let (ry8, nnz8) = (c.ry, c.info.nnz);
+            let cbp4 = self.code_luma4(&src.y, py, qp, Deadzone::INTER, dec, c);
+            let lam = self.f.lam.ssd[qp as usize];
+            let level_bits = |v: i16| {
+                if v == 0 {
+                    0.4
+                } else {
+                    3.0 + 2.0 * (v.unsigned_abs() as f64).log2()
+                }
+            };
+            let mut bits8 = 0f64;
+            for b in 0..4 {
+                if (cbp8 >> b) & 1 != 0 {
+                    bits8 += c.code.luma8[b].iter().map(|&v| level_bits(v)).sum::<f64>();
+                }
             }
-        } else {
-            false
-        };
-        let cbpl = if use8 {
-            self.code_luma8(&src.y, py, qp, Deadzone::INTER, self.f.p.decimate, c)
-        } else {
-            self.code_luma4(&src.y, py, qp, Deadzone::INTER, self.f.p.decimate, c)
+            let mut bits4 = 0f64;
+            for b in 0..16 {
+                if (cbp4 >> (b / 4)) & 1 != 0 {
+                    bits4 += 1.0 + c.code.luma4[b].iter().map(|&v| level_bits(v)).sum::<f64>();
+                }
+            }
+            let j8 = ssd(&src.y, 16, &ry8, 16, 16, 16) as f64 + lam * bits8;
+            let j4 = ssd(&src.y, 16, &c.ry, 16, 16, 16) as f64 + lam * bits4;
+            if j8 <= j4 {
+                c.ry = ry8;
+                c.info.nnz = nnz8;
+                (true, cbp8)
+            } else {
+                (false, cbp4)
+            }
         };
         c.code.t8x8 = use8 && cbpl != 0;
         c.info.t8x8 = c.code.t8x8;

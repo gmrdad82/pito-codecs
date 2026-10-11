@@ -167,7 +167,7 @@ pub fn idct8(d: &[i32; 64]) -> [i32; 64] {
 pub struct QuantTables {
     pub mf4: [[i32; 16]; 6],
     pub v4: [[i32; 16]; 6],
-    pub mf8: [[i64; 64]; 6],
+    pub mf8: [[i32; 64]; 6],
     pub v8: [[i32; 64]; 6],
 }
 
@@ -187,7 +187,7 @@ impl QuantTables {
                 let v = DEQUANT8[q][pos_class8(i)];
                 v8[q][i] = v;
                 let (x, y) = (i & 7, i >> 3);
-                mf8[q][i] = ((1u64 << 36) as f64 / (norm8[x] * norm8[y] * v as f64)).round() as i64;
+                mf8[q][i] = ((1u64 << 36) as f64 / (norm8[x] * norm8[y] * v as f64)).round() as i32;
             }
         }
         QuantTables { mf4, v4, mf8, v8 }
@@ -243,7 +243,7 @@ pub fn quant8(c: &mut [i32; 64], qt: &QuantTables, qp: u8, dz: Deadzone) -> u32 
     let mut nz = 0;
     for i in 0..64 {
         let v = c[i];
-        let a = ((v.unsigned_abs() as i64 * mf[i] + f) >> qbits) as i32;
+        let a = ((v.unsigned_abs() as i64 * mf[i] as i64 + f) >> qbits) as i32;
         c[i] = if v < 0 { -a } else { a };
         nz += (a != 0) as u32;
     }
