@@ -131,6 +131,16 @@ pub fn driver(backend: Backend) -> Result<String> {
     }
 }
 
+#[cfg_attr(
+    not(all(
+        feature = "h264",
+        feature = "hevc",
+        feature = "aac",
+        feature = "mp4",
+        feature = "filter"
+    )),
+    allow(dead_code)
+)]
 pub(crate) fn color(codec: Codec, extradata: &[u8]) -> Option<(u8, bool)> {
     let sets = nal::parse_extradata(codec, extradata).ok()?.parameter_sets;
     match codec {
@@ -346,6 +356,16 @@ impl GpuFrame {
         }
     }
 
+    #[cfg_attr(
+        not(all(
+            feature = "h264",
+            feature = "hevc",
+            feature = "aac",
+            feature = "mp4",
+            feature = "filter"
+        )),
+        allow(dead_code)
+    )]
     pub(crate) fn retime(&mut self, pts: i64, time_base: TimeBase) {
         self.time_base = time_base;
         match &mut self.inner {
@@ -358,6 +378,16 @@ impl GpuFrame {
         }
     }
 
+    #[cfg_attr(
+        not(all(
+            feature = "h264",
+            feature = "hevc",
+            feature = "aac",
+            feature = "mp4",
+            feature = "filter"
+        )),
+        allow(dead_code)
+    )]
     pub(crate) fn into_cpu(self) -> Option<Frame> {
         match self.inner {
             GpuInner::Cpu(f) => Some(f),
