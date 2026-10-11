@@ -45,7 +45,7 @@ pub struct DecodeStats {
 
 enum Pending {
     Ready(Picture),
-    Job(std::sync::mpsc::Receiver<Picture>),
+    Job(std::sync::mpsc::Receiver<Option<Picture>>),
     Existing(Arc<Frame>, i64, bool),
 }
 
@@ -56,6 +56,7 @@ pub struct Decoder {
     prev_seg_ids: Vec<u8>,
     last_size: Option<(u32, u32)>,
     last_show_frame: bool,
+    broken: bool,
     stats: DecodeStats,
     threads: usize,
     bufs: Arc<Pools>,
@@ -106,6 +107,7 @@ impl Decoder {
             prev_seg_ids: Vec::new(),
             last_size: None,
             last_show_frame: false,
+            broken: false,
             stats: DecodeStats::default(),
             threads: threads.max(1),
             bufs: Arc::default(),
@@ -146,10 +148,12 @@ impl Decoder {
 
     pub fn flush(&mut self) -> crate::media::Result<Vec<Image>> {
         let time_base = self.time_base;
-        self.flush_pictures()
-            .into_iter()
-            .map(|p| image_of(p, time_base))
-            .collect()
+        let pics = self.flush_pictures();
+        if std::mem::take(&mut self.broken) {
+            self.reset();
+            return Err(worker_failed().into());
+        }
+        pics.into_iter().map(|p| image_of(p, time_base)).collect()
     }
 
     pub fn decode_pictures(&mut self, data: &[u8], pts: i64) -> Result<Vec<Picture>> {
@@ -161,9 +165,20 @@ impl Decoder {
             if f.is_empty() {
                 continue;
             }
-            self.decode_frame(f, pts)?;
+            match guarded(|| self.decode_frame(f, pts)) {
+                Some(r) => r?,
+                None => {
+                    self.reset();
+                    return Err(worker_failed());
+                }
+            }
         }
-        Ok(self.drain(false))
+        let out = self.drain(false);
+        if std::mem::take(&mut self.broken) {
+            self.reset();
+            return Err(worker_failed());
+        }
+        Ok(out)
     }
 
     pub fn flush_pictures(&mut self) -> Vec<Picture> {
@@ -203,14 +218,17 @@ impl Decoder {
                 },
                 Pending::Job(rx) => {
                     let p = if must {
-                        rx.recv().ok()
+                        rx.recv().unwrap_or(None)
                     } else {
                         match rx.try_recv() {
-                            Ok(p) => Some(p),
+                            Ok(p) => p,
                             Err(std::sync::mpsc::TryRecvError::Empty) => break,
                             Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
                         }
                     };
+                    if p.is_none() {
+                        self.broken = true;
+                    }
                     self.pending.pop_front();
                     p
                 }
@@ -376,6 +394,7 @@ impl Decoder {
             self.bufs.mi.take_any(mi_rows * mi_cols, MiInfo::default()),
         ));
         let sync = Arc::new(RowSync::new(h.sb64_rows as usize, tile_cols));
+        let _unwind = FailOnUnwind(&sync);
         let draft =
             self.draft && h.refresh_frame_flags == 0 && h.show_frame && self.st.lf.level > 0;
         self.stats.draft_frames += draft as u64;
@@ -433,9 +452,16 @@ impl Decoder {
             let mut err = None;
             if ce > cs {
                 for (ri, &(rs, re)) in row_bounds.iter().enumerate() {
-                    if !td.decode_tile(tile_data[ci][ri], rs, re) {
-                        err = Some(Error::Invalid("tile data exhausted".into()));
-                        break;
+                    match guarded(|| td.decode_tile(tile_data[ci][ri], rs, re)) {
+                        Some(true) => {}
+                        Some(false) => {
+                            err = Some(Error::Invalid("tile data exhausted".into()));
+                            break;
+                        }
+                        None => {
+                            err = Some(worker_failed());
+                            break;
+                        }
                     }
                 }
             }
@@ -463,7 +489,7 @@ impl Decoder {
         }
         drop(ref_frames);
         drop(prev_mi);
-        self.finish_post(post);
+        self.finish_post(post)?;
         if counting {
             let saved = &self.st.contexts[h.frame_context_idx as usize];
             let mut a = saved.clone();
@@ -529,10 +555,16 @@ impl Decoder {
         let spawned = std::thread::Builder::new()
             .name("vp9-post".into())
             .spawn(move || {
-                if let Ok(job) = job_rx.recv()
-                    && let Some(p) = job.run()
-                {
-                    let _ = tx.send(p);
+                if let Ok(job) = job_rx.recv() {
+                    match guarded(|| job.run()) {
+                        Some(Some(p)) => {
+                            let _ = tx.send(Some(p));
+                        }
+                        Some(None) => {}
+                        None => {
+                            let _ = tx.send(None);
+                        }
+                    }
                 }
             });
         match spawned {
@@ -547,19 +579,20 @@ impl Decoder {
         }
     }
 
-    fn finish_post(&mut self, post: PostRun) {
+    fn finish_post(&mut self, post: PostRun) -> Result<()> {
         match post {
             PostRun::Thread(rx, shown) => {
                 if shown {
                     self.pending.push_back(Pending::Job(rx));
                 }
             }
-            PostRun::Inline(job) => {
-                if let Some(p) = job.run() {
-                    self.pending.push_back(Pending::Ready(p));
-                }
-            }
+            PostRun::Inline(job) => match guarded(|| job.run()) {
+                Some(Some(p)) => self.pending.push_back(Pending::Ready(p)),
+                Some(None) => {}
+                None => return Err(worker_failed()),
+            },
         }
+        Ok(())
     }
 
     fn count_frame(&mut self, h: &FrameHeader) {
@@ -633,7 +666,7 @@ pub(crate) fn segment_quant(h: &FrameHeader, seg: &Segmentation) -> [[[i32; 2]; 
 }
 
 enum PostRun {
-    Thread(std::sync::mpsc::Receiver<Picture>, bool),
+    Thread(std::sync::mpsc::Receiver<Option<Picture>>, bool),
     Inline(Box<PostJob>),
 }
 
@@ -834,4 +867,22 @@ fn image_of(p: Picture, time_base: TimeBase) -> crate::media::Result<Image> {
             plane(p.v, cw, ch),
         ],
     })
+}
+
+fn guarded<T>(f: impl FnOnce() -> T) -> Option<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).ok()
+}
+
+fn worker_failed() -> Error {
+    Error::Invalid("a decoding worker failed on this stream".into())
+}
+
+struct FailOnUnwind<'a>(&'a RowSync);
+
+impl Drop for FailOnUnwind<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.fail();
+        }
+    }
 }
