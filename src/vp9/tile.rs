@@ -1,5 +1,5 @@
 use crate::vp9::boolcoder::BoolDecoder;
-use crate::vp9::frame::{Frame, MiGrid, MiInfo, Mv};
+use crate::vp9::frame::{Frame, MiGrid, MiInfo, Mv, RowSync};
 use crate::vp9::header::{FrameHeader, Segmentation};
 use crate::vp9::probs::{Counts, FrameContext};
 use crate::vp9::tables::*;
@@ -23,17 +23,14 @@ pub struct FrameShared<'a> {
     pub refs: [Option<RefUse<'a>>; 3],
     pub seg_q: [[[i32; 2]; 2]; 8],
     pub counting: bool,
-    pub pools: &'a crate::vp9::frame::Pools,
+    pub dst: &'a Frame,
+    pub mi: &'a MiGrid,
+    pub sync: &'a RowSync,
 }
 
 pub struct Strip {
     pub mi_col_start: usize,
     pub mi_col_end: usize,
-    pub mi: Vec<MiInfo>,
-    pub seg_ids: Vec<u8>,
-    pub planes: [Vec<u16>; 3],
-    pub strides: [usize; 3],
-    pub x_off: [usize; 3],
     pub counts: Box<Counts>,
     pub compound_blocks: u64,
     pub scaled_blocks: u64,
@@ -72,6 +69,9 @@ pub struct TileDecoder<'a> {
     h: &'a FrameHeader,
     fc: &'a FrameContext,
     pub strip: Strip,
+    planes: [&'a mut [u16]; 3],
+    above_lines: [Vec<u16>; 3],
+    strides: [usize; 3],
     mi_cols: usize,
     mi_rows: usize,
     ss_x: usize,
@@ -91,7 +91,6 @@ pub struct TileDecoder<'a> {
     best_mv: [Mv; 2],
     coefs: Vec<i32>,
     token_cache: Vec<u8>,
-    pred: Vec<u16>,
     pred2: Vec<u16>,
     mc_tmp: Vec<u16>,
     mc_win: Vec<u16>,
@@ -108,24 +107,9 @@ impl<'a> TileDecoder<'a> {
         );
         let sb_rows = h.sb64_rows as usize;
         let sb_cols = h.sb64_cols as usize;
-        let strip_w = (mi_col_end - mi_col_start).div_ceil(8) * 64;
-        let strip_h = sb_rows * 64;
-        let x0 = mi_col_start * 8;
-        let uv_len = (strip_w >> ss_x) * (strip_h >> ss_y);
-        let planes = [
-            s.pools.samples.take(strip_w * strip_h, 0),
-            s.pools.samples.take(uv_len, 0),
-            s.pools.samples.take(uv_len, 0),
-        ];
-        let mi_w = mi_col_end - mi_col_start;
         let strip = Strip {
             mi_col_start,
             mi_col_end,
-            mi: s.pools.mi.take(mi_w * mi_rows, MiInfo::default()),
-            seg_ids: vec![0; mi_w * mi_rows],
-            planes,
-            strides: [strip_w, strip_w >> ss_x, strip_w >> ss_x],
-            x_off: [x0, x0 >> ss_x, x0 >> ss_x],
             counts: Box::default(),
             compound_blocks: 0,
             scaled_blocks: 0,
@@ -139,6 +123,9 @@ impl<'a> TileDecoder<'a> {
             h,
             fc: s.fc,
             strip,
+            planes: unsafe { s.dst.planes_mut() },
+            above_lines: s.dst.geo.map(|g| vec![0; g.stride]),
+            strides: s.dst.geo.map(|g| g.stride),
             mi_cols,
             mi_rows,
             ss_x,
@@ -158,7 +145,6 @@ impl<'a> TileDecoder<'a> {
             best_mv: [Mv::ZERO; 2],
             coefs: vec![0; 1024],
             token_cache: vec![0; 1024],
-            pred: vec![0; 64 * 64],
             pred2: vec![0; 64 * 64],
             mc_tmp: vec![
                 0;
@@ -179,8 +165,7 @@ impl<'a> TileDecoder<'a> {
 
     #[inline]
     fn mi_at(&self, r: usize, c: usize) -> &MiInfo {
-        &self.strip.mi
-            [r * (self.strip.mi_col_end - self.strip.mi_col_start) + c - self.strip.mi_col_start]
+        self.s.mi.at(r, c)
     }
 
     pub fn decode_tile(&mut self, data: &[u8], mi_row_start: usize, mi_row_end: usize) -> bool {
@@ -198,8 +183,24 @@ impl<'a> TileDecoder<'a> {
             for c in (cs..ce).step_by(8) {
                 self.decode_partition(&mut bd, r, c, BLOCK_64X64);
             }
+            self.save_above_lines(r / 8, cs, ce);
+            self.s.sync.mark(r / 8);
         }
         true
+    }
+
+    fn save_above_lines(&mut self, sb_row: usize, cs: usize, ce: usize) {
+        for p in 0..3 {
+            let (sx, sy) = if p > 0 {
+                (self.ss_x, self.ss_y)
+            } else {
+                (0, 0)
+            };
+            let y = (((sb_row + 1) * 64) >> sy) - 1;
+            let (x0, x1) = ((cs * 8) >> sx, (ce * 8) >> sx);
+            let o = y * self.strides[p];
+            self.above_lines[p][x0..x1].copy_from_slice(&self.planes[p][o + x0..o + x1]);
+        }
     }
 
     fn decode_partition(&mut self, bd: &mut BoolDecoder, r: usize, c: usize, bsize: u8) {
@@ -305,18 +306,11 @@ impl<'a> TileDecoder<'a> {
         };
         let bh = NUM_8X8_HIGH[b.size as usize] as usize;
         let bw = NUM_8X8_WIDE[b.size as usize] as usize;
-        let mi_w = self.strip.mi_col_end - self.strip.mi_col_start;
         let (y1, x1) = (
             (r + bh).min(self.mi_rows),
             (c + bw).min(self.strip.mi_col_end),
         );
-        for y in r..y1 {
-            let row = y * mi_w;
-            for x in c..x1 {
-                self.strip.mi[row + x - self.strip.mi_col_start] = info;
-                self.strip.seg_ids[row + x - self.strip.mi_col_start] = b.seg_id;
-            }
-        }
+        self.s.mi.fill(r, y1, c, x1, info);
     }
 
     fn intra_frame_mode_info(&mut self, bd: &mut BoolDecoder, b: &mut Blk) {

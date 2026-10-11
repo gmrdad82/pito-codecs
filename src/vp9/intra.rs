@@ -10,31 +10,35 @@ pub struct IntraEdge {
     pub bit_depth: u8,
 }
 
+crate::vp9::isa::dispatch! {
 pub fn predict(
     buf: &mut [u16],
     stride: usize,
-    x_off: usize,
     x: usize,
     y: usize,
     mode: u8,
     e: &IntraEdge,
+    line: Option<&[u16]>,
 ) {
     let log2 = e.tx_size as usize + 2;
     let size = 1usize << log2;
     let base = 1i32 << (e.bit_depth - 1);
-    let at = |xx: usize, yy: usize| yy * stride + xx - x_off;
+    let at = |xx: usize, yy: usize| yy * stride + xx;
     let mut above = [0i32; 65];
     let mut left = [0i32; 32];
+    let (src, row): (&[u16], usize) = match line {
+        Some(l) => (l, 0),
+        None => (&buf[..], (y.max(1) - 1) * stride),
+    };
     if !e.have_above {
         above[1..=2 * size].fill(base - 1);
     } else {
-        let row = (y - 1) * stride;
         for i in 0..size {
-            above[1 + i] = buf[row + (x + i).min(e.max_x) - x_off] as i32;
+            above[1 + i] = src[row + (x + i).min(e.max_x)] as i32;
         }
         if e.not_on_right && e.tx_size == 0 {
             for i in size..2 * size {
-                above[1 + i] = buf[row + (x + i).min(e.max_x) - x_off] as i32;
+                above[1 + i] = src[row + (x + i).min(e.max_x)] as i32;
             }
         } else {
             let v = above[size];
@@ -42,7 +46,7 @@ pub fn predict(
         }
     }
     above[0] = if e.have_above && e.have_left {
-        buf[at((x - 1).min(e.max_x), y - 1)] as i32
+        src[row + (x - 1).min(e.max_x)] as i32
     } else if e.have_above {
         base + 1
     } else {
@@ -220,4 +224,5 @@ pub fn predict(
             }
         }
     }
+}
 }
