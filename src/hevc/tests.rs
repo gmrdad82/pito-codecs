@@ -277,7 +277,24 @@ fn ensure(f: &Fixture) -> Option<(PathBuf, PathBuf)> {
         );
         std::fs::rename(&tmp, &yuv).unwrap();
     }
+    if !decodes_clean(&hevc) {
+        eprintln!(
+            "SKIPPED ({}): this ffmpeg's libx265 wrote a stream its own decoder rejects",
+            f.name
+        );
+        return None;
+    }
     Some((hevc, yuv))
+}
+
+fn decodes_clean(hevc: &Path) -> bool {
+    let out = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
+        .arg(hevc)
+        .args(["-f", "null", "-"])
+        .output()
+        .unwrap();
+    out.status.success() && out.stderr.is_empty()
 }
 
 pub(super) fn access_units(data: &[u8]) -> Vec<&[u8]> {
@@ -371,7 +388,9 @@ fn compare(name: &str, frames: &[Frame], reference: &[u8], f: &Fixture) {
 #[test]
 fn bit_exact_against_ffmpeg() {
     for f in CONFORMANCE {
-        let Some((hevc, yuv)) = ensure(f) else { return };
+        let Some((hevc, yuv)) = ensure(f) else {
+            continue;
+        };
         let data = std::fs::read(hevc).unwrap();
         let reference = std::fs::read(yuv).unwrap();
         let units: Vec<Vec<u8>> = access_units(&data)
