@@ -360,13 +360,30 @@ fn crf_18_encode_plays_in_ffmpeg_and_decodes_back() {
         b_frames: 2,
         ..EncoderConfig::default()
     };
-    let mut enc = Encoder::new(config).unwrap();
+    let mut enc = Encoder::new(config.clone()).unwrap();
     let mut packets = Vec::new();
     for f in &frames {
         packets.extend(enc.encode(f).unwrap());
     }
     packets.extend(enc.flush().unwrap());
     assert_eq!(packets.len(), frames.len());
+    let mut one = Encoder::new(EncoderConfig {
+        threads: 1,
+        ..config.clone()
+    })
+    .unwrap();
+    let mut single = Vec::new();
+    for f in &frames {
+        single.extend(one.encode(f).unwrap());
+    }
+    single.extend(one.flush().unwrap());
+    assert!(
+        packets
+            .iter()
+            .map(|p| &p.data)
+            .eq(single.iter().map(|p| &p.data)),
+        "frame threads change the bitstream"
+    );
     assert!(packets[0].keyframe);
     assert!(
         packets.windows(2).all(|p| p[0].dts < p[1].dts),
@@ -531,7 +548,7 @@ fn bench_encoder() {
             b_frames: b,
             ..EncoderConfig::default()
         };
-        let mut enc = Encoder::new(config).unwrap();
+        let mut enc = Encoder::new(config.clone()).unwrap();
         let t = Instant::now();
         let mut bytes = 0;
         for f in &frames {

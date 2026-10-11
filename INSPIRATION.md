@@ -1,8 +1,12 @@
 # Inspiration
 
-The codecs here are written in Rust. Parts are adapted from permissively licensed projects, each named below with the tag or commit it was taken from; their copyright and licence texts are kept in `NOTICE`.
+## Why
+
+I wanted something smaller and faster, written natively in Rust, for the PITO family of apps and my games. One library each app can carry, with no external ffmpeg to download, bundle or keep in step, and the GPU used first.
 
 ## Origins
+
+The codecs here are written in Rust. Parts are adapted from permissively licensed projects, each named below with the tag or commit it was taken from; their copyright and licence texts are kept in `NOTICE`.
 
 | Origin | Licence taken | Tag and commit | What came from it |
 | --- | --- | --- | --- |
@@ -23,7 +27,7 @@ The codecs here are written in Rust. Parts are adapted from permissively license
 
 ## Read, never copied
 
-FFmpeg, x264, x265, libde265, libvpx and libopus were read for understanding only: no code from them is copied, translated line by line, linked or bundled. FFmpeg appears only as a test oracle and as the optional route a user can provide themselves.
+FFmpeg, x264, x265, libde265, libvpx and libopus were read for understanding only: no code from them is copied, translated line by line, linked or bundled. FFmpeg appears only as the test oracle and the benchmark reference.
 
 ## What may come in
 

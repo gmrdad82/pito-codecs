@@ -2,13 +2,14 @@
 
 pub(crate) mod bits;
 pub(crate) mod boolcoder;
-mod decoder;
+pub(crate) mod decoder;
 pub mod enc;
 pub(crate) mod error;
 pub(crate) mod frame;
 pub(crate) mod header;
 pub(crate) mod inter;
 pub(crate) mod intra;
+pub(crate) mod isa;
 pub(crate) mod loopfilter;
 pub(crate) mod probs;
 #[rustfmt::skip]

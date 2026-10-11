@@ -37,6 +37,8 @@ pub const VAProfileH264High: VAProfile = 7;
 pub const VAProfileH264ConstrainedBaseline: VAProfile = 13;
 pub const VAProfileHEVCMain: VAProfile = 17;
 pub const VAProfileHEVCMain10: VAProfile = 18;
+pub const VAProfileVP9Profile0: VAProfile = 19;
+pub const VAProfileVP9Profile2: VAProfile = 21;
 pub const VAEntrypointVLD: VAEntrypoint = 1;
 
 pub const VAConfigAttribRTFormat: VAConfigAttribType = 0;
@@ -910,6 +912,38 @@ pub struct VAProcPipelineParameterBuffer {
 }
 
 pub const VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2: u32 = 0x4000_0000;
+pub const VA_SURFACE_ATTRIB_SETTABLE: u32 = 0x0000_0002;
+pub const VASurfaceAttribMemoryType: c_int = 6;
+pub const VASurfaceAttribExternalBufferDescriptor: c_int = 7;
+pub const VAGenericValueTypeInteger: c_int = 1;
+pub const VAGenericValueTypePointer: c_int = 3;
+pub const DRM_FORMAT_NV12: u32 = u32::from_le_bytes(*b"NV12");
+pub const DRM_FORMAT_P010: u32 = u32::from_le_bytes(*b"P010");
+pub const DRM_FORMAT_MOD_LINEAR: u64 = 0;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union VAGenericValueUnion {
+    pub i: c_int,
+    pub f: f32,
+    pub p: *mut c_void,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VAGenericValue {
+    pub type_: c_int,
+    pub value: VAGenericValueUnion,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VASurfaceAttrib {
+    pub type_: c_int,
+    pub flags: u32,
+    pub value: VAGenericValue,
+}
+
 pub const VA_EXPORT_SURFACE_READ_ONLY: u32 = 0x0001;
 pub const VA_EXPORT_SURFACE_SEPARATE_LAYERS: u32 = 0x0004;
 pub const VA_EXPORT_SURFACE_COMPOSED_LAYERS: u32 = 0x0008;

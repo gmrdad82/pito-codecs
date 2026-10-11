@@ -267,7 +267,9 @@ impl VaEncoder {
         }
         config.b_frames = config.b_frames.min(3);
         if config.gop == 0 {
-            config.gop = (config.fps_num / config.fps_den).max(1) * 2;
+            config.gop = (config.fps_num / config.fps_den.max(1))
+                .max(1)
+                .saturating_mul(2);
         }
         let blocks = if supported(entry[6]) && codec == Codec::Hevc {
             let v = entry[6];
@@ -656,15 +658,12 @@ impl VaEncoder {
                 target_percentage: (u64::from(target) * 100 / u64::from(peak.max(1))).clamp(1, 100)
                     as u32,
                 window_size: 1000,
-                initial_qp: PIC_INIT_QP as u32,
-                min_qp: 1,
-                max_qp: 51,
                 ..Default::default()
             };
             out.push(misc(ffi::VAEncMiscParameterTypeRateControl, &rc));
             let hrd = ffi::VAEncMiscParameterHRD {
                 initial_buffer_fullness: peak,
-                buffer_size: peak.saturating_mul(2),
+                buffer_size: peak,
                 ..Default::default()
             };
             out.push(misc(ffi::VAEncMiscParameterTypeHRD, &hrd));

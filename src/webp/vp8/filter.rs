@@ -35,7 +35,7 @@ pub struct Planes<'a> {
     pub cr: usize,
 }
 
-#[cfg(any(test, not(target_arch = "x86_64")))]
+#[cfg(any(all(test, target_os = "linux"), not(target_arch = "x86_64")))]
 pub mod scalar {
     use super::{Planes, Strength};
 

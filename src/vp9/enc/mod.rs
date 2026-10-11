@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use bitstream::{CompressedParams, SegParams, Uncompressed, write_compressed, write_uncompressed};
 use bool::BoolWriter;
 use entropy::{Costs, FrameSyntax, NullSink, TileWriter};
-use frame::{MiGrid, MiInfo, Picture, SbCoefs};
+use frame::{MiGrid, Picture, SbCoefs};
 use rc::{Aq, FrameKind, RateControl, RcConfig, RcMode, TileLayout, Wavefront};
 use search::{FrameEnv, SbEncoder, Shared, Speed, Workspace};
 use tables::*;
@@ -254,11 +254,7 @@ impl Encoder {
             trellis: true,
         };
         let mut recon = Picture::new(src.width, src.height);
-        let mut mi = MiGrid {
-            cols: mi_cols,
-            rows: mi_rows,
-            mi: vec![MiInfo::default(); mi_rows * mi_cols],
-        };
+        let mut mi = MiGrid::new(mi_rows, mi_cols, Vec::new());
         let mut uv = vec![0u8; mi_rows * mi_cols];
         let layout = self.wavefront.layout().clone();
         let refs: [Option<&Picture>; 3] = if key {
@@ -273,7 +269,7 @@ impl Encoder {
         let prev_mi = if key {
             None
         } else {
-            self.prev_mi.as_ref().map(|m| &m.mi[..])
+            self.prev_mi.as_ref().map(|m| m.as_slice())
         };
         {
             let env = FrameEnv {
@@ -293,7 +289,7 @@ impl Encoder {
                 prev_mi,
                 sign_bias: [false; 4],
             };
-            let shared = Shared::new(&mut recon, &mut mi.mi, &mut uv, mi_cols);
+            let shared = Shared::new(&mut recon, mi.as_mut_slice(), &mut uv, mi_cols);
             let coefs = &self.coefs;
             let sb_cols = self.sb_cols;
             self.wavefront.run(&mut self.workers, |ws, row| {

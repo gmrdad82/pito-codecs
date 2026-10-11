@@ -1,32 +1,26 @@
 pub(crate) mod itx;
 pub(crate) mod mc;
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 thread_local! {
     static OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 pub(crate) fn force_off(off: bool) {
     OFF.set(off);
 }
 
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 pub(crate) fn on() -> bool {
     #[cfg(test)]
     if OFF.get() {
         return false;
     }
-    #[cfg(target_arch = "x86_64")]
-    {
-        crate::hevc::isa::avx2()
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        false
-    }
+    crate::hevc::isa::avx2()
 }
 
 #[cfg(target_arch = "x86_64")]
