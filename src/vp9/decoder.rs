@@ -1,6 +1,6 @@
 use crate::media::{Frame as Image, Packet, PixelFormat, TimeBase};
 use crate::vp9::error::{Error, Result, ensure};
-use crate::vp9::frame::{BAND_PAD, Band, Frame, FrameInfo, MiGrid, MiInfo, Pools};
+use crate::vp9::frame::{Frame, FrameInfo, MiGrid, MiInfo, Pools};
 use crate::vp9::header::{
     FrameHeader, HeaderState, KEY_FRAME, RefInfo, parse_compressed, parse_uncompressed,
     split_superframe,
@@ -375,6 +375,23 @@ impl Decoder {
         }
         let counting = !h.error_resilient_mode && !h.frame_parallel_decoding_mode;
         let prev_mi = if use_prev { self.prev_mi.clone() } else { None };
+        let frame = Arc::new(Frame::new(
+            FrameInfo {
+                width: h.width,
+                height: h.height,
+                ss_x: h.color.subsampling_x,
+                ss_y: h.color.subsampling_y,
+                bit_depth: h.color.bit_depth,
+                color_space: h.color.color_space,
+                color_range: h.color.color_range,
+                render_width: h.render_width,
+                render_height: h.render_height,
+                key: h.frame_type == KEY_FRAME,
+                intra_only: h.intra_only,
+            },
+            self.bufs.clone(),
+        ));
+        let frame_ref = &*frame;
         let shared = FrameShared {
             h: &h,
             fc: &fc,
@@ -385,6 +402,7 @@ impl Decoder {
             seg_q,
             counting,
             pools: &self.bufs,
+            dst: frame_ref,
         };
         let col_bounds: Vec<(usize, usize)> = (0..tile_cols)
             .map(|i| {
@@ -442,22 +460,6 @@ impl Decoder {
         drop(prev_mi);
         let (mi, seg_ids) = assemble_mi(&mut strips, mi_rows, mi_cols, &self.bufs);
         let mi = Arc::new(mi);
-        let frame = Arc::new(Frame::new(
-            FrameInfo {
-                width: h.width,
-                height: h.height,
-                ss_x: h.color.subsampling_x,
-                ss_y: h.color.subsampling_y,
-                bit_depth: h.color.bit_depth,
-                color_space: h.color.color_space,
-                color_range: h.color.color_range,
-                render_width: h.render_width,
-                render_height: h.render_height,
-                key: h.frame_type == KEY_FRAME,
-                intra_only: h.intra_only,
-            },
-            self.bufs.clone(),
-        ));
         let draft =
             self.draft && h.refresh_frame_flags == 0 && h.show_frame && self.st.lf.level > 0;
         self.stats.draft_frames += draft as u64;
@@ -472,13 +474,12 @@ impl Decoder {
                 h.color.bit_depth,
             )
         });
+        recycle_strips(strips, &self.bufs);
         let job = PostJob {
             frame: frame.clone(),
-            strips,
             mi: mi.clone(),
             lf,
             out: h.show_frame.then_some((pts, draft)),
-            pools: self.bufs.clone(),
         };
         self.run_post(job);
         if counting {
@@ -617,30 +618,23 @@ impl Drop for Decoder {
 
 fn recycle_strips(strips: Vec<Strip>, pools: &Pools) {
     for s in strips {
-        for p in s.planes {
-            pools.samples.put(p);
-        }
         pools.mi.put(s.mi);
     }
 }
 
 struct PostJob {
     frame: Arc<Frame>,
-    strips: Vec<Strip>,
     mi: Arc<MiGrid>,
     lf: Option<LfFrame>,
     out: Option<(i64, bool)>,
-    pools: Arc<Pools>,
 }
 
 struct PublishGuard<'a>(&'a Frame);
 
 impl Drop for PublishGuard<'_> {
     fn drop(&mut self) {
-        for r in 0..self.0.sb_rows() {
-            if !self.0.is_published(r) {
-                self.0.publish(r, self.0.new_band());
-            }
+        if !self.0.is_complete() {
+            self.0.publish(self.0.sb_rows());
         }
     }
 }
@@ -653,87 +647,40 @@ impl PostJob {
             .out
             .map(|(pts, draft)| PictureBuilder::new(f, pts, draft));
         let sb_rows = f.sb_rows();
-        let mut held: Option<Band> = None;
         for r in 0..sb_rows {
-            let mut band = f.new_band();
-            for p in 0..3 {
-                let (fs, bh) = (f.strides[p], f.band_h[p]);
-                let dst = &mut band.planes[p];
-                for s in &self.strips {
-                    let ss = s.strides[p];
-                    let x0 = s.x_off[p];
-                    let w = ss.min(fs - x0);
-                    for k in 0..bh {
-                        let y = r * bh + k;
-                        let d = (BAND_PAD + k) * fs + x0;
-                        dst[d..d + w].copy_from_slice(&s.planes[p][y * ss..y * ss + w]);
-                    }
-                }
-            }
             if let Some(lf) = &self.lf {
-                if let Some(prev) = &held {
-                    for p in 0..3 {
-                        let (fs, bh) = (f.strides[p], f.band_h[p]);
-                        band.planes[p][..BAND_PAD * fs]
-                            .copy_from_slice(&prev.planes[p][bh * fs..(bh + BAND_PAD) * fs]);
-                    }
-                }
-                let [a, b, c] = &mut band.planes;
-                let mut views = [
-                    band_view(f, a, 0, r),
-                    band_view(f, b, 1, r),
-                    band_view(f, c, 2, r),
-                ];
+                let mut views: [PlaneView; 3] = std::array::from_fn(|p| band_view(f, p, r));
                 for c in 0..lf.mi_cols.div_ceil(8) {
                     filter_superblock(&mut views, &self.mi, lf, r * 8, c * 8);
                 }
-                if let Some(prev) = &mut held {
-                    for p in 0..3 {
-                        let (fs, bh) = (f.strides[p], f.band_h[p]);
-                        prev.planes[p][bh * fs..(bh + BAND_PAD) * fs]
-                            .copy_from_slice(&band.planes[p][..BAND_PAD * fs]);
-                    }
-                }
             }
-            if let Some(prev) = held.take() {
-                if let Some(pic) = &mut pic {
-                    pic.add(f, r - 1, &prev);
-                }
-                f.publish(r - 1, prev);
-            }
-            held = Some(band);
-        }
-        if let Some(last) = held {
-            if let Some(pic) = &mut pic {
-                pic.add(f, sb_rows - 1, &last);
-            }
-            f.publish(sb_rows - 1, last);
-        }
-        for s in self.strips {
-            for p in s.planes {
-                self.pools.samples.put(p);
+            if r > 0 {
+                finish(f, r - 1, &mut pic);
             }
         }
+        finish(f, sb_rows - 1, &mut pic);
         pic.map(PictureBuilder::finish)
     }
 }
 
-fn band_view<'a>(f: &Frame, d: &'a mut [u16], p: usize, r: usize) -> PlaneView<'a> {
-    let (fs, bh) = (f.strides[p], f.band_h[p]);
-    if r == 0 {
-        PlaneView {
-            data: &mut d[BAND_PAD * fs..],
-            stride: fs,
-            ox: 0,
-            oy: 0,
-        }
-    } else {
-        PlaneView {
-            data: d,
-            stride: fs,
-            ox: 0,
-            oy: r * bh - BAND_PAD,
-        }
+fn finish(f: &Frame, r: usize, pic: &mut Option<PictureBuilder>) {
+    if let Some(pic) = pic {
+        pic.add(f, r);
+    }
+    f.finish_rows(r);
+    f.publish(r + 1);
+}
+
+fn band_view(f: &Frame, p: usize, r: usize) -> PlaneView<'_> {
+    let g = f.geo[p];
+    let y0 = (r * g.band_h).saturating_sub(8);
+    let y1 = (r + 1) * g.band_h;
+    let pm = f.plane_mut(p);
+    PlaneView {
+        data: pm.row(0, y0, (y1 - y0) * g.stride),
+        stride: g.stride,
+        ox: 0,
+        oy: y0,
     }
 }
 
@@ -779,43 +726,36 @@ fn assemble_mi(
 struct PictureBuilder {
     planes: [Plane; 3],
     info: FrameInfo,
-    vis: [(usize, usize); 3],
     pts: i64,
     draft: bool,
 }
 
 impl PictureBuilder {
     fn new(f: &Frame, pts: i64, draft: bool) -> Self {
-        let planes = f.vis.map(|(w, h)| {
+        let planes = f.geo.map(|g| {
             if f.info.bit_depth == 8 {
-                Plane::U8(vec![0; w * h])
+                Plane::U8(Vec::with_capacity(g.width * g.height))
             } else {
-                Plane::U16(vec![0; w * h])
+                Plane::U16(Vec::with_capacity(g.width * g.height))
             }
         });
         PictureBuilder {
             planes,
             info: f.info,
-            vis: f.vis,
             pts,
             draft,
         }
     }
 
-    fn add(&mut self, f: &Frame, r: usize, band: &Band) {
+    fn add(&mut self, f: &Frame, r: usize) {
         for p in 0..3 {
-            let (w, h) = f.vis[p];
-            let (fs, bh) = (f.strides[p], f.band_h[p]);
-            let y0 = r * bh;
-            for y in y0..(y0 + bh).min(h) {
-                let src = &band.planes[p][(y - y0 + BAND_PAD) * fs..][..w];
+            let g = f.geo[p];
+            let pm = f.plane_mut(p);
+            for y in r * g.band_h..((r + 1) * g.band_h).min(g.height) {
+                let src: &[u16] = pm.row(0, y, g.width);
                 match &mut self.planes[p] {
-                    Plane::U8(d) => {
-                        for (d, &s) in d[y * w..y * w + w].iter_mut().zip(src) {
-                            *d = s as u8;
-                        }
-                    }
-                    Plane::U16(d) => d[y * w..y * w + w].copy_from_slice(src),
+                    Plane::U8(d) => narrow_row(src, d),
+                    Plane::U16(d) => d.extend_from_slice(src),
                 }
             }
         }
@@ -824,19 +764,23 @@ impl PictureBuilder {
     fn finish(self) -> Picture {
         let i = self.info;
         let [y, u, v] = self.planes;
+        let (cw, ch) = (
+            (i.width as usize + i.ss_x as usize) >> i.ss_x as usize,
+            (i.height as usize + i.ss_y as usize) >> i.ss_y as usize,
+        );
         Picture {
             width: i.width,
             height: i.height,
-            chroma_width: self.vis[1].0 as u32,
-            chroma_height: self.vis[1].1 as u32,
+            chroma_width: cw as u32,
+            chroma_height: ch as u32,
             bit_depth: i.bit_depth as u32,
             subsampling_x: i.ss_x,
             subsampling_y: i.ss_y,
             y,
             u,
             v,
-            y_stride: self.vis[0].0,
-            uv_stride: self.vis[1].0,
+            y_stride: i.width as usize,
+            uv_stride: cw,
             pts: self.pts,
             key: i.key,
             intra_only: i.intra_only,
@@ -851,10 +795,21 @@ impl PictureBuilder {
     }
 }
 
+crate::vp9::isa::dispatch! {
+fn narrow_row(src: &[u16], d: &mut Vec<u8>) {
+    let n = d.len();
+    d.resize(n + src.len(), 0);
+    for (o, &s) in d[n..].iter_mut().zip(src) {
+        *o = s as u8;
+    }
+}
+}
+
 fn picture_of(f: &Frame, pts: i64, draft: bool) -> Picture {
+    f.wait(f.sb_rows());
     let mut b = PictureBuilder::new(f, pts, draft);
     for r in 0..f.sb_rows() {
-        b.add(f, r, f.band(r));
+        b.add(f, r);
     }
     b.finish()
 }

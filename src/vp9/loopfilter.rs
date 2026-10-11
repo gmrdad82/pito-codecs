@@ -94,6 +94,7 @@ pub struct PlaneView<'a> {
     pub oy: usize,
 }
 
+crate::vp9::isa::dispatch! {
 pub fn filter_superblock(
     views: &mut [PlaneView; 3],
     mi: &MiGrid,
@@ -106,6 +107,7 @@ pub fn filter_superblock(
             filter_sb_plane(view, mi, f, plane, pass, row, col);
         }
     }
+}
 }
 
 fn filter_sb_plane(

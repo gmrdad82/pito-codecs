@@ -16,11 +16,24 @@ pub struct RefPlane<'a> {
 
 impl RefPlane<'_> {
     #[inline]
-    fn row(&self, y: usize) -> &[u16] {
-        self.frame.row(self.plane, y)
+    fn rows(&self, y0: isize, y1: isize) -> (&[u16], usize) {
+        let f = self.frame;
+        let g = &f.geo[self.plane];
+        f.wait_plane_row(self.plane, y1 - 1);
+        let start = (g.origin as isize + y0 * g.stride as isize - g.border_x as isize) as usize;
+        let len = (y1 - y0) as usize * g.stride;
+        (&f.plane(self.plane)[start..start + len], g.border_x)
+    }
+
+    #[inline]
+    fn clamped_row(&self, y: i32) -> &[u16] {
+        let y = y.clamp(0, self.last_y) as isize;
+        let (rows, bx) = self.rows(y, y + 1);
+        &rows[bx..]
     }
 }
 
+crate::vp9::isa::dispatch! {
 #[allow(clippy::too_many_arguments)]
 pub fn predict(
     r: &RefPlane,
@@ -33,29 +46,28 @@ pub fn predict(
     filter: u8,
     bit_depth: u8,
     out: &mut [u16],
+    os: usize,
     tmp: &mut [u16],
     win: &mut [u16],
 ) {
     if step_x == 16 && step_y == 16 {
-        predict_unscaled(r, x, y, w, h, filter, bit_depth, out, tmp, win);
+        predict_unscaled(r, x, y, w, h, filter, bit_depth, out, os, tmp, win);
     } else {
-        predict_scaled(r, x, y, step_x, step_y, w, h, filter, bit_depth, out, tmp);
+        predict_scaled(
+            r, x, y, step_x, step_y, w, h, filter, bit_depth, out, os, tmp,
+        );
     }
+}
 }
 
 fn fetch_window(r: &RefPlane, x0: i32, y0: i32, w: usize, h: usize, win: &mut [u16]) -> usize {
     let ws = w + 7;
     for row in 0..h + 7 {
-        let yy = (y0 - 3 + row as i32).clamp(0, r.last_y) as usize;
-        let src = r.row(yy);
+        let src = r.clamped_row(y0 - 3 + row as i32);
         let dst = &mut win[row * ws..row * ws + ws];
         let xs = x0 - 3;
-        if xs >= 0 && xs + ws as i32 - 1 <= r.last_x {
-            dst.copy_from_slice(&src[xs as usize..xs as usize + ws]);
-        } else {
-            for (c, d) in dst.iter_mut().enumerate() {
-                *d = src[(xs + c as i32).clamp(0, r.last_x) as usize];
-            }
+        for (c, d) in dst.iter_mut().enumerate() {
+            *d = src[(xs + c as i32).clamp(0, r.last_x) as usize];
         }
     }
     ws
@@ -71,34 +83,32 @@ fn predict_unscaled(
     filter: u8,
     bit_depth: u8,
     out: &mut [u16],
+    os: usize,
     tmp: &mut [u16],
     win: &mut [u16],
 ) {
     let (x0, y0) = (x >> 4, y >> 4);
     let (fx, fy) = ((x & 15) as usize, (y & 15) as usize);
     let max = (1i32 << bit_depth) - 1;
-    let inside = x0 - 3 >= 0
-        && y0 - 3 >= 0
-        && x0 + w as i32 + 4 <= r.last_x
-        && y0 + h as i32 + 4 <= r.last_y;
-    let span = if inside {
-        r.frame
-            .span(r.plane, (y0 - 3) as usize, (y0 + h as i32 + 5) as usize)
+    let g = &r.frame.geo[r.plane];
+    let inside = x0 - 3 >= -(g.border_x as i32)
+        && y0 - 3 >= -(g.border_y as i32)
+        && x0 + w as i32 + 5 <= (g.stride - g.border_x) as i32
+        && y0 + h as i32 + 5 <= (g.aligned_h + g.border_y) as i32
+        && r.last_x == g.width as i32 - 1
+        && r.last_y == g.height as i32 - 1;
+    let (src, ss, so): (&[u16], usize, usize) = if inside {
+        let (rows, bx) = r.rows((y0 - 3) as isize, (y0 + h as i32 + 5) as isize);
+        (rows, g.stride, (bx as i32 + x0 - 3) as usize)
     } else {
-        None
-    };
-    let (src, ss, so): (&[u16], usize, usize) = match span {
-        Some((data, o)) => (data, r.frame.strides[r.plane], o + (x0 - 3) as usize),
-        None => {
-            let ws = fetch_window(r, x0, y0, w, h, win);
-            (&win[..], ws, 0)
-        }
+        let ws = fetch_window(r, x0, y0, w, h, win);
+        (&win[..], ws, 0)
     };
     match (fx, fy) {
         (0, 0) => {
             for i in 0..h {
                 let s = so + (i + 3) * ss + 3;
-                out[i * w..i * w + w].copy_from_slice(&src[s..s + w]);
+                out[i * os..i * os + w].copy_from_slice(&src[s..s + w]);
             }
         }
         (_, 0) => {
@@ -108,7 +118,7 @@ fn predict_unscaled(
                     &src[so + (i + 3) * ss..],
                     f,
                     max,
-                    &mut out[i * w..i * w + w],
+                    &mut out[i * os..i * os + w],
                 );
             }
         }
@@ -120,7 +130,7 @@ fn predict_unscaled(
                     ss,
                     f,
                     max,
-                    &mut out[i * w..i * w + w],
+                    &mut out[i * os..i * os + w],
                 );
             }
         }
@@ -131,7 +141,7 @@ fn predict_unscaled(
                 filter_h(&src[so + i * ss..], fh, max, &mut tmp[i * w..i * w + w]);
             }
             for i in 0..h {
-                filter_v(&tmp[i * w..], w, fv, max, &mut out[i * w..i * w + w]);
+                filter_v(&tmp[i * w..], w, fv, max, &mut out[i * os..i * os + w]);
             }
         }
     }
@@ -262,13 +272,13 @@ fn predict_scaled(
     filter: u8,
     bit_depth: u8,
     out: &mut [u16],
+    os: usize,
     tmp: &mut [u16],
 ) {
     let max = (1i32 << bit_depth) - 1;
     let ih = ((((h as i32 - 1) * step_y + 15) >> 4) + 8) as usize;
     for row in 0..ih {
-        let yy = ((y >> 4) + row as i32 - 3).clamp(0, r.last_y) as usize;
-        let src = r.row(yy);
+        let src = r.clamped_row((y >> 4) + row as i32 - 3);
         for c in 0..w {
             let p = x + step_x * c as i32;
             let f = taps(filter, (p & 15) as usize);
@@ -289,7 +299,7 @@ fn predict_scaled(
             for t in 0..8 {
                 acc += f[t] as i32 * tmp[(base + t) * w + c] as i32;
             }
-            out[rr * w + c] = ((acc + 64) >> 7).clamp(0, max) as u16;
+            out[rr * os + c] = ((acc + 64) >> 7).clamp(0, max) as u16;
         }
     }
 }
@@ -317,12 +327,8 @@ mod tests {
             key: true,
             intra_only: false,
         };
-        let mut full = vec![0u16; 64 * 64];
-        for y in 0..h {
-            full[y * 64..y * 64 + w].copy_from_slice(&data[y * w..y * w + w]);
-        }
-        let chroma = vec![0u16; 32 * 32];
-        let frame = Frame::from_planes(info, [&full, &chroma, &chroma]);
+        let chroma = vec![0u16; w.div_ceil(2) * h.div_ceil(2)];
+        let frame = Frame::from_planes(info, [&data, &chroma, &chroma]);
         let r = RefPlane {
             frame: &frame,
             plane: 0,
@@ -351,10 +357,11 @@ mod tests {
                         filter,
                         8,
                         &mut a,
+                        bw,
                         &mut tmp,
                         &mut [0u16; 71 * 71],
                     );
-                    predict_scaled(&r, x, y, 16, 16, bw, bh, filter, 8, &mut b, &mut tmp);
+                    predict_scaled(&r, x, y, 16, 16, bw, bh, filter, 8, &mut b, bw, &mut tmp);
                     assert_eq!(a, b, "filter {filter} pos ({x},{y}) {bw}x{bh}");
                 }
             }

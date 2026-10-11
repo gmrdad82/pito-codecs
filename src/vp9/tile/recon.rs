@@ -83,12 +83,9 @@ impl<'a> TileDecoder<'a> {
                                 max_y: max_y - 1,
                                 bit_depth: self.bit_depth,
                             };
-                            let (stride, x_off) =
-                                (self.strip.strides[plane], self.strip.x_off[plane]);
                             intra::predict(
-                                &mut self.strip.planes[plane],
-                                stride,
-                                x_off,
+                                self.planes[plane],
+                                self.strides[plane],
                                 start_x,
                                 start_y,
                                 mode,
@@ -101,9 +98,8 @@ impl<'a> TileDecoder<'a> {
                             nonzero = eob > 0;
                             b.eob_total += nonzero as u32;
                             if eob > 0 {
-                                let (stride, x_off) =
-                                    (self.strip.strides[plane], self.strip.x_off[plane]);
-                                let o = start_y * stride + start_x - x_off;
+                                let stride = self.strides[plane];
+                                let o = start_y * stride + start_x;
                                 transform::inverse_transform_add(
                                     &self.coefs,
                                     tx_sz,
@@ -112,7 +108,7 @@ impl<'a> TileDecoder<'a> {
                                     eob,
                                     rows,
                                     self.bit_depth,
-                                    &mut self.strip.planes[plane][o..],
+                                    &mut self.planes[plane][o..],
                                     stride,
                                 );
                                 let sc = scan(tx_sz, tx_type);
@@ -358,12 +354,16 @@ impl<'a> TileDecoder<'a> {
                         b.ref_frame[rl]
                     )));
                 }
-                let out = if rl == 0 {
-                    &mut self.pred
+                let v = 1 << (self.bit_depth - 1);
+                if rl == 0 {
+                    let stride = self.strides[plane];
+                    for i in 0..h {
+                        let o = (y + i) * stride + x;
+                        self.planes[plane][o..o + w].fill(v);
+                    }
                 } else {
-                    &mut self.pred2
-                };
-                out[..w * h].fill(1 << (self.bit_depth - 1));
+                    self.pred2[..w * h].fill(v);
+                }
                 continue;
             };
             let (x_scale, y_scale) = (rf.x_scale as i64, rf.y_scale as i64);
@@ -399,10 +399,11 @@ impl<'a> TileDecoder<'a> {
                 last_x: ((f.info.width as i32 + sx as i32) >> sx) - 1,
                 last_y: ((f.info.height as i32 + sy as i32) >> sy) - 1,
             };
-            let out = if rl == 0 {
-                &mut self.pred
+            let stride = self.strides[plane];
+            let (out, os) = if rl == 0 {
+                (&mut self.planes[plane][y * stride + x..], stride)
             } else {
-                &mut self.pred2
+                (&mut self.pred2[..], w)
             };
             inter::predict(
                 &rp,
@@ -415,25 +416,19 @@ impl<'a> TileDecoder<'a> {
                 b.interp_filter,
                 self.bit_depth,
                 out,
+                os,
                 &mut self.mc_tmp,
                 &mut self.mc_win,
             );
         }
-        let (stride, x_off) = (self.strip.strides[plane], self.strip.x_off[plane]);
-        let dst = &mut self.strip.planes[plane];
-        for i in 0..h {
-            let o = (y + i) * stride + x - x_off;
-            let row = &mut dst[o..o + w];
-            if is_compound {
-                for ((d, &a), &bb) in row
-                    .iter_mut()
-                    .zip(&self.pred[i * w..i * w + w])
-                    .zip(&self.pred2[i * w..i * w + w])
-                {
-                    *d = ((a as u32 + bb as u32 + 1) >> 1) as u16;
+        if is_compound {
+            let stride = self.strides[plane];
+            let dst = &mut self.planes[plane];
+            for i in 0..h {
+                let o = (y + i) * stride + x;
+                for (d, &bb) in dst[o..o + w].iter_mut().zip(&self.pred2[i * w..i * w + w]) {
+                    *d = ((*d as u32 + bb as u32 + 1) >> 1) as u16;
                 }
-            } else {
-                row.copy_from_slice(&self.pred[i * w..i * w + w]);
             }
         }
     }

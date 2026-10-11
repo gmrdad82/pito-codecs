@@ -151,6 +151,28 @@ const CONFORMANCE: &[Fixture] = &[
 
 const BENCH: &[Fixture] = &[
     fx(
+        "bench_1080p_hq",
+        "testsrc2",
+        (1920, 1080),
+        60,
+        "noise=alls=3:allf=t",
+        "yuv420p",
+        &[
+            "-crf",
+            "12",
+            "-b:v",
+            "0",
+            "-speed",
+            "4",
+            "-tile-columns",
+            "2",
+            "-row-mt",
+            "1",
+            "-frame-parallel",
+            "0",
+        ],
+    ),
+    fx(
         "bench_1080p",
         "testsrc2",
         (1920, 1080),
@@ -525,16 +547,37 @@ fn damaged_streams_fail_without_panics() {
     }
 }
 
-fn time<T>(runs: usize, mut f: impl FnMut() -> T) -> (f64, T) {
-    let mut best = f64::MAX;
-    let mut last = None;
-    for _ in 0..runs {
-        let t0 = Instant::now();
-        let v = f();
-        best = best.min(t0.elapsed().as_secs_f64());
-        last = Some(v);
-    }
-    (best, last.unwrap())
+fn cpu_secs() -> f64 {
+    let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+    let fields: Vec<&str> = stat
+        .rsplit_once(')')
+        .map(|(_, r)| r.split_whitespace().collect())
+        .unwrap_or_default();
+    let tick = |i: usize| {
+        fields
+            .get(i)
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0)
+    };
+    (tick(11) + tick(12)) / 100.0
+}
+
+fn ffmpeg_bench(args: &[&str]) -> (f64, f64) {
+    let out = Command::new("ffmpeg")
+        .args(["-hide_banner", "-benchmark"])
+        .args(args)
+        .output()
+        .unwrap();
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    let field = |k: &str| {
+        text.rsplit(k)
+            .next()
+            .and_then(|t| t.split('s').next())
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(f64::NAN)
+    };
+    (field("utime=") + field("stime="), field("rtime="))
 }
 
 #[test]
@@ -558,32 +601,55 @@ fn decode_speed() {
     {
         let Some((ivf, yuv)) = ensure(f) else { return };
         let data = std::fs::read(&ivf).unwrap();
-        check(f, cores, &data, &std::fs::read(yuv).unwrap());
+        let ours_only = std::env::var_os("VP9_OURS_ONLY").is_some();
+        if !ours_only {
+            check(f, cores, &data, &std::fs::read(yuv).unwrap());
+        }
         let chunks = ivf_frames(&data);
         for &threads in &threads {
-            let (secs, frames) = time(3, || {
-                decode_frames(&mut Decoder::with_threads(threads), &chunks).len()
-            });
             let t = threads.to_string();
-            let (theirs, _) = time(3, || {
-                ff(&[
-                    "-threads",
-                    &t,
-                    "-c:v",
-                    "vp9",
-                    "-i",
-                    ivf.to_str().unwrap(),
-                    "-f",
-                    "null",
-                    "-",
-                ])
-            });
-            println!(
-                "{} ({} KB): {threads} thread(s): ours {:.1} fps, ffmpeg {:.1} fps",
+            let mut ours = (f64::MAX, f64::MAX);
+            let mut theirs = (f64::MAX, f64::MAX);
+            let mut frames = 0;
+            let rounds = if ours_only { 3 } else { 5 };
+            for _ in 0..rounds {
+                let (c0, t0) = (cpu_secs(), Instant::now());
+                frames = decode_frames(&mut Decoder::with_threads(threads), &chunks).len();
+                ours = (
+                    ours.0.min(t0.elapsed().as_secs_f64()),
+                    ours.1.min(cpu_secs() - c0),
+                );
+                if !ours_only {
+                    let (cpu, wall) = ffmpeg_bench(&[
+                        "-threads",
+                        &t,
+                        "-c:v",
+                        "vp9",
+                        "-i",
+                        ivf.to_str().unwrap(),
+                        "-f",
+                        "null",
+                        "-",
+                    ]);
+                    theirs = (theirs.0.min(wall), theirs.1.min(cpu));
+                }
+            }
+            let ms = |s: f64| 1000.0 * s / frames as f64;
+            print!(
+                "{} {threads} thread(s): ours {:.1} fps wall, {:.2} cpu ms/frame",
                 f.name,
-                data.len() / 1024,
-                frames as f64 / secs,
-                frames as f64 / theirs
+                frames as f64 / ours.0,
+                ms(ours.1)
+            );
+            if ours_only {
+                println!();
+                continue;
+            }
+            println!(
+                "; ffmpeg {:.1} fps wall, {:.2} cpu ms/frame; cpu ratio {:.2}",
+                frames as f64 / theirs.0,
+                ms(theirs.1),
+                ours.1 / theirs.1
             );
         }
     }
