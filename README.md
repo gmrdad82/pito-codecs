@@ -40,8 +40,6 @@ Known gaps in `v0.1.0`, being worked on now:
 - **Filters** between decode and encode (`filter`): scaling, colour, geometry, frame rate, overlays, resampling and loudness.
 - **A front for apps** (`media`), which picks the fastest working route for each call. It can probe a file, give the first frame or stills for a filmstrip, play a file, pull its audio as PCM over any time range or as a stereo mix of its tracks with a gain each, and export with smart cuts, which copy the middle of each piece and re-encode only the edges.
 
-Works on Linux, Windows and macOS. GPU routes: VA-API and NVENC on Linux, VideoToolbox on macOS, Media Foundation and NVENC on Windows.
-
 ## Install
 
 Add it as a git dependency at a tag, with the features you need (all are on by default):
