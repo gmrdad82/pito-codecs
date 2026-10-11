@@ -6,6 +6,7 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use pito_codecs::aac;
@@ -24,7 +25,17 @@ type Res<T> = Result<T, Box<dyn Error>>;
 
 const CLIP_SECONDS: u32 = 20;
 const ENCODE_FRAMES: usize = 240;
-const SIZES: [(u32, u32); 2] = [(1920, 1080), (2560, 1440)];
+const ALL_SIZES: [(u32, u32); 2] = [(1920, 1080), (2560, 1440)];
+
+static QUICK: AtomicBool = AtomicBool::new(false);
+
+fn sizes() -> &'static [(u32, u32)] {
+    if QUICK.load(Ordering::Relaxed) {
+        &ALL_SIZES[..1]
+    } else {
+        &ALL_SIZES
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 struct Row {
@@ -163,7 +174,7 @@ fn prepare(dir: &Path, fixtures: &Path) -> Res<Assets> {
         }
     }
     let mut video = HashMap::new();
-    for (w, h) in SIZES {
+    for &(w, h) in sizes() {
         for codec in [Codec::H264, Codec::Hevc] {
             let name = match codec {
                 Codec::H264 => format!("h264-{h}.mp4"),
@@ -212,7 +223,7 @@ fn prepare(dir: &Path, fixtures: &Path) -> Res<Assets> {
         }
     }
     let mut raw = BTreeMap::new();
-    for (w, h) in SIZES {
+    for &(w, h) in sizes() {
         let out = dir.join(format!("raw-{h}.yuv"));
         if !out.exists() {
             eprintln!("bench: raw {w}x{h} frames");
@@ -544,7 +555,7 @@ impl Bench {
 
     fn decode(&mut self, a: &Assets) {
         for codec in [Codec::H264, Codec::Hevc] {
-            for (_, h) in SIZES {
+            for &(_, h) in sizes() {
                 let path = a.video[&(codec, h)].clone();
                 let pstr = path_str(&path);
                 let frames = Reader::open(&path)
@@ -624,7 +635,7 @@ impl Bench {
     }
 
     fn encode(&mut self, a: &Assets) {
-        for (w, h) in SIZES {
+        for &(w, h) in sizes() {
             let id_prefix = format!("encode.{h}");
             if !self.want(&[&id_prefix]) {
                 continue;
@@ -791,7 +802,7 @@ impl Bench {
 
     fn transcode(&mut self, a: &Assets) {
         for codec in [Codec::H264, Codec::Hevc] {
-            let (_, h) = SIZES[1];
+            let (_, h) = *sizes().last().unwrap_or(&ALL_SIZES[0]);
             let name = codec.to_string().to_lowercase().replace('.', "");
             let id = format!("transcode.{name}.{h}.gpu");
             if !self.want(&[&id]) {
@@ -1075,7 +1086,7 @@ impl Bench {
     }
 
     fn first_frame(&mut self, a: &Assets) {
-        let (_, h) = SIZES[1];
+        let (_, h) = *sizes().last().unwrap_or(&ALL_SIZES[0]);
         for codec in [Codec::H264, Codec::Hevc] {
             for (key, text, choice) in [("cpu", "CPU", Choice::Cpu), ("gpu", "GPU", Choice::Gpu)] {
                 let name = codec.to_string().to_lowercase().replace('.', "");
@@ -1086,7 +1097,11 @@ impl Bench {
                 let path = a.video[&(codec, h)].clone();
                 let node = self.node.clone();
                 let dir = a.dir.join("ttff");
-                let runs = self.runs.max(5);
+                let runs = if QUICK.load(Ordering::Relaxed) {
+                    3
+                } else {
+                    self.runs.max(5)
+                };
                 let m = (|| -> Res<Measured> {
                     fs::create_dir_all(&dir)?;
                     let prefs = Prefs {
@@ -1140,7 +1155,7 @@ impl Bench {
 
     fn filmstrip(&mut self, a: &Assets) {
         for codec in [Codec::H264, Codec::Hevc] {
-            for (_, h) in SIZES {
+            for &(_, h) in sizes() {
                 for (key, text, choice) in [
                     ("cpu", "CPU", Choice::Cpu),
                     ("auto", "GPU FIRST", Choice::Auto),
@@ -1238,7 +1253,7 @@ impl Bench {
     }
 
     fn smart_cut(&mut self, a: &Assets) {
-        for (_, h) in SIZES {
+        for &(_, h) in sizes() {
             let ids = [
                 format!("smartcut.{h}.copy"),
                 format!("smartcut.{h}.reencode"),
@@ -1361,12 +1376,15 @@ impl Bench {
 
     fn scale(&mut self, a: &Assets) {
         let cases = [(1440u32, 1080u32), (1440, 720), (1080, 720), (1080, 1440)];
+        let cases = cases
+            .into_iter()
+            .filter(|(from, _)| sizes().iter().any(|s| s.1 == *from));
         for (from, to) in cases {
             let id = format!("scale.{from}to{to}");
             if !self.want(&[&id]) {
                 continue;
             }
-            let (sw, sh) = SIZES
+            let (sw, sh) = ALL_SIZES
                 .iter()
                 .find(|s| s.1 == from)
                 .copied()
@@ -1562,6 +1580,7 @@ fn charts(rows: &[Row], images: &Path, machine: &Machine, date: &str) -> Res<()>
 fn main() -> Res<()> {
     let mut args = std::env::args().skip(1);
     let mut runs = 3usize;
+    let mut quick = false;
     let mut only = Vec::new();
     let mut out = PathBuf::from("tmp/bench");
     let mut images = PathBuf::from("docs/images");
@@ -1571,6 +1590,10 @@ fn main() -> Res<()> {
     while let Some(a) = args.next() {
         match a.as_str() {
             "--runs" => runs = args.next().ok_or("--runs N")?.parse()?,
+            "--quick" => {
+                quick = true;
+                runs = 1;
+            }
             "--only" => only.push(args.next().ok_or("--only ID")?),
             "--out" => out = args.next().ok_or("--out DIR")?.into(),
             "--images" => images = args.next().ok_or("--images DIR")?.into(),
@@ -1579,13 +1602,18 @@ fn main() -> Res<()> {
             "--no-charts" => no_charts = true,
             _ => {
                 return Err(format!(
-                    "usage: bench [--runs N] [--only ID]... [--out DIR] [--images DIR] [--fixtures DIR] [--charts-only] [--no-charts] (unknown {a})"
+                    "usage: bench [--runs N] [--quick] [--only ID]... [--out DIR] [--images DIR] [--fixtures DIR] [--charts-only] [--no-charts] (unknown {a})"
                 )
                 .into());
             }
         }
     }
-    let results_path = out.join("results.json");
+    QUICK.store(quick, Ordering::Relaxed);
+    let results_path = out.join(if quick {
+        "results-quick.json"
+    } else {
+        "results.json"
+    });
     if charts_only {
         let r: Results = serde_json::from_slice(&fs::read(&results_path)?)?;
         charts(&r.rows, &images, &r.machine, &r.date)?;
@@ -1637,7 +1665,7 @@ fn main() -> Res<()> {
     };
     fs::write(&results_path, serde_json::to_vec_pretty(&merged)?)?;
     println!("wrote {}", results_path.display());
-    if !no_charts && b.only.is_empty() {
+    if !no_charts && !quick && b.only.is_empty() {
         charts(&merged.rows, &images, &merged.machine, &merged.date)?;
         println!("wrote charts to {}", images.display());
     }
