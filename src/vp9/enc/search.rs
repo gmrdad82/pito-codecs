@@ -689,6 +689,7 @@ impl<'a> SbEncoder<'a> {
             best: pmv(refs.best),
             hints: &[],
             ref_rate: costs.single_ref[rctx][0][0],
+            half: None,
         }];
         let choice = InterChoice {
             src: self.src_slice(0, c * 8, r * 8),
