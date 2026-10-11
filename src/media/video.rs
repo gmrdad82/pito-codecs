@@ -2,11 +2,12 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::gpu::{GpuFrame, GpuScaler};
 use crate::mp4::Reader;
 
 use super::ffmpeg::{Child, Ffmpeg};
 use super::native;
-use super::picture::resize;
+use super::picture::{Color, resize};
 use super::probe::{Probe, probe};
 use super::route::{Caps, Choice, Prefs, pick_decode};
 use super::types::{Error, Frame, PixelFormat, Result, Route, TimeBase};
@@ -140,26 +141,19 @@ pub fn open(
                 native::Frames::open(src.reader()?.clone(), from, native::threads(), src.route)?;
             let mut reasons = src.reasons.clone();
             reasons.extend(decoded.reason.clone());
-            let route = decoded.route();
-            let (width, height) = size.unwrap_or((p.width, p.height));
-            let fps = fps.unwrap_or(p.fps);
             let format = if p.bit_depth <= 8 {
                 PixelFormat::Yuv420p8
             } else {
                 PixelFormat::Yuv420p10
             };
-            return Ok(Video {
-                inner: Inner::Native(Box::new(decoded), fps),
-                route,
+            return Ok(native_video(
+                decoded,
                 reasons,
-                width,
-                height,
+                size.unwrap_or((p.width, p.height)),
+                fps.unwrap_or(p.fps),
                 format,
-                time_base: TimeBase::new(fps.1, fps.0),
-                next: 0,
-                left: frames,
-                got: 0,
-            });
+                frames,
+            ));
         }
         Route::Ffmpeg => {}
     }
@@ -293,6 +287,247 @@ impl Iterator for Video {
     type Item = Result<Frame>;
 
     fn next(&mut self) -> Option<Result<Frame>> {
+        self.read().transpose()
+    }
+}
+
+pub const IN_FLIGHT: usize = 8;
+
+pub enum VideoFrame {
+    Gpu(GpuFrame),
+    Cpu(Frame),
+}
+
+impl VideoFrame {
+    pub fn pts(&self) -> i64 {
+        match self {
+            VideoFrame::Gpu(f) => f.pts(),
+            VideoFrame::Cpu(f) => f.pts,
+        }
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        match self {
+            VideoFrame::Gpu(f) => f.size(),
+            VideoFrame::Cpu(f) => (f.width, f.height),
+        }
+    }
+
+    pub fn on_gpu(&self) -> bool {
+        matches!(self, VideoFrame::Gpu(_))
+    }
+}
+
+enum GpuRoute {
+    Gpu {
+        scaler: Option<GpuScaler>,
+        frames: Box<native::Frames>,
+        fps: (u32, u32),
+    },
+    Cpu(Video),
+}
+
+pub struct GpuVideo {
+    inner: GpuRoute,
+    pub route: Route,
+    pub reasons: Vec<String>,
+    pub width: u32,
+    pub height: u32,
+    pub format: PixelFormat,
+    pub time_base: TimeBase,
+    pub color: Color,
+}
+
+impl std::fmt::Debug for GpuVideo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "GpuVideo({} {}x{}, {} on the GPU)",
+            self.route,
+            self.width,
+            self.height,
+            if self.on_gpu() { "frames" } else { "no frames" }
+        )
+    }
+}
+
+fn even(v: u32) -> u32 {
+    v.max(2) & !1
+}
+
+fn stream_color(src: &Source) -> Color {
+    let found = src.reader.as_ref().and_then(|r| {
+        let t = &r.tracks[r.video()?];
+        crate::gpu::color(t.codec()?, &t.extradata()?)
+    });
+    let (matrix, full_range) = found.unwrap_or((2, false));
+    Color { matrix, full_range }
+}
+
+pub fn decode_video_gpu(
+    path: &Path,
+    from: f64,
+    size: Option<(u32, u32)>,
+    prefs: &Prefs,
+) -> Result<GpuVideo> {
+    let src = source(path, prefs)?;
+    open_gpu(&src, from, size, None)
+}
+
+pub fn open_gpu(
+    src: &Source,
+    from: f64,
+    size: Option<(u32, u32)>,
+    fps: Option<(u32, u32)>,
+) -> Result<GpuVideo> {
+    let p = &src.probe;
+    let size = size
+        .filter(|&(w, h)| w > 0 && h > 0)
+        .map(|(w, h)| (even(w), even(h)))
+        .unwrap_or((p.width, p.height));
+    let fps = fps.unwrap_or(p.fps);
+    let color = stream_color(src);
+    let format = if p.bit_depth <= 8 {
+        PixelFormat::Yuv420p8
+    } else {
+        PixelFormat::Yuv420p10
+    };
+    if src.route == Route::Gpu {
+        let frames = native::Frames::open(src.reader()?.clone(), from, native::threads(), Route::Gpu)?;
+        let mut reasons = src.reasons.clone();
+        reasons.extend(frames.reason.clone());
+        if frames.route() == Route::Gpu {
+            let ten_bit = format == PixelFormat::Yuv420p10;
+            let scaler = match GpuScaler::with_frames(size.0, size.1, ten_bit, IN_FLIGHT) {
+                Ok(s) => Some(s),
+                Err(e) if size == (p.width, p.height) => {
+                    reasons.push(format!(
+                        "no GPU scaler ({e}); frames are the decoder's own surfaces"
+                    ));
+                    None
+                }
+                Err(e) => {
+                    reasons.push(format!(
+                        "no GPU scaler ({e}); frames are scaled on the CPU"
+                    ));
+                    None
+                }
+            };
+            return Ok(GpuVideo {
+                inner: GpuRoute::Gpu {
+                    scaler,
+                    frames: Box::new(frames),
+                    fps,
+                },
+                route: Route::Gpu,
+                reasons,
+                width: size.0,
+                height: size.1,
+                format,
+                time_base: TimeBase::new(fps.1, fps.0),
+                color,
+            });
+        }
+        let video = native_video(frames, reasons, size, fps, format, None);
+        return Ok(GpuVideo::cpu(video, color));
+    }
+    let video = open(src, from, None, Some(size), Some(fps))?;
+    Ok(GpuVideo::cpu(video, color))
+}
+
+fn native_video(
+    frames: native::Frames,
+    reasons: Vec<String>,
+    size: (u32, u32),
+    fps: (u32, u32),
+    format: PixelFormat,
+    left: Option<u64>,
+) -> Video {
+    Video {
+        route: frames.route(),
+        inner: Inner::Native(Box::new(frames), fps),
+        reasons,
+        width: size.0,
+        height: size.1,
+        format,
+        time_base: TimeBase::new(fps.1, fps.0),
+        next: 0,
+        left,
+        got: 0,
+    }
+}
+
+impl GpuVideo {
+    fn cpu(video: Video, color: Color) -> Self {
+        Self {
+            route: video.route,
+            reasons: video.reasons.clone(),
+            width: video.width,
+            height: video.height,
+            format: video.format,
+            time_base: video.time_base,
+            color,
+            inner: GpuRoute::Cpu(video),
+        }
+    }
+
+    pub fn on_gpu(&self) -> bool {
+        matches!(self.inner, GpuRoute::Gpu { .. })
+    }
+
+    pub fn recycle(&mut self, frame: VideoFrame) {
+        let VideoFrame::Cpu(frame) = frame else {
+            return;
+        };
+        match &mut self.inner {
+            GpuRoute::Gpu { frames, .. } => frames.recycle(frame),
+            GpuRoute::Cpu(video) => video.recycle(frame),
+        }
+    }
+
+    fn read(&mut self) -> Result<Option<VideoFrame>> {
+        let size = (self.width, self.height);
+        let time_base = self.time_base;
+        let (frames, scaler, fps) = match &mut self.inner {
+            GpuRoute::Cpu(video) => return Ok(video.read()?.map(VideoFrame::Cpu)),
+            GpuRoute::Gpu {
+                frames,
+                scaler,
+                fps,
+            } => (frames, scaler, *fps),
+        };
+        let Some(mut frame) = frames.next_gpu()? else {
+            return Ok(None);
+        };
+        let seconds = frames.track().seconds(frame.pts());
+        let pts = (seconds * fps.0 as f64 / fps.1.max(1) as f64).round() as i64;
+        if !frame.on_gpu() {
+            let Some(mut cpu) = frame.into_cpu() else {
+                return Ok(None);
+            };
+            cpu.pts = pts;
+            cpu.time_base = time_base;
+            if (cpu.width, cpu.height) != size {
+                cpu = resize(&cpu, size.0, size.1);
+            }
+            return Ok(Some(VideoFrame::Cpu(cpu)));
+        }
+        frame.retime(pts, time_base);
+        match scaler {
+            Some(s) => Ok(Some(VideoFrame::Gpu(s.scale(&frame)?))),
+            None if frame.size() == size => Ok(Some(VideoFrame::Gpu(frame))),
+            None => {
+                let cpu = frame.download()?;
+                Ok(Some(VideoFrame::Cpu(resize(&cpu, size.0, size.1))))
+            }
+        }
+    }
+}
+
+impl Iterator for GpuVideo {
+    type Item = Result<VideoFrame>;
+
+    fn next(&mut self) -> Option<Result<VideoFrame>> {
         self.read().transpose()
     }
 }
