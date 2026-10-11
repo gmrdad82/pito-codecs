@@ -5,7 +5,7 @@ use crate::vp9::spec_tables::SUBPEL_FILTERS;
 const WIN: usize = 64 + 7;
 
 #[inline(always)]
-fn taps(filter: u8, frac: usize) -> &'static [i16; 8] {
+pub(super) fn taps(filter: u8, frac: usize) -> &'static [i16; 8] {
     let o = ((filter as usize & 3) * 16 + frac) * 8;
     SUBPEL_FILTERS[o..o + 8].try_into().unwrap()
 }
@@ -115,7 +115,7 @@ pub fn filter_block(
     }
 }
 
-fn h_pass(
+pub(super) fn h_pass(
     src: &[u8],
     ss: usize,
     so: usize,
@@ -133,7 +133,7 @@ fn h_pass(
     h_pass_any(src, ss, so, w, h, f, dst, ds)
 }
 
-fn v_pass(
+pub(super) fn v_pass(
     src: &[u8],
     ss: usize,
     so: usize,
@@ -306,6 +306,7 @@ impl MvLimits {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 pub struct BlockPos {
     pub mi_row: usize,
     pub mi_col: usize,

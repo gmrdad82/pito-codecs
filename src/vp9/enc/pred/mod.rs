@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 
 pub mod dist;
+pub mod halfpel;
 pub mod inter;
 pub mod intra;
 pub(crate) mod isa;
