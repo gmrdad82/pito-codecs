@@ -598,6 +598,7 @@ fn sao_row<P: Pel>(pic: &PicState<P>, r: usize, bottom: bool) {
             );
         }
         pic.frame.pad_rows::<P>(c, ly0, ly1);
+        pic.frame.emit::<P>(c, ly0, ly1);
     }
 }
 }

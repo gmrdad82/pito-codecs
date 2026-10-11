@@ -28,7 +28,15 @@ pub struct Frame {
     col: Box<[OnceLock<Box<[ColMv]>>]>,
     store: Slots,
     pub image: OnceLock<Mutex<Option<Image>>>,
+    out: Mutex<Option<Output>>,
     pool: Option<PlanePool>,
+}
+
+pub type Crop = (usize, usize, usize, usize);
+
+struct Output {
+    crop: Crop,
+    planes: [Vec<u8>; 3],
 }
 
 pub type PlanePool = Arc<Mutex<Vec<Store>>>;
@@ -81,6 +89,7 @@ impl Frame {
             col: (0..n).map(|_| OnceLock::new()).collect(),
             store: Slots::default(),
             image: OnceLock::new(),
+            out: Mutex::new(None),
             pool: None,
         }
     }
@@ -268,6 +277,49 @@ impl Frame {
                     self.publish_top(r, vec![ColMv::default(); w16 * lines.div_ceil(16)].into());
                 }
             }
+        }
+    }
+
+    fn crop_of(&self, plane: usize, crop: Crop) -> Crop {
+        let (cx, cy, cw, ch) = crop;
+        if plane == 0 {
+            crop
+        } else {
+            (cx / 2, cy / 2, cw.div_ceil(2), ch.div_ceil(2))
+        }
+    }
+
+    pub fn set_output(&self, crop: Crop, mut planes: [Vec<u8>; 3]) {
+        let bytes = if self.bit_depth > 8 { 2 } else { 1 };
+        for (plane, v) in planes.iter_mut().enumerate() {
+            let (_, _, w, h) = self.crop_of(plane, crop);
+            if v.len() != w * h * bytes {
+                v.clear();
+                v.resize(w * h * bytes, 0);
+            }
+        }
+        if let Ok(mut o) = self.out.lock() {
+            *o = Some(Output { crop, planes });
+        }
+    }
+
+    pub fn take_output(&self) -> Option<[Vec<u8>; 3]> {
+        self.out.lock().ok()?.take().map(|o| o.planes)
+    }
+
+    pub fn emit<P: Pel>(&self, plane: usize, y0: usize, y1: usize) {
+        let Ok(mut o) = self.out.lock() else { return };
+        let Some(o) = o.as_mut() else { return };
+        let (cx, cy, cw, ch) = self.crop_of(plane, o.crop);
+        let g = &self.grids::<P>()[plane];
+        let (s, origin) = (self.stride(plane), self.origin(plane));
+        let n = cw * P::BYTES;
+        for y in y0.max(cy)..y1.min(cy + ch) {
+            let at = origin + y * s + cx;
+            let Some(dst) = o.planes[plane].get_mut((y - cy) * n..(y - cy + 1) * n) else {
+                return;
+            };
+            P::write_bytes(dst, g.slice(at..at + cw));
         }
     }
 

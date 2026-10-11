@@ -21,6 +21,7 @@ pub(crate) trait Pel:
     fn slot(s: &Slots) -> &OnceLock<[Grid<Self>; 3]>;
     fn unstore(s: Store) -> Option<[Grid<Self>; 3]>;
     fn extend_bytes(out: &mut Vec<u8>, src: &[Self]);
+    fn write_bytes(out: &mut [u8], src: &[Self]);
 }
 
 impl Pel for u8 {
@@ -45,6 +46,10 @@ impl Pel for u8 {
     fn extend_bytes(out: &mut Vec<u8>, src: &[u8]) {
         out.extend_from_slice(src);
     }
+
+    fn write_bytes(out: &mut [u8], src: &[u8]) {
+        out.copy_from_slice(src);
+    }
 }
 
 impl Pel for u16 {
@@ -68,5 +73,11 @@ impl Pel for u16 {
 
     fn extend_bytes(out: &mut Vec<u8>, src: &[u16]) {
         out.extend(src.iter().flat_map(|s| s.to_le_bytes()));
+    }
+
+    fn write_bytes(out: &mut [u8], src: &[u16]) {
+        for (d, s) in out.chunks_exact_mut(2).zip(src) {
+            d.copy_from_slice(&s.to_le_bytes());
+        }
     }
 }
