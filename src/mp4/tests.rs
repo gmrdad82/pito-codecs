@@ -22,6 +22,7 @@ fn generate(name: &str, seconds: u32, video: &[&str]) -> PathBuf {
     if path.exists() {
         return path;
     }
+    let tmp = dir().join(format!(".{}-{name}", std::process::id()));
     let st = Command::new("ffmpeg")
         .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
         .arg(format!("testsrc2=size=320x240:rate=30:duration={seconds}"))
@@ -33,10 +34,14 @@ fn generate(name: &str, seconds: u32, video: &[&str]) -> PathBuf {
         .args([
             "-c:a", "aac", "-b:a", "96k", "-ac", "2", "-pix_fmt", "yuv420p",
         ])
-        .arg(&path)
+        .arg(&tmp)
         .status()
         .unwrap();
     assert!(st.success());
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        assert!(std::path::Path::new(&path).exists(), "{e}");
+        let _ = std::fs::remove_file(&tmp);
+    }
     path
 }
 

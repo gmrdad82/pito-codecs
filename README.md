@@ -1,10 +1,10 @@
-<p align="center"><img src="docs/images/decode.gif" width="800" alt="A terminal running pcodec on a 1080p H.264 clip: it probes the file, decodes it at about 590 fps on the CPU and about 1,700 fps on the GPU through VA-API, then encodes it to HEVC on the GPU at about 600 fps."></p>
+<p align="center"><img src="docs/images/decode.gif" width="800" alt="A terminal running pcod on a 1080p H.264 clip: it probes the file, decodes it at about 1,440 fps on the CPU and about 1,700 fps on the GPU through VA-API, then encodes it to HEVC on the GPU at about 620 fps."></p>
 
 # pito-codecs
 
 [![CI](https://github.com/gmrdad82/pito-codecs/actions/workflows/ci.yml/badge.svg)](https://github.com/gmrdad82/pito-codecs/actions/workflows/ci.yml) [![Version](https://img.shields.io/github/v/tag/gmrdad82/pito-codecs)](https://github.com/gmrdad82/pito-codecs/tags)
 
-pito-codecs is a pure Rust library of fast video, audio and image codecs and containers that run on the CPU and on the GPU. It covers H.264, H.265, VP9, AAC, Opus, MP4, MKV and WebM, GIF and WebP. It is part of [PITO](https://pitomd.com) and ships as one MIT Cargo package with a feature per part. No ffmpeg is linked or bundled: ffmpeg serves only as a test oracle here, and as an optional route an app can offer when its user has ffmpeg installed.
+pito-codecs is a pure Rust library of fast video, audio and image codecs and containers that run on the CPU and on the GPU. It covers H.264, H.265, VP9, AAC, Opus, MP4, MKV and WebM, GIF and WebP. It is part of [PITO](https://pitomd.com) and ships as one MIT Cargo package with a feature per part. It needs no ffmpeg: none is linked or bundled, and ffmpeg serves only as the test oracle and the benchmark reference.
 
 ## Status
 
@@ -28,7 +28,6 @@ The GPU route is tested on Linux with VA-API, on an AMD Radeon RX 9060 XT with M
 Known gaps in `v0.1.0`, being worked on now:
 
 - **CPU decode speed.** Our H.264 and H.265 decoders run at 0.3 to 0.7 times ffmpeg's speed on the CPU; the GPU route is faster than ffmpeg's.
-- **VA-API encode quality.** At the same size, our VA-API encodes score about 5 dB lower PSNR than ffmpeg's `h264_vaapi` and `hevc_vaapi`, because quality drifts across a GOP.
 - **CPU H.264 encode quality and speed.** Our CPU H.264 encoder trails libx264 on both.
 
 ## What it is
@@ -39,7 +38,7 @@ Known gaps in `v0.1.0`, being worked on now:
 - **Containers:** MP4, MOV, MKV and WebM read, write and remux; Ogg Opus.
 - **Images:** GIF and WebP, still and animated.
 - **Filters** between decode and encode (`filter`): scaling, colour, geometry, frame rate, overlays, resampling and loudness.
-- **A front for apps** (`media`), which picks the fastest working route for each call. It can probe a file, give the first frame or stills for a filmstrip, play a file, pull its audio as PCM, and export with smart cuts, which copy the middle of each piece and re-encode only the edges.
+- **A front for apps** (`media`), which picks the fastest working route for each call. It can probe a file, give the first frame or stills for a filmstrip, play a file, pull its audio as PCM over any time range or as a stereo mix of its tracks with a gain each, and export with smart cuts, which copy the middle of each piece and re-encode only the edges.
 
 ## Install
 
@@ -47,7 +46,7 @@ Add it as a git dependency at a tag, with the features you need (all are on by d
 
 ```toml
 [dependencies]
-pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v0.1.0", default-features = false, features = ["h264", "mp4"] }
+pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v0.1.2", default-features = false, features = ["h264", "mp4"] }
 ```
 
 | Feature | What it holds |
@@ -117,13 +116,17 @@ let info = probe("clip.mp4".as_ref(), &prefs)?;
 let still = first_frame("clip.mp4".as_ref(), 240, &prefs)?;
 ```
 
-`examples/pcodec.rs` is a small command line over the library, and it is what the GIF above shows: `cargo run --release --example pcodec -- decode clip.mp4 --route gpu`.
+`examples/pcod.rs` is a small command line over the library, and it is what the GIF above shows: `cargo run --release --example pcod -- decode clip.mp4 --route gpu`.
 
 ## Routes
 
-- GPU first, then the CPU code here. A user-provided ffmpeg is used only when the app's settings pick it, per decode and per encode.
-- H.265 encodes on the GPU only. Without a GPU HEVC encoder it falls back to H.264 on the GPU, then H.264 on the CPU, and says why.
-- Every fallback comes with a plain reason the app can show.
+The front tries the GPU first and our own CPU code second, for every decode and every encode.
+
+- **GPU first.** VA-API on Linux decodes and encodes H.264 and H.265.
+- **Then the CPU.** When there is no GPU route (no VA-API device or driver, or no GPU decoder or encoder for that codec), our CPU code takes the job.
+- **H.265 encodes on the GPU only.** Without a GPU HEVC encoder it falls back to H.264 on the GPU, then to H.264 on the CPU.
+- **An export whose GPU encoder refuses to start** (a size or format the hardware won't take) encodes H.264 on the CPU instead.
+- **Every fallback says why**, in a plain reason the app can show, such as "no GPU HEVC encoder on this machine; encoding H.264 on the GPU instead".
 
 ## Speed
 
@@ -133,7 +136,7 @@ Each pair below was measured back to back against the system ffmpeg on the same 
 - **GPU:** AMD Radeon RX 9060 XT on Mesa 26.2 radeonsi through VA-API, on Linux.
 - **ffmpeg:** 9.0.1.
 
-The input is 20 s of NASA's public-domain "A Message of Resilience from the International Space Station" (720p60). It was scaled to 1080p and 1440p and encoded with libx264 at CRF 20 and libx265 at CRF 23. The command is `pgpu run -- cargo run --release --example bench -- --runs 3`, which writes `tmp/bench/results.json` and the charts below. Each number is the median of three runs. The machine was busy with other builds (load average 34 to 38), so the absolute numbers are floors.
+The input is 20 s of NASA's public-domain "A Message of Resilience from the International Space Station" (720p60). It was scaled to 1080p and 1440p and encoded with libx264 at CRF 20 and libx265 at CRF 23. The command is `pgpu run -- cargo run --release --example bench -- --runs 3`, which writes `tmp/bench/results.json` and the charts below; `--charts-only` redraws the charts from that file. Each number is the median of three runs. The machine was busy with other builds (load average 34 to 38), so the absolute numbers are floors.
 
 ![Speed against ffmpeg, per job](docs/images/bench-speedup.png)
 
@@ -148,27 +151,34 @@ The input is 20 s of NASA's public-domain "A Message of Resilience from the Inte
 | H.264 1440p encode, VA-API, QP 23 | 413 fps | 342 fps |
 | HEVC 1440p encode, VA-API, QP 23 | 534 fps | 294 fps |
 | H.264 1440p GPU transcode, frames stay on the GPU | 313 fps | 274 fps |
-| H.264 1080p encode, CPU, CRF 23 (ffmpeg: libx264 medium) | 83 fps | 189 fps |
+| H.264 1080p encode, CPU, CRF 23 (ffmpeg: libx264 medium, hand-written assembly; ours has no hand-written SIMD yet) | 83 fps | 189 fps |
 | H.264 1440p time to first frame, CPU (ffmpeg includes process start) | 8 ms | 150 ms |
 | H.264 1440p filmstrip, 12 stills at 240 px, GPU first | 205 stills/s | 26 stills/s |
-| Smart-cut export 1080p, 3 cuts, frame-accurate (ffmpeg: full re-encode) | 7.2x real time | 4.9x real time |
+| Smart-cut export 1080p, 3 cuts, frame-accurate (ffmpeg: re-encodes every frame; ours copies the middle and re-encodes around each cut) | 7.2× real time | 4.9× real time |
+| Smart-cut export 1080p against ffmpeg's stream copy (ffmpeg encodes nothing and cuts on keyframes, so it is not frame-accurate) | 7.2× real time | 54.3× real time |
 | Scale 1440p to 1080p, bicubic | 1683 fps | 778 fps |
-| AAC encode, 128 kbps stereo | 211x real time | 116x real time |
-| EBU R128 loudness, 48 kHz stereo | 3007x real time | 502x real time |
+| AAC decode, 48 kHz stereo | 633× real time | 1357× real time |
+| AAC encode, 128 kbps stereo | 211× real time | 116× real time |
+| EBU R128 loudness, 48 kHz stereo | 3007× real time | 502× real time |
 
 The CPU decoders have improved since this run: H.264 1440p decode on 16 threads is now about 926 fps and HEVC 1080p about 717 fps, while VP9 and Opus are newer still. The next release reruns the benchmark on a quiet machine.
 
-![Decode frames per second](docs/images/bench-decode.png)
-![Encode frames per second](docs/images/bench-encode.png)
-![First frame, filmstrip, smart cut and scale](docs/images/bench-pipeline.png)
-![Audio real-time factors](docs/images/bench-audio.png)
+The chart above shows each job as times faster or slower than ffmpeg, on a log scale centred on the same speed, so 2× slower is as long as 2× faster. The charts below hold the measured values, one chart per unit, pito-codecs and ffmpeg side by side on one axis from zero. Rows marked * or † are not like for like, and each chart says why under it.
+
+![Decode, frames per second](docs/images/bench-decode.png)
+![Encode, frames per second](docs/images/bench-encode.png)
+![Time to first frame, milliseconds](docs/images/bench-first-frame.png)
+![Filmstrip, stills per second](docs/images/bench-filmstrip.png)
+![Smart-cut export, times real time](docs/images/bench-export.png)
+![Scale, frames per second](docs/images/bench-scale.png)
+![Audio, times real time](docs/images/bench-audio.png)
 
 ## Roadmap
 
 Each minor release up to `1.0.0` lands as its group is finished and measured:
 
 - CPU decode at or past ffmpeg's speed for H.264, H.265 and VP9, with hand-written AVX2 kernels.
-- VA-API encode quality matched with ffmpeg's, and the CPU H.264 encoder at libx264's quality per bit.
+- The CPU H.264 encoder at libx264's quality per bit.
 - VP9 decode through VA-API, and a faster VP9 encoder.
 - Opus SILK and hybrid encode for speech.
 - WebP lossless and lossy encode.
@@ -189,7 +199,7 @@ Issues are welcome at [github.com/gmrdad82/pito-codecs/issues](https://github.co
 
 ## Credits
 
-Parts are adapted from [FilmCraft](https://github.com/storytold/filmcraft) (MIT OR Apache-2.0, taken under MIT) and from libwebp (BSD-3-Clause). The VA-API and NVENC declarations follow the MIT-licensed libva and NVIDIA headers. FFmpeg, libvpx, libopus and x264 were never copied; ffmpeg serves as a test oracle and as an optional route the user provides. The ITU-T H.264 and H.265 Recommendations, the VP9 specification, RFC 6716, RFC 6386, the GIF89a specification and the ISO MP4 and AAC standards are the sources. Origins are listed in [INSPIRATION.md](INSPIRATION.md) and their notices in [NOTICE](NOTICE). The demo and benchmark clips are public-domain NASA footage from PITO's fixture sets.
+Parts are adapted from [FilmCraft](https://github.com/storytold/filmcraft) (MIT OR Apache-2.0, taken under MIT) and from libwebp (BSD-3-Clause). The VA-API and NVENC declarations follow the MIT-licensed libva and NVIDIA headers. FFmpeg, libvpx, libopus and x264 were never copied; ffmpeg serves only as the test oracle and the benchmark reference. The ITU-T H.264 and H.265 Recommendations, the VP9 specification, RFC 6716, RFC 6386, the GIF89a specification and the ISO MP4 and AAC standards are the sources. Origins are listed in [INSPIRATION.md](INSPIRATION.md) and their notices in [NOTICE](NOTICE). The demo and benchmark clips are public-domain NASA footage from PITO's fixture sets.
 
 ## Licence
 

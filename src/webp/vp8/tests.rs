@@ -96,6 +96,63 @@ fn bench() {
             mp / theirs,
             file.len()
         );
+        for (q, effort) in [(75.0, 4u8), (75.0, 2), (90.0, 4)] {
+            let options = Options {
+                quality: q,
+                effort,
+                ..Options::lossy(q)
+            };
+            let (te, ours) = timed(3, || {
+                super::encode(&img.data, img.width, img.height, &options).unwrap()
+            });
+            let (tl, theirs) = timed(3, || lib.encode(img, q));
+            let ob = lib.decode_rgba(&riff(&ours)).unwrap();
+            let tb = lib.decode_rgba(&theirs).unwrap();
+            eprintln!(
+                "{name} q{q} e{effort}: encode ours {:.1} ms ({:.1} MP/s) {} bytes {:.2} dB, libwebp {:.1} ms ({:.1} MP/s) {} bytes {:.2} dB",
+                te * 1e3,
+                mp / te,
+                ours.len(),
+                rgb_psnr(&img.data, &ob.data),
+                tl * 1e3,
+                mp / tl,
+                theirs.len(),
+                rgb_psnr(&img.data, &tb.data)
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore]
+fn bench_one_thread() {
+    let Some(lib) = lib() else { return };
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/bench");
+    let Some(img) = oracle::ffmpeg_decode(&root.join("coast-1920x1080.png")) else {
+        return;
+    };
+    let img = &img[0];
+    let one = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    for effort in [0u8, 2, 4, 6] {
+        let options = Options {
+            quality: 75.0,
+            effort,
+            ..Options::lossy(75.0)
+        };
+        let (te, ours) = timed(3, || {
+            one.install(|| super::encode(&img.data, img.width, img.height, &options).unwrap())
+        });
+        let (tl, theirs) = timed(3, || lib.encode(img, 75.0));
+        eprintln!(
+            "1 thread e{effort}: ours {:.1} ms {} bytes, libwebp {:.1} ms {} bytes",
+            te * 1e3,
+            ours.len(),
+            tl * 1e3,
+            theirs.len()
+        );
     }
 }
 
@@ -228,5 +285,118 @@ fn simd_filter_matches_scalar() {
             a == b,
             "round {round}: level {level} sharpness {sharp} simple {simple}"
         );
+    }
+}
+
+fn riff(vp8: &[u8]) -> Vec<u8> {
+    let pad = vp8.len() & 1;
+    let mut f = Vec::with_capacity(vp8.len() + 20 + pad);
+    f.extend_from_slice(b"RIFF");
+    f.extend_from_slice(&((4 + 8 + vp8.len() + pad) as u32).to_le_bytes());
+    f.extend_from_slice(b"WEBPVP8 ");
+    f.extend_from_slice(&(vp8.len() as u32).to_le_bytes());
+    f.extend_from_slice(vp8);
+    if pad == 1 {
+        f.push(0);
+    }
+    f
+}
+
+fn rgb_psnr(a: &[u8], b: &[u8]) -> f64 {
+    let strip = |v: &[u8]| {
+        v.chunks_exact(4)
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect::<Vec<u8>>()
+    };
+    oracle::psnr(&strip(a), &strip(b))
+}
+
+#[test]
+fn encode_decodes_in_libwebp() {
+    let Some(lib) = lib() else { return };
+    let cases = [
+        ("testsrc2", 320, 240, 75.0, 4u8, 26.0f64),
+        ("mandelbrot", 333, 187, 90.0, 6, 30.0),
+        ("smptehdbars", 127, 61, 20.0, 0, 30.0),
+        ("testsrc", 1, 1, 50.0, 4, 30.0),
+        ("cellauto", 97, 33, 100.0, 2, 30.0),
+        ("testsrc2", 640, 512, 50.0, 4, 25.0),
+    ];
+    for (src, w, h, q, effort, min_psnr) in cases {
+        let Some(frames) = oracle::source(src, w, h, 1) else {
+            return;
+        };
+        let img = &frames[0];
+        let options = Options {
+            quality: q,
+            effort,
+            ..Options::lossy(q)
+        };
+        let ours = super::encode(&img.data, w, h, &options).expect("encode");
+        let file = riff(&ours);
+        let theirs = lib.decode_rgba(&file).expect("libwebp decodes ours");
+        let mut back = vec![0u8; img.data.len()];
+        super::decode_into(&ours, &mut back).expect("we decode ours");
+        assert!(
+            back == theirs.data,
+            "{src} {w}x{h} q{q}: libwebp and we disagree"
+        );
+        let p = rgb_psnr(&img.data, &back);
+        let ref_file = lib.encode(img, q);
+        let ref_back = lib.decode_rgba(&ref_file).unwrap();
+        let rp = rgb_psnr(&img.data, &ref_back.data);
+        eprintln!(
+            "{src} {w}x{h} q{q} e{effort}: ours {} bytes {p:.2} dB, libwebp {} bytes {rp:.2} dB",
+            file.len(),
+            ref_file.len()
+        );
+        assert!(
+            p >= min_psnr.min(rp - 1.0),
+            "{src} q{q}: PSNR {p:.2} against libwebp's {rp:.2}"
+        );
+    }
+}
+
+#[test]
+fn simd_kernels_match_scalar() {
+    use super::dsp::{self, BPS};
+    let mut seed = 0x9e37_79b9u32;
+    let mut rnd = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed
+    };
+    for round in 0..2000 {
+        let spread = [2u32, 16, 256][round % 3];
+        let base = rnd() % 256;
+        let mut px = || (base + rnd() % spread).min(255) as u8;
+        let a: Vec<u8> = (0..BPS * 16).map(|_| px()).collect();
+        let b: Vec<u8> = (0..BPS * 16).map(|_| px()).collect();
+        assert_eq!(dsp::sse16(&a, 0, &b, 0), dsp::sse16_scalar(&a, 0, &b, 0));
+        assert_eq!(dsp::sse8(&a, 3, &b, 5), dsp::sse8_scalar(&a, 3, &b, 5));
+        assert_eq!(dsp::sse4(&a, 7, &b, 1), dsp::sse4_scalar(&a, 7, &b, 1));
+        let (mut f1, mut f2) = ([0i16; 16], [0i16; 16]);
+        dsp::fdct(&a, 1, &b, 2, &mut f1);
+        dsp::fdct_scalar(&a, 1, &b, 2, &mut f2);
+        assert_eq!(f1, f2, "fdct round {round}");
+        let q = 4 + (rnd() % 157) as i16;
+        let mut c = [0i16; 16];
+        for (i, v) in c.iter_mut().enumerate() {
+            if rnd() % 3 == 0 || i == 0 {
+                *v = ((rnd() % 64) as i16 - 32) * q;
+            }
+        }
+        let (mut d1, mut d2) = (a.clone(), a.clone());
+        dsp::idct_add(&c, &mut d1, 2 * BPS + 4);
+        dsp::idct_add_scalar(&c, &mut d2, 2 * BPS + 4);
+        assert!(d1 == d2, "idct round {round}");
+        assert_eq!(dsp::nz_zigzag(&c), dsp::nz_zigzag_scalar(&c));
+        let m = super::enc::Matrix::new([q as i32, q as i32 + 7], [96, 110]);
+        let (mut l1, mut l2) = ([0i16; 16], [0i16; 16]);
+        let first = round % 2;
+        let n1 = super::enc::quantize(&m, &f1, first, &mut l1);
+        let n2 = super::enc::quantize_scalar(&m, &f1, first, &mut l2);
+        assert_eq!((n1, l1), (n2, l2), "quantize round {round}");
     }
 }
