@@ -157,34 +157,46 @@ pub struct AnimEncoder {
     options: Options,
     loop_count: u16,
     background: [u8; 4],
-    body: Vec<u8>,
-    pending: Option<Pending>,
     prev: Option<Rgba>,
-    alpha: bool,
-    work: Rgba,
+    jobs: Vec<Job>,
+    pieces: Vec<Encoded>,
+    spare: Vec<Rgba>,
+    batch: usize,
 }
 
-struct Pending {
+struct Job {
     head: [u32; 4],
     duration: u32,
     blend: bool,
+    image: Rgba,
+    plain: Option<Rgba>,
+}
+
+struct Encoded {
+    head: [u32; 4],
+    duration: u32,
+    blend: bool,
+    alpha: bool,
     data: Vec<u8>,
 }
 
 impl AnimEncoder {
     pub fn new(width: u32, height: u32, options: Options, loop_count: u16) -> Result<Self> {
         check_image(&Rgba::new(width, height))?;
+        let batch = std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .clamp(1, 16);
         Ok(AnimEncoder {
             width,
             height,
             options,
             loop_count,
             background: [0; 4],
-            body: Vec::new(),
-            pending: None,
             prev: None,
-            alpha: false,
-            work: Rgba::new(0, 0),
+            jobs: Vec::new(),
+            pieces: Vec::new(),
+            spare: Vec::new(),
+            batch,
         })
     }
 
@@ -198,93 +210,148 @@ impl AnimEncoder {
         }
         check_image(image)?;
         let duration = duration.min(0xff_ffff);
-        let Some(prev) = &self.prev else {
-            let (data, alpha) = encode_piece(image, &self.options)?;
-            self.alpha |= alpha;
-            self.pending = Some(Pending {
-                head: [0, 0, self.width, self.height],
-                duration,
-                blend: false,
-                data,
-            });
-            self.prev = Some(image.clone());
-            return Ok(());
-        };
-        let Some((x0, y0, x1, y1)) = changed(prev, image) else {
-            if let Some(p) = &mut self.pending {
-                p.duration = (p.duration + duration).min(0xff_ffff);
-            }
-            return Ok(());
-        };
-        let (x0, y0) = (x0 & !1, y0 & !1);
-        let (w, h) = (x1 - x0, y1 - y0);
-        self.work.width = w;
-        self.work.height = h;
-        self.work.data.clear();
-        let stride = self.width as usize * 4;
-        let mut opaque = true;
-        for y in y0..y1 {
-            let o = y as usize * stride + x0 as usize * 4;
-            let row = &image.data[o..o + w as usize * 4];
-            opaque &= row.chunks_exact(4).all(|p| p[3] == 255);
-            self.work.data.extend_from_slice(row);
-        }
-        let blend = opaque && self.options.lossless;
-        if blend {
-            for y in y0..y1 {
-                let o = y as usize * stride + x0 as usize * 4;
-                let before = &prev.data[o..o + w as usize * 4];
-                let wo = (y - y0) as usize * w as usize * 4;
-                for (dst, old) in self.work.data[wo..wo + w as usize * 4]
-                    .chunks_exact_mut(4)
-                    .zip(before.chunks_exact(4))
-                {
-                    if dst == old {
-                        dst.copy_from_slice(&[0, 0, 0, 0]);
-                    }
+        let mut work = self.spare.pop().unwrap_or_else(|| Rgba::new(0, 0));
+        let job = match &self.prev {
+            None => {
+                work.width = self.width;
+                work.height = self.height;
+                work.data.clear();
+                work.data.extend_from_slice(&image.data);
+                Job {
+                    head: [0, 0, self.width, self.height],
+                    duration,
+                    blend: false,
+                    image: work,
+                    plain: None,
                 }
             }
+            Some(prev) => {
+                let Some((x0, y0, x1, y1)) = changed(prev, image) else {
+                    self.spare.push(work);
+                    let last = match self.jobs.last_mut() {
+                        Some(j) => &mut j.duration,
+                        None => &mut self.pieces.last_mut().expect("a frame before").duration,
+                    };
+                    *last = (*last + duration).min(0xff_ffff);
+                    return Ok(());
+                };
+                let (x0, y0) = (x0 & !1, y0 & !1);
+                let (w, h) = (x1 - x0, y1 - y0);
+                work.width = w;
+                work.height = h;
+                work.data.clear();
+                let stride = self.width as usize * 4;
+                let row = w as usize * 4;
+                let mut opaque = true;
+                for y in y0..y1 {
+                    let o = y as usize * stride + x0 as usize * 4;
+                    let src = &image.data[o..o + row];
+                    opaque &= src.chunks_exact(4).all(|p| p[3] == 255);
+                    work.data.extend_from_slice(src);
+                }
+                let blend = opaque && self.options.lossless;
+                let mut plain = None;
+                if blend {
+                    let mut copy = self.spare.pop().unwrap_or_else(|| Rgba::new(0, 0));
+                    copy.width = w;
+                    copy.height = h;
+                    copy.data.clear();
+                    copy.data.extend_from_slice(&work.data);
+                    plain = Some(copy);
+                    for y in y0..y1 {
+                        let o = y as usize * stride + x0 as usize * 4;
+                        let before = &prev.data[o..o + row];
+                        let wo = (y - y0) as usize * row;
+                        for (dst, old) in work.data[wo..wo + row]
+                            .chunks_exact_mut(4)
+                            .zip(before.chunks_exact(4))
+                        {
+                            if dst == old {
+                                dst.copy_from_slice(&[0, 0, 0, 0]);
+                            }
+                        }
+                    }
+                }
+                Job {
+                    head: [x0, y0, w, h],
+                    duration,
+                    blend,
+                    image: work,
+                    plain,
+                }
+            }
+        };
+        match &mut self.prev {
+            Some(p) => p.data.copy_from_slice(&image.data),
+            None => self.prev = Some(image.clone()),
         }
-        let (data, alpha) = encode_piece(&self.work, &self.options)?;
-        self.alpha |= alpha;
-        self.flush();
-        self.pending = Some(Pending {
-            head: [x0, y0, w, h],
-            duration,
-            blend,
-            data,
-        });
-        self.prev
-            .as_mut()
-            .unwrap()
-            .data
-            .copy_from_slice(&image.data);
+        self.jobs.push(job);
+        if self.jobs.len() >= self.batch {
+            self.encode_jobs()?;
+        }
         Ok(())
     }
 
-    fn flush(&mut self) {
-        let Some(p) = self.pending.take() else {
-            return;
-        };
-        let mut f = Vec::with_capacity(16 + p.data.len());
-        riff::put_u24(&mut f, p.head[0] / 2);
-        riff::put_u24(&mut f, p.head[1] / 2);
-        riff::put_u24(&mut f, p.head[2] - 1);
-        riff::put_u24(&mut f, p.head[3] - 1);
-        riff::put_u24(&mut f, p.duration);
-        f.push(if p.blend { 0 } else { 0x02 });
-        f.extend_from_slice(&p.data);
-        riff::put_chunk(&mut self.body, b"ANMF", &f);
+    fn encode_jobs(&mut self) -> Result<()> {
+        let jobs = std::mem::take(&mut self.jobs);
+        let options = self.options;
+        type Out = Result<(Vec<u8>, bool)>;
+        let results: Vec<(Out, Option<Out>)> = std::thread::scope(|s| {
+            let handles: Vec<_> = jobs
+                .iter()
+                .map(|j| {
+                    let image = &j.image;
+                    let a = s.spawn(move || encode_piece(image, &options));
+                    let b = j
+                        .plain
+                        .as_ref()
+                        .map(|p| s.spawn(move || encode_piece(p, &options)));
+                    (a, b)
+                })
+                .collect();
+            let join = |h: std::thread::ScopedJoinHandle<'_, Out>| {
+                h.join()
+                    .unwrap_or_else(|_| Err(invalid("frame encode panicked")))
+            };
+            handles
+                .into_iter()
+                .map(|(a, b)| (join(a), b.map(join)))
+                .collect()
+        });
+        for (mut job, (blended, plain)) in jobs.into_iter().zip(results) {
+            let (mut data, mut alpha) = blended?;
+            if let Some(p) = plain {
+                let (pd, pa) = p?;
+                if pd.len() < data.len() {
+                    data = pd;
+                    alpha = pa;
+                    job.blend = false;
+                }
+            }
+            self.pieces.push(Encoded {
+                head: job.head,
+                duration: job.duration,
+                blend: job.blend,
+                alpha,
+                data,
+            });
+            self.spare.push(job.image);
+            if let Some(p) = job.plain {
+                self.spare.push(p);
+            }
+        }
+        Ok(())
     }
 
     pub fn finish(mut self) -> Result<Vec<u8>> {
-        if self.pending.is_none() {
+        self.encode_jobs()?;
+        if self.pieces.is_empty() {
             return Err(invalid("animation without frames"));
         }
-        self.flush();
+        let alpha = self.pieces.iter().any(|p| p.alpha);
         let mut w = riff::Writer::new();
         let mut x = Vec::with_capacity(10);
-        x.extend_from_slice(&[0x02 | if self.alpha { 0x10 } else { 0 }, 0, 0, 0]);
+        x.extend_from_slice(&[0x02 | if alpha { 0x10 } else { 0 }, 0, 0, 0]);
         riff::put_u24(&mut x, self.width - 1);
         riff::put_u24(&mut x, self.height - 1);
         w.chunk(b"VP8X", &x);
@@ -292,7 +359,18 @@ impl AnimEncoder {
         let mut anim = vec![b[2], b[1], b[0], b[3]];
         anim.extend_from_slice(&self.loop_count.to_le_bytes());
         w.chunk(b"ANIM", &anim);
-        w.out.extend_from_slice(&self.body);
+        let mut f = Vec::new();
+        for p in &self.pieces {
+            f.clear();
+            riff::put_u24(&mut f, p.head[0] / 2);
+            riff::put_u24(&mut f, p.head[1] / 2);
+            riff::put_u24(&mut f, p.head[2] - 1);
+            riff::put_u24(&mut f, p.head[3] - 1);
+            riff::put_u24(&mut f, p.duration);
+            f.push(if p.blend { 0 } else { 0x02 });
+            f.extend_from_slice(&p.data);
+            w.chunk(b"ANMF", &f);
+        }
         w.finish()
     }
 }

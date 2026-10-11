@@ -788,3 +788,18 @@ pub(crate) mod cols4 {
 pub(crate) mod cols8 {
     transforms_1d!(crate::vp9::transform::Cols<8>);
 }
+
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod v4 {
+    transforms_1d!(crate::vp9::transform::simd::V4);
+}
+
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod v8 {
+    transforms_1d!(crate::vp9::transform::simd::V8);
+}
+
+#[cfg(test)]
+pub(crate) mod affine {
+    transforms_1d!(crate::vp9::transform::tests::Af);
+}

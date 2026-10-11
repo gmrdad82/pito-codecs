@@ -297,8 +297,8 @@ pub fn coeffs(
     16
 }
 
-const Y_OFF: usize = BPS + 8;
-const UV_OFF: usize = BPS + 8;
+pub const Y_OFF: usize = BPS + 8;
+pub const UV_OFF: usize = BPS + 8;
 
 pub struct Work {
     pub y: [u8; BPS * 17],
