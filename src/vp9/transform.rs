@@ -1,3 +1,4 @@
+use crate::vp9::frame::Pixel;
 use crate::vp9::tables::{ADST_ADST, ADST_DCT, DCT_ADST, DCT_DCT};
 use crate::vp9::transform_gen::{narrow, wide};
 
@@ -146,7 +147,7 @@ fn sat(v: i32, lim: i32) -> i32 {
 
 crate::vp9::isa::dispatch! {
 #[allow(clippy::too_many_arguments)]
-pub fn inverse_transform_add(
+pub fn inverse_transform_add<P: Pixel>(
     coefs: &[i32],
     tx_size: u8,
     tx_type: u8,
@@ -154,7 +155,7 @@ pub fn inverse_transform_add(
     eob: usize,
     rows: usize,
     bit_depth: u8,
-    dst: &mut [u16],
+    dst: &mut [P],
     stride: usize,
 ) {
     let n = 4usize << tx_size;
@@ -174,7 +175,7 @@ pub fn inverse_transform_add(
             let r = iwht4([t[j], t[4 + j], t[8 + j], t[12 + j]], 0);
             for i in 0..4 {
                 let p = &mut dst[i * stride + j];
-                *p = (*p as i32).saturating_add(r[i]).clamp(0, max) as u16;
+                *p = P::put(p.get().saturating_add(r[i]).clamp(0, max));
             }
         }
         return;
@@ -193,7 +194,7 @@ pub fn inverse_transform_add(
         }
         for i in 0..n {
             for p in dst[i * stride..i * stride + n].iter_mut() {
-                *p = (*p as i32 + v).clamp(0, max) as u16;
+                *p = P::put((p.get() + v).clamp(0, max));
             }
         }
         return;
@@ -214,7 +215,7 @@ pub fn inverse_transform_add(
         && coefs.len() >= n * n
         && dst.len() >= (n - 1) * stride + n
     {
-        unsafe { simd::itx::<true>(coefs, tx_size, &p, dst, stride) };
+        unsafe { simd::itx::<P, true>(coefs, tx_size, &p, dst, stride) };
         return;
     }
     #[cfg(target_arch = "x86_64")]
@@ -224,18 +225,18 @@ pub fn inverse_transform_add(
         && dst.len() >= (n - 1) * stride + n
         && unsafe { simd::l1(&coefs[..rows.clamp(1, n) * n]) } <= WIDE_L1
     {
-        unsafe { simd::itx::<false>(coefs, tx_size, &p, dst, stride) };
+        unsafe { simd::itx::<P, false>(coefs, tx_size, &p, dst, stride) };
         return;
     }
     match (tx_size, bit_depth == 8) {
-        (0, true) => itx_narrow::<4>(coefs, &p, dst, stride),
-        (1, true) => itx_narrow::<8>(coefs, &p, dst, stride),
-        (2, true) => itx_narrow::<16>(coefs, &p, dst, stride),
-        (_, true) => itx_narrow::<32>(coefs, &p, dst, stride),
-        (0, false) => itx_wide::<4>(coefs, &p, dst, stride),
-        (1, false) => itx_wide::<8>(coefs, &p, dst, stride),
-        (2, false) => itx_wide::<16>(coefs, &p, dst, stride),
-        (_, false) => itx_wide::<32>(coefs, &p, dst, stride),
+        (0, true) => itx_narrow::<P, 4>(coefs, &p, dst, stride),
+        (1, true) => itx_narrow::<P, 8>(coefs, &p, dst, stride),
+        (2, true) => itx_narrow::<P, 16>(coefs, &p, dst, stride),
+        (_, true) => itx_narrow::<P, 32>(coefs, &p, dst, stride),
+        (0, false) => itx_wide::<P, 4>(coefs, &p, dst, stride),
+        (1, false) => itx_wide::<P, 8>(coefs, &p, dst, stride),
+        (2, false) => itx_wide::<P, 16>(coefs, &p, dst, stride),
+        (_, false) => itx_wide::<P, 32>(coefs, &p, dst, stride),
     }
 }
 }
@@ -252,7 +253,7 @@ struct TxParams {
     max: i32,
 }
 
-fn itx_narrow<const N: usize>(coefs: &[i32], p: &TxParams, dst: &mut [u16], stride: usize) {
+fn itx_narrow<P: Pixel, const N: usize>(coefs: &[i32], p: &TxParams, dst: &mut [P], stride: usize) {
     let lim = 1 << 24;
     let mut t = [[0i32; N]; N];
     for (i, row) in t.iter_mut().enumerate().take(p.rows.min(N)) {
@@ -286,11 +287,11 @@ fn itx_narrow<const N: usize>(coefs: &[i32], p: &TxParams, dst: &mut [u16], stri
 }
 
 #[inline(always)]
-fn add_cols<const N: usize, const W: usize>(
+fn add_cols<P: Pixel, const N: usize, const W: usize>(
     y: &[Cols<W>; N],
     c0: usize,
     p: &TxParams,
-    dst: &mut [u16],
+    dst: &mut [P],
     stride: usize,
 ) {
     for (i, v) in y.iter().enumerate() {
@@ -302,7 +303,7 @@ fn add_cols<const N: usize, const W: usize>(
         };
         for j in 0..W {
             let r = (v.0[j].wrapping_add(p.round) >> p.shift).clamp(-(1 << 20), 1 << 20);
-            d[j] = (d[j] as i32 + r).max(0).min(p.max) as u16;
+            d[j] = P::put((d[j].get() + r).max(0).min(p.max));
         }
     }
 }
@@ -404,7 +405,7 @@ macro_rules! adst4_lanes {
 }
 adst4_lanes!(iadst4_cols, Cols<4>);
 
-fn itx_wide<const N: usize>(coefs: &[i32], p: &TxParams, dst: &mut [u16], stride: usize) {
+fn itx_wide<P: Pixel, const N: usize>(coefs: &[i32], p: &TxParams, dst: &mut [P], stride: usize) {
     let lim = 1i64 << 40;
     let mut t = [[0i64; N]; N];
     for (i, row) in t.iter_mut().enumerate().take(p.rows.min(N)) {
@@ -426,7 +427,7 @@ fn itx_wide<const N: usize>(coefs: &[i32], p: &TxParams, dst: &mut [u16], stride
             let d = &mut dst[i * stride + j];
             let r = ((col[i].clamp(-lim, lim) + p.round as i64) >> p.shift)
                 .clamp(-(1 << 30), 1 << 30) as i32;
-            *d = (*d as i32 + r).clamp(0, p.max) as u16;
+            *d = P::put((d.get() + r).clamp(0, p.max));
         }
     }
 }
@@ -434,6 +435,7 @@ fn itx_wide<const N: usize>(coefs: &[i32], p: &TxParams, dst: &mut [u16], stride
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod simd {
     use super::{SINPI_1_9, SINPI_2_9, SINPI_3_9, SINPI_4_9, TxParams, fixed};
+    use crate::vp9::frame::Pixel;
     use crate::vp9::transform_gen::{v4, v8};
     use std::arch::x86_64::*;
 
@@ -585,10 +587,14 @@ pub(crate) mod simd {
     }
 
     #[inline(always)]
-    fn add4(d: &mut [u16], v: V4, p: &TxParams) {
+    fn add4<P: Pixel>(d: &mut [P], v: V4, p: &TxParams) {
         let d = &mut d[..4];
         unsafe {
-            let px = _mm_cvtepu16_epi32(_mm_loadl_epi64(d.as_ptr().cast()));
+            let px = if P::WIDE {
+                _mm_cvtepu16_epi32(_mm_loadl_epi64(d.as_ptr().cast()))
+            } else {
+                _mm_cvtepu8_epi32(_mm_cvtsi32_si128(d.as_ptr().cast::<i32>().read_unaligned()))
+            };
             let r = _mm_sra_epi32(
                 _mm_add_epi32(v.0, _mm_set1_epi32(p.round)),
                 _mm_cvtsi32_si128(p.shift as i32),
@@ -597,15 +603,26 @@ pub(crate) mod simd {
                 _mm_max_epi32(_mm_add_epi32(px, r), _mm_setzero_si128()),
                 _mm_set1_epi32(p.max),
             );
-            _mm_storel_epi64(d.as_mut_ptr().cast(), _mm_packus_epi32(s, s));
+            let w = _mm_packus_epi32(s, s);
+            if P::WIDE {
+                _mm_storel_epi64(d.as_mut_ptr().cast(), w);
+            } else {
+                d.as_mut_ptr()
+                    .cast::<i32>()
+                    .write_unaligned(_mm_cvtsi128_si32(_mm_packus_epi16(w, w)));
+            }
         }
     }
 
     #[inline(always)]
-    fn add8(d: &mut [u16], v: V8, p: &TxParams) {
+    fn add8<P: Pixel>(d: &mut [P], v: V8, p: &TxParams) {
         let d = &mut d[..8];
         unsafe {
-            let px = _mm256_cvtepu16_epi32(_mm_loadu_si128(d.as_ptr().cast()));
+            let px = if P::WIDE {
+                _mm256_cvtepu16_epi32(_mm_loadu_si128(d.as_ptr().cast()))
+            } else {
+                _mm256_cvtepu8_epi32(_mm_loadl_epi64(d.as_ptr().cast()))
+            };
             let r = _mm256_sra_epi32(
                 _mm256_add_epi32(v.0, _mm256_set1_epi32(p.round)),
                 _mm_cvtsi32_si128(p.shift as i32),
@@ -615,7 +632,11 @@ pub(crate) mod simd {
                 _mm256_set1_epi32(p.max),
             );
             let o = _mm_packus_epi32(_mm256_castsi256_si128(s), _mm256_extracti128_si256::<1>(s));
-            _mm_storeu_si128(d.as_mut_ptr().cast(), o);
+            if P::WIDE {
+                _mm_storeu_si128(d.as_mut_ptr().cast(), o);
+            } else {
+                _mm_storel_epi64(d.as_mut_ptr().cast(), _mm_packus_epi16(o, o));
+            }
         }
     }
 
@@ -638,7 +659,12 @@ pub(crate) mod simd {
     }
 
     #[target_feature(enable = "avx2")]
-    fn itx4<const SATURATE: bool>(coefs: &[i32], p: &TxParams, dst: &mut [u16], stride: usize) {
+    fn itx4<P: Pixel, const SATURATE: bool>(
+        coefs: &[i32],
+        p: &TxParams,
+        dst: &mut [P],
+        stride: usize,
+    ) {
         let mut r = [V4::from(0); 4];
         for (i, v) in r.iter_mut().enumerate() {
             let c = load4(&coefs[i * 4..]);
@@ -684,10 +710,10 @@ pub(crate) mod simd {
     }
 
     #[target_feature(enable = "avx2")]
-    fn cols8<const N: usize, const G: usize, const KR: usize>(
+    fn cols8<P: Pixel, const N: usize, const G: usize, const KR: usize>(
         tc: &[[V8; N]; G],
         p: &TxParams,
-        dst: &mut [u16],
+        dst: &mut [P],
         stride: usize,
     ) {
         let k = (KR * 8).min(N);
@@ -702,10 +728,10 @@ pub(crate) mod simd {
     }
 
     #[target_feature(enable = "avx2")]
-    fn itx8<const N: usize, const G: usize, const SATURATE: bool>(
+    fn itx8<P: Pixel, const N: usize, const G: usize, const SATURATE: bool>(
         coefs: &[i32],
         p: &TxParams,
-        dst: &mut [u16],
+        dst: &mut [P],
         stride: usize,
     ) {
         let coefs = &coefs[..N * N];
@@ -730,26 +756,26 @@ pub(crate) mod simd {
             }
         }
         match kr {
-            1 => cols8::<N, G, 1>(&tc, p, dst, stride),
-            2 => cols8::<N, G, 2>(&tc, p, dst, stride),
-            3 => cols8::<N, G, 3>(&tc, p, dst, stride),
-            _ => cols8::<N, G, 4>(&tc, p, dst, stride),
+            1 => cols8::<P, N, G, 1>(&tc, p, dst, stride),
+            2 => cols8::<P, N, G, 2>(&tc, p, dst, stride),
+            3 => cols8::<P, N, G, 3>(&tc, p, dst, stride),
+            _ => cols8::<P, N, G, 4>(&tc, p, dst, stride),
         }
     }
 
     #[target_feature(enable = "avx2")]
-    pub(super) fn itx<const SATURATE: bool>(
+    pub(super) fn itx<P: Pixel, const SATURATE: bool>(
         coefs: &[i32],
         tx_size: u8,
         p: &TxParams,
-        dst: &mut [u16],
+        dst: &mut [P],
         stride: usize,
     ) {
         match tx_size {
-            0 => itx4::<SATURATE>(coefs, p, dst, stride),
-            1 => itx8::<8, 1, SATURATE>(coefs, p, dst, stride),
-            2 => itx8::<16, 2, SATURATE>(coefs, p, dst, stride),
-            _ => itx8::<32, 4, SATURATE>(coefs, p, dst, stride),
+            0 => itx4::<P, SATURATE>(coefs, p, dst, stride),
+            1 => itx8::<P, 8, 1, SATURATE>(coefs, p, dst, stride),
+            2 => itx8::<P, 16, 2, SATURATE>(coefs, p, dst, stride),
+            _ => itx8::<P, 32, 4, SATURATE>(coefs, p, dst, stride),
         }
     }
 
@@ -771,7 +797,14 @@ pub(crate) mod simd {
     }
 
     #[target_feature(enable = "avx2")]
-    pub(super) fn dc_add(n: usize, v: i32, max: i32, dst: &mut [u16], stride: usize) {
+    pub(super) fn dc_add<P: Pixel>(n: usize, v: i32, max: i32, dst: &mut [P], stride: usize) {
+        if let Some(d) = P::narrow_mut(dst) {
+            dc_add8(n, v, d, stride);
+            return;
+        }
+        let Some(dst) = P::wide_mut(dst) else {
+            return;
+        };
         let v = v.clamp(-max - 1, max + 1) as i16;
         let (vv, mx, z) = (
             _mm256_set1_epi16(v),
@@ -796,6 +829,41 @@ pub(crate) mod simd {
                             let s = _mm256_loadu_si256(c.as_ptr().cast());
                             _mm256_storeu_si256(c.as_mut_ptr().cast(), px(s));
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    fn dc_add8(n: usize, v: i32, dst: &mut [u8], stride: usize) {
+        let m = v.unsigned_abs().min(255) as i8;
+        let up = _mm256_set1_epi8(if v >= 0 { m } else { 0 });
+        let down = _mm256_set1_epi8(if v < 0 { m } else { 0 });
+        let px = |s: __m256i| _mm256_subs_epu8(_mm256_adds_epu8(s, up), down);
+        for i in 0..n {
+            let row = &mut dst[i * stride..i * stride + n];
+            unsafe {
+                match n {
+                    4 => {
+                        let s = _mm256_castsi128_si256(_mm_cvtsi32_si128(
+                            row.as_ptr().cast::<i32>().read_unaligned(),
+                        ));
+                        row.as_mut_ptr()
+                            .cast::<i32>()
+                            .write_unaligned(_mm_cvtsi128_si32(_mm256_castsi256_si128(px(s))));
+                    }
+                    8 => {
+                        let s = _mm256_castsi128_si256(_mm_loadl_epi64(row.as_ptr().cast()));
+                        _mm_storel_epi64(row.as_mut_ptr().cast(), _mm256_castsi256_si128(px(s)));
+                    }
+                    16 => {
+                        let s = _mm256_castsi128_si256(_mm_loadu_si128(row.as_ptr().cast()));
+                        _mm_storeu_si128(row.as_mut_ptr().cast(), _mm256_castsi256_si128(px(s)));
+                    }
+                    _ => {
+                        let s = _mm256_loadu_si256(row.as_ptr().cast());
+                        _mm256_storeu_si256(row.as_mut_ptr().cast(), px(s));
                     }
                 }
             }
@@ -1100,13 +1168,13 @@ pub(crate) mod tests {
             #[cfg(target_arch = "x86_64")]
             let base_c = base.clone();
             let (mut a, mut b) = (base.clone(), base);
-            itx_narrow::<N>(&coefs, &p, &mut a, stride);
+            itx_narrow::<u16, N>(&coefs, &p, &mut a, stride);
             itx_narrow_ref::<N>(&coefs, &p, &mut b, stride);
             assert_eq!(a, b, "N {N} case {case}");
             #[cfg(target_arch = "x86_64")]
             if crate::vp9::isa::avx2() {
                 let mut c = base_c.clone();
-                unsafe { simd::itx::<true>(&coefs, tx_size as u8, &p, &mut c, stride) };
+                unsafe { simd::itx::<u16, true>(&coefs, tx_size as u8, &p, &mut c, stride) };
                 assert_eq!(a, c, "simd N {N} case {case}");
                 let mut wide_coefs = coefs.clone();
                 let mut left = WIDE_L1 as i64;
@@ -1131,8 +1199,8 @@ pub(crate) mod tests {
                 let pw = TxParams { max: 1023, ..p };
                 let base10: Vec<u16> = base_c.iter().map(|v| v * 4).collect();
                 let (mut d, mut e) = (base10.clone(), base10);
-                itx_wide::<N>(&wide_coefs, &pw, &mut d, stride);
-                unsafe { simd::itx::<false>(&wide_coefs, tx_size as u8, &pw, &mut e, stride) };
+                itx_wide::<u16, N>(&wide_coefs, &pw, &mut d, stride);
+                unsafe { simd::itx::<u16, false>(&wide_coefs, tx_size as u8, &pw, &mut e, stride) };
                 assert_eq!(d, e, "wide simd N {N} case {case}");
             }
         }
@@ -1161,10 +1229,10 @@ pub(crate) mod tests {
     #[target_feature(enable = "avx2,bmi1,bmi2,lzcnt,popcnt,fma")]
     fn old_itx(coefs: &[i32], tx: u8, p: &TxParams, dst: &mut [u16], stride: usize) {
         match tx {
-            0 => itx_narrow::<4>(coefs, p, dst, stride),
-            1 => itx_narrow::<8>(coefs, p, dst, stride),
-            2 => itx_narrow::<16>(coefs, p, dst, stride),
-            _ => itx_narrow::<32>(coefs, p, dst, stride),
+            0 => itx_narrow::<u16, 4>(coefs, p, dst, stride),
+            1 => itx_narrow::<u16, 8>(coefs, p, dst, stride),
+            2 => itx_narrow::<u16, 16>(coefs, p, dst, stride),
+            _ => itx_narrow::<u16, 32>(coefs, p, dst, stride),
         }
     }
 
@@ -1218,7 +1286,13 @@ pub(crate) mod tests {
                 let t = Instant::now();
                 for _ in 0..iters {
                     unsafe {
-                        simd::itx::<true>(black_box(&coefs), tx, &p, black_box(&mut dst), stride)
+                        simd::itx::<u16, true>(
+                            black_box(&coefs),
+                            tx,
+                            &p,
+                            black_box(&mut dst),
+                            stride,
+                        )
                     };
                 }
                 let b = t.elapsed().as_nanos() as f64 / iters as f64;

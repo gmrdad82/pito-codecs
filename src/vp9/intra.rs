@@ -1,3 +1,4 @@
+use crate::vp9::frame::Pixel;
 use crate::vp9::tables::*;
 
 pub struct IntraEdge {
@@ -11,14 +12,14 @@ pub struct IntraEdge {
 }
 
 crate::vp9::isa::dispatch! {
-pub fn predict(
-    buf: &mut [u16],
+pub fn predict<P: Pixel>(
+    buf: &mut [P],
     stride: usize,
     x: usize,
     y: usize,
     mode: u8,
     e: &IntraEdge,
-    line: Option<&[u16]>,
+    line: Option<&[P]>,
 ) {
     let log2 = e.tx_size as usize + 2;
     let size = 1usize << log2;
@@ -26,7 +27,7 @@ pub fn predict(
     let at = |xx: usize, yy: usize| yy * stride + xx;
     let mut above = [0i32; 65];
     let mut left = [0i32; 32];
-    let (src, row): (&[u16], usize) = match line {
+    let (src, row): (&[P], usize) = match line {
         Some(l) => (l, 0),
         None => (&buf[..], (y.max(1) - 1) * stride),
     };
@@ -34,11 +35,11 @@ pub fn predict(
         above[1..=2 * size].fill(base - 1);
     } else {
         for i in 0..size {
-            above[1 + i] = src[row + (x + i).min(e.max_x)] as i32;
+            above[1 + i] = src[row + (x + i).min(e.max_x)].get();
         }
         if e.not_on_right && e.tx_size == 0 {
             for i in size..2 * size {
-                above[1 + i] = src[row + (x + i).min(e.max_x)] as i32;
+                above[1 + i] = src[row + (x + i).min(e.max_x)].get();
             }
         } else {
             let v = above[size];
@@ -46,7 +47,7 @@ pub fn predict(
         }
     }
     above[0] = if e.have_above && e.have_left {
-        src[row + (x - 1).min(e.max_x)] as i32
+        src[row + (x - 1).min(e.max_x)].get()
     } else if e.have_above {
         base + 1
     } else {
@@ -54,7 +55,7 @@ pub fn predict(
     };
     if e.have_left {
         for i in 0..size {
-            left[i] = buf[at(x - 1, (y + i).min(e.max_y))] as i32;
+            left[i] = buf[at(x - 1, (y + i).min(e.max_y))].get();
         }
     } else {
         left[..size].fill(base + 1);
@@ -62,7 +63,7 @@ pub fn predict(
     let a = |i: isize| above[(i + 1) as usize];
     let max = (1i32 << e.bit_depth) - 1;
     let o = at(x, y);
-    let mut put = |i: usize, j: usize, v: i32| buf[o + i * stride + j] = v as u16;
+    let mut put = |i: usize, j: usize, v: i32| buf[o + i * stride + j] = P::put(v);
     let r1 = |v: i32| (v + 1) >> 1;
     let r2 = |v: i32| (v + 2) >> 2;
     match mode {

@@ -1,4 +1,4 @@
-use crate::vp9::frame::{MiGrid, MiInfo};
+use crate::vp9::frame::{MiGrid, MiInfo, Pixel};
 use crate::vp9::header::{LoopFilterParams, Segmentation};
 use crate::vp9::tables::*;
 
@@ -90,15 +90,15 @@ impl LfFrame {
     }
 }
 
-pub struct PlaneView<'a> {
-    pub data: &'a mut [u16],
+pub struct PlaneView<'a, P> {
+    pub data: &'a mut [P],
     pub stride: usize,
     pub ox: usize,
     pub oy: usize,
 }
 
-pub fn filter_superblock(
-    views: &mut [PlaneView; 3],
+pub fn filter_superblock<P: Pixel>(
+    views: &mut [PlaneView<P>; 3],
     mi: &MiGrid,
     f: &LfFrame,
     row: usize,
@@ -149,8 +149,8 @@ pub(crate) struct Group {
     pub apply: u8,
 }
 
-fn filter_sb_planes(
-    views: &mut [PlaneView],
+fn filter_sb_planes<P: Pixel>(
+    views: &mut [PlaneView<P>],
     cells: &[Cell; 64],
     f: &LfFrame,
     chroma: bool,
@@ -290,8 +290,8 @@ fn filter_sb_planes(
 }
 
 crate::vp9::isa::dispatch! {
-fn filter_edge(
-    d: &mut [u16],
+fn filter_edge<P: Pixel>(
+    d: &mut [P],
     pos: usize,
     along: usize,
     across: usize,
@@ -327,14 +327,14 @@ fn filter_edge(
         let p = pos + k * 8 * along;
         let wide = g.size == TX_16X16;
         match (f.bit_depth <= 10, wide, rows) {
-            (true, false, false) => lanes16::filter_group::<4, false>(d, p, along, across, &lim),
-            (true, false, true) => lanes16::filter_group::<4, true>(d, p, along, across, &lim),
-            (true, true, false) => lanes16::filter_group::<8, false>(d, p, along, across, &lim),
-            (true, true, true) => lanes16::filter_group::<8, true>(d, p, along, across, &lim),
-            (false, false, false) => lanes32::filter_group::<4, false>(d, p, along, across, &lim),
-            (false, false, true) => lanes32::filter_group::<4, true>(d, p, along, across, &lim),
-            (false, true, false) => lanes32::filter_group::<8, false>(d, p, along, across, &lim),
-            (false, true, true) => lanes32::filter_group::<8, true>(d, p, along, across, &lim),
+            (true, false, false) => lanes16::filter_group::<P, 4, false>(d, p, along, across, &lim),
+            (true, false, true) => lanes16::filter_group::<P, 4, true>(d, p, along, across, &lim),
+            (true, true, false) => lanes16::filter_group::<P, 8, false>(d, p, along, across, &lim),
+            (true, true, true) => lanes16::filter_group::<P, 8, true>(d, p, along, across, &lim),
+            (false, false, false) => lanes32::filter_group::<P, 4, false>(d, p, along, across, &lim),
+            (false, false, true) => lanes32::filter_group::<P, 4, true>(d, p, along, across, &lim),
+            (false, true, false) => lanes32::filter_group::<P, 8, false>(d, p, along, across, &lim),
+            (false, true, true) => lanes32::filter_group::<P, 8, true>(d, p, along, across, &lim),
         }
     }
 }
@@ -355,12 +355,13 @@ macro_rules! group_filter {
     ($m:ident, $t:ty) => {
         mod $m {
             use super::{LANES, Limits};
+            use crate::vp9::frame::Pixel;
             use crate::vp9::tables::*;
             type T = $t;
 
             #[inline(always)]
-            pub(super) fn filter_group<const R: usize, const ROWS: bool>(
-                d: &mut [u16],
+            pub(super) fn filter_group<P: Pixel, const R: usize, const ROWS: bool>(
+                d: &mut [P],
                 pos: usize,
                 along: usize,
                 step: usize,
@@ -379,17 +380,17 @@ macro_rules! group_filter {
                 let start = pos - R * step;
                 if ROWS {
                     for k in 0..2 * R {
-                        let row: &[u16; LANES] = d[start + k * step..start + k * step + LANES]
+                        let row: &[P; LANES] = d[start + k * step..start + k * step + LANES]
                             .try_into()
                             .expect("lanes");
-                        v[8 - R + k] = std::array::from_fn(|l| row[l] as T);
+                        v[8 - R + k] = std::array::from_fn(|l| row[l].get() as T);
                     }
                 } else {
                     for l in 0..LANES {
                         let s = start + l * along;
-                        let line: &[u16] = &d[s..s + 2 * R];
+                        let line: &[P] = &d[s..s + 2 * R];
                         for k in 0..2 * R {
-                            v[8 - R + k][l] = line[k] as T;
+                            v[8 - R + k][l] = line[k].get() as T;
                         }
                     }
                 }
@@ -498,18 +499,18 @@ macro_rules! group_filter {
                 if ROWS {
                     for k in lo..hi {
                         let o = start + (k + R - 8) * step;
-                        let row: &mut [u16; LANES] =
+                        let row: &mut [P; LANES] =
                             (&mut d[o..o + LANES]).try_into().expect("lanes");
                         for l in 0..LANES {
-                            row[l] = out[k][l] as u16;
+                            row[l] = P::put(out[k][l] as i32);
                         }
                     }
                 } else {
                     for l in 0..LANES {
                         let s = start + l * along;
-                        let line: &mut [u16] = &mut d[s..s + 2 * R];
+                        let line: &mut [P] = &mut d[s..s + 2 * R];
                         for k in 0..2 * R {
-                            line[k] = out[8 - R + k][l] as u16;
+                            line[k] = P::put(out[8 - R + k][l] as i32);
                         }
                     }
                 }

@@ -1,4 +1,5 @@
 use super::{Group, LfFrame};
+use crate::vp9::frame::Pixel;
 use crate::vp9::tables::{TX_8X8, TX_16X16};
 use std::arch::x86_64::*;
 
@@ -51,6 +52,51 @@ unsafe fn transpose16(m: &[V; 16]) -> [V; 16] {
 }
 
 #[inline(always)]
+unsafe fn ld16<P: Pixel>(p: *const P) -> V {
+    unsafe {
+        if P::WIDE {
+            _mm256_loadu_si256(p.cast())
+        } else {
+            _mm256_cvtepu8_epi16(_mm_loadu_si128(p.cast()))
+        }
+    }
+}
+
+#[inline(always)]
+unsafe fn st16<P: Pixel>(p: *mut P, v: V) {
+    unsafe {
+        if P::WIDE {
+            _mm256_storeu_si256(p.cast(), v)
+        } else {
+            let b = _mm256_permute4x64_epi64::<0b1000>(_mm256_packus_epi16(v, v));
+            _mm_storeu_si128(p.cast(), _mm256_castsi256_si128(b))
+        }
+    }
+}
+
+#[inline(always)]
+unsafe fn ld8<P: Pixel>(p: *const P) -> __m128i {
+    unsafe {
+        if P::WIDE {
+            _mm_loadu_si128(p.cast())
+        } else {
+            _mm_cvtepu8_epi16(_mm_loadl_epi64(p.cast()))
+        }
+    }
+}
+
+#[inline(always)]
+unsafe fn st8<P: Pixel>(p: *mut P, v: __m128i) {
+    unsafe {
+        if P::WIDE {
+            _mm_storeu_si128(p.cast(), v)
+        } else {
+            _mm_storel_epi64(p.cast(), _mm_packus_epi16(v, v))
+        }
+    }
+}
+
+#[inline(always)]
 unsafe fn halves(a: i16, b: i16) -> V {
     unsafe { _mm256_set_m128i(_mm_set1_epi16(b), _mm_set1_epi16(a)) }
 }
@@ -81,8 +127,8 @@ unsafe fn wide<const LOG2: i32, const N: usize>(v: &[V; 16]) -> [V; N] {
 }
 
 #[target_feature(enable = "avx2")]
-pub(super) unsafe fn filter16(
-    d: &mut [u16],
+pub(super) unsafe fn filter16<P: Pixel>(
+    d: &mut [P],
     pos: usize,
     along: usize,
     across: usize,
@@ -104,18 +150,18 @@ pub(super) unsafe fn filter16(
     unsafe {
         let base = d.as_mut_ptr().add(pos);
         match (wide, rows) {
-            (true, true) => edge::<true, true>(base, along, across, g, f),
-            (true, false) => edge::<true, false>(base, along, across, g, f),
-            (false, true) => edge::<false, true>(base, along, across, g, f),
-            (false, false) => edge::<false, false>(base, along, across, g, f),
+            (true, true) => edge::<P, true, true>(base, along, across, g, f),
+            (true, false) => edge::<P, true, false>(base, along, across, g, f),
+            (false, true) => edge::<P, false, true>(base, along, across, g, f),
+            (false, false) => edge::<P, false, false>(base, along, across, g, f),
         }
     }
 }
 
 #[target_feature(enable = "avx2")]
 #[inline]
-unsafe fn edge<const WIDE: bool, const ROWS: bool>(
-    base: *mut u16,
+unsafe fn edge<P: Pixel, const WIDE: bool, const ROWS: bool>(
+    base: *mut P,
     along: usize,
     across: usize,
     g: [Group; 2],
@@ -157,19 +203,19 @@ unsafe fn edge<const WIDE: bool, const ROWS: bool>(
         if ROWS {
             let r = if WIDE { 8 } else { 4 };
             for k in 8 - r..8 + r {
-                v[k] = _mm256_loadu_si256(at(k as isize - 8) as *const V);
+                v[k] = ld16(at(k as isize - 8));
             }
         } else if WIDE {
             let mut m = [zero; 16];
             for (l, m) in m.iter_mut().enumerate() {
-                *m = _mm256_loadu_si256(base.add(l * along).sub(8) as *const V);
+                *m = ld16(base.add(l * along).sub(8));
             }
             v = transpose16(&m);
         } else {
             let mut m = [zero; 8];
             for (l, m) in m.iter_mut().enumerate() {
-                let a = _mm_loadu_si128(base.add(l * along).sub(4) as *const __m128i);
-                let b = _mm_loadu_si128(base.add((l + 8) * along).sub(4) as *const __m128i);
+                let a = ld8(base.add(l * along).sub(4));
+                let b = ld8(base.add((l + 8) * along).sub(4));
                 *m = _mm256_set_m128i(b, a);
             }
             let t = transpose8(m);
@@ -277,31 +323,28 @@ unsafe fn edge<const WIDE: bool, const ROWS: bool>(
         }
         if ROWS {
             for k in 6..10 {
-                _mm256_storeu_si256(at(k as isize - 8) as *mut V, v[k]);
+                st16(at(k as isize - 8), v[k]);
             }
             if any_flat {
-                _mm256_storeu_si256(at(-3) as *mut V, v[5]);
-                _mm256_storeu_si256(at(2) as *mut V, v[10]);
+                st16(at(-3), v[5]);
+                st16(at(2), v[10]);
             }
             if any_flat2 {
                 for k in (1..5).chain(11..15) {
-                    _mm256_storeu_si256(at(k as isize - 8) as *mut V, v[k]);
+                    st16(at(k as isize - 8), v[k]);
                 }
             }
         } else if WIDE {
             let m = transpose16(&v);
             for (l, m) in m.iter().enumerate() {
-                _mm256_storeu_si256(base.add(l * along).sub(8) as *mut V, *m);
+                st16(base.add(l * along).sub(8), *m);
             }
         } else {
             let m = transpose8([v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11]]);
             for (l, m) in m.iter().enumerate() {
-                _mm_storeu_si128(
-                    base.add(l * along).sub(4) as *mut __m128i,
-                    _mm256_castsi256_si128(*m),
-                );
-                _mm_storeu_si128(
-                    base.add((l + 8) * along).sub(4) as *mut __m128i,
+                st8(base.add(l * along).sub(4), _mm256_castsi256_si128(*m));
+                st8(
+                    base.add((l + 8) * along).sub(4),
                     _mm256_extracti128_si256::<1>(*m),
                 );
             }
