@@ -1,0 +1,86 @@
+[package]
+name = "pito-codecs"
+description = "Video and audio codecs, containers and GPU routes in Rust for PITO apps"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT"
+repository = "https://github.com/gmrdad82/pito-codecs"
+
+[features]
+default = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter", "opus", "vp9", "webp", "mkv", "gif"]
+media = []
+h264 = ["media", "dep:rayon"]
+hevc = ["media", "dep:rayon"]
+aac = ["media"]
+mp4 = ["media"]
+gpu = [
+    "media",
+    "dep:libloading",
+    "dep:windows",
+    "dep:objc2-core-foundation",
+    "dep:objc2-core-media",
+    "dep:objc2-core-video",
+    "dep:objc2-video-toolbox",
+]
+filter = ["media", "dep:rayon"]
+mkv = ["media", "mp4"]
+opus = ["media"]
+vp9 = ["media", "dep:rayon"]
+webp = ["media", "filter", "dep:rayon"]
+gif = ["filter", "dep:rayon"]
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+libloading = { version = "0.8", optional = true }
+
+[dependencies]
+rayon = { version = "1.10", optional = true }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libloading = "0.8"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Variant",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = { version = "0.3.2", optional = true }
+objc2-core-media = { version = "0.3.2", optional = true }
+objc2-core-video = { version = "0.3.2", optional = true }
+objc2-video-toolbox = { version = "0.3.2", optional = true }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+debug = false
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[[example]]
+name = "media_speed"
+required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter"]
+
+[[example]]
+name = "bench"
+required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter"]
+
+[[example]]
+name = "pcodec"
+required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter"]
+
+[dev-dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+png = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

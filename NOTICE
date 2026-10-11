@@ -1,0 +1,182 @@
+Parts of this package are adapted from FilmCraft
+(https://github.com/storytold/filmcraft, tag v0.6.0, commit 2ff3f5e266838700c292a35aaf762e3d4dcef980),
+Copyright (c) 2026 ArtCraft Team and the FilmCraft contributors, used under
+the MIT License (FilmCraft is dual-licensed MIT OR Apache-2.0; the MIT terms
+are taken here):
+
+MIT License
+
+Copyright (c) 2026 ArtCraft Team and the FilmCraft contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Adapted modules (one line per module, filled in by each task):
+
+- src/h264/: from crates/h264 (the H.264 decoder), crates/h264enc (the encoder) and crates/bitstream (bit reader and writer).
+- src/hevc/: from crates/hevc (the H.265 decoder) and crates/bitstream (bit reader, NAL splitting); adapted to the shared Frame and Packet types, with an hvcC writer added.
+- src/aac/: from crates/aac (the AAC-LC decoder and encoder) and crates/bitstream; src/aac/pcm.rs is new.
+- src/mp4/: from crates/isobmff (the MP4 and MOV reader and writer); remux and the MOV brand are new.
+- src/gpu/: decode from crates/platform/src/vaapi (the VA-API front ends, libva FFI and session) and crates/platform/src/biplanar.rs, with the H.264 and HEVC parameter, slice and DPB code of crates/h264 and crates/hevc in src/gpu/syntax; the VA-API encoders, packed headers, VPP and dma-buf export are new.
+- src/gpu/nvenc/: from crates/platform/src/nvenc (ffi, session, device, HEVC).
+- src/gpu/videotoolbox/: from crates/platform/src/videotoolbox.rs and videotoolbox_encode.rs.
+- src/gpu/media_foundation/: from crates/platform/src/media_foundation and crates/platform/src/annexb.rs.
+- src/filter/: the EBU R128 meter (K-weighting filters, gating histogram, loudness range) and the true-peak polyphase oversampler from crates/audio-dsp; the rest is new.
+- src/vp9/: the VP9 decoder from crates/vp9 (header and superframe parsing, boolean decoder, probability adaptation, tiles, prediction, transforms, loop filter, frame threading); the shared Frame and Packet front and the bit reader (from crates/bitstream) are adapted.
+- src/opus/: the decoder (SILK, CELT, hybrid, multistream, OpusHead) from crates/opus; the range encoder, the FFT butterflies and the Ogg reader and writer are new.
+- src/mkv/: the Matroska and WebM reader (EBML, lacing, Cues, damage resync) from crates/matroska; the writer, remux and MP4 to MKV are reworked or new.
+- src/vp9/enc/: the VP9 encoder; its motion vector prediction (mvref.rs) and the syntax contexts of entropy.rs mirror crates/vp9's tile.rs, and it reuses the decoder's tables, probability adaptation and loop filter; the rest is new.
+- src/gif/: new, written from the GIF89a specification; no code adapted.
+- src/vp9/enc/tx/: the inverse DCT and ADST butterflies (transform_gen.rs), the scan, band and energy-class tables and the coefficient-context neighbours from crates/vp9; the forward transforms (the transposes of those butterflies), the quantiser, the trellis and the AVX2 kernels are new.
+- src/webp/: new, written from RFC 9649 (the container, VP8L lossless and animation); src/webp/vp8/ is described below.
+- src/opus/enc/: the CELT encoder is new, written from RFC 6716; it shares the decoder's tables and range coder.
+
+The VA-API declarations in src/gpu/vaapi/ffi.rs are transcribed from libva's
+headers (va.h, va_dec_hevc.h, va_enc_h264.h, va_enc_hevc.h, va_vpp.h, va_drm.h,
+va_drmcommon.h; libva 2.23, https://github.com/intel/libva), which carry this
+notice:
+
+Copyright (c) 2007-2009 Intel Corporation. All Rights Reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sub license, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice (including the
+next paragraph) shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.
+IN NO EVENT SHALL INTEL AND/OR ITS SUPPLIERS BE LIABLE FOR
+ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+The NVENC declarations in src/gpu/nvenc/ffi.rs are transcribed from NVIDIA's
+nvEncodeAPI.h (Video Codec SDK, API 12.1), which carries this notice:
+
+Copyright (c) 2010-2023 NVIDIA Corporation
+
+Permission is hereby granted, free of charge, to any person
+obtaining a copy of this software and associated documentation
+files (the "Software"), to deal in the Software without
+restriction, including without limitation the rights to use,
+copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the software, and to permit persons to whom the
+software is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
+
+src/webp/vp8/ (the VP8 lossy codec of WebP) is written from RFC 6386 and
+RFC 9649. Its loop filter, intra prediction, token and transform details
+follow the reference decoder published in RFC 6386, Section 20, and its YUV
+to RGB conversion, fancy chroma upsampler, SSE2 loop filter layout, forward
+transforms and quality scale are adapted from libwebp (v1.6.0,
+https://chromium.googlesource.com/webm/libwebp). They carry these notices:
+
+RFC 6386 reference decoder:
+
+Copyright (c) 2010, 2011, Google Inc.  All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+  * Redistributions of source code must retain the above copyright
+    notice, this list of conditions and the following disclaimer.
+
+  * Redistributions in binary form must reproduce the above copyright
+    notice, this list of conditions and the following disclaimer in
+    the documentation and/or other materials provided with the
+    distribution.
+
+  * Neither the name of Google nor the names of its contributors may
+    be used to endorse or promote products derived from this software
+    without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT
+HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
+OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
+AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY
+WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+
+libwebp:
+
+Copyright (c) 2010, Google Inc. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+  * Redistributions of source code must retain the above copyright
+    notice, this list of conditions and the following disclaimer.
+
+  * Redistributions in binary form must reproduce the above copyright
+    notice, this list of conditions and the following disclaimer in
+    the documentation and/or other materials provided with the
+    distribution.
+
+  * Neither the name of Google nor the names of its contributors may
+    be used to endorse or promote products derived from this software
+    without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Images in this repository that are not code, where each comes from, and what
+covers it, all under the MIT licence like the code:
+- docs/images/decode.gif: a terminal clip recorded by prec from this
+  repository's own shot (render/terminal.toml and render/terminal/), running
+  examples/pcodec.rs over a clip render/terminal/clip.sh makes
+- docs/images/bench-decode.png, bench-encode.png, bench-audio.png,
+  bench-pipeline.png and bench-speedup.png: charts examples/bench.rs draws from
+  its own measurements on public-domain NASA footage ("A Message of Resilience
+  from the International Space Station")

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+fast=0
+case "${1:-}" in
+    --fast) fast=1 ;;
+    "") ;;
+    *)
+        echo "usage: bin/gate [--fast]" >&2
+        exit 2
+        ;;
+esac
+
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+if [ "$fast" -eq 0 ]; then
+    cargo build --release
+fi
+echo "gate ok"

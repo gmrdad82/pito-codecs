@@ -1,0 +1,689 @@
+use std::ffi::{CStr, c_char, c_int, c_void};
+use std::panic::AssertUnwindSafe;
+use std::ptr::NonNull;
+use std::sync::{Mutex, OnceLock, PoisonError};
+
+use objc2_core_foundation::{
+    CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType,
+};
+use objc2_core_media::{
+    CMSampleBuffer, CMTime, CMTimeFlags, CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
+    CMVideoFormatDescriptionGetHEVCParameterSetAtIndex,
+};
+use objc2_core_video::{
+    CVImageBuffer, CVPixelBufferCreate, CVPixelBufferLockFlags, CVPixelBufferPool,
+    kCVPixelBufferHeightKey, kCVPixelBufferIOSurfacePropertiesKey,
+    kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey,
+};
+use objc2_video_toolbox::{
+    VTCompressionSession, VTEncodeInfoFlags, VTSessionSetProperty,
+    kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AllowOpenGOP,
+    kVTCompressionPropertyKey_AverageBitRate, kVTCompressionPropertyKey_DataRateLimits,
+    kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
+    kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_Quality,
+    kVTCompressionPropertyKey_RealTime, kVTProfileLevel_H264_Baseline_AutoLevel,
+    kVTProfileLevel_H264_High_AutoLevel, kVTProfileLevel_H264_Main_AutoLevel,
+    kVTProfileLevel_HEVC_Main_AutoLevel, kVTProfileLevel_HEVC_Main10_AutoLevel,
+    kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
+};
+
+use super::{Locked, NV12_VIDEO, P010_VIDEO, codec_type, label, planes};
+use crate::gpu::nal;
+use crate::gpu::{Bitstream, EncoderConfig, Profile, Rate};
+use crate::media::{Codec, Error, Frame, Packet, PixelFormat, Result, TimeBase};
+
+enum Output {
+    Packet {
+        data: Vec<u8>,
+        pts: i64,
+        dts: CMTime,
+        keyframe: bool,
+    },
+    Failed(Error),
+}
+
+type Sets = [Vec<Vec<u8>>; 3];
+
+struct Shared {
+    codec: Codec,
+    bitstream: Bitstream,
+    sets: Mutex<Option<Sets>>,
+    out: Mutex<Vec<Output>>,
+}
+
+impl Shared {
+    fn push(&self, o: Output) {
+        self.out
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(o);
+    }
+}
+
+struct Session {
+    session: CFRetained<VTCompressionSession>,
+    shared: Box<Shared>,
+}
+
+unsafe impl Send for Session {}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = self.session.complete_frames(invalid_time());
+            self.session.invalidate();
+        }
+    }
+}
+
+fn invalid_time() -> CMTime {
+    CMTime {
+        value: 0,
+        timescale: 0,
+        flags: CMTimeFlags(0),
+        epoch: 0,
+    }
+}
+
+fn valid_time(value: i64, timescale: i32) -> CMTime {
+    CMTime {
+        value,
+        timescale,
+        flags: CMTimeFlags::Valid,
+        epoch: 0,
+    }
+}
+
+fn ticks(t: CMTime, tb: TimeBase) -> Option<i64> {
+    let flags = t.flags;
+    let bad = CMTimeFlags::PositiveInfinity | CMTimeFlags::NegativeInfinity;
+    if !flags.contains(CMTimeFlags::Valid) || flags.intersects(bad) || t.timescale <= 0 {
+        return None;
+    }
+    let num = i128::from(t.value) * i128::from(tb.den);
+    let den = i128::from(t.timescale) * i128::from(tb.num);
+    if den == 0 {
+        return None;
+    }
+    i64::try_from((2 * num + den).div_euclid(2 * den)).ok()
+}
+
+fn read_sets(sample: &CMSampleBuffer, codec: Codec) -> Result<Sets> {
+    let format = unsafe { sample.format_description() }
+        .ok_or_else(|| Error::Backend("compressed frame without a format description".into()))?;
+    let mut sets: Sets = [Vec::new(), Vec::new(), Vec::new()];
+    let (mut index, mut count) = (0usize, 1usize);
+    while index < count && index < 32 {
+        let (mut ptr, mut size, mut total, mut length): (*const u8, usize, usize, c_int) =
+            (std::ptr::null(), 0, 0, 0);
+        let status = unsafe {
+            match codec {
+                Codec::Hevc => CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                    &format,
+                    index,
+                    &mut ptr,
+                    &mut size,
+                    &mut total,
+                    &mut length,
+                ),
+                _ => CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                    &format,
+                    index,
+                    &mut ptr,
+                    &mut size,
+                    &mut total,
+                    &mut length,
+                ),
+            }
+        };
+        if status != 0 {
+            return Err(Error::Backend(format!(
+                "cannot read the {codec:?} parameter sets ({status})"
+            )));
+        }
+        if length != 4 {
+            return Err(Error::Backend(format!("NAL length size {length}")));
+        }
+        if ptr.is_null() || size == 0 || size > 65_535 {
+            return Err(Error::Backend("empty or oversized parameter set".into()));
+        }
+        count = total;
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, size) }.to_vec();
+        let slot = match (codec, nal::nal_type(codec, &bytes)) {
+            (Codec::Hevc, 32) => Some(0),
+            (Codec::Hevc, 33) | (Codec::H264, 7) => Some(1),
+            (Codec::Hevc, 34) | (Codec::H264, 8) => Some(2),
+            _ => None,
+        };
+        if let Some(i) = slot {
+            sets[i].push(bytes);
+        }
+        index += 1;
+    }
+    if sets[1].is_empty() || sets[2].is_empty() || (codec == Codec::Hevc && sets[0].is_empty()) {
+        return Err(Error::Backend(
+            "the format description lacks parameter sets".into(),
+        ));
+    }
+    Ok(sets)
+}
+
+fn to_start_codes(data: &mut [u8]) {
+    let mut at = 0;
+    while let Some(head) = data.get_mut(at..at + 4) {
+        let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+        head.copy_from_slice(&[0, 0, 0, 1]);
+        at += 4 + len;
+    }
+}
+
+fn read_packet(sample: &CMSampleBuffer, shared: &Shared, pts: i64) -> Result<Output> {
+    let block = unsafe { sample.data_buffer() }
+        .ok_or_else(|| Error::Backend("compressed frame without data".into()))?;
+    let len = unsafe { block.data_length() };
+    if len == 0 {
+        return Err(Error::Backend("empty compressed frame".into()));
+    }
+    let mut data = vec![0u8; len];
+    let dest = NonNull::from(&mut data[0]).cast::<c_void>();
+    let status = unsafe { block.copy_data_bytes(0, len, dest) };
+    if status != 0 {
+        return Err(Error::Backend(format!(
+            "cannot copy a compressed frame ({status})"
+        )));
+    }
+    let codec = shared.codec;
+    let mut guard = shared.sets.lock().unwrap_or_else(PoisonError::into_inner);
+    if guard.is_none() {
+        *guard = Some(read_sets(sample, codec)?);
+    }
+    let sets = guard.as_ref().map(|s| s.as_slice()).unwrap_or_default();
+    let (keyframe, inline) = {
+        let nals = nal::length_prefixed(&data, 4)?;
+        (
+            nals.iter().any(|n| nal::is_keyframe(codec, n)),
+            nals.iter().any(|n| nal::is_parameter_set(codec, n)),
+        )
+    };
+    let annexb = shared.bitstream == Bitstream::AnnexB;
+    let data = if !inline && !(annexb && keyframe) {
+        if annexb {
+            to_start_codes(&mut data);
+        }
+        data
+    } else {
+        let nals = nal::length_prefixed(&data, 4)?;
+        let kept: Vec<&[u8]> = nals
+            .into_iter()
+            .filter(|n| !nal::is_parameter_set(codec, n))
+            .collect();
+        if annexb {
+            let mut out = Vec::with_capacity(len + 256);
+            let head = sets.iter().flatten().map(Vec::as_slice);
+            for n in head.chain(kept) {
+                out.extend_from_slice(&[0, 0, 0, 1]);
+                out.extend_from_slice(n);
+            }
+            out
+        } else {
+            nal::length_prefix(&kept)
+        }
+    };
+    let dts = unsafe { sample.decode_time_stamp() };
+    Ok(Output::Packet {
+        data,
+        pts,
+        dts,
+        keyframe,
+    })
+}
+
+unsafe extern "C-unwind" fn output(
+    refcon: *mut c_void,
+    frame_refcon: *mut c_void,
+    status: i32,
+    flags: VTEncodeInfoFlags,
+    sample: *mut CMSampleBuffer,
+) {
+    if refcon.is_null() {
+        return;
+    }
+    let shared = unsafe { &*(refcon as *const Shared) };
+    let pts = frame_refcon.addr() as isize as i64;
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if status != 0 {
+            return Output::Failed(Error::Backend(format!(
+                "VideoToolbox encode error {status}"
+            )));
+        }
+        if flags.contains(VTEncodeInfoFlags::FrameDropped) {
+            return Output::Failed(Error::Backend("VideoToolbox dropped a frame".into()));
+        }
+        let Some(sample) = NonNull::new(sample) else {
+            return Output::Failed(Error::Backend(
+                "VideoToolbox returned no data for a frame".into(),
+            ));
+        };
+        read_packet(unsafe { sample.as_ref() }, shared, pts).unwrap_or_else(Output::Failed)
+    }));
+    shared.push(result.unwrap_or_else(|_| {
+        Output::Failed(Error::Backend(
+            "panic while reading a compressed frame".into(),
+        ))
+    }));
+}
+
+unsafe extern "C" {
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+}
+
+fn optional_key(name: &CStr) -> Option<&'static CFString> {
+    let any = std::ptr::without_provenance_mut::<c_void>(-2isize as usize);
+    let symbol = unsafe { dlsym(any, name.as_ptr()) };
+    let slot = NonNull::new(symbol)?.cast::<*const CFString>();
+    unsafe { slot.read().as_ref() }
+}
+
+fn set(session: &VTCompressionSession, key: &CFString, value: &CFType) -> i32 {
+    unsafe { VTSessionSetProperty(session.as_ref(), key, Some(value)) }
+}
+
+fn require(status: i32, what: &str) -> Result<()> {
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(Error::Unsupported(format!(
+            "VideoToolbox refused {what} ({status})"
+        )))
+    }
+}
+
+fn bits_per_second(kbps: u32) -> i32 {
+    i32::try_from(u64::from(kbps) * 1000).unwrap_or(i32::MAX)
+}
+
+fn rate_limit(session: &VTCompressionSession, kbps: u32) {
+    let key = unsafe { kVTCompressionPropertyKey_DataRateLimits };
+    let bytes = CFNumber::new_i32(bits_per_second(kbps) / 8);
+    let seconds = CFNumber::new_f64(1.0);
+    let limits = CFArray::<CFType>::from_objects(&[bytes.as_ref(), seconds.as_ref()]);
+    let _ = set(session, key, limits.as_ref());
+}
+
+fn estimate(codec: Codec, config: &EncoderConfig, quality: u8) -> i32 {
+    let fps = f64::from(config.fps.0) / f64::from(config.fps.1);
+    let pixels = f64::from(config.width) * f64::from(config.height) * fps;
+    let scale = if codec == Codec::Hevc { 0.06 } else { 0.1 };
+    let bps = pixels * scale * 2f64.powf((23.0 - f64::from(quality)) / 6.0);
+    bps.clamp(100_000.0, f64::from(i32::MAX)) as i32
+}
+
+fn configure(
+    session: &VTCompressionSession,
+    codec: Codec,
+    config: &EncoderConfig,
+    profile: &CFString,
+    reorder: bool,
+) -> Result<()> {
+    let key = unsafe { kVTCompressionPropertyKey_ProfileLevel };
+    require(set(session, key, profile.as_ref()), "the profile")?;
+    let key = unsafe { kVTCompressionPropertyKey_RealTime };
+    let _ = set(session, key, CFBoolean::new(false).as_ref());
+    let key = unsafe { kVTCompressionPropertyKey_AllowFrameReordering };
+    require(
+        set(session, key, CFBoolean::new(reorder).as_ref()),
+        "frame reordering",
+    )?;
+    let key = unsafe { kVTCompressionPropertyKey_AllowOpenGOP };
+    let _ = set(session, key, CFBoolean::new(false).as_ref());
+    let gop = match config.gop {
+        0 => (2 * u64::from(config.fps.0)).div_ceil(u64::from(config.fps.1)),
+        n => u64::from(n),
+    };
+    let gop = gop.clamp(1, i32::MAX as u64) as i32;
+    let key = unsafe { kVTCompressionPropertyKey_MaxKeyFrameInterval };
+    require(
+        set(session, key, CFNumber::new_i32(gop).as_ref()),
+        "the keyframe interval",
+    )?;
+    let fps = f64::from(config.fps.0) / f64::from(config.fps.1);
+    let key = unsafe { kVTCompressionPropertyKey_ExpectedFrameRate };
+    let _ = set(session, key, CFNumber::new_f64(fps).as_ref());
+    let average = unsafe { kVTCompressionPropertyKey_AverageBitRate };
+    match config.rate {
+        Rate::Crf(q) | Rate::Qp(q) => {
+            let quality = f64::from(51 - q.min(51)) / 51.0;
+            let key = unsafe { kVTCompressionPropertyKey_Quality };
+            if set(session, key, CFNumber::new_f64(quality).as_ref()) != 0 {
+                let bps = CFNumber::new_i32(estimate(codec, config, q));
+                require(set(session, average, bps.as_ref()), "the bitrate")?;
+            }
+            if let Rate::Qp(q) = config.rate {
+                let qp = CFNumber::new_i32(i32::from(q.min(51)));
+                for name in [
+                    c"kVTCompressionPropertyKey_MinAllowedFrameQP",
+                    c"kVTCompressionPropertyKey_MaxAllowedFrameQP",
+                ] {
+                    if let Some(key) = optional_key(name) {
+                        let _ = set(session, key, qp.as_ref());
+                    }
+                }
+            }
+        }
+        Rate::Bitrate(kbps) => {
+            let bps = CFNumber::new_i32(bits_per_second(kbps));
+            require(set(session, average, bps.as_ref()), "the bitrate")?;
+            rate_limit(session, kbps);
+        }
+        Rate::Vbr { kbps, max_kbps } => {
+            let bps = CFNumber::new_i32(bits_per_second(kbps));
+            require(set(session, average, bps.as_ref()), "the bitrate")?;
+            rate_limit(session, max_kbps.max(kbps));
+        }
+    }
+    Ok(())
+}
+
+pub fn hardware(codec: Codec) -> bool {
+    static PROBE: OnceLock<(bool, bool)> = OnceLock::new();
+    let (h264, hevc) = *PROBE.get_or_init(|| {
+        let config = EncoderConfig {
+            width: 1280,
+            height: 720,
+            ..EncoderConfig::default()
+        };
+        let probe = |c: Codec| VtEncoder::new(c, &config).is_ok();
+        (probe(Codec::H264), probe(Codec::Hevc))
+    });
+    match codec {
+        Codec::H264 => h264,
+        Codec::Hevc => hevc,
+        Codec::Aac => false,
+    }
+}
+
+pub struct VtEncoder {
+    session: Session,
+    codec: Codec,
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    pixel_format: u32,
+    b_frames: u8,
+    duration: CMTime,
+    pool: Option<CFRetained<CVPixelBufferPool>>,
+    attrs: CFRetained<CFDictionary<CFString, CFType>>,
+    extradata: Option<Vec<u8>>,
+    time_base: Option<TimeBase>,
+    last_dts: Option<i64>,
+    submitted: u64,
+}
+
+unsafe impl Send for VtEncoder {}
+
+impl VtEncoder {
+    pub fn new(codec: Codec, config: &EncoderConfig) -> Result<Self> {
+        let codec_type = codec_type(codec)?;
+        let (w, h) = (config.width, config.height);
+        if w == 0 || h == 0 || w > 16384 || h > 16384 {
+            return Err(Error::Invalid(format!("encoder picture size {w}x{h}")));
+        }
+        if !w.is_multiple_of(2) || !h.is_multiple_of(2) {
+            return Err(Error::Unsupported(format!(
+                "odd picture size {w}x{h} on VideoToolbox"
+            )));
+        }
+        let (num, den) = config.fps;
+        if num == 0 || den == 0 || num > i32::MAX as u32 {
+            return Err(Error::Invalid("encoder frame rate must be set".into()));
+        }
+        let (profile, format, pixel_format) = unsafe {
+            match (codec, config.profile) {
+                (Codec::H264, Profile::Baseline) => (
+                    kVTProfileLevel_H264_Baseline_AutoLevel,
+                    PixelFormat::Yuv420p8,
+                    NV12_VIDEO,
+                ),
+                (Codec::H264, Profile::Main) => (
+                    kVTProfileLevel_H264_Main_AutoLevel,
+                    PixelFormat::Yuv420p8,
+                    NV12_VIDEO,
+                ),
+                (Codec::H264, Profile::High) => (
+                    kVTProfileLevel_H264_High_AutoLevel,
+                    PixelFormat::Yuv420p8,
+                    NV12_VIDEO,
+                ),
+                (Codec::Hevc, Profile::Main10) => (
+                    kVTProfileLevel_HEVC_Main10_AutoLevel,
+                    PixelFormat::Yuv420p10,
+                    P010_VIDEO,
+                ),
+                (Codec::Hevc, _) => (
+                    kVTProfileLevel_HEVC_Main_AutoLevel,
+                    PixelFormat::Yuv420p8,
+                    NV12_VIDEO,
+                ),
+                (c, p) => {
+                    return Err(Error::Unsupported(format!("{c:?} {p:?} on VideoToolbox")));
+                }
+            }
+        };
+        let reorder = config.b_frames > 0 && config.profile != Profile::Baseline;
+        let shared = Box::new(Shared {
+            codec,
+            bitstream: config.bitstream,
+            sets: Mutex::new(None),
+            out: Mutex::new(Vec::new()),
+        });
+        let require_key: &CFString =
+            unsafe { kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder };
+        let spec = CFDictionary::<CFString, CFType>::from_slices(
+            &[require_key],
+            &[CFBoolean::new(true).as_ref()],
+        );
+        let pf = CFNumber::new_i32(pixel_format as i32);
+        let (cw, ch) = (CFNumber::new_i32(w as i32), CFNumber::new_i32(h as i32));
+        let io = CFDictionary::<CFString, CFType>::from_slices(&[], &[]);
+        let keys: [&CFString; 4] = unsafe {
+            [
+                kCVPixelBufferPixelFormatTypeKey,
+                kCVPixelBufferWidthKey,
+                kCVPixelBufferHeightKey,
+                kCVPixelBufferIOSurfacePropertiesKey,
+            ]
+        };
+        let attrs = CFDictionary::<CFString, CFType>::from_slices(
+            &keys,
+            &[pf.as_ref(), cw.as_ref(), ch.as_ref(), io.as_ref()],
+        );
+        let mut out: *mut VTCompressionSession = std::ptr::null_mut();
+        let status = unsafe {
+            VTCompressionSession::create(
+                None,
+                w as i32,
+                h as i32,
+                codec_type,
+                Some(spec.as_ref()),
+                Some(attrs.as_ref()),
+                None,
+                Some(output),
+                &*shared as *const Shared as *mut c_void,
+                NonNull::from(&mut out),
+            )
+        };
+        let session = NonNull::new(out).filter(|_| status == 0).ok_or_else(|| {
+            Error::Unsupported(format!(
+                "this Mac has no hardware {codec:?} encoder for {w}x{h} ({status})"
+            ))
+        })?;
+        let session = Session {
+            session: unsafe { CFRetained::from_raw(session) },
+            shared,
+        };
+        configure(&session.session, codec, config, profile, reorder)?;
+        require(
+            unsafe { session.session.prepare_to_encode_frames() },
+            "to prepare the encoder",
+        )?;
+        let pool = unsafe { session.session.pixel_buffer_pool() };
+        Ok(Self {
+            session,
+            codec,
+            width: w,
+            height: h,
+            format,
+            pixel_format,
+            b_frames: if reorder { config.b_frames } else { 0 },
+            duration: valid_time(i64::from(den), num as i32),
+            pool,
+            attrs,
+            extradata: None,
+            time_base: None,
+            last_dts: None,
+            submitted: 0,
+        })
+    }
+
+    pub fn name(&self) -> &str {
+        label(self.codec)
+    }
+
+    pub fn b_frames(&self) -> u8 {
+        self.b_frames
+    }
+
+    pub fn extradata(&self) -> Option<&[u8]> {
+        self.extradata.as_deref()
+    }
+
+    fn buffer(&self) -> Result<CFRetained<CVImageBuffer>> {
+        let mut raw: *mut CVImageBuffer = std::ptr::null_mut();
+        let status = match &self.pool {
+            Some(pool) => unsafe {
+                CVPixelBufferPool::create_pixel_buffer(None, pool, NonNull::from(&mut raw))
+            },
+            None => unsafe {
+                CVPixelBufferCreate(
+                    None,
+                    self.width as usize,
+                    self.height as usize,
+                    self.pixel_format,
+                    Some(self.attrs.as_ref()),
+                    NonNull::from(&mut raw),
+                )
+            },
+        };
+        let raw = NonNull::new(raw).filter(|_| status == 0).ok_or_else(|| {
+            Error::Backend(format!(
+                "cannot allocate an encoder input buffer ({status})"
+            ))
+        })?;
+        Ok(unsafe { CFRetained::from_raw(raw) })
+    }
+
+    pub fn encode(&mut self, frame: &Frame) -> Result<Vec<Packet>> {
+        if frame.format != self.format || frame.width != self.width || frame.height != self.height {
+            return Err(Error::Invalid(format!(
+                "the encoder takes {}x{} {:?} frames, not {}x{} {:?}",
+                self.width, self.height, self.format, frame.width, frame.height, frame.format
+            )));
+        }
+        let tb = *self.time_base.get_or_insert(frame.time_base);
+        let timescale = i32::try_from(tb.den)
+            .ok()
+            .filter(|&d| d > 0 && tb.num > 0)
+            .ok_or_else(|| Error::Invalid(format!("time base {}/{}", tb.num, tb.den)))?;
+        let value = frame
+            .pts
+            .checked_mul(i64::from(tb.num))
+            .ok_or_else(|| Error::Invalid(format!("pts {} out of range", frame.pts)))?;
+        let pts = valid_time(value, timescale);
+        let buffer = self.buffer()?;
+        {
+            let mut lock = Locked::new(&buffer, CVPixelBufferLockFlags(0))?;
+            let (luma, chroma) = lock.planes_mut()?;
+            planes::from_planar(frame, luma, chroma).map_err(Error::Backend)?;
+        }
+        let refcon = std::ptr::without_provenance_mut::<c_void>(frame.pts as isize as usize);
+        let status = unsafe {
+            self.session.session.encode_frame(
+                &buffer,
+                pts,
+                self.duration,
+                None,
+                refcon,
+                std::ptr::null_mut(),
+            )
+        };
+        if status != 0 {
+            return Err(Error::Backend(format!(
+                "VTCompressionSessionEncodeFrame failed ({status})"
+            )));
+        }
+        self.submitted += 1;
+        if self.submitted == 1 {
+            let status = unsafe { self.session.session.complete_frames(pts) };
+            if status != 0 {
+                return Err(Error::Backend(format!(
+                    "VideoToolbox could not finish the first frame ({status})"
+                )));
+            }
+        }
+        self.drain()
+    }
+
+    pub fn flush(&mut self) -> Result<Vec<Packet>> {
+        let status = unsafe { self.session.session.complete_frames(invalid_time()) };
+        if status != 0 {
+            return Err(Error::Backend(format!(
+                "VideoToolbox could not finish the pending frames ({status})"
+            )));
+        }
+        self.drain()
+    }
+
+    fn drain(&mut self) -> Result<Vec<Packet>> {
+        let shared = &self.session.shared;
+        let outputs =
+            std::mem::take(&mut *shared.out.lock().unwrap_or_else(PoisonError::into_inner));
+        if outputs.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.extradata.is_none() {
+            let sets = shared.sets.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some([vps, sps, pps]) = sets.as_ref() {
+                self.extradata = Some(match self.codec {
+                    Codec::Hevc => nal::build_hvcc(vps, sps, pps)?,
+                    _ => nal::build_avcc(sps, pps)?,
+                });
+            }
+        }
+        let tb = self.time_base.unwrap_or(TimeBase::new(1, 90000));
+        let mut packets = Vec::with_capacity(outputs.len());
+        for o in outputs {
+            let (data, pts, dts, keyframe) = match o {
+                Output::Packet {
+                    data,
+                    pts,
+                    dts,
+                    keyframe,
+                } => (data, pts, dts, keyframe),
+                Output::Failed(e) => return Err(e),
+            };
+            let dts = ticks(dts, tb).unwrap_or(pts).min(pts);
+            let dts = match self.last_dts {
+                Some(last) if dts <= last => last + 1,
+                _ => dts,
+            };
+            self.last_dts = Some(dts);
+            packets.push(Packet {
+                data,
+                pts,
+                dts,
+                keyframe,
+            });
+        }
+        Ok(packets)
+    }
+}

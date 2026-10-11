@@ -1,0 +1,1663 @@
+#[path = "bench/charts.rs"]
+mod charts;
+
+use std::collections::{BTreeMap, HashMap};
+use std::error::Error;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Instant;
+
+use pito_codecs::aac;
+use pito_codecs::filter::{Kernel, LoudnessMeter, Scaler};
+use pito_codecs::gpu::{self, HwDecoder, HwEncoder};
+use pito_codecs::h264;
+use pito_codecs::hevc;
+use pito_codecs::media::{
+    AudioBuffer, Choice, Codec, ExportOptions, Frame, Packet, Piece, PixelFormat, Prefs, TimeBase,
+    export, first_frame, frames_at,
+};
+use pito_codecs::mp4::{CodecConfig, Reader};
+use serde::{Deserialize, Serialize};
+
+type Res<T> = Result<T, Box<dyn Error>>;
+
+const CLIP_SECONDS: u32 = 20;
+const ENCODE_FRAMES: usize = 240;
+const SIZES: [(u32, u32); 2] = [(1920, 1080), (2560, 1440)];
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct Row {
+    id: String,
+    group: String,
+    label: String,
+    unit: String,
+    higher_is_better: bool,
+    ours: Option<f64>,
+    ffmpeg: Option<f64>,
+    speedup: Option<f64>,
+    ours_runs: Vec<f64>,
+    ffmpeg_runs: Vec<f64>,
+    route: String,
+    note: String,
+    details: BTreeMap<String, f64>,
+    skipped: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Machine {
+    cpu: String,
+    threads: usize,
+    gpu: String,
+    driver: String,
+    ffmpeg: String,
+    os: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Results {
+    date: String,
+    command: String,
+    commit: String,
+    runs: usize,
+    input: String,
+    machine: Machine,
+    load_average_start: String,
+    load_average_end: String,
+    rows: Vec<Row>,
+}
+
+#[derive(Default)]
+struct Measured {
+    ours: Vec<f64>,
+    ffmpeg: Vec<f64>,
+    route: String,
+    note: String,
+    details: BTreeMap<String, f64>,
+}
+
+fn median(v: &[f64]) -> Option<f64> {
+    if v.is_empty() {
+        return None;
+    }
+    let mut s = v.to_vec();
+    s.sort_by(f64::total_cmp);
+    let m = s.len() / 2;
+    Some(if s.len() % 2 == 1 {
+        s[m]
+    } else {
+        (s[m - 1] + s[m]) / 2.0
+    })
+}
+
+fn render_node() -> String {
+    let mut nodes: Vec<PathBuf> = fs::read_dir("/dev/dri")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("renderD"))
+        })
+        .collect();
+    nodes.sort();
+    nodes
+        .first()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "/dev/dri/renderD128".into())
+}
+
+fn ffmpeg_run(args: &[&str], info: bool) -> Res<(f64, String)> {
+    let t = Instant::now();
+    let out = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-loglevel",
+            if info { "info" } else { "error" },
+        ])
+        .args(args)
+        .output()?;
+    let secs = t.elapsed().as_secs_f64();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        return Err(format!("ffmpeg {}: {}", args.join(" "), stderr.trim()).into());
+    }
+    Ok((secs, stderr))
+}
+
+fn ffmpeg_time(args: &[&str]) -> Res<f64> {
+    Ok(ffmpeg_run(args, false)?.0)
+}
+
+fn path_str(p: &Path) -> String {
+    p.display().to_string()
+}
+
+fn repeat(runs: usize, mut f: impl FnMut() -> Res<f64>) -> Res<Vec<f64>> {
+    (0..runs).map(|_| f()).collect()
+}
+
+struct Assets {
+    dir: PathBuf,
+    speech: PathBuf,
+    video: HashMap<(Codec, u32), PathBuf>,
+    raw: BTreeMap<u32, PathBuf>,
+    pcm: PathBuf,
+}
+
+fn prepare(dir: &Path, fixtures: &Path) -> Res<Assets> {
+    fs::create_dir_all(dir)?;
+    let clip = fixtures.join("clips/resilience.mp4");
+    let speech = fixtures.join("clips/solstice.mp4");
+    if !clip.exists() || !speech.exists() {
+        eprintln!("bench: materialising the speech media set");
+        let st = Command::new("prun")
+            .args(["fixtures", "speech", "--into"])
+            .arg(fixtures)
+            .status()?;
+        if !st.success() {
+            return Err("prun fixtures speech failed".into());
+        }
+    }
+    let mut video = HashMap::new();
+    for (w, h) in SIZES {
+        for codec in [Codec::H264, Codec::Hevc] {
+            let name = match codec {
+                Codec::H264 => format!("h264-{h}.mp4"),
+                _ => format!("hevc-{h}.mp4"),
+            };
+            let out = dir.join(&name);
+            if !out.exists() {
+                eprintln!("bench: encoding {name}");
+                let vf = format!("scale={w}:{h}:flags=lanczos");
+                let secs = CLIP_SECONDS.to_string();
+                let mut a = vec![
+                    "-t",
+                    &secs,
+                    "-i",
+                    clip.to_str().ok_or("path")?,
+                    "-vf",
+                    &vf,
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-g",
+                    "120",
+                ];
+                if codec == Codec::H264 {
+                    a.extend(["-c:v", "libx264", "-preset", "medium", "-crf", "20"]);
+                } else {
+                    a.extend([
+                        "-c:v",
+                        "libx265",
+                        "-preset",
+                        "fast",
+                        "-crf",
+                        "23",
+                        "-tag:v",
+                        "hvc1",
+                        "-x265-params",
+                        "log-level=error",
+                    ]);
+                }
+                a.extend(["-c:a", "copy", "-movflags", "+faststart"]);
+                let part = dir.join(format!("part-{name}"));
+                a.push(part.to_str().ok_or("path")?);
+                ffmpeg_time(&a)?;
+                fs::rename(&part, &out)?;
+            }
+            video.insert((codec, h), out);
+        }
+    }
+    let mut raw = BTreeMap::new();
+    for (w, h) in SIZES {
+        let out = dir.join(format!("raw-{h}.yuv"));
+        if !out.exists() {
+            eprintln!("bench: raw {w}x{h} frames");
+            let src = &video[&(Codec::H264, h)];
+            let part = dir.join(format!("part-raw-{h}.yuv"));
+            ffmpeg_time(&[
+                "-i",
+                src.to_str().ok_or("path")?,
+                "-frames:v",
+                &ENCODE_FRAMES.to_string(),
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "yuv420p",
+                part.to_str().ok_or("path")?,
+            ])?;
+            fs::rename(&part, &out)?;
+        }
+        raw.insert(h, out);
+    }
+    let pcm = dir.join("audio.f32");
+    if !pcm.exists() {
+        eprintln!("bench: speech PCM");
+        let part = dir.join("part-audio.f32");
+        ffmpeg_time(&[
+            "-i",
+            speech.to_str().ok_or("path")?,
+            "-vn",
+            "-f",
+            "f32le",
+            "-ac",
+            "2",
+            "-ar",
+            "48000",
+            part.to_str().ok_or("path")?,
+        ])?;
+        fs::rename(&part, &pcm)?;
+    }
+    Ok(Assets {
+        dir: dir.to_path_buf(),
+        speech,
+        video,
+        raw,
+        pcm,
+    })
+}
+
+fn annexb_into(out: &mut Vec<u8>, data: &[u8], length: usize) {
+    let mut pos = 0;
+    while length > 0 && pos + length <= data.len() {
+        let n = data[pos..pos + length]
+            .iter()
+            .fold(0usize, |a, &b| (a << 8) | b as usize);
+        pos += length;
+        let Some(nal) = data.get(pos..pos + n) else {
+            break;
+        };
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(nal);
+        pos += n;
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Dec {
+    Cpu(usize),
+    GpuRead,
+    GpuSurface,
+}
+
+fn packet_of(r: &Reader, track: usize, index: usize, buf: &mut Vec<u8>) -> Res<Packet> {
+    let t = &r.tracks[track];
+    let s = t.samples[index];
+    r.read_into(track, index, buf)?;
+    Ok(Packet {
+        data: std::mem::take(buf),
+        pts: s.pts.saturating_add(t.edit_offset),
+        dts: s.dts.saturating_add(t.edit_offset),
+        keyframe: s.keyframe,
+    })
+}
+
+fn decode_ours(path: &Path, mode: Dec) -> Res<(u64, f64)> {
+    let t0 = Instant::now();
+    let r = Reader::open(path)?;
+    let track = r.video().ok_or("no video track")?;
+    let t = &r.tracks[track];
+    let tb = TimeBase::new(1, t.timescale.max(1));
+    let count = t.samples.len();
+    let mut buf = Vec::new();
+    let mut frames = 0u64;
+    match mode {
+        Dec::Cpu(threads) => match t.config() {
+            Some(CodecConfig::Avc(c)) => {
+                let mut dec = h264::Decoder::with_threads(threads);
+                dec.set_time_base(tb);
+                let mut params = Vec::new();
+                for nal in c.sps.iter().chain(&c.pps) {
+                    params.extend_from_slice(&[0, 0, 0, 1]);
+                    params.extend_from_slice(nal);
+                }
+                let length = c.length_size.clamp(1, 4) as usize;
+                let mut annexb = Vec::new();
+                for i in 0..count {
+                    let p = packet_of(&r, track, i, &mut buf)?;
+                    annexb.clear();
+                    if p.keyframe {
+                        annexb.extend_from_slice(&params);
+                    }
+                    annexb_into(&mut annexb, &p.data, length);
+                    buf = p.data;
+                    let packet = Packet {
+                        data: std::mem::take(&mut annexb),
+                        pts: p.pts,
+                        dts: p.dts,
+                        keyframe: p.keyframe,
+                    };
+                    let out = dec.decode(&packet)?;
+                    annexb = packet.data;
+                    frames += out.len() as u64;
+                    for f in out {
+                        dec.recycle(f);
+                    }
+                }
+                frames += dec.flush()?.len() as u64;
+            }
+            Some(CodecConfig::Hevc(_)) => {
+                let mut dec = hevc::Decoder::with_threads(threads);
+                dec.configure_hvcc(&t.extradata().ok_or("no hvcC")?)?;
+                dec.set_time_base(tb);
+                for i in 0..count {
+                    let p = packet_of(&r, track, i, &mut buf)?;
+                    frames += dec.decode(&p)?.len() as u64;
+                    buf = p.data;
+                }
+                frames += dec.flush()?.len() as u64;
+            }
+            _ => return Err("not H.264 or HEVC".into()),
+        },
+        Dec::GpuRead | Dec::GpuSurface => {
+            let codec = t.codec().ok_or("unknown codec")?;
+            let mut dec =
+                HwDecoder::new(codec, &t.extradata().unwrap_or_default())?.with_time_base(tb);
+            for i in 0..count {
+                let p = packet_of(&r, track, i, &mut buf)?;
+                frames += if mode == Dec::GpuRead {
+                    dec.decode(&p)?.len()
+                } else {
+                    dec.decode_gpu(&p)?.len()
+                } as u64;
+                buf = p.data;
+            }
+            frames += if mode == Dec::GpuRead {
+                dec.flush()?.len()
+            } else {
+                dec.flush_gpu()?.len()
+            } as u64;
+        }
+    }
+    Ok((frames, t0.elapsed().as_secs_f64()))
+}
+
+fn load_raw(path: &Path, w: u32, h: u32) -> Res<Vec<Frame>> {
+    let bytes = fs::read(path)?;
+    let (y, c) = (w as usize * h as usize, (w as usize / 2) * (h as usize / 2));
+    let each = y + 2 * c;
+    let tb = TimeBase::new(1, 60);
+    Ok(bytes
+        .chunks_exact(each)
+        .enumerate()
+        .map(|(i, b)| {
+            let mut f = Frame::new(PixelFormat::Yuv420p8, w, h, i as i64, tb);
+            f.planes[0].data.copy_from_slice(&b[..y]);
+            f.planes[1].data.copy_from_slice(&b[y..y + c]);
+            f.planes[2].data.copy_from_slice(&b[y + c..]);
+            f
+        })
+        .collect())
+}
+
+fn encode_cpu(frames: &[Frame], w: u32, h: u32) -> Res<(f64, Vec<u8>)> {
+    let t = Instant::now();
+    let mut enc = h264::Encoder::new(h264::EncoderConfig {
+        width: w,
+        height: h,
+        fps: (60, 1),
+        rate: h264::Rate::Crf(23),
+        gop: 250,
+        b_frames: 2,
+        bitstream: h264::Bitstream::AnnexB,
+        ..h264::EncoderConfig::default()
+    })?;
+    let mut out = Vec::new();
+    for f in frames {
+        for p in enc.encode(f)? {
+            out.extend_from_slice(&p.data);
+        }
+    }
+    for p in enc.flush()? {
+        out.extend_from_slice(&p.data);
+    }
+    Ok((t.elapsed().as_secs_f64(), out))
+}
+
+fn encode_gpu(frames: &[Frame], w: u32, h: u32, codec: Codec) -> Res<(f64, Vec<u8>, String)> {
+    let t = Instant::now();
+    let mut enc = HwEncoder::new(
+        codec,
+        &gpu::EncoderConfig {
+            width: w,
+            height: h,
+            fps: (60, 1),
+            profile: gpu::Profile::High,
+            rate: gpu::Rate::Qp(23),
+            gop: 250,
+            b_frames: 0,
+            bitstream: gpu::Bitstream::AnnexB,
+        },
+    )?;
+    let name = enc.name().to_string();
+    let mut out = Vec::new();
+    for f in frames {
+        for p in enc.encode(f)? {
+            out.extend_from_slice(&p.data);
+        }
+    }
+    for p in enc.flush()? {
+        out.extend_from_slice(&p.data);
+    }
+    Ok((t.elapsed().as_secs_f64(), out, name))
+}
+
+fn psnr(dir: &Path, stream: &Path, format: &str, raw: &Path, w: u32, h: u32) -> Option<f64> {
+    let size = format!("{w}x{h}");
+    let (_, log) = ffmpeg_run(
+        &[
+            "-framerate",
+            "60",
+            "-f",
+            format,
+            "-i",
+            stream.to_str()?,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
+            "-s",
+            &size,
+            "-framerate",
+            "60",
+            "-i",
+            raw.to_str()?,
+            "-lavfi",
+            "[0:v]setpts=N/(60*TB)[a];[1:v]setpts=N/(60*TB)[b];[a][b]psnr",
+            "-f",
+            "null",
+            "-",
+        ],
+        true,
+    )
+    .ok()?;
+    let _ = dir;
+    let at = log.rfind("average:")? + "average:".len();
+    log[at..].split_whitespace().next()?.parse().ok()
+}
+
+struct Bench {
+    runs: usize,
+    only: Vec<String>,
+    rows: Vec<Row>,
+    node: String,
+}
+
+impl Bench {
+    fn want(&self, ids: &[&str]) -> bool {
+        self.only.is_empty()
+            || ids
+                .iter()
+                .any(|id| self.only.iter().any(|o| id.contains(o.as_str())))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add(
+        &mut self,
+        id: &str,
+        group: &str,
+        label: &str,
+        unit: &str,
+        higher: bool,
+        measured: Res<Measured>,
+    ) {
+        if !self.want(&[id]) {
+            return;
+        }
+        let mut row = Row {
+            id: id.into(),
+            group: group.into(),
+            label: label.into(),
+            unit: unit.into(),
+            higher_is_better: higher,
+            ..Row::default()
+        };
+        match measured {
+            Ok(m) => {
+                row.ours = median(&m.ours);
+                row.ffmpeg = median(&m.ffmpeg);
+                row.speedup = row
+                    .ours
+                    .zip(row.ffmpeg)
+                    .map(|(o, f)| if higher { o / f } else { f / o });
+                row.ours_runs = m.ours;
+                row.ffmpeg_runs = m.ffmpeg;
+                row.route = m.route;
+                row.note = m.note;
+                row.details = m.details;
+            }
+            Err(e) => row.skipped = Some(e.to_string()),
+        }
+        println!(
+            "{:<44} ours {:>10} ffmpeg {:>10} {}  {}",
+            row.id,
+            row.ours.map_or("-".into(), |v| format!("{v:.1}")),
+            row.ffmpeg.map_or("-".into(), |v| format!("{v:.1}")),
+            row.speedup.map_or("".into(), |s| format!("{s:.2}x")),
+            row.skipped.as_deref().unwrap_or("")
+        );
+        self.rows.push(row);
+    }
+
+    fn decode(&mut self, a: &Assets) {
+        for codec in [Codec::H264, Codec::Hevc] {
+            for (_, h) in SIZES {
+                let path = a.video[&(codec, h)].clone();
+                let pstr = path_str(&path);
+                let frames = Reader::open(&path)
+                    .ok()
+                    .and_then(|r| r.video().map(|v| r.tracks[v].samples.len() as u64))
+                    .unwrap_or(0);
+                let all = std::thread::available_parallelism()
+                    .map_or(4, |n| n.get())
+                    .min(16);
+                let modes = [
+                    ("cpu-1t", "CPU, 1 thread", Dec::Cpu(1)),
+                    ("cpu-all", "CPU, all threads", Dec::Cpu(all)),
+                    ("gpu-readback", "VA-API, frames read back", Dec::GpuRead),
+                    ("gpu-surface", "VA-API, surface only", Dec::GpuSurface),
+                ];
+                for (key, text, mode) in modes {
+                    let id = format!(
+                        "decode.{}.{h}.{key}",
+                        codec.to_string().to_lowercase().replace('.', "")
+                    );
+                    if !self.want(&[&id]) {
+                        continue;
+                    }
+                    let label = format!("{codec} {h}P DECODE, {text}");
+                    let runs = self.runs;
+                    let node = self.node.clone();
+                    let m = (|| -> Res<Measured> {
+                        let mut m = Measured {
+                            route: if matches!(mode, Dec::Cpu(_)) {
+                                "cpu"
+                            } else {
+                                "gpu"
+                            }
+                            .into(),
+                            ..Measured::default()
+                        };
+                        let mut n = frames;
+                        decode_ours(&path, mode)?;
+                        for _ in 0..runs {
+                            let (count, s) = decode_ours(&path, mode)?;
+                            n = count;
+                            m.ours.push(count as f64 / s);
+                        }
+                        let threads = match mode {
+                            Dec::Cpu(1) => vec!["-threads", "1"],
+                            Dec::Cpu(_) => vec!["-threads", "0"],
+                            Dec::GpuRead => vec!["-hwaccel", "vaapi", "-hwaccel_device", &node],
+                            Dec::GpuSurface => vec![
+                                "-hwaccel",
+                                "vaapi",
+                                "-hwaccel_device",
+                                &node,
+                                "-hwaccel_output_format",
+                                "vaapi",
+                            ],
+                        };
+                        let mut args = threads;
+                        args.extend([
+                            "-i",
+                            &pstr,
+                            "-an",
+                            "-fps_mode",
+                            "passthrough",
+                            "-f",
+                            "null",
+                            "-",
+                        ]);
+                        ffmpeg_time(&args)?;
+                        m.ffmpeg = repeat(runs, || Ok(n as f64 / ffmpeg_time(&args)?))?;
+                        m.details.insert("frames".into(), n as f64);
+                        Ok(m)
+                    })();
+                    self.add(&id, "decode", &label, "fps", true, m);
+                }
+            }
+        }
+    }
+
+    fn encode(&mut self, a: &Assets) {
+        for (w, h) in SIZES {
+            let id_prefix = format!("encode.{h}");
+            if !self.want(&[&id_prefix]) {
+                continue;
+            }
+            let raw = a.raw[&h].clone();
+            let frames = match load_raw(&raw, w, h) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("bench: {e}");
+                    continue;
+                }
+            };
+            let n = frames.len() as f64;
+            let size = format!("{w}x{h}");
+            let rawstr = path_str(&raw);
+            let runs = self.runs;
+            let node = self.node.clone();
+            let dir = a.dir.clone();
+            let ffmpeg_args = |codec: &[&str], format: &str, out: &str, hw: bool| -> Vec<String> {
+                let mut v: Vec<String> = Vec::new();
+                if hw {
+                    v.extend(["-vaapi_device".into(), node.clone()]);
+                }
+                v.extend(
+                    [
+                        "-f",
+                        "rawvideo",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-s",
+                        &size,
+                        "-framerate",
+                        "60",
+                        "-i",
+                        &rawstr,
+                    ]
+                    .map(String::from),
+                );
+                if hw {
+                    v.extend(["-vf".into(), "format=nv12,hwupload".into()]);
+                }
+                v.extend(codec.iter().map(|s| s.to_string()));
+                v.extend(["-f".into(), format.into(), out.into()]);
+                v
+            };
+            let run_ff = |args: &[String]| -> Res<f64> {
+                let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                ffmpeg_time(&refs)
+            };
+            let with_quality =
+                |m: &mut Measured, ours: &[u8], theirs: &Path, ext: &str, fmt: &str| {
+                    let ours_path = dir.join(format!("ours-{h}.{ext}"));
+                    if fs::write(&ours_path, ours).is_ok()
+                        && let Some(p) = psnr(&dir, &ours_path, fmt, &raw, w, h)
+                    {
+                        m.details.insert("ours_psnr_db".into(), p);
+                    }
+                    if let Some(p) = psnr(&dir, theirs, fmt, &raw, w, h) {
+                        m.details.insert("ffmpeg_psnr_db".into(), p);
+                    }
+                    m.details.insert("ours_bytes".into(), ours.len() as f64);
+                    m.details.insert(
+                        "ffmpeg_bytes".into(),
+                        fs::metadata(theirs).map_or(0.0, |x| x.len() as f64),
+                    );
+                };
+
+            for (key, preset) in [("medium", "medium"), ("veryfast", "veryfast")] {
+                let id = format!("encode.{h}.h264.cpu.{key}");
+                if !self.want(&[&id]) {
+                    continue;
+                }
+                let m = (|| -> Res<Measured> {
+                    let mut m = Measured {
+                        route: "cpu".into(),
+                        note: format!(
+                            "ours: Balanced preset CRF 23, 2 B-frames, GOP 250; libx264 {preset} CRF 23, 2 B-frames, GOP 250; {ENCODE_FRAMES} frames"
+                        ),
+                        ..Measured::default()
+                    };
+                    let mut last = Vec::new();
+                    for _ in 0..runs {
+                        let (s, out) = encode_cpu(&frames, w, h)?;
+                        m.ours.push(n / s);
+                        last = out;
+                    }
+                    let out = dir.join(format!("ffmpeg-{h}-{key}.h264"));
+                    let args = ffmpeg_args(
+                        &[
+                            "-c:v", "libx264", "-preset", preset, "-crf", "23", "-bf", "2", "-g",
+                            "250",
+                        ],
+                        "h264",
+                        &path_str(&out),
+                        false,
+                    );
+                    for _ in 0..runs {
+                        m.ffmpeg.push(n / run_ff(&args)?);
+                    }
+                    with_quality(&mut m, &last, &out, "h264", "h264");
+                    Ok(m)
+                })();
+                self.add(
+                    &id,
+                    "encode",
+                    &format!(
+                        "H.264 {h}P ENCODE, CPU vs LIBX264 {}",
+                        preset.to_uppercase()
+                    ),
+                    "fps",
+                    true,
+                    m,
+                );
+            }
+
+            for (codec, name, fmt, encoder) in [
+                (Codec::H264, "h264", "h264", "h264_vaapi"),
+                (Codec::Hevc, "hevc", "hevc", "hevc_vaapi"),
+            ] {
+                let id = format!("encode.{h}.{name}.gpu");
+                if !self.want(&[&id]) {
+                    continue;
+                }
+                let m = (|| -> Res<Measured> {
+                    let mut m = Measured {
+                        route: "gpu".into(),
+                        note: format!(
+                            "ours: VA-API constant QP 23, no B-frames, GOP 250; ffmpeg {encoder} -qp 23, same; {ENCODE_FRAMES} frames from system memory"
+                        ),
+                        ..Measured::default()
+                    };
+                    let (_, _, driver) = encode_gpu(&frames[..8], w, h, codec)?;
+                    m.note.push_str(&format!("; backend {driver}"));
+                    let mut last = Vec::new();
+                    for _ in 0..runs {
+                        let (s, out, _) = encode_gpu(&frames, w, h, codec)?;
+                        m.ours.push(n / s);
+                        last = out;
+                    }
+                    let out = dir.join(format!("ffmpeg-{h}-gpu.{name}"));
+                    let args = ffmpeg_args(
+                        &["-c:v", encoder, "-qp", "23", "-bf", "0", "-g", "250"],
+                        fmt,
+                        &path_str(&out),
+                        true,
+                    );
+                    for _ in 0..runs {
+                        m.ffmpeg.push(n / run_ff(&args)?);
+                    }
+                    with_quality(&mut m, &last, &out, name, fmt);
+                    Ok(m)
+                })();
+                self.add(
+                    &id,
+                    "encode",
+                    &format!("{} {h}P ENCODE, VA-API", codec.to_string().to_uppercase()),
+                    "fps",
+                    true,
+                    m,
+                );
+            }
+        }
+    }
+
+    fn transcode(&mut self, a: &Assets) {
+        for codec in [Codec::H264, Codec::Hevc] {
+            let (_, h) = SIZES[1];
+            let name = codec.to_string().to_lowercase().replace('.', "");
+            let id = format!("transcode.{name}.{h}.gpu");
+            if !self.want(&[&id]) {
+                continue;
+            }
+            let path = a.video[&(codec, h)].clone();
+            let pstr = path_str(&path);
+            let out = path_str(&a.dir.join(format!(
+                "ffmpeg-transcode-{name}.{}",
+                if codec == Codec::H264 { "h264" } else { "hevc" }
+            )));
+            let runs = self.runs;
+            let node = self.node.clone();
+            let m = (|| -> Res<Measured> {
+                let mut m = Measured {
+                    route: "gpu".into(),
+                    note: "decode on the GPU, encode on the GPU, frames stay on the GPU; constant QP 23, no B-frames".into(),
+                    ..Measured::default()
+                };
+                let one = || -> Res<(u64, f64)> {
+                    let t0 = Instant::now();
+                    let r = Reader::open(&path)?;
+                    let track = r.video().ok_or("no video")?;
+                    let t = &r.tracks[track];
+                    let mut dec = HwDecoder::new(codec, &t.extradata().unwrap_or_default())?
+                        .with_time_base(TimeBase::new(1, t.timescale.max(1)));
+                    let mut enc = HwEncoder::new(
+                        codec,
+                        &gpu::EncoderConfig {
+                            width: t.width,
+                            height: t.height,
+                            fps: (60, 1),
+                            profile: gpu::Profile::High,
+                            rate: gpu::Rate::Qp(23),
+                            gop: 250,
+                            b_frames: 0,
+                            bitstream: gpu::Bitstream::AnnexB,
+                        },
+                    )?;
+                    let mut buf = Vec::new();
+                    let mut frames = 0u64;
+                    for i in 0..t.samples.len() {
+                        let p = packet_of(&r, track, i, &mut buf)?;
+                        for f in dec.decode_gpu(&p)? {
+                            enc.encode_gpu(&f)?;
+                            frames += 1;
+                        }
+                        buf = p.data;
+                    }
+                    for f in dec.flush_gpu()? {
+                        enc.encode_gpu(&f)?;
+                        frames += 1;
+                    }
+                    enc.flush()?;
+                    Ok((frames, t0.elapsed().as_secs_f64()))
+                };
+                let (mut n, _) = one()?;
+                for _ in 0..runs {
+                    let (c, s) = one()?;
+                    n = c;
+                    m.ours.push(c as f64 / s);
+                }
+                let encoder = if codec == Codec::H264 {
+                    "h264_vaapi"
+                } else {
+                    "hevc_vaapi"
+                };
+                let args = [
+                    "-hwaccel",
+                    "vaapi",
+                    "-hwaccel_device",
+                    &node,
+                    "-hwaccel_output_format",
+                    "vaapi",
+                    "-i",
+                    &pstr,
+                    "-an",
+                    "-c:v",
+                    encoder,
+                    "-qp",
+                    "23",
+                    "-bf",
+                    "0",
+                    "-g",
+                    "250",
+                    "-f",
+                    if codec == Codec::H264 { "h264" } else { "hevc" },
+                    &out,
+                ];
+                for _ in 0..runs {
+                    m.ffmpeg.push(n as f64 / ffmpeg_time(&args)?);
+                }
+                Ok(m)
+            })();
+            self.add(
+                &id,
+                "encode",
+                &format!("{codec} {h}P GPU TRANSCODE, SURFACES"),
+                "fps",
+                true,
+                m,
+            );
+        }
+    }
+
+    fn audio(&mut self, a: &Assets) {
+        let speech = a.speech.clone();
+        let sstr = path_str(&speech);
+        let pcm = a.pcm.clone();
+        let pstr = path_str(&pcm);
+        let runs = self.runs;
+        let dir = a.dir.clone();
+        let seconds = fs::metadata(&pcm).map_or(0.0, |m| m.len() as f64 / (48000.0 * 8.0));
+        let id = "audio.aac.decode";
+        if self.want(&[id]) {
+            let m = (|| -> Res<Measured> {
+                let one = || -> Res<f64> {
+                    let t0 = Instant::now();
+                    let r = Reader::open(&speech)?;
+                    let i = *r.audio().first().ok_or("no audio")?;
+                    let mut dec = aac::Decoder::new(&r.tracks[i].extradata().ok_or("no config")?)?;
+                    let mut buf = Vec::new();
+                    let mut frames = 0usize;
+                    for k in 0..r.tracks[i].samples.len() {
+                        r.read_into(i, k, &mut buf)?;
+                        frames += dec.decode_frame(&buf)?.frames();
+                    }
+                    let _ = frames;
+                    Ok(t0.elapsed().as_secs_f64())
+                };
+                let mut m = Measured {
+                    route: "cpu".into(),
+                    note: format!("{seconds:.0} s of 48 kHz stereo AAC-LC"),
+                    ..Measured::default()
+                };
+                one()?;
+                m.ours = repeat(runs, || Ok(seconds / one()?))?;
+                let args = ["-i", &sstr, "-vn", "-f", "null", "-"];
+                ffmpeg_time(&args)?;
+                m.ffmpeg = repeat(runs, || Ok(seconds / ffmpeg_time(&args)?))?;
+                Ok(m)
+            })();
+            self.add(
+                id,
+                "audio",
+                "AAC DECODE, 48 KHZ STEREO",
+                "x realtime",
+                true,
+                m,
+            );
+        }
+        let id = "audio.aac.encode";
+        if self.want(&[id]) {
+            let m = (|| -> Res<Measured> {
+                let bytes = fs::read(&pcm)?;
+                let samples: Vec<f32> = bytes
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                    .collect();
+                let one = || -> Res<(f64, usize)> {
+                    let t0 = Instant::now();
+                    let mut enc = aac::Encoder::new(aac::EncoderConfig {
+                        rate: 48000,
+                        channels: 2,
+                        bitrate: 128000,
+                    })?;
+                    let mut size = 0usize;
+                    for chunk in samples.chunks(48000 * 2) {
+                        let buf = AudioBuffer {
+                            samples: chunk.to_vec(),
+                            rate: 48000,
+                            channels: 2,
+                        };
+                        size += enc
+                            .encode(&buf)?
+                            .iter()
+                            .map(|p| p.data.len())
+                            .sum::<usize>();
+                    }
+                    size += enc.flush().iter().map(|p| p.data.len()).sum::<usize>();
+                    Ok((t0.elapsed().as_secs_f64(), size))
+                };
+                let mut m = Measured {
+                    route: "cpu".into(),
+                    note: format!(
+                        "{seconds:.0} s of 48 kHz stereo at 128 kbps; ffmpeg's native aac encoder"
+                    ),
+                    ..Measured::default()
+                };
+                let (_, size) = one()?;
+                m.ours = repeat(runs, || Ok(seconds / one()?.0))?;
+                m.details.insert("ours_bytes".into(), size as f64);
+                let out = path_str(&dir.join("ffmpeg.aac"));
+                let args = [
+                    "-f", "f32le", "-ar", "48000", "-ac", "2", "-i", &pstr, "-c:a", "aac", "-b:a",
+                    "128k", "-f", "adts", &out,
+                ];
+                ffmpeg_time(&args)?;
+                m.ffmpeg = repeat(runs, || Ok(seconds / ffmpeg_time(&args)?))?;
+                m.details.insert(
+                    "ffmpeg_bytes".into(),
+                    fs::metadata(&out).map_or(0.0, |x| x.len() as f64),
+                );
+                Ok(m)
+            })();
+            self.add(
+                id,
+                "audio",
+                "AAC ENCODE, 128 KBPS STEREO",
+                "x realtime",
+                true,
+                m,
+            );
+        }
+        let id = "audio.r128";
+        if self.want(&[id]) {
+            let m = (|| -> Res<Measured> {
+                let bytes = fs::read(&pcm)?;
+                let samples: Vec<f32> = bytes
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                    .collect();
+                let one = || -> Res<(f64, f64)> {
+                    let t0 = Instant::now();
+                    let mut meter = LoudnessMeter::new(48000, 2)?;
+                    for chunk in samples.chunks(48000 * 2) {
+                        meter.process(&AudioBuffer {
+                            samples: chunk.to_vec(),
+                            rate: 48000,
+                            channels: 2,
+                        })?;
+                    }
+                    Ok((t0.elapsed().as_secs_f64(), meter.summary().integrated))
+                };
+                let mut m = Measured {
+                    route: "cpu".into(),
+                    note: format!(
+                        "{seconds:.0} s of 48 kHz stereo, integrated loudness, range and true peak"
+                    ),
+                    ..Measured::default()
+                };
+                let (_, lufs) = one()?;
+                m.ours = repeat(runs, || Ok(seconds / one()?.0))?;
+                m.details.insert("ours_lufs".into(), lufs);
+                let args = [
+                    "-f",
+                    "f32le",
+                    "-ar",
+                    "48000",
+                    "-ac",
+                    "2",
+                    "-i",
+                    &pstr,
+                    "-af",
+                    "ebur128=peak=true",
+                    "-f",
+                    "null",
+                    "-",
+                ];
+                let (_, log) = ffmpeg_run(&args, true)?;
+                if let Some(at) = log.rfind("I:")
+                    && let Some(v) = log[at + 2..]
+                        .split_whitespace()
+                        .next()
+                        .and_then(|v| v.parse().ok())
+                {
+                    m.details.insert("ffmpeg_lufs".into(), v);
+                }
+                m.ffmpeg = repeat(runs, || Ok(seconds / ffmpeg_run(&args, true)?.0))?;
+                Ok(m)
+            })();
+            self.add(
+                id,
+                "audio",
+                "EBU R128 LOUDNESS, 48 KHZ STEREO",
+                "x realtime",
+                true,
+                m,
+            );
+        }
+    }
+
+    fn first_frame(&mut self, a: &Assets) {
+        let (_, h) = SIZES[1];
+        for codec in [Codec::H264, Codec::Hevc] {
+            for (key, text, choice) in [("cpu", "CPU", Choice::Cpu), ("gpu", "GPU", Choice::Gpu)] {
+                let name = codec.to_string().to_lowercase().replace('.', "");
+                let id = format!("first-frame.{name}.{h}.{key}");
+                if !self.want(&[&id]) {
+                    continue;
+                }
+                let path = a.video[&(codec, h)].clone();
+                let node = self.node.clone();
+                let dir = a.dir.join("ttff");
+                let runs = self.runs.max(5);
+                let m = (|| -> Res<Measured> {
+                    fs::create_dir_all(&dir)?;
+                    let prefs = Prefs {
+                        decode: choice.clone(),
+                        ..Prefs::default()
+                    };
+                    let mut m = Measured {
+                        route: key.into(),
+                        note: "a cold file each time: opened, parsed, first frame decoded, scaled to 240 px; ffmpeg includes starting the process".into(),
+                        ..Measured::default()
+                    };
+                    for i in 0..runs {
+                        let copy = dir.join(format!("{name}-{key}-{i}.mp4"));
+                        let _ = fs::remove_file(&copy);
+                        fs::hard_link(&path, &copy)?;
+                        let t0 = Instant::now();
+                        first_frame(&copy, 240, &prefs)?;
+                        m.ours.push(t0.elapsed().as_secs_f64() * 1e3);
+                    }
+                    m.details.insert("ours_first_call_ms".into(), m.ours[0]);
+                    let pstr = path_str(&path);
+                    let mut args = vec![];
+                    if key == "gpu" {
+                        args.extend(["-hwaccel", "vaapi", "-hwaccel_device", &node]);
+                    }
+                    args.extend([
+                        "-i",
+                        &pstr,
+                        "-frames:v",
+                        "1",
+                        "-vf",
+                        "scale=-2:240",
+                        "-f",
+                        "null",
+                        "-",
+                    ]);
+                    m.ffmpeg = repeat(runs, || Ok(ffmpeg_time(&args)? * 1e3))?;
+                    Ok(m)
+                })();
+                self.add(
+                    &id,
+                    "pipeline",
+                    &format!("{codec} {h}P TIME TO FIRST FRAME, {text}"),
+                    "ms",
+                    false,
+                    m,
+                );
+            }
+        }
+    }
+
+    fn filmstrip(&mut self, a: &Assets) {
+        for codec in [Codec::H264, Codec::Hevc] {
+            for (_, h) in SIZES {
+                for (key, text, choice) in [
+                    ("cpu", "CPU", Choice::Cpu),
+                    ("auto", "GPU FIRST", Choice::Auto),
+                ] {
+                    let name = codec.to_string().to_lowercase().replace('.', "");
+                    let id = format!("filmstrip.{name}.{h}.{key}");
+                    if !self.want(&[&id]) {
+                        continue;
+                    }
+                    let path = a.video[&(codec, h)].clone();
+                    let pstr = path_str(&path);
+                    let runs = self.runs;
+                    let m = (|| -> Res<Measured> {
+                        let prefs = Prefs {
+                            decode: choice.clone(),
+                            ..Prefs::default()
+                        };
+                        let times: Vec<f64> = (0..12)
+                            .map(|k| CLIP_SECONDS as f64 * (k as f64 + 0.5) / 12.0)
+                            .collect();
+                        let mut m = Measured {
+                            route: key.into(),
+                            note: "12 stills at 240 px, snapped to keyframes; ffmpeg runs 12 processes (-noaccurate_seek), 8 at a time".into(),
+                            ..Measured::default()
+                        };
+                        frames_at(&path, &times, 240, &prefs)?;
+                        m.ours = repeat(runs, || {
+                            let t0 = Instant::now();
+                            frames_at(&path, &times, 240, &prefs)?;
+                            Ok(12.0 / t0.elapsed().as_secs_f64())
+                        })?;
+                        let strs: Vec<String> = times.iter().map(|t| format!("{t:.3}")).collect();
+                        let one = |t: &str| -> Res<f64> {
+                            ffmpeg_time(&[
+                                "-ss",
+                                t,
+                                "-noaccurate_seek",
+                                "-i",
+                                &pstr,
+                                "-frames:v",
+                                "1",
+                                "-vf",
+                                "scale=-2:240",
+                                "-f",
+                                "null",
+                                "-",
+                            ])
+                        };
+                        let parallel = || -> Res<f64> {
+                            let t0 = Instant::now();
+                            let next = std::sync::atomic::AtomicUsize::new(0);
+                            let failed = std::sync::Mutex::new(None::<String>);
+                            std::thread::scope(|s| {
+                                for _ in 0..8 {
+                                    s.spawn(|| {
+                                        loop {
+                                            let i = next
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            let Some(t) = strs.get(i) else { break };
+                                            if let Err(e) = one(t) {
+                                                *failed.lock().unwrap() = Some(e.to_string());
+                                            }
+                                        }
+                                    });
+                                }
+                            });
+                            if let Some(e) = failed.into_inner().unwrap() {
+                                return Err(e.into());
+                            }
+                            Ok(12.0 / t0.elapsed().as_secs_f64())
+                        };
+                        parallel()?;
+                        m.ffmpeg = repeat(runs, parallel)?;
+                        let t0 = Instant::now();
+                        for t in &strs {
+                            one(t)?;
+                        }
+                        m.details.insert(
+                            "ffmpeg_sequential".into(),
+                            12.0 / t0.elapsed().as_secs_f64(),
+                        );
+                        Ok(m)
+                    })();
+                    self.add(
+                        &id,
+                        "pipeline",
+                        &format!("{codec} {h}P FILMSTRIP STILLS, {text}"),
+                        "stills/s",
+                        true,
+                        m,
+                    );
+                }
+            }
+        }
+    }
+
+    fn smart_cut(&mut self, a: &Assets) {
+        for (_, h) in SIZES {
+            let ids = [
+                format!("smartcut.{h}.copy"),
+                format!("smartcut.{h}.reencode"),
+            ];
+            if !self.want(&[&ids[0], &ids[1]]) {
+                continue;
+            }
+            let path = a.video[&(Codec::H264, h)].clone();
+            let pstr = path_str(&path);
+            let dir = a.dir.join("smartcut");
+            let runs = self.runs;
+            let spans: [(f64, f64); 3] = [(2.3, 7.6), (11.1, 13.9), (14.2, 19.1)];
+            let seconds: f64 = spans.iter().map(|(a, b)| b - a).sum();
+            let ours = (|| -> Res<(Vec<f64>, f64, u64, u64)> {
+                fs::create_dir_all(&dir)?;
+                let out = dir.join("ours.mp4");
+                let pieces: Vec<Piece> = spans
+                    .iter()
+                    .map(|(from, to)| Piece {
+                        path: path.clone(),
+                        from: *from,
+                        to: *to,
+                    })
+                    .collect();
+                let one = || -> Res<(f64, u64, u64)> {
+                    let t0 = Instant::now();
+                    let done = export(&out, &pieces, ExportOptions::default(), |_| true)?;
+                    Ok((t0.elapsed().as_secs_f64(), done.copied, done.encoded))
+                };
+                let (_, copied, encoded) = one()?;
+                let times = repeat(runs, || Ok(seconds / one()?.0))?;
+                Ok((times, fs::metadata(&out)?.len() as f64, copied, encoded))
+            })();
+            let theirs = |reencode: bool| -> Res<(Vec<f64>, f64)> {
+                fs::create_dir_all(&dir)?;
+                let list = dir.join("list.txt");
+                let out = dir.join(if reencode {
+                    "ffmpeg-re.mp4"
+                } else {
+                    "ffmpeg-copy.mp4"
+                });
+                let one = || -> Res<f64> {
+                    let mut total = 0.0;
+                    let mut entries = String::new();
+                    for (i, (from, to)) in spans.iter().enumerate() {
+                        let piece = dir.join(format!("piece-{i}.mp4"));
+                        let (f, d) = (format!("{from:.3}"), format!("{:.3}", to - from));
+                        let mut args = vec!["-ss", &f, "-i", &pstr, "-t", &d];
+                        if reencode {
+                            args.extend([
+                                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a",
+                                "aac", "-b:a", "192k",
+                            ]);
+                        } else {
+                            args.extend(["-c", "copy", "-avoid_negative_ts", "make_zero"]);
+                        }
+                        let ps = path_str(&piece);
+                        args.push(&ps);
+                        total += ffmpeg_time(&args)?;
+                        entries.push_str(&format!(
+                            "file '{}'\n",
+                            piece.file_name().and_then(|n| n.to_str()).unwrap_or("")
+                        ));
+                    }
+                    fs::write(&list, entries)?;
+                    total += ffmpeg_time(&[
+                        "-f",
+                        "concat",
+                        "-safe",
+                        "0",
+                        "-i",
+                        &path_str(&list),
+                        "-c",
+                        "copy",
+                        &path_str(&out),
+                    ])?;
+                    Ok(total)
+                };
+                one()?;
+                let times = repeat(runs, || Ok(seconds / one()?))?;
+                Ok((times, fs::metadata(&out)?.len() as f64))
+            };
+            for (i, reencode) in [false, true].into_iter().enumerate() {
+                let m = (|| -> Res<Measured> {
+                    let (o, o_size, copied, encoded) =
+                        ours.as_ref().map_err(|e| e.to_string())?.clone();
+                    let (f, f_size) = theirs(reencode)?;
+                    let mut m = Measured {
+                        route: "auto".into(),
+                        note: if reencode {
+                            "3 cuts, 10.1 s kept; ffmpeg re-encodes every frame with libx264 veryfast CRF 18 (frame-accurate)".into()
+                        } else {
+                            "3 cuts, 10.1 s kept; ffmpeg stream-copies (snaps to keyframes, not frame-accurate)".into()
+                        },
+                        ours: o,
+                        ffmpeg: f,
+                        ..Measured::default()
+                    };
+                    m.details.insert("ours_bytes".into(), o_size);
+                    m.details.insert("ffmpeg_bytes".into(), f_size);
+                    m.details.insert("ours_frames_copied".into(), copied as f64);
+                    m.details
+                        .insert("ours_frames_encoded".into(), encoded as f64);
+                    Ok(m)
+                })();
+                self.add(
+                    &ids[i],
+                    "pipeline",
+                    &format!(
+                        "SMART-CUT EXPORT {h}P VS FFMPEG {}",
+                        if reencode { "RE-ENCODE" } else { "STREAM COPY" }
+                    ),
+                    "x realtime",
+                    true,
+                    m,
+                );
+            }
+        }
+    }
+
+    fn scale(&mut self, a: &Assets) {
+        let cases = [(1440u32, 1080u32), (1440, 720), (1080, 720), (1080, 1440)];
+        for (from, to) in cases {
+            let id = format!("scale.{from}to{to}");
+            if !self.want(&[&id]) {
+                continue;
+            }
+            let (sw, sh) = SIZES
+                .iter()
+                .find(|s| s.1 == from)
+                .copied()
+                .unwrap_or((1920, 1080));
+            let (dw, dh) = (to * 16 / 9, to);
+            let raw = a.raw[&from].clone();
+            let rawstr = path_str(&raw);
+            let runs = self.runs;
+            let m = (|| -> Res<Measured> {
+                let frames = load_raw(&raw, sw, sh)?;
+                let scaler = Scaler::new(sw, sh, dw, dh, PixelFormat::Yuv420p8, Kernel::Bicubic)?;
+                let mut dst = Frame::new(PixelFormat::Yuv420p8, dw, dh, 0, TimeBase::new(1, 60));
+                let one = |dst: &mut Frame| -> Res<f64> {
+                    let t0 = Instant::now();
+                    for f in &frames {
+                        scaler.run(f, dst)?;
+                    }
+                    Ok(frames.len() as f64 / t0.elapsed().as_secs_f64())
+                };
+                one(&mut dst)?;
+                let mut m = Measured {
+                    route: "cpu".into(),
+                    note: format!(
+                        "{} frames, bicubic, 8-bit 4:2:0, all threads on both sides",
+                        frames.len()
+                    ),
+                    ..Measured::default()
+                };
+                m.ours = repeat(runs, || one(&mut dst))?;
+                let size = format!("{sw}x{sh}");
+                let vf = format!("scale={dw}:{dh}:flags=bicubic");
+                let n = frames.len() as f64;
+                let args = [
+                    "-f",
+                    "rawvideo",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-s",
+                    &size,
+                    "-framerate",
+                    "60",
+                    "-i",
+                    &rawstr,
+                    "-vf",
+                    &vf,
+                    "-f",
+                    "null",
+                    "-",
+                ];
+                ffmpeg_time(&args)?;
+                m.ffmpeg = repeat(runs, || Ok(n / ffmpeg_time(&args)?))?;
+                Ok(m)
+            })();
+            self.add(
+                &id,
+                "pipeline",
+                &format!("SCALE {from}P TO {to}P, BICUBIC"),
+                "fps",
+                true,
+                m,
+            );
+        }
+    }
+}
+
+fn shell(cmd: &str, args: &[&str]) -> String {
+    Command::new(cmd)
+        .args(args)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+fn machine() -> Machine {
+    let cpu = fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("model name"))
+                .and_then(|l| l.split(':').nth(1))
+                .map(|v| v.trim().to_string())
+        })
+        .unwrap_or_default();
+    let vainfo = Command::new("vainfo")
+        .output()
+        .map(|o| {
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            )
+        })
+        .unwrap_or_default();
+    let driver = vainfo
+        .lines()
+        .find_map(|l| l.split("Driver version:").nth(1))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let gpu = driver
+        .split(" for ")
+        .nth(1)
+        .map(|s| s.split(" (").next().unwrap_or(s).to_string())
+        .unwrap_or_default();
+    Machine {
+        cpu,
+        threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
+        gpu,
+        driver,
+        ffmpeg: shell("ffmpeg", &["-version"])
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string(),
+        os: shell("uname", &["-sr"]),
+    }
+}
+
+fn fmt_value(v: f64, unit: &str) -> String {
+    match unit {
+        "ms" if v < 100.0 => format!("{v:.1} MS"),
+        "ms" => format!("{v:.0} MS"),
+        "x realtime" if v < 100.0 => format!("{v:.1}X RT"),
+        "x realtime" => format!("{v:.0}X RT"),
+        "stills/s" => format!("{v:.0} STILLS/S"),
+        _ => format!("{v:.0} FPS"),
+    }
+}
+
+fn charts(rows: &[Row], images: &Path, machine: &Machine, date: &str) -> Res<()> {
+    let sub = format!("{} + {} | {}", machine.cpu, machine.gpu, date);
+    let groups = [
+        (
+            "decode",
+            "bench-decode.png",
+            "DECODE SPEED",
+            "FFMPEG TIMES INCLUDE STARTING THE PROCESS. BIGGER BAR IS FASTER.",
+        ),
+        (
+            "encode",
+            "bench-encode.png",
+            "ENCODE SPEED",
+            "SAME RAW FRAMES AND SETTINGS ON BOTH SIDES. SEE RESULTS.JSON FOR SIZE AND PSNR.",
+        ),
+        (
+            "audio",
+            "bench-audio.png",
+            "AUDIO SPEED",
+            "RT = SECONDS OF AUDIO PER SECOND OF WORK. BIGGER BAR IS FASTER.",
+        ),
+        (
+            "pipeline",
+            "bench-pipeline.png",
+            "APP PIPELINE SPEED",
+            "FIRST FRAME: OURS IS IN-PROCESS, FFMPEG STARTS A PROCESS. BIGGER BAR IS FASTER.",
+        ),
+    ];
+    let mut all = Vec::new();
+    for (group, file, title, foot) in groups {
+        let entries: Vec<charts::Entry> = rows
+            .iter()
+            .filter(|r| r.group == group)
+            .filter_map(|r| {
+                let (o, f, s) = (r.ours?, r.ffmpeg?, r.speedup?);
+                let speed = |v: f64| if r.higher_is_better { v } else { 1.0 / v };
+                Some(charts::Entry {
+                    label: r.label.clone(),
+                    ours: speed(o),
+                    ffmpeg: speed(f),
+                    ours_text: fmt_value(o, &r.unit),
+                    ffmpeg_text: fmt_value(f, &r.unit),
+                    speedup: s,
+                })
+            })
+            .collect();
+        for e in &entries {
+            all.push((e.label.clone(), e.speedup));
+        }
+        if !entries.is_empty() {
+            charts::grouped(&images.join(file), title, &sub, foot, &entries)?;
+        }
+    }
+    if !all.is_empty() {
+        charts::speedup(
+            &images.join("bench-speedup.png"),
+            "PITO-CODECS VS FFMPEG",
+            &sub,
+            &all,
+        )?;
+    }
+    Ok(())
+}
+
+fn main() -> Res<()> {
+    let mut args = std::env::args().skip(1);
+    let mut runs = 3usize;
+    let mut only = Vec::new();
+    let mut out = PathBuf::from("tmp/bench");
+    let mut images = PathBuf::from("docs/images");
+    let mut fixtures = PathBuf::from("tmp/bench/fixtures");
+    let mut charts_only = false;
+    let mut no_charts = false;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--runs" => runs = args.next().ok_or("--runs N")?.parse()?,
+            "--only" => only.push(args.next().ok_or("--only ID")?),
+            "--out" => out = args.next().ok_or("--out DIR")?.into(),
+            "--images" => images = args.next().ok_or("--images DIR")?.into(),
+            "--fixtures" => fixtures = args.next().ok_or("--fixtures DIR")?.into(),
+            "--charts-only" => charts_only = true,
+            "--no-charts" => no_charts = true,
+            _ => {
+                return Err(format!(
+                    "usage: bench [--runs N] [--only ID]... [--out DIR] [--images DIR] [--fixtures DIR] [--charts-only] [--no-charts] (unknown {a})"
+                )
+                .into());
+            }
+        }
+    }
+    let results_path = out.join("results.json");
+    if charts_only {
+        let r: Results = serde_json::from_slice(&fs::read(&results_path)?)?;
+        charts(&r.rows, &images, &r.machine, &r.date)?;
+        return Ok(());
+    }
+    let load_start = fs::read_to_string("/proc/loadavg").unwrap_or_default();
+    let assets = prepare(&out, &fixtures)?;
+    let mut b = Bench {
+        runs: runs.max(1),
+        only,
+        rows: Vec::new(),
+        node: render_node(),
+    };
+    b.decode(&assets);
+    b.encode(&assets);
+    b.transcode(&assets);
+    b.audio(&assets);
+    b.first_frame(&assets);
+    b.filmstrip(&assets);
+    b.smart_cut(&assets);
+    b.scale(&assets);
+    let date = shell("date", &["-u", "+%Y-%m-%d"]);
+    let results = Results {
+        date: date.clone(),
+        command: format!(
+            "cargo run --release --example bench -- {}",
+            std::env::args().skip(1).collect::<Vec<_>>().join(" ")
+        )
+        .trim()
+        .to_string(),
+        commit: shell("git", &["rev-parse", "--short", "HEAD"]),
+        runs: b.runs,
+        input: format!(
+            "{CLIP_SECONDS} s of the public-domain NASA 'A Message of Resilience from the International Space Station' clip (prun speech set), 720p60 scaled to 1080p and 1440p and re-encoded with libx264 (CRF 20) and libx265 (CRF 23); audio from the NASA solstice interview (prun speech set)"
+        ),
+        machine: machine(),
+        load_average_start: load_start.trim().to_string(),
+        load_average_end: fs::read_to_string("/proc/loadavg")
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+        rows: b.rows,
+    };
+    fs::create_dir_all(&out)?;
+    let merged = if results.rows.is_empty() || (!b.only.is_empty() && results_path.exists()) {
+        merge(&results_path, results)?
+    } else {
+        results
+    };
+    fs::write(&results_path, serde_json::to_vec_pretty(&merged)?)?;
+    println!("wrote {}", results_path.display());
+    if !no_charts && b.only.is_empty() {
+        charts(&merged.rows, &images, &merged.machine, &merged.date)?;
+        println!("wrote charts to {}", images.display());
+    }
+    Ok(())
+}
+
+fn merge(path: &Path, mut fresh: Results) -> Res<Results> {
+    let Ok(bytes) = fs::read(path) else {
+        return Ok(fresh);
+    };
+    let Ok(old) = serde_json::from_slice::<Results>(&bytes) else {
+        return Ok(fresh);
+    };
+    let mut rows = old.rows;
+    for r in std::mem::take(&mut fresh.rows) {
+        match rows.iter_mut().find(|o| o.id == r.id) {
+            Some(slot) => *slot = r,
+            None => rows.push(r),
+        }
+    }
+    fresh.rows = rows;
+    Ok(fresh)
+}

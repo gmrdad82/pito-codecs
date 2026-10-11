@@ -1,0 +1,8 @@
+tmp/
+target/
+node_modules/
+.claude/
+/.dev/
+/AGENTS.md
+/CLAUDE.md
+/prompts
