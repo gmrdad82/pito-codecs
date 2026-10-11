@@ -78,7 +78,10 @@ fn write_yuv(name: &str, frame: &Frame) {
     }
     let part = format!("{}.part-{}", path(name), std::process::id());
     std::fs::write(&part, bytes).unwrap();
-    std::fs::rename(&part, path(name)).unwrap();
+    if let Err(e) = std::fs::rename(&part, path(name)) {
+        assert!(std::path::Path::new(&path(name)).exists(), "{e}");
+        let _ = std::fs::remove_file(&part);
+    }
 }
 
 fn ffmpeg_version() -> &'static str {
@@ -110,7 +113,10 @@ fn make(label: &str, args: &[&str]) -> String {
         full.extend_from_slice(args);
         full.push(&part);
         ffmpeg(&full);
-        std::fs::rename(&part, path(&name)).unwrap();
+        if let Err(e) = std::fs::rename(&part, path(&name)) {
+            assert!(std::path::Path::new(&path(&name)).exists(), "{e}");
+            let _ = std::fs::remove_file(&part);
+        }
     }
     name
 }

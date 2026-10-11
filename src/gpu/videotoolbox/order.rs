@@ -63,10 +63,11 @@ impl Order {
     }
 
     pub fn reset(&mut self) {
-        *self = Self {
-            epoch: self.epoch.wrapping_add(1),
-            ..Self::new()
-        };
+        self.epoch = self.epoch.wrapping_add(1);
+        self.first = true;
+        self.after_eos = false;
+        self.avc_poc = h264s::PocState::default();
+        self.hevc_poc = HevcPoc::default();
     }
 
     pub fn key(&mut self, codec: Codec, nals: &[&[u8]]) -> Result<Option<Key>> {

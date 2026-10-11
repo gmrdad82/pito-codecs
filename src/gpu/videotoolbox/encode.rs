@@ -350,7 +350,7 @@ fn configure(
     let average = unsafe { kVTCompressionPropertyKey_AverageBitRate };
     match config.rate {
         Rate::Crf(q) | Rate::Qp(q) => {
-            let quality = f64::from(51 - q.min(51)) / 51.0;
+            let quality = (f64::from(51 - q.min(51)) / 51.0).sqrt();
             let key = unsafe { kVTCompressionPropertyKey_Quality };
             if set(session, key, CFNumber::new_f64(quality).as_ref()) != 0 {
                 let bps = CFNumber::new_i32(estimate(codec, config, q));
@@ -659,11 +659,7 @@ impl VtEncoder {
             }
         }
         let tb = self.time_base.unwrap_or(TimeBase::new(1, 90000));
-        let delay = if self.b_frames > 0 {
-            ticks(self.duration, tb).unwrap_or(1).max(1)
-        } else {
-            0
-        };
+        let delay = ticks(self.duration, tb).unwrap_or(1).max(1) * i64::from(self.b_frames);
         let mut packets = Vec::with_capacity(outputs.len());
         for o in outputs {
             let (data, pts, keyframe) = match o {

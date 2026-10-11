@@ -80,7 +80,10 @@ fn clip() -> &'static Path {
             .unwrap()
             .success();
         assert!(ok);
-        std::fs::rename(&part, &out).unwrap();
+        if let Err(e) = std::fs::rename(&part, &out) {
+            assert!(std::path::Path::new(&out).exists(), "{e}");
+            let _ = std::fs::remove_file(&part);
+        }
         out
     })
 }

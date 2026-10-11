@@ -301,7 +301,10 @@ fn ensure(f: &Fixture) -> Option<(PathBuf, PathBuf)> {
         base.extend(["-f", "ivf", tmp_s]);
         ff(&base);
         let _ = std::fs::remove_file(format!("{log_s}-0.log"));
-        std::fs::rename(&tmp, &ivf).unwrap();
+        if let Err(e) = std::fs::rename(&tmp, &ivf) {
+            assert!(std::path::Path::new(&ivf).exists(), "{e}");
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
     if !yuv.exists() {
         let tmp = scratch(&format!("{}.yuv", f.name));
@@ -318,7 +321,10 @@ fn ensure(f: &Fixture) -> Option<(PathBuf, PathBuf)> {
             f.pix_fmt,
             tmp.to_str().unwrap(),
         ]);
-        std::fs::rename(&tmp, &yuv).unwrap();
+        if let Err(e) = std::fs::rename(&tmp, &yuv) {
+            assert!(std::path::Path::new(&yuv).exists(), "{e}");
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
     Some((ivf, yuv))
 }

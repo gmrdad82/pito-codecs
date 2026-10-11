@@ -421,8 +421,9 @@ fn encode_decode_back(w: u32, h: u32) {
         let (packets, extradata, _) = encode_all(codec, &config, &frames);
         assert_eq!(packets.len(), n, "{codec:?} {profile:?}: packet count");
         assert!(packets[0].keyframe);
-        assert!(packets.windows(2).all(|p| p[0].dts < p[1].dts));
-        assert!(packets.iter().all(|p| p.dts <= p.pts));
+        let times: Vec<(i64, i64)> = packets.iter().map(|p| (p.pts, p.dts)).collect();
+        assert!(packets.windows(2).all(|p| p[0].dts < p[1].dts), "{times:?}");
+        assert!(packets.iter().all(|p| p.dts <= p.pts), "{times:?}");
         let ext = if codec == Codec::Hevc { "hevc" } else { "h264" };
         let path = dir().join(format!("encoded-{profile:?}-{b_frames}-{w}x{h}.{ext}"));
         std::fs::write(&path, annexb_stream(codec, &packets, &extradata)).unwrap();

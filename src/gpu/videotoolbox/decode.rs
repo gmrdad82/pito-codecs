@@ -444,6 +444,8 @@ impl VtDecoder {
 
     fn open(&mut self, sets: Vec<Vec<u8>>) -> Result<()> {
         let layout = layout(self.codec, &sets)?;
+        let nals: Vec<&[u8]> = sets.iter().map(Vec::as_slice).collect();
+        self.order.key(self.codec, &nals)?;
         self.session = Some(Session::new(self.codec, &sets, &layout)?);
         self.layout = Some(layout);
         self.sets = sets;

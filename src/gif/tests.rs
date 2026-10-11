@@ -70,7 +70,10 @@ fn source(name: &str, w: u32, h: u32, frames: u32) -> Vec<Rgba> {
             "rgba",
             &path(&part),
         ]);
-        std::fs::rename(path(&part), path(&file)).unwrap();
+        if let Err(e) = std::fs::rename(path(&part), path(&file)) {
+            assert!(std::path::Path::new(&path(&file)).exists(), "{e}");
+            let _ = std::fs::remove_file(path(&part));
+        }
     }
     raw_frames(&file, w, h)
 }
