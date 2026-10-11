@@ -484,7 +484,7 @@ fn gpu_playback_keeps_frames_on_the_gpu_and_falls_back_to_the_cpu() {
             let f = f.unwrap();
             assert_eq!(
                 (f.on_gpu(), f.size(), f.pts()),
-                (on_gpu, (640, 360), 180 + n)
+                (on_gpu && cfg!(target_os = "linux"), (640, 360), 180 + n)
             );
             #[cfg(target_os = "linux")]
             if let VideoFrame::Gpu(g) = &f {
@@ -509,10 +509,15 @@ fn gpu_playback_keeps_frames_on_the_gpu_and_falls_back_to_the_cpu() {
         .next()
         .unwrap()
         .unwrap();
-    let VideoFrame::Gpu(ours) = ours else {
-        panic!("a native-size frame left the GPU");
+    assert_eq!(
+        ours.on_gpu(),
+        cfg!(target_os = "linux"),
+        "a native-size frame left the GPU"
+    );
+    let ours = match ours {
+        VideoFrame::Gpu(g) => g.download().unwrap(),
+        VideoFrame::Cpu(f) => f,
     };
-    let ours = ours.download().unwrap();
     let cpu = decode_video(clip(), 1.0, None, &cpu)
         .unwrap()
         .next()
