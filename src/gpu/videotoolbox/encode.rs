@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
@@ -16,7 +17,7 @@ use objc2_core_video::{
     kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey,
 };
 use objc2_video_toolbox::{
-    VTCompressionSession, VTEncodeInfoFlags, VTSessionSetProperty,
+    VTCompressionSession, VTEncodeInfoFlags, VTPixelTransferSession, VTSessionSetProperty,
     kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AllowOpenGOP,
     kVTCompressionPropertyKey_AverageBitRate, kVTCompressionPropertyKey_DataRateLimits,
     kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
@@ -29,14 +30,13 @@ use objc2_video_toolbox::{
 
 use super::{Locked, NV12_VIDEO, P010_VIDEO, codec_type, label, planes};
 use crate::gpu::nal;
-use crate::gpu::{Bitstream, EncoderConfig, Profile, Rate};
+use crate::gpu::{Bitstream, EncoderConfig, GpuFrame, Profile, Rate};
 use crate::media::{Codec, Error, Frame, Packet, PixelFormat, Result, TimeBase};
 
 enum Output {
     Packet {
         data: Vec<u8>,
         pts: i64,
-        dts: CMTime,
         keyframe: bool,
     },
     Failed(Error),
@@ -229,11 +229,9 @@ fn read_packet(sample: &CMSampleBuffer, shared: &Shared, pts: i64) -> Result<Out
             nal::length_prefix(&kept)
         }
     };
-    let dts = unsafe { sample.decode_time_stamp() };
     Ok(Output::Packet {
         data,
         pts,
-        dts,
         keyframe,
     })
 }
@@ -352,7 +350,7 @@ fn configure(
     let average = unsafe { kVTCompressionPropertyKey_AverageBitRate };
     match config.rate {
         Rate::Crf(q) | Rate::Qp(q) => {
-            let quality = f64::from(51 - q.min(51)) / 51.0;
+            let quality = (f64::from(51 - q.min(51)) / 51.0).sqrt();
             let key = unsafe { kVTCompressionPropertyKey_Quality };
             if set(session, key, CFNumber::new_f64(quality).as_ref()) != 0 {
                 let bps = CFNumber::new_i32(estimate(codec, config, q));
@@ -398,7 +396,7 @@ pub fn hardware(codec: Codec) -> bool {
     match codec {
         Codec::H264 => h264,
         Codec::Hevc => hevc,
-        Codec::Aac => false,
+        Codec::Aac | Codec::Vp9 | Codec::Opus => false,
     }
 }
 
@@ -415,8 +413,61 @@ pub struct VtEncoder {
     attrs: CFRetained<CFDictionary<CFString, CFType>>,
     extradata: Option<Vec<u8>>,
     time_base: Option<TimeBase>,
-    last_dts: Option<i64>,
+    queued: VecDeque<i64>,
+    scaler: Option<Scaler>,
     submitted: u64,
+}
+
+struct Scaler {
+    session: CFRetained<VTPixelTransferSession>,
+    source: CFRetained<CVImageBuffer>,
+    size: (u32, u32),
+}
+
+impl Scaler {
+    fn new(size: (u32, u32), pixel_format: u32) -> Result<Self> {
+        let mut raw: *mut VTPixelTransferSession = std::ptr::null_mut();
+        let status = unsafe { VTPixelTransferSession::create(None, NonNull::from(&mut raw)) };
+        let session = NonNull::new(raw).filter(|_| status == 0).ok_or_else(|| {
+            Error::Backend(format!("cannot open a VideoToolbox scaler ({status})"))
+        })?;
+        let session = unsafe { CFRetained::from_raw(session) };
+        let pf = CFNumber::new_i32(pixel_format as i32);
+        let io = CFDictionary::<CFString, CFType>::from_slices(&[], &[]);
+        let keys: [&CFString; 2] = unsafe {
+            [
+                kCVPixelBufferPixelFormatTypeKey,
+                kCVPixelBufferIOSurfacePropertiesKey,
+            ]
+        };
+        let attrs =
+            CFDictionary::<CFString, CFType>::from_slices(&keys, &[pf.as_ref(), io.as_ref()]);
+        let mut raw: *mut CVImageBuffer = std::ptr::null_mut();
+        let status = unsafe {
+            CVPixelBufferCreate(
+                None,
+                size.0 as usize,
+                size.1 as usize,
+                pixel_format,
+                Some(attrs.as_ref()),
+                NonNull::from(&mut raw),
+            )
+        };
+        let source = NonNull::new(raw).filter(|_| status == 0).ok_or_else(|| {
+            Error::Backend(format!("cannot allocate a scaler input buffer ({status})"))
+        })?;
+        Ok(Self {
+            session,
+            source: unsafe { CFRetained::from_raw(source) },
+            size,
+        })
+    }
+}
+
+impl Drop for Scaler {
+    fn drop(&mut self) {
+        unsafe { self.session.invalidate() };
+    }
 }
 
 unsafe impl Send for VtEncoder {}
@@ -540,7 +591,8 @@ impl VtEncoder {
             attrs,
             extradata: None,
             time_base: None,
-            last_dts: None,
+            queued: VecDeque::new(),
+            scaler: None,
             submitted: 0,
         })
     }
@@ -589,6 +641,44 @@ impl VtEncoder {
                 self.width, self.height, self.format, frame.width, frame.height, frame.format
             )));
         }
+        self.submit(frame)
+    }
+
+    pub fn encode_gpu(&mut self, frame: &GpuFrame) -> Result<Vec<Packet>> {
+        let frame = frame.download()?;
+        if frame.format != self.format {
+            return Err(Error::Invalid(format!(
+                "the encoder takes {:?} frames, not {:?}",
+                self.format, frame.format
+            )));
+        }
+        self.submit(&frame)
+    }
+
+    fn scale(&mut self, frame: &Frame, target: &CVImageBuffer) -> Result<()> {
+        let size = (frame.width, frame.height);
+        if self.scaler.as_ref().is_none_or(|s| s.size != size) {
+            self.scaler = Some(Scaler::new(size, self.pixel_format)?);
+        }
+        let Some(scaler) = self.scaler.as_ref() else {
+            return Err(Error::Backend("no VideoToolbox scaler".into()));
+        };
+        {
+            let mut lock = Locked::new(&scaler.source, CVPixelBufferLockFlags(0))?;
+            let (luma, chroma) = lock.planes_mut()?;
+            planes::from_planar(frame, luma, chroma).map_err(Error::Backend)?;
+        }
+        let status = unsafe { scaler.session.transfer_image(&scaler.source, target) };
+        if status != 0 {
+            return Err(Error::Backend(format!(
+                "VideoToolbox could not scale {}x{} to {}x{} ({status})",
+                size.0, size.1, self.width, self.height
+            )));
+        }
+        Ok(())
+    }
+
+    fn submit(&mut self, frame: &Frame) -> Result<Vec<Packet>> {
         let tb = *self.time_base.get_or_insert(frame.time_base);
         let timescale = i32::try_from(tb.den)
             .ok()
@@ -600,10 +690,12 @@ impl VtEncoder {
             .ok_or_else(|| Error::Invalid(format!("pts {} out of range", frame.pts)))?;
         let pts = valid_time(value, timescale);
         let buffer = self.buffer()?;
-        {
+        if (frame.width, frame.height) == (self.width, self.height) {
             let mut lock = Locked::new(&buffer, CVPixelBufferLockFlags(0))?;
             let (luma, chroma) = lock.planes_mut()?;
             planes::from_planar(frame, luma, chroma).map_err(Error::Backend)?;
+        } else {
+            self.scale(frame, &buffer)?;
         }
         let refcon = std::ptr::without_provenance_mut::<c_void>(frame.pts as isize as usize);
         let status = unsafe {
@@ -621,6 +713,7 @@ impl VtEncoder {
                 "VTCompressionSessionEncodeFrame failed ({status})"
             )));
         }
+        self.queued.push_back(frame.pts);
         self.submitted += 1;
         if self.submitted == 1 {
             let status = unsafe { self.session.session.complete_frames(pts) };
@@ -660,23 +753,19 @@ impl VtEncoder {
             }
         }
         let tb = self.time_base.unwrap_or(TimeBase::new(1, 90000));
+        let delay = ticks(self.duration, tb).unwrap_or(1).max(1) * i64::from(self.b_frames);
         let mut packets = Vec::with_capacity(outputs.len());
         for o in outputs {
-            let (data, pts, dts, keyframe) = match o {
+            let (data, pts, keyframe) = match o {
                 Output::Packet {
                     data,
                     pts,
-                    dts,
                     keyframe,
-                } => (data, pts, dts, keyframe),
+                } => (data, pts, keyframe),
                 Output::Failed(e) => return Err(e),
             };
-            let dts = ticks(dts, tb).unwrap_or(pts).min(pts);
-            let dts = match self.last_dts {
-                Some(last) if dts <= last => last + 1,
-                _ => dts,
-            };
-            self.last_dts = Some(dts);
+            let base = self.queued.pop_front().unwrap_or(pts);
+            let dts = (base - delay).min(pts);
             packets.push(Packet {
                 data,
                 pts,

@@ -1,5 +1,5 @@
-app = "pcodec"
-bin = "pcodec"
+app = "pcod"
+bin = "pcod"
 grid = [72, 20]
 frame = "window"
 prompt = "$ "
@@ -7,7 +7,7 @@ typing = "30ms"
 setup = "sh {app}/render/terminal/clip.sh {scratch}/demo"
 
 [build]
-command = "cargo build --release --locked --example pcodec"
+command = "cargo build --release --locked --example pcod"
 bin_dir = "{target}/release/examples"
 
 [env]
@@ -40,7 +40,7 @@ brightWhite = "#a6adc8"
 
 [shots.decode]
 kind = "clip"
-line = "pcodec probes a 1080p clip, decodes it on the CPU and on the GPU, then encodes HEVC on the GPU"
+line = "pcod probes a 1080p clip, decodes it on the CPU and on the GPU, then encodes HEVC on the GPU"
 tape = "render/terminal/decode.tape"
 launch = "cd {scratch}/demo && export PATH={bin}:$PATH && clear"
 settle = "400ms"

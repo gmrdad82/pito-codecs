@@ -235,6 +235,11 @@ fn parse_extended<'a>(x: &[u8], chunks: Chunks<'a>) -> Result<Parsed<'a>> {
     let flags = x[0];
     let width = u24(&x[4..]) + 1;
     let height = u24(&x[7..]) + 1;
+    if width as u64 * height as u64 > 1 << 28 {
+        return Err(crate::media::Error::Unsupported(format!(
+            "webp: {width}x{height} canvas is over 268 megapixels"
+        )));
+    }
     let animated = flags & 0x02 != 0;
     let mut info = Info {
         width,

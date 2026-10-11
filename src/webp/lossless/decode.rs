@@ -1,11 +1,13 @@
 use super::bits::Bits;
 use super::huffman::{self, Code};
-use super::transform::{self, Transform, add_pixels};
+use super::transform::{Rows, Transform, add_pixels};
 use crate::media::Result;
 use crate::webp::riff::invalid;
 
 const NUM_LENGTH: usize = 24;
 const NUM_DIST: usize = 40;
+const GREEN_ROOT: u32 = 8;
+const ROOT: u32 = 8;
 
 #[derive(Clone, Copy)]
 struct Group {
@@ -14,6 +16,7 @@ struct Group {
 }
 
 struct Codes {
+    cache_bits: u32,
     table: Vec<u32>,
     groups: Vec<Group>,
     meta: Vec<u32>,
@@ -47,7 +50,7 @@ impl<'a> Decoder<'a> {
         Ok((w, h, alpha))
     }
 
-    pub fn image(&mut self, width: usize, height: usize) -> Result<Vec<u32>> {
+    pub fn image(&mut self, width: usize, height: usize, mut out: Out) -> Result<()> {
         let mut transforms = Vec::new();
         let mut xsize = width;
         while self.bits.bit() {
@@ -60,15 +63,61 @@ impl<'a> Decoder<'a> {
             }
             transforms.push(t);
         }
+        let codes = self.prelude(xsize, height, true)?;
         let mut data = vec![0u32; xsize * height];
-        self.stream(xsize, height, true, &mut data)?;
-        if self.bits.overrun() {
-            return Err(invalid("VP8L data truncated"));
+        let batch = (65536 / xsize).max(16);
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        if xsize * height < 1 << 18 || threads < 2 {
+            let mut rows = Rows::new(&transforms, width);
+            let mut done = 0;
+            self.pixels(
+                xsize,
+                height,
+                &codes,
+                &mut data,
+                batch,
+                &mut |d: &[u32], upto: usize| {
+                    for y in done..upto {
+                        out.put(y, rows.row(y, &d[y * xsize..(y + 1) * xsize]));
+                    }
+                    done = upto;
+                },
+            )?;
+            return Ok(());
         }
-        if transforms.is_empty() {
-            return Ok(data);
-        }
-        transform::inverse(&transforms, width, height, data)
+        let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, usize, Vec<u32>)>(8);
+        let (back_tx, back_rx) = std::sync::mpsc::channel::<Vec<u32>>();
+        let transforms = &transforms;
+        std::thread::scope(|s| {
+            let worker = s.spawn(move || {
+                let mut rows = Rows::new(transforms, width);
+                for (y0, y1, buf) in rx {
+                    for y in y0..y1 {
+                        let i = (y - y0) * xsize;
+                        out.put(y, rows.row(y, &buf[i..i + xsize]));
+                    }
+                    let _ = back_tx.send(buf);
+                }
+            });
+            let mut done = 0;
+            let res = self.pixels(
+                xsize,
+                height,
+                &codes,
+                &mut data,
+                batch,
+                &mut |d: &[u32], upto: usize| {
+                    let mut buf = back_rx.try_recv().unwrap_or_default();
+                    buf.clear();
+                    buf.extend_from_slice(&d[done * xsize..upto * xsize]);
+                    let _ = tx.send((done, upto, buf));
+                    done = upto;
+                },
+            );
+            drop(tx);
+            let _ = worker.join();
+            res
+        })
     }
 
     fn transform(&mut self, xsize: usize, height: usize) -> Result<Transform> {
@@ -108,11 +157,19 @@ impl<'a> Decoder<'a> {
 
     fn sub_image(&mut self, width: usize, height: usize) -> Result<Vec<u32>> {
         let mut data = vec![0u32; width * height];
-        self.stream(width, height, false, &mut data)?;
+        let codes = self.prelude(width, height, false)?;
+        self.pixels(
+            width,
+            height,
+            &codes,
+            &mut data,
+            usize::MAX,
+            &mut |_: &[u32], _| {},
+        )?;
         Ok(data)
     }
 
-    fn stream(&mut self, width: usize, height: usize, top: bool, out: &mut [u32]) -> Result<()> {
+    fn prelude(&mut self, width: usize, height: usize, top: bool) -> Result<Codes> {
         let cache_bits = if self.bits.bit() {
             let b = self.bits.read(4);
             if !(1..=11).contains(&b) {
@@ -122,8 +179,7 @@ impl<'a> Decoder<'a> {
         } else {
             0
         };
-        let codes = self.codes(width, height, top, cache_bits)?;
-        self.pixels(width, height, &codes, cache_bits, out)
+        self.codes(width, height, top, cache_bits)
     }
 
     fn codes(&mut self, width: usize, height: usize, top: bool, cache_bits: u32) -> Result<Codes> {
@@ -143,15 +199,17 @@ impl<'a> Decoder<'a> {
         }
         let cache = if cache_bits > 0 { 1 << cache_bits } else { 0 };
         let sizes = [256 + NUM_LENGTH + cache, 256, 256, 256, NUM_DIST];
-        let mut table = Vec::with_capacity(count * 5 * 300);
-        let mut groups = Vec::with_capacity(count);
+        let mut table = Vec::with_capacity(count.min(256) * 5 * 300);
+        let mut groups = Vec::with_capacity(count.min(256));
         for _ in 0..count {
             let mut codes = [Code {
                 start: 0,
+                root: 0,
                 single: None,
             }; 5];
-            for (c, &size) in codes.iter_mut().zip(&sizes) {
-                *c = huffman::read_code(&mut self.bits, size, &mut self.lengths, &mut table)?;
+            for (i, (c, &size)) in codes.iter_mut().zip(&sizes).enumerate() {
+                let root = if i == 0 { GREEN_ROOT } else { ROOT };
+                *c = huffman::read_code(&mut self.bits, size, &mut self.lengths, &mut table, root)?;
             }
             let literal = match (codes[1].single, codes[2].single, codes[3].single) {
                 (Some(r), Some(b), Some(a)) => Some((a as u32) << 24 | (r as u32) << 16 | b as u32),
@@ -163,6 +221,7 @@ impl<'a> Decoder<'a> {
             }
         }
         Ok(Codes {
+            cache_bits,
             table,
             groups,
             meta,
@@ -176,10 +235,12 @@ impl<'a> Decoder<'a> {
         width: usize,
         height: usize,
         codes: &Codes,
-        cache_bits: u32,
         out: &mut [u32],
+        batch: usize,
+        flush: &mut dyn FnMut(&[u32], usize),
     ) -> Result<()> {
         let bits = &mut self.bits;
+        let cache_bits = codes.cache_bits;
         let table = &codes.table[..];
         let total = width * height;
         let mut cache = vec![0u32; if cache_bits > 0 { 1 << cache_bits } else { 0 }];
@@ -202,6 +263,7 @@ impl<'a> Decoder<'a> {
         let mut y = 0usize;
         let mut pos = 0usize;
         let mut g = group_at(0, 0);
+        let mut flushed = 0usize;
         while pos < total {
             if x & mask == 0 {
                 g = group_at(x, y);
@@ -227,6 +289,10 @@ impl<'a> Decoder<'a> {
                     if bits.overrun() {
                         return Err(invalid("VP8L data truncated"));
                     }
+                    if y - flushed >= batch {
+                        flush(out, y);
+                        flushed = y;
+                    }
                 }
             } else if s < 256 + NUM_LENGTH as u32 {
                 let len = prefix_value(s - 256, bits) as usize;
@@ -246,6 +312,10 @@ impl<'a> Decoder<'a> {
                 }
                 if bits.overrun() {
                     return Err(invalid("VP8L data truncated"));
+                }
+                if y - flushed >= batch {
+                    flush(out, y);
+                    flushed = y;
                 }
                 if pos < total && !codes.meta.is_empty() {
                     g = group_at(x, y);
@@ -269,13 +339,44 @@ impl<'a> Decoder<'a> {
                     if bits.overrun() {
                         return Err(invalid("VP8L data truncated"));
                     }
+                    if y - flushed >= batch {
+                        flush(out, y);
+                        flushed = y;
+                    }
                 }
             }
         }
         if bits.overrun() {
             return Err(invalid("VP8L data truncated"));
         }
+        if flushed < height {
+            flush(out, height);
+        }
         Ok(())
+    }
+}
+
+pub(super) enum Out<'o> {
+    Rgba(&'o mut [u8]),
+    Green(&'o mut [u8]),
+}
+
+impl Out<'_> {
+    #[inline]
+    fn put(&mut self, y: usize, row: &[u32]) {
+        let w = row.len();
+        match self {
+            Out::Rgba(o) => {
+                for (d, &p) in o[y * w * 4..(y + 1) * w * 4].chunks_exact_mut(4).zip(row) {
+                    d.copy_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8, (p >> 24) as u8]);
+                }
+            }
+            Out::Green(o) => {
+                for (d, &p) in o[y * w..(y + 1) * w].iter_mut().zip(row) {
+                    *d = (p >> 8) as u8;
+                }
+            }
+        }
     }
 }
 

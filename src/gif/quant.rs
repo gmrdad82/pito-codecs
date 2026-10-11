@@ -354,33 +354,29 @@ fn kmeans(points: &[Point], mut centers: Vec<[f32; 3]>, rounds: usize) -> Vec<[f
     for _ in 0..rounds {
         let soa = Soa::new(&centers);
         let k = centers.len();
-        let sums = points
+        let parts: Vec<Vec<[f64; 4]>> = points
             .par_chunks(4096)
-            .fold(
-                || vec![[0.0f64; 4]; k],
-                |mut acc, chunk| {
-                    for p in chunk {
-                        let i = nearest_lab(&soa, p.lab);
-                        let w = p.weight as f64;
-                        acc[i][0] += w;
-                        for c in 0..3 {
-                            acc[i][c + 1] += w * p.lab[c] as f64;
-                        }
+            .map(|chunk| {
+                let mut acc = vec![[0.0f64; 4]; k];
+                for p in chunk {
+                    let i = nearest_lab(&soa, p.lab);
+                    let w = p.weight as f64;
+                    acc[i][0] += w;
+                    for c in 0..3 {
+                        acc[i][c + 1] += w * p.lab[c] as f64;
                     }
-                    acc
-                },
-            )
-            .reduce(
-                || vec![[0.0f64; 4]; k],
-                |mut a, b| {
-                    for (x, y) in a.iter_mut().zip(&b) {
-                        for c in 0..4 {
-                            x[c] += y[c];
-                        }
-                    }
-                    a
-                },
-            );
+                }
+                acc
+            })
+            .collect();
+        let mut sums = vec![[0.0f64; 4]; k];
+        for part in &parts {
+            for (x, y) in sums.iter_mut().zip(part) {
+                for c in 0..4 {
+                    x[c] += y[c];
+                }
+            }
+        }
         for (c, s) in centers.iter_mut().zip(&sums) {
             if s[0] > 0.0 {
                 *c = [

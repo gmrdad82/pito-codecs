@@ -61,7 +61,7 @@ fn intra_matches_decoder() {
                 max_y: f.max_y,
                 bit_depth: 8,
             };
-            crate::vp9::intra::predict(&mut theirs, w, 0, x, y, mode, &e);
+            crate::vp9::intra::predict(&mut theirs, w, x, y, mode, &e, None);
             for i in 0..size {
                 for j in 0..size {
                     assert_eq!(
@@ -134,13 +134,7 @@ fn inter_matches_decoder() {
         key: true,
         intra_only: false,
     };
-    let (stride, ah) = (128usize, 128usize);
-    let mut full = vec![0u16; stride * ah];
-    for y in 0..h {
-        for x in 0..w {
-            full[y * stride + x] = src[y * w + x] as u16;
-        }
-    }
+    let full: Vec<u16> = src.iter().map(|&v| v as u16).collect();
     let chroma = vec![0u16; 64 * 64];
     let frame = Frame::from_planes(info, [&full, &chroma, &chroma]);
     let r = crate::vp9::inter::RefPlane {
@@ -153,6 +147,7 @@ fn inter_matches_decoder() {
     let bare = Padded::new(&src, w, h, 0);
     let mut tmp = vec![0u16; 80 * 80];
     let mut win = vec![0u16; 80 * 80];
+    let mut pred = vec![0u16; 64 * 64];
     for _ in 0..600 {
         let bw = 4usize << rng.below(5);
         let bh = 4usize << rng.below(5);
@@ -171,8 +166,11 @@ fn inter_matches_decoder() {
             filter,
             8,
             &mut theirs,
+            bw,
+            false,
             &mut tmp,
             &mut win,
+            &mut pred,
         );
         for p in [&padded, &bare] {
             let mut ours = vec![0u8; bw * bh];

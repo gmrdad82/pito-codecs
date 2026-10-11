@@ -54,14 +54,19 @@ const VP9: &[&str] = &[
 fn generate(name: &str, args: &[&str]) -> PathBuf {
     let path = dir().join(name);
     if !path.exists() {
+        let tmp = dir().join(format!(".{}-{name}", std::process::id()));
         let st = Command::new("ffmpeg")
             .args(["-v", "error", "-y"])
             .args(sources(6))
             .args(args)
-            .arg(&path)
+            .arg(&tmp)
             .status()
             .unwrap();
         assert!(st.success());
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            assert!(std::path::Path::new(&path).exists(), "{e}");
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
     path
 }
@@ -78,7 +83,12 @@ fn streamed(name: &str) -> PathBuf {
             .output()
             .unwrap();
         assert!(out.status.success());
-        std::fs::write(&path, out.stdout).unwrap();
+        let tmp = dir().join(format!(".{}-{name}", std::process::id()));
+        std::fs::write(&tmp, out.stdout).unwrap();
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            assert!(std::path::Path::new(&path).exists(), "{e}");
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
     path
 }
@@ -257,14 +267,19 @@ fn mp4_to_mkv() {
     }
     let mp4 = dir().join("bframes.mp4");
     if !mp4.exists() {
+        let tmp = dir().join(format!(".{}-bframes.mp4", std::process::id()));
         let st = Command::new("ffmpeg")
             .args(["-v", "error", "-y"])
             .args(sources(4))
             .args(H264)
-            .arg(&mp4)
+            .arg(&tmp)
             .status()
             .unwrap();
         assert!(st.success());
+        if let Err(e) = std::fs::rename(&tmp, &mp4) {
+            assert!(std::path::Path::new(&mp4).exists(), "{e}");
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
     let out = dir().join("from-mp4.mkv");
     remux_mp4(&mp4, &out).unwrap();

@@ -258,7 +258,10 @@ fn ensure(f: &Fixture) -> Option<(PathBuf, PathBuf)> {
         mid.extend(args);
         mid.extend(["-f", "hevc"]);
         ff(&["-f", "lavfi"], Path::new(&src), &mid, &tmp);
-        std::fs::rename(&tmp, &hevc).unwrap();
+        if let Err(e) = std::fs::rename(&tmp, &hevc) {
+            assert!(std::path::Path::new(&hevc).exists(), "{e}");
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
     if !yuv.exists() {
         let tmp = scratch(&format!("{}.yuv", f.name));
@@ -275,9 +278,29 @@ fn ensure(f: &Fixture) -> Option<(PathBuf, PathBuf)> {
             ],
             &tmp,
         );
-        std::fs::rename(&tmp, &yuv).unwrap();
+        if let Err(e) = std::fs::rename(&tmp, &yuv) {
+            assert!(std::path::Path::new(&yuv).exists(), "{e}");
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+    if !decodes_clean(&hevc) {
+        eprintln!(
+            "SKIPPED ({}): this ffmpeg's libx265 wrote a stream its own decoder rejects",
+            f.name
+        );
+        return None;
     }
     Some((hevc, yuv))
+}
+
+fn decodes_clean(hevc: &Path) -> bool {
+    let out = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
+        .arg(hevc)
+        .args(["-f", "null", "-"])
+        .output()
+        .unwrap();
+    out.status.success() && out.stderr.is_empty()
 }
 
 pub(super) fn access_units(data: &[u8]) -> Vec<&[u8]> {
@@ -371,7 +394,9 @@ fn compare(name: &str, frames: &[Frame], reference: &[u8], f: &Fixture) {
 #[test]
 fn bit_exact_against_ffmpeg() {
     for f in CONFORMANCE {
-        let Some((hevc, yuv)) = ensure(f) else { return };
+        let Some((hevc, yuv)) = ensure(f) else {
+            continue;
+        };
         let data = std::fs::read(hevc).unwrap();
         let reference = std::fs::read(yuv).unwrap();
         let units: Vec<Vec<u8>> = access_units(&data)

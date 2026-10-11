@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::SystemTime;
 
+use rayon::prelude::*;
+
+use crate::gpu::GpuFrame;
 use crate::mp4::{CodecConfig, Reader, Track};
 
 use super::picture::{Color, rotate, to_rgba_color};
@@ -348,6 +351,7 @@ pub struct Frames {
     next: usize,
     start: i64,
     queue: VecDeque<Frame>,
+    gpu: VecDeque<GpuFrame>,
     flushed: bool,
     buf: Vec<u8>,
 }
@@ -367,6 +371,7 @@ impl Frames {
             next,
             start,
             queue: VecDeque::new(),
+            gpu: VecDeque::new(),
             flushed: false,
             buf: Vec::new(),
         })
@@ -386,32 +391,69 @@ impl Frames {
 
     pub fn next_frame(&mut self) -> Result<Option<Frame>> {
         loop {
-            while let Some(f) = self.queue.pop_front() {
-                if f.pts >= self.start {
-                    return Ok(Some(f));
-                }
+            if let Some(f) = self.next_queued() {
+                return Ok(Some(f));
             }
-            let t = &self.reader.tracks[self.track];
-            if let Some(s) = t.samples.get(self.next).copied() {
-                self.reader
-                    .read_into(self.track, self.next, &mut self.buf)?;
-                let packet = Packet {
-                    data: std::mem::take(&mut self.buf),
-                    pts: s.pts.saturating_add(t.edit_offset),
-                    dts: s.dts.saturating_add(t.edit_offset),
-                    keyframe: s.keyframe,
-                };
-                self.next += 1;
-                let out = self.dec.decode(&packet);
-                self.buf = packet.data;
-                self.queue.extend(out?);
-            } else if !self.flushed {
-                self.flushed = true;
-                self.queue.extend(self.dec.flush()?);
-            } else {
+            if !self.pump(false)? {
                 return Ok(None);
             }
         }
+    }
+
+    pub fn next_gpu(&mut self) -> Result<Option<GpuFrame>> {
+        loop {
+            while let Some(f) = self.gpu.pop_front() {
+                if f.pts() >= self.start {
+                    return Ok(Some(f));
+                }
+            }
+            if let Some(f) = self.next_queued() {
+                return Ok(Some(GpuFrame::cpu(f)));
+            }
+            if !self.pump(true)? {
+                return Ok(None);
+            }
+        }
+    }
+
+    fn next_queued(&mut self) -> Option<Frame> {
+        while let Some(f) = self.queue.pop_front() {
+            if f.pts >= self.start {
+                return Some(f);
+            }
+            self.dec.recycle(f);
+        }
+        None
+    }
+
+    fn pump(&mut self, gpu: bool) -> Result<bool> {
+        let t = &self.reader.tracks[self.track];
+        if let Some(s) = t.samples.get(self.next).copied() {
+            self.reader
+                .read_into(self.track, self.next, &mut self.buf)?;
+            let packet = Packet {
+                data: std::mem::take(&mut self.buf),
+                pts: s.pts.saturating_add(t.edit_offset),
+                dts: s.dts.saturating_add(t.edit_offset),
+                keyframe: s.keyframe,
+            };
+            self.next += 1;
+            let out = match &mut self.dec {
+                Decoder::Gpu(dec) if gpu => dec.decode_gpu(&packet).map(|f| self.gpu.extend(f)),
+                dec => dec.decode(&packet).map(|f| self.queue.extend(f)),
+            };
+            self.buf = packet.data;
+            out?;
+        } else if !self.flushed {
+            self.flushed = true;
+            match &mut self.dec {
+                Decoder::Gpu(dec) if gpu => self.gpu.extend(dec.flush_gpu()?),
+                dec => self.queue.extend(dec.flush()?),
+            }
+        } else {
+            return Ok(false);
+        }
+        Ok(true)
     }
 }
 
@@ -445,23 +487,104 @@ pub fn still_decoder(reader: &Reader, route: Route) -> Result<Decoder> {
     Ok(Decoder::for_route(t, 1, route)?.0)
 }
 
-pub fn audio_pcm(path: &Path, track: usize, rate: u32, mono: bool) -> Result<AudioBuffer> {
+const PAD: f64 = 0.02;
+const CHUNK: f64 = 4.0;
+
+pub fn audio_range(
+    path: &Path,
+    track: usize,
+    from: f64,
+    to: f64,
+    rate: u32,
+    channels: u16,
+) -> Result<AudioBuffer> {
     let r = reader(path)?;
     let ids = r.audio();
     let &i = ids
         .get(track)
         .ok_or_else(|| Error::Invalid(format!("no audio track {track}")))?;
-    let buf = decode_audio(&r, i, 0.0, f64::INFINITY)?;
-    let buf = if mono {
-        crate::aac::mono(&buf)
+    let at = |t: f64| (t * rate as f64).round() as usize;
+    let start = at(from.max(0.0));
+    let length = r.tracks[i].duration_seconds();
+    let end = if to.is_finite() {
+        Some(at(to))
+    } else if length > 0.0 {
+        Some(at(length).max(start))
     } else {
-        crate::aac::downmix_stereo(&buf)
+        None
     };
-    Ok(if buf.rate == rate {
+    let Some(end) = end else {
+        return piece(&r, i, start, None, rate, channels);
+    };
+    let chunk = at(CHUNK).max(1);
+    let n = (end - start).div_ceil(chunk).max(1);
+    if n == 1 {
+        return piece(&r, i, start, Some(end), rate, channels);
+    }
+    let pieces = (0..n)
+        .into_par_iter()
+        .map(|k| {
+            let s = start + k * chunk;
+            piece(&r, i, s, Some((s + chunk).min(end)), rate, channels)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut out = AudioBuffer::new(rate, channels);
+    out.samples.reserve((end - start) * channels as usize);
+    for p in pieces {
+        out.samples.extend_from_slice(&p.samples);
+    }
+    Ok(out)
+}
+
+fn piece(
+    r: &Reader,
+    i: usize,
+    start: usize,
+    end: Option<usize>,
+    rate: u32,
+    channels: u16,
+) -> Result<AudioBuffer> {
+    let pad = start.min((PAD * rate as f64).round() as usize);
+    let t0 = (start - pad) as f64 / rate as f64;
+    let t1 = end.map_or(f64::INFINITY, |e| e as f64 / rate as f64 + PAD);
+    let raw = decode_audio(r, i, t0, t1)?;
+    let buf = if channels > raw.channels {
+        shape(at_rate(raw, rate), channels)?
+    } else {
+        at_rate(shape(raw, channels)?, rate)
+    };
+    Ok(cut(buf, pad, end.map(|e| e - start)))
+}
+
+fn at_rate(buf: AudioBuffer, rate: u32) -> AudioBuffer {
+    if buf.rate == rate {
         buf
     } else {
         crate::aac::resample(&buf, rate)
+    }
+}
+
+pub fn shape(buf: AudioBuffer, channels: u16) -> Result<AudioBuffer> {
+    Ok(match channels {
+        c if c == buf.channels => buf,
+        1 => crate::aac::mono(&buf),
+        2 => crate::aac::downmix_stereo(&buf),
+        c => {
+            return Err(Error::Invalid(format!(
+                "{c} channels from a {}-channel track: ask for 1, 2 or {}",
+                buf.channels, buf.channels
+            )));
+        }
     })
+}
+
+pub fn cut(mut buf: AudioBuffer, skip: usize, want: Option<usize>) -> AudioBuffer {
+    let ch = buf.channels.max(1) as usize;
+    buf.samples.drain(..(skip * ch).min(buf.samples.len()));
+    if let Some(w) = want {
+        buf.samples.resize(w * ch, 0.0);
+    }
+    buf
 }
 
 pub fn decode_audio(r: &Reader, i: usize, from: f64, to: f64) -> Result<AudioBuffer> {
@@ -482,12 +605,9 @@ pub fn decode_audio(r: &Reader, i: usize, from: f64, to: f64) -> Result<AudioBuf
     let channels = dec.channels().max(1);
     let mut out = AudioBuffer::new(rate, channels);
     let from_t = t.ticks(from.max(0.0));
-    let first = (0..t.samples.len())
-        .find(|&k| {
-            t.presentation(k)
-                .is_some_and(|p| p + t.samples[k].duration as i64 > from_t)
-        })
-        .unwrap_or(t.samples.len())
+    let first = t
+        .samples
+        .partition_point(|s| s.pts.saturating_add(t.edit_offset) + s.duration as i64 <= from_t)
         .saturating_sub(1);
     let start_t = t.presentation(first).unwrap_or(0);
     let skip = if from > 0.0 || start_t < 0 {
@@ -497,11 +617,11 @@ pub fn decode_audio(r: &Reader, i: usize, from: f64, to: f64) -> Result<AudioBuf
     } else {
         0
     };
-    let want = if to.is_finite() {
-        Some(((to - from.max(0.0)) * rate as f64).round().max(0.0) as usize)
-    } else {
-        None
-    };
+    let end = t.duration_seconds();
+    let to = if end > 0.0 { to.min(end) } else { to };
+    let want = to
+        .is_finite()
+        .then(|| ((to - from.max(0.0)) * rate as f64).round().max(0.0) as usize);
     let mut buf = Vec::new();
     let mut skipped = 0usize;
     for k in first..t.samples.len() {

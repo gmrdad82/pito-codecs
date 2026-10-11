@@ -1,5 +1,3 @@
-use crate::media::Result;
-
 pub(super) enum Transform {
     Predict {
         bits: u32,
@@ -98,57 +96,133 @@ pub(super) fn predict(mode: u32, l: u32, t: u32, tl: u32, tr: u32) -> u32 {
     }
 }
 
-pub(super) fn inverse(
-    transforms: &[Transform],
-    width: usize,
-    height: usize,
-    mut data: Vec<u32>,
-) -> Result<Vec<u32>> {
-    let mut xsize = data.len() / height;
-    for t in transforms.iter().rev() {
-        match t {
-            Transform::Predict { bits, data: modes } => {
-                inverse_predict(&mut data, xsize, height, *bits, modes)
-            }
-            Transform::Color { bits, data: elems } => inverse_color(&mut data, xsize, *bits, elems),
-            Transform::SubtractGreen => {
-                for p in data.iter_mut() {
-                    let g = (*p >> 8) & 0xff;
-                    *p = add_pixels(*p, g << 16 | g);
-                }
-            }
-            Transform::Index {
-                bits,
-                palette,
-                width: w,
-            } => {
-                data = unpack(&data, xsize, *w, height, *bits, palette);
-                xsize = *w;
-            }
-        }
-    }
-    debug_assert_eq!(xsize, width);
-    Ok(data)
+enum Stage<'a> {
+    Predict {
+        bits: u32,
+        modes: &'a [u32],
+        mw: usize,
+        prev: Vec<u32>,
+    },
+    Color {
+        bits: u32,
+        elems: &'a [u32],
+        mw: usize,
+    },
+    SubtractGreen,
+    Index {
+        bits: u32,
+        palette: &'a [u32],
+        width: usize,
+    },
 }
 
-fn inverse_predict(data: &mut [u32], width: usize, height: usize, bits: u32, modes: &[u32]) {
-    data[0] = add_pixels(data[0], 0xff000000);
-    for x in 1..width {
-        data[x] = add_pixels(data[x], data[x - 1]);
-    }
-    let bw = 1usize << bits;
-    let mw = width.div_ceil(bw);
-    for y in 1..height {
-        let (prev, cur) = data[(y - 1) * width..(y + 1) * width].split_at_mut(width);
-        cur[0] = add_pixels(cur[0], prev[0]);
-        let row_modes = &modes[(y >> bits) * mw..];
-        let mut x = 1;
-        while x < width {
-            let end = ((x & !(bw - 1)) + bw).min(width);
-            let mode = (row_modes[x >> bits] >> 8) & 0xf;
-            predict_run(mode, prev, cur, x, end);
-            x = end;
+pub(super) struct Rows<'a> {
+    stages: Vec<Stage<'a>>,
+    a: Vec<u32>,
+    b: Vec<u32>,
+}
+
+impl<'a> Rows<'a> {
+    pub fn new(transforms: &'a [Transform], width: usize) -> Self {
+        let mut sizes = Vec::with_capacity(transforms.len());
+        let mut xsize = width;
+        for t in transforms {
+            sizes.push(xsize);
+            if let Transform::Index { bits, .. } = t {
+                xsize = xsize.div_ceil(1 << bits);
+            }
         }
+        let stages = transforms
+            .iter()
+            .zip(sizes)
+            .rev()
+            .map(|(t, xs)| match t {
+                Transform::Predict { bits, data } => Stage::Predict {
+                    bits: *bits,
+                    modes: data,
+                    mw: xs.div_ceil(1 << bits),
+                    prev: vec![0; xs],
+                },
+                Transform::Color { bits, data } => Stage::Color {
+                    bits: *bits,
+                    elems: data,
+                    mw: xs.div_ceil(1 << bits),
+                },
+                Transform::SubtractGreen => Stage::SubtractGreen,
+                Transform::Index {
+                    bits,
+                    palette,
+                    width,
+                } => Stage::Index {
+                    bits: *bits,
+                    palette,
+                    width: *width,
+                },
+            })
+            .collect();
+        Rows {
+            stages,
+            a: Vec::with_capacity(width),
+            b: Vec::with_capacity(width),
+        }
+    }
+
+    pub fn row(&mut self, y: usize, input: &[u32]) -> &[u32] {
+        self.a.clear();
+        self.a.extend_from_slice(input);
+        for st in self.stages.iter_mut() {
+            match st {
+                Stage::Predict {
+                    bits,
+                    modes,
+                    mw,
+                    prev,
+                } => {
+                    predict_row(&mut self.a, prev, y, *bits, &modes[(y >> *bits) * *mw..]);
+                    prev.copy_from_slice(&self.a);
+                }
+                Stage::Color { bits, elems, mw } => {
+                    color_row(&mut self.a, *bits, &elems[(y >> *bits) * *mw..]);
+                }
+                Stage::SubtractGreen => {
+                    for p in self.a.iter_mut() {
+                        let g = (*p >> 8) & 0xff;
+                        *p = add_pixels(*p, g << 16 | g);
+                    }
+                }
+                Stage::Index {
+                    bits,
+                    palette,
+                    width,
+                } => {
+                    self.b.clear();
+                    self.b.resize(*width, 0);
+                    unpack_row(&self.a, &mut self.b, *bits, palette);
+                    std::mem::swap(&mut self.a, &mut self.b);
+                }
+            }
+        }
+        &self.a
+    }
+}
+
+fn predict_row(cur: &mut [u32], prev: &[u32], y: usize, bits: u32, modes: &[u32]) {
+    let width = cur.len();
+    if y == 0 {
+        cur[0] = add_pixels(cur[0], 0xff000000);
+        for x in 1..width {
+            cur[x] = add_pixels(cur[x], cur[x - 1]);
+        }
+        return;
+    }
+    cur[0] = add_pixels(cur[0], prev[0]);
+    let bw = 1usize << bits;
+    let mut x = 1;
+    while x < width {
+        let end = ((x & !(bw - 1)) + bw).min(width);
+        let mode = (modes[x >> bits] >> 8) & 0xf;
+        predict_run(mode, prev, cur, x, end);
+        x = end;
     }
 }
 
@@ -207,52 +281,35 @@ pub(super) fn color_delta(t: u8, c: u8) -> i32 {
     (t as i8 as i32 * c as i8 as i32) >> 5
 }
 
-fn inverse_color(data: &mut [u32], width: usize, bits: u32, elems: &[u32]) {
-    let mw = width.div_ceil(1 << bits);
-    for (y, row) in data.chunks_exact_mut(width).enumerate() {
-        let er = &elems[(y >> bits) * mw..];
-        for (bx, seg) in row.chunks_mut(1 << bits).enumerate() {
-            let e = er[bx];
-            let g2r = e as u8;
-            let g2b = (e >> 8) as u8;
-            let r2b = (e >> 16) as u8;
-            for p in seg {
-                let v = *p;
-                let g = (v >> 8) as u8;
-                let r = ((v >> 16) as i32 + color_delta(g2r, g)) as u8;
-                let b = (v as i32 + color_delta(g2b, g) + color_delta(r2b, r)) as u8;
-                *p = (v & 0xff00ff00) | (r as u32) << 16 | b as u32;
-            }
+fn color_row(row: &mut [u32], bits: u32, elems: &[u32]) {
+    for (seg, &e) in row.chunks_mut(1 << bits).zip(elems) {
+        let g2r = e as u8;
+        let g2b = (e >> 8) as u8;
+        let r2b = (e >> 16) as u8;
+        for p in seg {
+            let v = *p;
+            let g = (v >> 8) as u8;
+            let r = ((v >> 16) as i32 + color_delta(g2r, g)) as u8;
+            let b = (v as i32 + color_delta(g2b, g) + color_delta(r2b, r)) as u8;
+            *p = (v & 0xff00ff00) | (r as u32) << 16 | b as u32;
         }
     }
 }
 
-fn unpack(
-    data: &[u32],
-    xsize: usize,
-    width: usize,
-    height: usize,
-    bits: u32,
-    palette: &[u32],
-) -> Vec<u32> {
-    let mut out = vec![0u32; width * height];
+fn unpack_row(input: &[u32], out: &mut [u32], bits: u32, palette: &[u32]) {
     if bits == 0 {
-        for (o, &p) in out.iter_mut().zip(data) {
+        for (o, &p) in out.iter_mut().zip(input) {
             *o = palette[((p >> 8) & 0xff) as usize];
         }
-        return out;
+        return;
     }
     let bpp = 8 >> bits;
-    let per = 1usize << bits;
     let m = (1u32 << bpp) - 1;
-    for (orow, irow) in out.chunks_exact_mut(width).zip(data.chunks_exact(xsize)) {
-        for (oc, &p) in orow.chunks_mut(per).zip(irow) {
-            let mut v = (p >> 8) & 0xff;
-            for o in oc {
-                *o = palette[(v & m) as usize];
-                v >>= bpp;
-            }
+    for (oc, &p) in out.chunks_mut(1 << bits).zip(input) {
+        let mut v = (p >> 8) & 0xff;
+        for o in oc {
+            *o = palette[(v & m) as usize];
+            v >>= bpp;
         }
     }
-    out
 }

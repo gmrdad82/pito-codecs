@@ -6,6 +6,7 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use pito_codecs::aac;
@@ -24,7 +25,17 @@ type Res<T> = Result<T, Box<dyn Error>>;
 
 const CLIP_SECONDS: u32 = 20;
 const ENCODE_FRAMES: usize = 240;
-const SIZES: [(u32, u32); 2] = [(1920, 1080), (2560, 1440)];
+const ALL_SIZES: [(u32, u32); 2] = [(1920, 1080), (2560, 1440)];
+
+static QUICK: AtomicBool = AtomicBool::new(false);
+
+fn sizes() -> &'static [(u32, u32)] {
+    if QUICK.load(Ordering::Relaxed) {
+        &ALL_SIZES[..1]
+    } else {
+        &ALL_SIZES
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 struct Row {
@@ -163,7 +174,7 @@ fn prepare(dir: &Path, fixtures: &Path) -> Res<Assets> {
         }
     }
     let mut video = HashMap::new();
-    for (w, h) in SIZES {
+    for &(w, h) in sizes() {
         for codec in [Codec::H264, Codec::Hevc] {
             let name = match codec {
                 Codec::H264 => format!("h264-{h}.mp4"),
@@ -212,7 +223,7 @@ fn prepare(dir: &Path, fixtures: &Path) -> Res<Assets> {
         }
     }
     let mut raw = BTreeMap::new();
-    for (w, h) in SIZES {
+    for &(w, h) in sizes() {
         let out = dir.join(format!("raw-{h}.yuv"));
         if !out.exists() {
             eprintln!("bench: raw {w}x{h} frames");
@@ -445,6 +456,8 @@ fn encode_gpu(frames: &[Frame], w: u32, h: u32, codec: Codec) -> Res<(f64, Vec<u
     Ok((t.elapsed().as_secs_f64(), out, name))
 }
 
+const BT709: &str = "setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709";
+
 fn psnr(dir: &Path, stream: &Path, format: &str, raw: &Path, w: u32, h: u32) -> Option<f64> {
     let size = format!("{w}x{h}");
     let (_, log) = ffmpeg_run(
@@ -466,7 +479,9 @@ fn psnr(dir: &Path, stream: &Path, format: &str, raw: &Path, w: u32, h: u32) -> 
             "-i",
             raw.to_str()?,
             "-lavfi",
-            "[0:v]setpts=N/(60*TB)[a];[1:v]setpts=N/(60*TB)[b];[a][b]psnr",
+            &format!(
+                "[0:v]setpts=N/(60*TB),{BT709}[a];[1:v]setpts=N/(60*TB),{BT709}[b];[a][b]psnr"
+            ),
             "-f",
             "null",
             "-",
@@ -544,7 +559,7 @@ impl Bench {
 
     fn decode(&mut self, a: &Assets) {
         for codec in [Codec::H264, Codec::Hevc] {
-            for (_, h) in SIZES {
+            for &(_, h) in sizes() {
                 let path = a.video[&(codec, h)].clone();
                 let pstr = path_str(&path);
                 let frames = Reader::open(&path)
@@ -624,7 +639,7 @@ impl Bench {
     }
 
     fn encode(&mut self, a: &Assets) {
-        for (w, h) in SIZES {
+        for &(w, h) in sizes() {
             let id_prefix = format!("encode.{h}");
             if !self.want(&[&id_prefix]) {
                 continue;
@@ -791,7 +806,7 @@ impl Bench {
 
     fn transcode(&mut self, a: &Assets) {
         for codec in [Codec::H264, Codec::Hevc] {
-            let (_, h) = SIZES[1];
+            let (_, h) = *sizes().last().unwrap_or(&ALL_SIZES[0]);
             let name = codec.to_string().to_lowercase().replace('.', "");
             let id = format!("transcode.{name}.{h}.gpu");
             if !self.want(&[&id]) {
@@ -1075,7 +1090,7 @@ impl Bench {
     }
 
     fn first_frame(&mut self, a: &Assets) {
-        let (_, h) = SIZES[1];
+        let (_, h) = *sizes().last().unwrap_or(&ALL_SIZES[0]);
         for codec in [Codec::H264, Codec::Hevc] {
             for (key, text, choice) in [("cpu", "CPU", Choice::Cpu), ("gpu", "GPU", Choice::Gpu)] {
                 let name = codec.to_string().to_lowercase().replace('.', "");
@@ -1086,7 +1101,11 @@ impl Bench {
                 let path = a.video[&(codec, h)].clone();
                 let node = self.node.clone();
                 let dir = a.dir.join("ttff");
-                let runs = self.runs.max(5);
+                let runs = if QUICK.load(Ordering::Relaxed) {
+                    3
+                } else {
+                    self.runs.max(5)
+                };
                 let m = (|| -> Res<Measured> {
                     fs::create_dir_all(&dir)?;
                     let prefs = Prefs {
@@ -1140,7 +1159,7 @@ impl Bench {
 
     fn filmstrip(&mut self, a: &Assets) {
         for codec in [Codec::H264, Codec::Hevc] {
-            for (_, h) in SIZES {
+            for &(_, h) in sizes() {
                 for (key, text, choice) in [
                     ("cpu", "CPU", Choice::Cpu),
                     ("auto", "GPU FIRST", Choice::Auto),
@@ -1238,7 +1257,7 @@ impl Bench {
     }
 
     fn smart_cut(&mut self, a: &Assets) {
-        for (_, h) in SIZES {
+        for &(_, h) in sizes() {
             let ids = [
                 format!("smartcut.{h}.copy"),
                 format!("smartcut.{h}.reencode"),
@@ -1361,12 +1380,15 @@ impl Bench {
 
     fn scale(&mut self, a: &Assets) {
         let cases = [(1440u32, 1080u32), (1440, 720), (1080, 720), (1080, 1440)];
+        let cases = cases
+            .into_iter()
+            .filter(|(from, _)| sizes().iter().any(|s| s.1 == *from));
         for (from, to) in cases {
             let id = format!("scale.{from}to{to}");
             if !self.want(&[&id]) {
                 continue;
             }
-            let (sw, sh) = SIZES
+            let (sw, sh) = ALL_SIZES
                 .iter()
                 .find(|s| s.1 == from)
                 .copied()
@@ -1488,72 +1510,210 @@ fn fmt_value(v: f64, unit: &str) -> String {
     match unit {
         "ms" if v < 100.0 => format!("{v:.1} MS"),
         "ms" => format!("{v:.0} MS"),
-        "x realtime" if v < 100.0 => format!("{v:.1}X RT"),
-        "x realtime" => format!("{v:.0}X RT"),
+        "x realtime" if v < 100.0 => format!("{v:.1}×"),
+        "x realtime" => format!("{v:.0}×"),
         "stills/s" => format!("{v:.0} STILLS/S"),
         _ => format!("{v:.0} FPS"),
     }
 }
 
+fn kind(id: &str) -> (usize, &'static str) {
+    match id.split('.').next().unwrap_or("") {
+        "decode" if id.contains(".cpu") => (0, "DECODE, CPU"),
+        "decode" => (1, "DECODE, GPU (VA-API)"),
+        "encode" | "transcode" => (2, "ENCODE AND GPU TRANSCODE"),
+        "audio" => (3, "AUDIO"),
+        "first-frame" | "filmstrip" => (4, "FIRST FRAME AND FILMSTRIP"),
+        "smartcut" => (5, "SMART-CUT EXPORT"),
+        _ => (6, "SCALE"),
+    }
+}
+
+fn mark(id: &str) -> &'static str {
+    if id.starts_with("encode.") && id.contains(".cpu.") {
+        " *"
+    } else if id.starts_with("smartcut.") {
+        " †"
+    } else {
+        ""
+    }
+}
+
+const X264_NOTE: &str = "* NOT LIKE FOR LIKE: LIBX264 RUNS HAND-WRITTEN ASSEMBLY, WHILE OUR CPU H.264 ENCODER IS RUST WITH NO HAND-WRITTEN SIMD YET.";
+const CUT_NOTE: &str = "† NOT LIKE FOR LIKE: OUR EXPORT IS FRAME-ACCURATE; IT COPIES THE MIDDLE OF EACH PIECE AND RE-ENCODES THE FRAMES BETWEEN EACH CUT AND ITS NEAREST KEYFRAME (540 OF 780 FRAMES AT 1080P HERE). FFMPEG'S STREAM COPY ENCODES NOTHING AND CUTS ON KEYFRAMES, SO IT IS NOT FRAME-ACCURATE. FFMPEG'S RE-ENCODE IS FRAME-ACCURATE AND RE-ENCODES EVERY FRAME WITH LIBX264 VERYFAST, CRF 18.";
+
+fn strip(label: &str, word: &str) -> String {
+    if word.is_empty() {
+        label.to_string()
+    } else {
+        label.replacen(word, "", 1)
+    }
+}
+
+struct Spec {
+    file: &'static str,
+    title: &'static str,
+    unit: &'static str,
+    pick: fn(&str) -> bool,
+    group: fn(&str) -> (usize, &'static str),
+    strip: &'static str,
+    notes: &'static [&'static str],
+}
+
 fn charts(rows: &[Row], images: &Path, machine: &Machine, date: &str) -> Res<()> {
-    let sub = format!("{} + {} | {}", machine.cpu, machine.gpu, date);
-    let groups = [
-        (
-            "decode",
-            "bench-decode.png",
-            "DECODE SPEED",
-            "FFMPEG TIMES INCLUDE STARTING THE PROCESS. BIGGER BAR IS FASTER.",
-        ),
-        (
-            "encode",
-            "bench-encode.png",
-            "ENCODE SPEED",
-            "SAME RAW FRAMES AND SETTINGS ON BOTH SIDES. SEE RESULTS.JSON FOR SIZE AND PSNR.",
-        ),
-        (
-            "audio",
-            "bench-audio.png",
-            "AUDIO SPEED",
-            "RT = SECONDS OF AUDIO PER SECOND OF WORK. BIGGER BAR IS FASTER.",
-        ),
-        (
-            "pipeline",
-            "bench-pipeline.png",
-            "APP PIPELINE SPEED",
-            "FIRST FRAME: OURS IS IN-PROCESS, FFMPEG STARTS A PROCESS. BIGGER BAR IS FASTER.",
-        ),
+    let sub = format!("{} + {}, {}", machine.cpu, machine.gpu, date);
+    let none = |_: &str| (0, "");
+    let specs = [
+        Spec {
+            file: "bench-decode.png",
+            title: "DECODE SPEED",
+            unit: "FRAMES PER SECOND, HIGHER IS BETTER",
+            pick: |id| id.starts_with("decode."),
+            group: |id| {
+                if id.contains(".cpu") {
+                    (0, "CPU")
+                } else {
+                    (1, "GPU (VA-API)")
+                }
+            },
+            strip: " DECODE",
+            notes: &[
+                "SURFACE ONLY: FRAMES STAY ON THE GPU. READ BACK: EVERY FRAME IS COPIED TO MEMORY. FFMPEG'S TIMES INCLUDE STARTING ITS PROCESS.",
+            ],
+        },
+        Spec {
+            file: "bench-encode.png",
+            title: "ENCODE SPEED",
+            unit: "FRAMES PER SECOND, HIGHER IS BETTER",
+            pick: |id| id.starts_with("encode.") || id.starts_with("transcode."),
+            group: |id| {
+                if id.starts_with("transcode.") {
+                    (2, "GPU TRANSCODE: DECODE AND ENCODE ON THE GPU")
+                } else if id.contains(".cpu.") {
+                    (0, "CPU, CRF 23 (FFMPEG: LIBX264)")
+                } else {
+                    (1, "GPU (VA-API), QP 23")
+                }
+            },
+            strip: " ENCODE",
+            notes: &[
+                X264_NOTE,
+                "BOTH SIDES ENCODE THE SAME 240 RAW FRAMES; OURS HOLDS THEM IN MEMORY, FFMPEG READS THEM FROM A FILE.",
+            ],
+        },
+        Spec {
+            file: "bench-first-frame.png",
+            title: "TIME TO FIRST FRAME",
+            unit: "MILLISECONDS, LOWER IS BETTER",
+            pick: |id| id.starts_with("first-frame."),
+            group: none,
+            strip: " TIME TO FIRST FRAME",
+            notes: &[
+                "A COLD FILE OPENED AND ITS FIRST FRAME DECODED. OURS RUNS IN THE APP'S PROCESS; FFMPEG'S TIME INCLUDES STARTING ITS PROCESS, AS AN APP THAT CALLS FFMPEG PAYS IT.",
+            ],
+        },
+        Spec {
+            file: "bench-filmstrip.png",
+            title: "FILMSTRIP SPEED",
+            unit: "STILLS PER SECOND, HIGHER IS BETTER",
+            pick: |id| id.starts_with("filmstrip."),
+            group: none,
+            strip: " FILMSTRIP STILLS",
+            notes: &[
+                "12 STILLS AT 240 PX, SNAPPED TO KEYFRAMES. OURS RUNS IN ONE PROCESS; FFMPEG RUNS 12 PROCESSES, 8 AT A TIME.",
+            ],
+        },
+        Spec {
+            file: "bench-export.png",
+            title: "SMART-CUT EXPORT",
+            unit: "× REAL TIME, HIGHER IS BETTER",
+            pick: |id| id.starts_with("smartcut."),
+            group: none,
+            strip: "SMART-CUT EXPORT ",
+            notes: &[
+                "3 CUTS KEEP 10.1 S OF A 20 S CLIP. × REAL TIME IS SECONDS KEPT PER SECOND OF WORK.",
+                CUT_NOTE,
+            ],
+        },
+        Spec {
+            file: "bench-scale.png",
+            title: "SCALE SPEED",
+            unit: "FRAMES PER SECOND, HIGHER IS BETTER",
+            pick: |id| id.starts_with("scale."),
+            group: none,
+            strip: "SCALE ",
+            notes: &[
+                "BICUBIC, 8-BIT 4:2:0, ALL THREADS ON BOTH SIDES. OURS SCALES FRAMES IN MEMORY; FFMPEG READS THEM FROM A FILE.",
+            ],
+        },
+        Spec {
+            file: "bench-audio.png",
+            title: "AUDIO SPEED",
+            unit: "× REAL TIME, HIGHER IS BETTER",
+            pick: |id| id.starts_with("audio."),
+            group: none,
+            strip: "",
+            notes: &["× REAL TIME IS SECONDS OF AUDIO PER SECOND OF WORK."],
+        },
     ];
-    let mut all = Vec::new();
-    for (group, file, title, foot) in groups {
-        let entries: Vec<charts::Entry> = rows
+    let done: Vec<&Row> = rows
+        .iter()
+        .filter(|r| r.ours.is_some() && r.ffmpeg.is_some() && r.speedup.is_some())
+        .collect();
+    for spec in &specs {
+        let mut picked: Vec<&Row> = done
             .iter()
-            .filter(|r| r.group == group)
-            .filter_map(|r| {
-                let (o, f, s) = (r.ours?, r.ffmpeg?, r.speedup?);
-                let speed = |v: f64| if r.higher_is_better { v } else { 1.0 / v };
-                Some(charts::Entry {
-                    label: r.label.clone(),
-                    ours: speed(o),
-                    ffmpeg: speed(f),
-                    ours_text: fmt_value(o, &r.unit),
-                    ffmpeg_text: fmt_value(f, &r.unit),
-                    speedup: s,
-                })
+            .copied()
+            .filter(|r| (spec.pick)(&r.id))
+            .collect();
+        picked.sort_by_key(|r| (spec.group)(&r.id).0);
+        let entries: Vec<charts::Pair> = picked
+            .iter()
+            .map(|r| charts::Pair {
+                group: (spec.group)(&r.id).1.into(),
+                label: format!("{}{}", strip(&r.label, spec.strip), mark(&r.id)),
+                ours: r.ours.unwrap_or(0.0),
+                ffmpeg: r.ffmpeg.unwrap_or(0.0),
+                ours_text: fmt_value(r.ours.unwrap_or(0.0), &r.unit),
+                ffmpeg_text: fmt_value(r.ffmpeg.unwrap_or(0.0), &r.unit),
+                speedup: r.speedup.unwrap_or(1.0),
             })
             .collect();
-        for e in &entries {
-            all.push((e.label.clone(), e.speedup));
-        }
         if !entries.is_empty() {
-            charts::grouped(&images.join(file), title, &sub, foot, &entries)?;
+            let notes: Vec<String> = spec.notes.iter().map(|n| n.to_string()).collect();
+            charts::paired(
+                &images.join(spec.file),
+                spec.title,
+                spec.unit,
+                &sub,
+                &notes,
+                &entries,
+            )?;
         }
     }
-    if !all.is_empty() {
-        charts::speedup(
+    let mut all = done;
+    all.sort_by_key(|r| kind(&r.id).0);
+    let ratios: Vec<charts::Ratio> = all
+        .iter()
+        .map(|r| charts::Ratio {
+            group: kind(&r.id).1.into(),
+            label: format!("{}{}", r.label, mark(&r.id)),
+            speedup: r.speedup.unwrap_or(1.0),
+        })
+        .collect();
+    if !ratios.is_empty() {
+        let notes = [
+            "THE SAME JOB ON BOTH SIDES, AS MANY TIMES FASTER OR SLOWER THAN FFMPEG. THE MEASURED VALUES ARE IN THE CHARTS PER UNIT.".to_string(),
+            X264_NOTE.to_string(),
+            "† NOT LIKE FOR LIKE: OUR EXPORT IS FRAME-ACCURATE AND RE-ENCODES THE FRAMES AROUND EACH CUT. FFMPEG'S STREAM COPY ENCODES NOTHING AND CUTS ON KEYFRAMES; ITS RE-ENCODE RE-ENCODES EVERY FRAME.".to_string(),
+        ];
+        charts::ratios(
             &images.join("bench-speedup.png"),
             "PITO-CODECS VS FFMPEG",
+            "TIMES FASTER OR SLOWER, LOG SCALE",
             &sub,
-            &all,
+            &notes,
+            &ratios,
         )?;
     }
     Ok(())
@@ -1562,6 +1722,7 @@ fn charts(rows: &[Row], images: &Path, machine: &Machine, date: &str) -> Res<()>
 fn main() -> Res<()> {
     let mut args = std::env::args().skip(1);
     let mut runs = 3usize;
+    let mut quick = false;
     let mut only = Vec::new();
     let mut out = PathBuf::from("tmp/bench");
     let mut images = PathBuf::from("docs/images");
@@ -1571,6 +1732,10 @@ fn main() -> Res<()> {
     while let Some(a) = args.next() {
         match a.as_str() {
             "--runs" => runs = args.next().ok_or("--runs N")?.parse()?,
+            "--quick" => {
+                quick = true;
+                runs = 1;
+            }
             "--only" => only.push(args.next().ok_or("--only ID")?),
             "--out" => out = args.next().ok_or("--out DIR")?.into(),
             "--images" => images = args.next().ok_or("--images DIR")?.into(),
@@ -1579,13 +1744,18 @@ fn main() -> Res<()> {
             "--no-charts" => no_charts = true,
             _ => {
                 return Err(format!(
-                    "usage: bench [--runs N] [--only ID]... [--out DIR] [--images DIR] [--fixtures DIR] [--charts-only] [--no-charts] (unknown {a})"
+                    "usage: bench [--runs N] [--quick] [--only ID]... [--out DIR] [--images DIR] [--fixtures DIR] [--charts-only] [--no-charts] (unknown {a})"
                 )
                 .into());
             }
         }
     }
-    let results_path = out.join("results.json");
+    QUICK.store(quick, Ordering::Relaxed);
+    let results_path = out.join(if quick {
+        "results-quick.json"
+    } else {
+        "results.json"
+    });
     if charts_only {
         let r: Results = serde_json::from_slice(&fs::read(&results_path)?)?;
         charts(&r.rows, &images, &r.machine, &r.date)?;
@@ -1637,7 +1807,7 @@ fn main() -> Res<()> {
     };
     fs::write(&results_path, serde_json::to_vec_pretty(&merged)?)?;
     println!("wrote {}", results_path.display());
-    if !no_charts && b.only.is_empty() {
+    if !no_charts && !quick && b.only.is_empty() {
         charts(&merged.rows, &images, &merged.machine, &merged.date)?;
         println!("wrote charts to {}", images.display());
     }

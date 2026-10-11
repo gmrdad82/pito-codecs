@@ -1,5 +1,6 @@
 mod decode;
 mod encode;
+mod order;
 mod planes;
 
 use objc2_core_media::{CMVideoCodecType, kCMVideoCodecType_H264, kCMVideoCodecType_HEVC};
@@ -9,7 +10,7 @@ use objc2_core_video::{
     CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
 };
 
-use crate::gpu::{Backend, DecoderBackend, Direction, EncoderBackend, EncoderConfig};
+use crate::gpu::{Backend, DecoderBackend, Direction, EncoderBackend, EncoderConfig, GpuFrame};
 use crate::media::{Codec, Error, Frame, Packet, Result};
 
 use decode::VtDecoder;
@@ -25,7 +26,9 @@ fn codec_type(codec: Codec) -> Result<CMVideoCodecType> {
     match codec {
         Codec::H264 => Ok(kCMVideoCodecType_H264),
         Codec::Hevc => Ok(kCMVideoCodecType_HEVC),
-        Codec::Aac => Err(Error::Unsupported("AAC on the GPU".into())),
+        Codec::Aac | Codec::Vp9 | Codec::Opus => {
+            Err(Error::Unsupported(format!("{codec:?} on VideoToolbox")))
+        }
     }
 }
 
@@ -150,6 +153,10 @@ impl EncoderBackend for VtEncoder {
 
     fn encode(&mut self, frame: &Frame) -> Result<Vec<Packet>> {
         VtEncoder::encode(self, frame)
+    }
+
+    fn encode_gpu(&mut self, frame: &GpuFrame) -> Result<Vec<Packet>> {
+        VtEncoder::encode_gpu(self, frame)
     }
 
     fn flush(&mut self) -> Result<Vec<Packet>> {
