@@ -261,14 +261,16 @@ fn mp4_to_mkv() {
     }
     let mp4 = dir().join("bframes.mp4");
     if !mp4.exists() {
+        let tmp = dir().join(format!(".{}-bframes.mp4", std::process::id()));
         let st = Command::new("ffmpeg")
             .args(["-v", "error", "-y"])
             .args(sources(4))
             .args(H264)
-            .arg(&mp4)
+            .arg(&tmp)
             .status()
             .unwrap();
         assert!(st.success());
+        std::fs::rename(&tmp, &mp4).unwrap();
     }
     let out = dir().join("from-mp4.mkv");
     remux_mp4(&mp4, &out).unwrap();
