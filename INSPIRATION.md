@@ -4,6 +4,8 @@
 
 I wanted something smaller and faster, written natively in Rust, for the PITO family of apps and my games. One library each app can carry, with no external ffmpeg to download, bundle or keep in step, and the GPU used first.
 
+It is my own Rust, built for speed, that I can change and release on my own schedule, with fast iterations, instead of waiting on ffmpeg's and other projects' releases. Everything taken in is permissively licensed, so pito-codecs stays MIT.
+
 ## Origins
 
 The codecs here are written in Rust. Parts are adapted from permissively licensed projects, each named below with the tag or commit it was taken from; their copyright and licence texts are kept in `NOTICE`.
