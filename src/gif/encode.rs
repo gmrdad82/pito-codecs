@@ -1,5 +1,6 @@
 use super::lzw::LzwEncoder;
 use super::quant::{Dither, Histogram, Lut, Mapper, Palette};
+use super::{Error, Result};
 use crate::filter::Rgba;
 use rayon::prelude::*;
 use std::cell::RefCell;
@@ -94,6 +95,23 @@ fn bits_for(entries: usize) -> u8 {
     b
 }
 
+fn check_size(width: u32, height: u32) -> Result<()> {
+    if !(1..=65535).contains(&width) || !(1..=65535).contains(&height) {
+        return Err(Error::Invalid("GIF sides are 1 to 65535"));
+    }
+    Ok(())
+}
+
+fn check_frame(frame: &Rgba, width: usize, height: usize) -> Result<()> {
+    if frame.width as usize != width || frame.height as usize != height {
+        return Err(Error::Invalid("every frame has the canvas size"));
+    }
+    if frame.data.len() < width * height * 4 {
+        return Err(Error::Invalid("frame data shorter than its size"));
+    }
+    Ok(())
+}
+
 fn packed_colors(p: &Palette) -> [u32; 256] {
     let mut t = [0u32; 256];
     for (d, c) in t.iter_mut().zip(p.colors()) {
@@ -103,16 +121,13 @@ fn packed_colors(p: &Palette) -> [u32; 256] {
 }
 
 impl Encoder {
-    pub fn new(width: u32, height: u32, opts: EncodeOptions) -> Encoder {
-        assert!(
-            (1..=65535).contains(&width) && (1..=65535).contains(&height),
-            "GIF sides are 1 to 65535"
-        );
+    pub fn new(width: u32, height: u32, opts: EncodeOptions) -> Result<Encoder> {
+        check_size(width, height)?;
         let opts = EncodeOptions {
             colors: opts.colors.clamp(2, 256),
             ..opts
         };
-        Encoder {
+        Ok(Encoder {
             width: width as usize,
             height: height as usize,
             opts,
@@ -126,30 +141,33 @@ impl Encoder {
             canvas: vec![0; width as usize * height as usize],
             held: None,
             spare: Vec::new(),
-        }
+        })
     }
 
-    pub fn with_palette(width: u32, height: u32, opts: EncodeOptions, palette: Palette) -> Encoder {
-        let mut e = Encoder::new(width, height, opts);
-        let palette = Palette::new(palette.colors()[..palette.len().min(255)].to_vec());
+    pub fn with_palette(
+        width: u32,
+        height: u32,
+        opts: EncodeOptions,
+        palette: Palette,
+    ) -> Result<Encoder> {
+        let mut e = Encoder::new(width, height, opts)?;
+        let palette = Palette::new(palette.colors()[..palette.len().min(255)].to_vec())?;
         let lut = Lut::new(&palette);
         e.global = Some((palette, lut));
-        e
+        Ok(e)
     }
 
     fn max_colors(&self) -> usize {
         self.opts.colors.min(255)
     }
 
-    pub fn push(&mut self, frame: Rgba, delay_cs: u16) {
-        assert!(
-            frame.width as usize == self.width && frame.height as usize == self.height,
-            "every frame has the canvas size"
-        );
+    pub fn push(&mut self, frame: Rgba, delay_cs: u16) -> Result<()> {
+        check_frame(&frame, self.width, self.height)?;
         self.batch.push((frame, delay_cs));
         if self.batch.len() >= batch_size() {
             self.flush_batch(false);
         }
+        Ok(())
     }
 
     fn flush_batch(&mut self, last: bool) {
@@ -178,12 +196,6 @@ impl Encoder {
     }
 
     fn process(&mut self, frames: &[(&Rgba, u16)], last: bool) {
-        assert!(
-            frames
-                .iter()
-                .all(|f| f.0.width as usize == self.width && f.0.height as usize == self.height),
-            "every frame has the canvas size"
-        );
         if self.opts.palette == PaletteMode::Global && self.global.is_none() && !frames.is_empty() {
             let refs: Vec<&Rgba> = frames.iter().map(|f| f.0).collect();
             let palette = Palette::from_frames(&refs, self.max_colors());
@@ -514,17 +526,21 @@ crate::gif::isa::dispatch! {
     }
 }
 
-pub fn encode(frames: &[Rgba], delays_cs: &[u16], opts: EncodeOptions) -> Vec<u8> {
+pub fn encode(frames: &[Rgba], delays_cs: &[u16], opts: EncodeOptions) -> Result<Vec<u8>> {
     let Some(first) = frames.first() else {
-        return Encoder::new(1, 1, opts).finish();
+        return Err(Error::Invalid("no frames to encode"));
     };
+    check_size(first.width, first.height)?;
+    for f in frames {
+        check_frame(f, first.width as usize, first.height as usize)?;
+    }
     let mut e = match opts.palette {
         PaletteMode::Global => {
             let refs: Vec<&Rgba> = frames.iter().collect();
             let palette = Palette::from_frames(&refs, opts.colors.clamp(2, 256).min(255));
-            Encoder::with_palette(first.width, first.height, opts, palette)
+            Encoder::with_palette(first.width, first.height, opts, palette)?
         }
-        PaletteMode::PerFrame => Encoder::new(first.width, first.height, opts),
+        PaletteMode::PerFrame => Encoder::new(first.width, first.height, opts)?,
     };
     let delays: Vec<u16> = (0..frames.len())
         .map(|i| delays_cs.get(i).copied().unwrap_or(10))
@@ -535,5 +551,5 @@ pub fn encode(frames: &[Rgba], delays_cs: &[u16], opts: EncodeOptions) -> Vec<u8
     for (i, chunk) in refs.chunks(size).enumerate() {
         e.process(chunk, i + 1 == chunks);
     }
-    e.close()
+    Ok(e.close())
 }

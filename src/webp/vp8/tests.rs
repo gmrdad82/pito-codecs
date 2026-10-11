@@ -61,6 +61,73 @@ fn decodes_libwebp_bit_exact() {
     let _ = (Options::default(), Rgba::new(1, 1));
 }
 
+#[test]
+fn decodes_libvpx_partitions_and_simple_filter_like_ffmpeg() {
+    let cases = [
+        ("testsrc2", "0", "1", "0", 352, 288, "30"),
+        ("mandelbrot", "0", "8", "0", 352, 288, "50"),
+        ("testsrc2", "0", "4", "3", 352, 288, "50"),
+        ("mandelbrot", "1", "1", "0", 352, 288, "50"),
+        ("testsrc2", "1", "8", "6", 640, 360, "40"),
+        ("mandelbrot", "3", "2", "2", 98, 62, "60"),
+    ];
+    for (src, profile, slices, sharpness, w, h, q) in cases {
+        let ivf = oracle::dir().join(format!("libvpx-{profile}-{}.ivf", std::process::id()));
+        let lavfi = format!("{src}=s={w}x{h}:r=1");
+        let made = oracle::ffmpeg(&[
+            "-f",
+            "lavfi",
+            "-i",
+            &lavfi,
+            "-frames:v",
+            "1",
+            "-c:v",
+            "libvpx",
+            "-profile:v",
+            profile,
+            "-slices",
+            slices,
+            "-sharpness",
+            sharpness,
+            "-qmin",
+            q,
+            "-qmax",
+            "63",
+            "-b:v",
+            "50k",
+            "-f",
+            "ivf",
+            ivf.to_str().unwrap(),
+        ]);
+        if !made {
+            return;
+        }
+        let file = std::fs::read(&ivf).unwrap();
+        let theirs = std::process::Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+            .arg(&ivf)
+            .args([
+                "-frames:v",
+                "1",
+                "-pix_fmt",
+                "yuv420p",
+                "-f",
+                "rawvideo",
+                "-",
+            ])
+            .output()
+            .unwrap();
+        std::fs::remove_file(&ivf).ok();
+        assert!(theirs.status.success());
+        let frame = &file[32 + 12..];
+        let f = super::decode_yuv(frame).expect("decode");
+        assert!(
+            crop(&f).concat() == theirs.stdout,
+            "{src} profile {profile}, {slices} partitions, sharpness {sharpness}: differs from ffmpeg"
+        );
+    }
+}
+
 fn timed<T>(n: usize, mut f: impl FnMut() -> T) -> (f64, T) {
     let mut best = f64::MAX;
     let mut out = f();

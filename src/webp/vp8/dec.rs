@@ -4,6 +4,7 @@ use super::filter::{self, Strength};
 use super::tables::*;
 use super::yuv;
 use crate::media::{Error, Result};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 pub type Probs = [[[[u8; 11]; 3]; 17]; 4];
 
@@ -197,7 +198,9 @@ pub fn header(data: &[u8]) -> Result<Header<'_>> {
                     l += mode_delta;
                 }
             }
-            *st = filter::strength(l, sharpness, i4 == 1);
+            if level > 0 {
+                *st = filter::strength(l, sharpness, i4 == 1);
+            }
         }
     }
     Ok(Header {
@@ -369,34 +372,23 @@ impl RowData {
     }
 }
 
-pub struct Parser<'a> {
-    pub hdr: Header<'a>,
-    parts: Vec<BoolDecoder<'a>>,
+pub struct Modes<'a> {
+    br: BoolDecoder<'a>,
     intra_t: Vec<u8>,
-    nz_t: Vec<u32>,
+    segment_map: bool,
+    segment_probs: [u8; 3],
+    skip_prob: Option<u8>,
 }
 
-impl<'a> Parser<'a> {
-    pub fn new(data: &'a [u8]) -> Result<Self> {
-        let hdr = header(data)?;
-        let parts = hdr.parts.iter().map(|p| BoolDecoder::new(p)).collect();
-        let mb_w = hdr.mb_w;
-        Ok(Parser {
-            parts,
-            intra_t: vec![0; mb_w * 4],
-            nz_t: vec![0; mb_w],
-            hdr,
-        })
-    }
-
-    fn modes(&mut self, intra_l: &mut [u8; 4], mx: usize) -> Mb {
-        let br = &mut self.hdr.first;
-        let segment = if self.hdr.segment_map {
-            br.tree(&SEGMENT_TREE, &self.hdr.segment_probs)
+impl Modes<'_> {
+    fn mb(&mut self, intra_l: &mut [u8; 4], mx: usize) -> Mb {
+        let br = &mut self.br;
+        let segment = if self.segment_map {
+            br.tree(&SEGMENT_TREE, &self.segment_probs)
         } else {
             0
         };
-        let skip = match self.hdr.skip_prob {
+        let skip = match self.skip_prob {
             Some(p) => br.get(p),
             None => false,
         };
@@ -426,6 +418,74 @@ impl<'a> Parser<'a> {
         }
     }
 
+    pub fn row(&mut self, out: &mut [MbData]) {
+        let mut intra_l = [0u8; 4];
+        for (mx, d) in out.iter_mut().enumerate() {
+            d.mb = self.mb(&mut intra_l, mx);
+        }
+    }
+}
+
+pub struct Tables {
+    probs: Probs,
+    quant: [Quant; 4],
+    strength: [[Strength; 2]; 4],
+}
+
+pub trait Above {
+    fn get(&mut self, mx: usize) -> u32;
+    fn set(&mut self, mx: usize, v: u32);
+}
+
+impl Above for [u32] {
+    #[inline(always)]
+    fn get(&mut self, mx: usize) -> u32 {
+        self[mx]
+    }
+
+    #[inline(always)]
+    fn set(&mut self, mx: usize, v: u32) {
+        self[mx] = v;
+    }
+}
+
+struct Wave<'s> {
+    nz: &'s [AtomicU32],
+    above: Option<&'s AtomicUsize>,
+    mine: &'s AtomicUsize,
+}
+
+impl Above for Wave<'_> {
+    #[inline(always)]
+    fn get(&mut self, mx: usize) -> u32 {
+        if let Some(a) = self.above {
+            let mut spins = 0u32;
+            while a.load(Ordering::Acquire) <= mx {
+                if spins < 64 {
+                    std::hint::spin_loop();
+                    spins += 1;
+                } else {
+                    std::thread::yield_now();
+                }
+            }
+        }
+        self.nz[mx].load(Ordering::Relaxed)
+    }
+
+    #[inline(always)]
+    fn set(&mut self, mx: usize, v: u32) {
+        self.nz[mx].store(v, Ordering::Relaxed);
+        self.mine.store(mx + 1, Ordering::Release);
+    }
+}
+
+pub struct Tokens<'a> {
+    parts: Vec<BoolDecoder<'a>>,
+    nz_t: Vec<u32>,
+    tables: Tables,
+}
+
+impl Tokens<'_> {
     fn residuals(
         br: &mut BoolDecoder,
         probs: &Probs,
@@ -512,33 +572,85 @@ impl<'a> Parser<'a> {
         (ac, any)
     }
 
-    pub fn row(&mut self, my: usize, out: &mut RowData) {
-        let mut intra_l = [0u8; 4];
+    fn mb_row<A: Above + ?Sized>(
+        c: &Tables,
+        br: &mut BoolDecoder,
+        above: &mut A,
+        out: &mut RowData,
+    ) {
         let mut nz_l = 0u32;
-        let part = my % self.parts.len();
-        for mx in 0..self.hdr.mb_w {
-            let mb = self.modes(&mut intra_l, mx);
+        for (mx, d) in out.mbs.iter_mut().enumerate() {
+            let mb = d.mb;
+            let mut t = above.get(mx);
             let (ac, any) = if mb.skip {
                 let keep = if mb.ymode == B_PRED { 0x100 } else { 0 };
-                self.nz_t[mx] &= keep;
+                t &= keep;
                 nz_l &= keep;
                 (0, false)
             } else {
                 Self::residuals(
-                    &mut self.parts[part],
-                    &self.hdr.probs,
-                    &self.hdr.quant[mb.segment as usize],
+                    br,
+                    &c.probs,
+                    &c.quant[mb.segment as usize],
                     &mb,
-                    &mut self.nz_t[mx],
+                    &mut t,
                     &mut nz_l,
                     &mut out.coeffs[mx * 384..mx * 384 + 384],
                 )
             };
-            let mut strength =
-                self.hdr.strength[mb.segment as usize][(mb.ymode == B_PRED) as usize];
+            above.set(mx, t);
+            let mut strength = c.strength[mb.segment as usize][(mb.ymode == B_PRED) as usize];
             strength.inner |= any;
-            out.mbs[mx] = MbData { mb, ac, strength };
+            d.ac = ac;
+            d.strength = strength;
         }
+    }
+
+    pub fn row(&mut self, my: usize, out: &mut RowData) {
+        let part = my % self.parts.len();
+        Self::mb_row(
+            &self.tables,
+            &mut self.parts[part],
+            self.nz_t.as_mut_slice(),
+            out,
+        );
+    }
+}
+
+pub struct Parser<'a> {
+    pub hdr: Header<'a>,
+    pub modes: Modes<'a>,
+    pub tokens: Tokens<'a>,
+}
+
+impl<'a> Parser<'a> {
+    pub fn new(data: &'a [u8]) -> Result<Self> {
+        let hdr = header(data)?;
+        let mb_w = hdr.mb_w;
+        Ok(Parser {
+            modes: Modes {
+                br: hdr.first.clone(),
+                intra_t: vec![0; mb_w * 4],
+                segment_map: hdr.segment_map,
+                segment_probs: hdr.segment_probs,
+                skip_prob: hdr.skip_prob,
+            },
+            tokens: Tokens {
+                parts: hdr.parts.iter().map(|p| BoolDecoder::new(p)).collect(),
+                nz_t: vec![0; mb_w],
+                tables: Tables {
+                    probs: hdr.probs,
+                    quant: hdr.quant,
+                    strength: hdr.strength,
+                },
+            },
+            hdr,
+        })
+    }
+
+    pub fn row(&mut self, my: usize, out: &mut RowData) {
+        self.modes.row(&mut out.mbs);
+        self.tokens.row(my, out);
     }
 }
 
@@ -708,6 +820,12 @@ impl Raw {
         assert!(a <= b);
         unsafe { std::slice::from_raw_parts_mut(self.0.add(a), b - a) }
     }
+
+    unsafe fn view(&self, stride: usize, a: usize, b: usize) -> &[u8] {
+        let (a, b) = (a * stride, (b * stride).min(self.1));
+        assert!(a <= b);
+        unsafe { std::slice::from_raw_parts(self.0.add(a), b - a) }
+    }
 }
 
 struct Shared {
@@ -761,9 +879,9 @@ impl Shared {
         let ce = (b - 1) / 2 + 1;
         let p = unsafe {
             yuv::Yuv {
-                y: self.y.rows(self.ys, yr, b),
-                u: self.u.rows(self.uvs, cr, ce),
-                v: self.v.rows(self.uvs, cr, ce),
+                y: self.y.view(self.ys, yr, b),
+                u: self.u.view(self.uvs, cr, ce),
+                v: self.v.view(self.uvs, cr, ce),
                 ys: self.ys,
                 uvs: self.uvs,
                 yr,
@@ -780,7 +898,7 @@ fn band_end(my: usize, mb_h: usize, height: usize) -> usize {
     if my + 1 == mb_h { height } else { my * 16 + 9 }
 }
 
-const RING: usize = 6;
+const RING: usize = 12;
 
 pub fn decode_rgba(data: &[u8], out: &mut [u8]) -> Result<()> {
     let mut parser = Parser::new(data)?;
@@ -824,20 +942,59 @@ pub fn decode_rgba(data: &[u8], out: &mut [u8]) -> Result<()> {
         return Ok(());
     }
     let sh = &sh;
+    let Parser {
+        mut modes, tokens, ..
+    } = parser;
+    let Tokens { parts, tables, .. } = tokens;
+    let nparts = parts.len();
+    let workers = nparts.min(threads.saturating_sub(3)).max(1);
+    let mut groups: Vec<Vec<BoolDecoder>> = (0..workers).map(|_| Vec::new()).collect();
+    for (p, br) in parts.into_iter().enumerate() {
+        groups[p % workers].push(br);
+    }
+    let nz: Vec<AtomicU32> = (0..mb_w).map(|_| AtomicU32::new(0)).collect();
+    let progress: Vec<AtomicUsize> = (0..mb_h).map(|_| AtomicUsize::new(0)).collect();
+    let (tables, nz, progress) = (&tables, &nz[..], &progress[..]);
     std::thread::scope(|s| {
         use std::sync::mpsc::channel;
         let (free_tx, free_rx) = channel::<RowData>();
         let (full_tx, full_rx) = channel::<(usize, RowData)>();
         let (done_tx, done_rx) = channel::<(usize, RowData)>();
-        let (band_tx, band_rx) = channel::<(usize, usize, &mut [u8])>();
         for _ in 0..RING {
             free_tx.send(RowData::new(mb_w)).ok();
         }
+        let mut work = Vec::with_capacity(workers);
+        for mut group in groups {
+            let (tx, rx) = channel::<(usize, RowData)>();
+            work.push(tx);
+            let full_tx = full_tx.clone();
+            s.spawn(move || {
+                for (my, mut row) in rx {
+                    let mut wave = Wave {
+                        nz,
+                        above: my.checked_sub(1).map(|a| &progress[a]),
+                        mine: &progress[my],
+                    };
+                    let br = &mut group[(my % nparts) / workers];
+                    Tokens::mb_row(tables, br, &mut wave, &mut row);
+                    if full_tx.send((my, row)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(full_tx);
         s.spawn(move || {
-            for (my, mut row) in full_rx {
-                unsafe { sh.recon(&mut recon, my, &mut row) };
-                if done_tx.send((my, row)).is_err() {
-                    break;
+            let mut held: Vec<Option<RowData>> = (0..RING).map(|_| None).collect();
+            let mut next = 0;
+            for (my, row) in full_rx {
+                held[my % RING] = Some(row);
+                while let Some(mut row) = held[next % RING].take() {
+                    unsafe { sh.recon(&mut recon, next, &mut row) };
+                    if done_tx.send((next, row)).is_err() {
+                        return;
+                    }
+                    next += 1;
                 }
             }
         });
@@ -846,24 +1003,19 @@ pub fn decode_rgba(data: &[u8], out: &mut [u8]) -> Result<()> {
             for (my, row) in done_rx {
                 unsafe { sh.filter_row(my, &row.mbs) };
                 free_tx.send(row).ok();
-                if let Some(b) = bands.next() {
-                    band_tx.send(b).ok();
+                if let Some((a, b, band)) = bands.next() {
+                    unsafe { sh.convert(a, b, band) };
                 }
-            }
-        });
-        s.spawn(move || {
-            for (a, b, band) in band_rx {
-                unsafe { sh.convert(a, b, band) };
             }
         });
         for my in 0..mb_h {
             let Ok(mut row) = free_rx.recv() else { break };
-            parser.row(my, &mut row);
-            if full_tx.send((my, row)).is_err() {
+            modes.row(&mut row.mbs);
+            if work[(my % nparts) % workers].send((my, row)).is_err() {
                 break;
             }
         }
-        drop(full_tx);
+        drop(work);
     });
     Ok(())
 }

@@ -8,6 +8,7 @@ pub fn qscale2qp(q: f64) -> f64 {
 }
 
 const QCOMP: f64 = 0.6;
+const CRF_TREE_SHIFT: f64 = 3.0;
 
 fn type_idx(t: SliceType) -> usize {
     match t {
@@ -89,7 +90,7 @@ impl RateControl {
                 };
             }
             RcKind::Crf(c) => {
-                let c = *c as f64;
+                let c = *c as f64 + CRF_TREE_SHIFT;
                 return (c + match t {
                     SliceType::I => -2.0,
                     SliceType::P => 0.0,

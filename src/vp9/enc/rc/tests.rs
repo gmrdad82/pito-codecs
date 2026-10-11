@@ -105,9 +105,13 @@ fn synthetic(rc: &mut RateControl, frames: usize, keyint: usize, stats: &[FrameA
         };
         let a = stats[i];
         let p = rc.plan(kind, &a);
-        let k = if kind == FrameKind::Key { 3.1 } else { 1.7 };
+        let (k, e) = if kind == FrameKind::Key {
+            (3.1, 0.8)
+        } else {
+            (40.0, 1.4)
+        };
         let wobble = 1.0 + 0.15 * ((i as f64) * 0.7).sin();
-        let bits = (k * a.cost(kind) as f64 / qstep(p.base_q_idx).powf(1.08) * wobble) as u64;
+        let bits = (k * a.cost(kind) as f64 / qstep(p.base_q_idx).powf(e) * wobble) as u64;
         rc.update(kind, bits, p.base_q_idx);
         total += bits;
     }
@@ -174,7 +178,9 @@ fn variance_aq_gives_flat_areas_the_finer_quantiser() {
             img[y * w + x] = tex[y * w + x];
         }
     }
-    let mut rc = RateControl::new(RcConfig::new(RcMode::Crf { crf: 30 }, w, h));
+    let mut cfg = RcConfig::new(RcMode::Crf { crf: 30 }, w, h);
+    cfg.aq = Aq::Variance;
+    let mut rc = RateControl::new(cfg);
     let a = rc.analyse(&img, w);
     let p = rc.plan(FrameKind::Key, &a);
     let seg = rc.segmentation();

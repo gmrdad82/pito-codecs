@@ -3,9 +3,9 @@ use crate::hevc::dpb::{Dpb, Output, OutputMeta, PocState, RefPicSet, build_ref_l
 use crate::hevc::error::{Error, Result, ensure, invalid};
 use crate::hevc::params::{Layout, Pps, Sps, Vps};
 use crate::hevc::pel::Pel;
-use crate::hevc::picture::{Frame, FrameRef, RowPool};
+use crate::hevc::picture::{Frame, FrameRef, PlanePool};
 use crate::hevc::slice::{NalHeader, SliceHeader, nal_type};
-use crate::hevc::slicedec::{PicState, Pool, Scaling, SliceDecoder, SliceJob};
+use crate::hevc::slicedec::{PicState, Pool, Scaling, SliceDecoder, SliceJob, SliceRun};
 use crate::hevc::{ColorInfo, Hvcc};
 use crate::media::{Frame as Image, Packet, PixelFormat, Plane, TimeBase};
 use std::collections::VecDeque;
@@ -32,18 +32,20 @@ struct Shared {
     error: Mutex<Option<Error>>,
     pool8: Pool<u8>,
     pool16: Pool<u16>,
-    rows: RowPool,
+    rows: PlanePool,
     images: Mutex<Vec<Vec<u8>>>,
 }
 
 impl Shared {
     fn image_buffers(&self) -> [Vec<u8>; 3] {
         let mut p = self.images.lock().unwrap_or_else(PoisonError::into_inner);
-        [
+        let mut b = [
             p.pop().unwrap_or_default(),
             p.pop().unwrap_or_default(),
             p.pop().unwrap_or_default(),
-        ]
+        ];
+        b.sort_by_key(|v| std::cmp::Reverse(v.capacity()));
+        b
     }
 }
 
@@ -556,6 +558,11 @@ fn run_job(job: Job, shared: &Shared) {
         helpers,
     } = job;
     let slices = Arc::new(slices);
+    if let Some((meta, _)) = &out {
+        let (cx, cy, cw, ch) = meta.crop;
+        let crop = (cx as usize, cy as usize, cw as usize, ch as usize);
+        frame.set_output(crop, shared.image_buffers());
+    }
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let input = Input {
             frame: frame.clone(),
@@ -573,24 +580,11 @@ fn run_job(job: Job, shared: &Shared) {
             decode_picture::<u8>(input, shared.pool8.clone())
         }
     }));
+    let ready = result.is_ok();
     let err = match result {
         Ok(e) => e,
         Err(_) => {
-            let gray = Frame::gray(0, frame.poc, &frame);
-            for r in 0..frame.num_rows() {
-                if !frame.is_published(r) {
-                    let row = gray.row(r);
-                    frame.publish(
-                        r,
-                        crate::hevc::picture::FrameRow {
-                            y: row.y.clone(),
-                            cb: row.cb.clone(),
-                            cr: row.cr.clone(),
-                            col: row.col.clone(),
-                        },
-                    );
-                }
-            }
+            frame.fill_unpublished_gray();
             Some(Error::Invalid(
                 "internal error while decoding a picture".into(),
             ))
@@ -600,8 +594,10 @@ fn run_job(job: Job, shared: &Shared) {
         slot.get_or_insert(e);
     }
     if let Some((meta, time_base)) = out {
-        let image = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            convert(&frame, &meta, time_base, shared.image_buffers())
+        let bufs = frame.take_output();
+        let image = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match bufs {
+            Some(b) if ready => image(&meta, time_base, b),
+            b => convert(&frame, &meta, time_base, b.unwrap_or_default()),
         }))
         .ok();
         let _ = frame.image.set(Mutex::new(image));
@@ -640,6 +636,19 @@ fn decode_picture<P: Pel>(input: Input, pool: Pool<P>) -> Option<Error> {
         draft,
         Some(pool),
     ));
+    if helpers > 0
+        && let Some(run) = SliceRun::plan(&pic, &slices)
+    {
+        let run = Arc::new(run);
+        for _ in 0..helpers.min(run.slices() - 1) {
+            let (pic, slices, run) = (pic.clone(), slices.clone(), run.clone());
+            rayon::spawn(move || run.work(&pic, &slices));
+        }
+        run.work(&pic, &slices);
+        pic.signal.wait_until(|| run.done());
+        crate::hevc::filter::finish(&pic);
+        return run.take_error();
+    }
     let mut first_err = None;
     for (i, s) in slices.iter().enumerate() {
         let plan = if helpers > 0 { s.row_plan(&pic) } else { None };
@@ -686,8 +695,13 @@ crate::hevc::isa::dispatch! {
 fn convert(frame: &Frame, meta: &OutputMeta, time_base: TimeBase, bufs: [Vec<u8>; 3]) -> Image {
     let (cx, cy, cw, ch) = meta.crop;
     let (cx, cy, cw, ch) = (cx as usize, cy as usize, cw as usize, ch as usize);
+    image(meta, time_base, frame.copy_cropped((cx, cy, cw, ch), bufs))
+}
+}
+
+fn image(meta: &OutputMeta, time_base: TimeBase, [y, u, v]: [Vec<u8>; 3]) -> Image {
+    let (cw, ch) = (meta.crop.2 as usize, meta.crop.3 as usize);
     let wide = meta.bit_depth > 8;
-    let [y, u, v] = frame.copy_cropped((cx, cy, cw, ch), bufs);
     let (ccw, cch) = (cw.div_ceil(2), ch.div_ceil(2));
     let bps = if wide { 2 } else { 1 };
     let plane = |data: Vec<u8>, w: usize, h: usize| Plane {
@@ -708,5 +722,4 @@ fn convert(frame: &Frame, meta: &OutputMeta, time_base: TimeBase, bufs: [Vec<u8>
         time_base,
         planes: [plane(y, cw, ch), plane(u, ccw, cch), plane(v, ccw, cch)],
     }
-}
 }

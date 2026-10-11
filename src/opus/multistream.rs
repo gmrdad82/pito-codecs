@@ -23,6 +23,18 @@ impl Decoder {
     }
 
     pub fn from_head(head: OpusHead, sample_rate: u32) -> Result<Decoder> {
+        if head.channels == 0
+            || head.streams == 0
+            || head.coupled_streams > head.streams
+            || head.streams.saturating_add(head.coupled_streams) > 255
+            || head.mapping.len() != head.channels
+            || head
+                .mapping
+                .iter()
+                .any(|&m| m != 255 && m as usize >= head.streams + head.coupled_streams)
+        {
+            return Err(Error::Invalid("inconsistent Opus channel mapping".into()));
+        }
         let mut streams = Vec::with_capacity(head.streams);
         for s in 0..head.streams {
             let ch = if s < head.coupled_streams { 2 } else { 1 };
@@ -97,7 +109,10 @@ impl Decoder {
                     self.streams[0].conceal(dur, out)?
                 }
             };
-            if self.head.mapping_family != 0 || self.head.mapping != [0, 1][..self.head.channels] {
+            if self.head.mapping_family != 0
+                || self.head.channels != self.streams[0].channels()
+                || self.head.mapping != [0, 1][..self.head.channels]
+            {
                 let ch = self.head.channels;
                 let tmp = &mut self.scratch[0];
                 tmp.clear();

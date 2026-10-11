@@ -6,15 +6,15 @@ use crate::hevc::spec_tables::{CHROMA_FILTER, LUMA_FILTER};
 const WIN: usize = 64 + 7;
 
 pub struct McScratch<P: Pel> {
-    win: Vec<P>,
     tmp: Vec<i16>,
+    pel: std::marker::PhantomData<P>,
 }
 
 impl<P: Pel> Default for McScratch<P> {
     fn default() -> Self {
         McScratch {
-            win: vec![P::default(); WIN * WIN],
             tmp: vec![0; WIN * WIN],
+            pel: std::marker::PhantomData,
         }
     }
 }
@@ -74,65 +74,6 @@ fn filt<const T: usize, S: Copy + Into<i32>>(
     }
 }
 
-#[inline(always)]
-fn filt_lines_w<const T: usize, const W: usize, P: Pel>(
-    lines: &[&[P]],
-    x: usize,
-    f: &[i8; T],
-    shift: u32,
-    out: &mut [i16],
-) {
-    let mut acc = [0i32; W];
-    for k in 0..T {
-        let c = f[k] as i32;
-        let Some(p) = lines
-            .get(k)
-            .and_then(|l| l.get(x..))
-            .and_then(|s| s.first_chunk::<W>())
-        else {
-            return;
-        };
-        for j in 0..W {
-            acc[j] += c * p[j].into();
-        }
-    }
-    let Some(o) = out.first_chunk_mut::<W>() else {
-        return;
-    };
-    for j in 0..W {
-        o[j] = (acc[j] >> shift) as i16;
-    }
-}
-
-#[inline(always)]
-fn filt_lines<const T: usize, P: Pel>(
-    lines: &[&[P]],
-    x: usize,
-    f: &[i8; T],
-    shift: u32,
-    out: &mut [i16],
-    w: usize,
-) {
-    match w {
-        2 => filt_lines_w::<T, 2, P>(lines, x, f, shift, out),
-        4 => filt_lines_w::<T, 4, P>(lines, x, f, shift, out),
-        6 => filt_lines_w::<T, 6, P>(lines, x, f, shift, out),
-        8 => filt_lines_w::<T, 8, P>(lines, x, f, shift, out),
-        12 => filt_lines_w::<T, 12, P>(lines, x, f, shift, out),
-        16 => filt_lines_w::<T, 16, P>(lines, x, f, shift, out),
-        24 => filt_lines_w::<T, 24, P>(lines, x, f, shift, out),
-        32 => filt_lines_w::<T, 32, P>(lines, x, f, shift, out),
-        48 => filt_lines_w::<T, 48, P>(lines, x, f, shift, out),
-        64 => filt_lines_w::<T, 64, P>(lines, x, f, shift, out),
-        _ => {
-            for (j, o) in out[..w].iter_mut().enumerate() {
-                let s: i32 = (0..T).map(|k| f[k] as i32 * lines[k][x + j].into()).sum();
-                *o = (s >> shift) as i16;
-            }
-        }
-    }
-}
-
 pub(crate) struct Taps<'a, const T: usize> {
     pub fx: usize,
     pub fy: usize,
@@ -144,7 +85,8 @@ pub(crate) struct Taps<'a, const T: usize> {
 
 #[inline(always)]
 pub(crate) fn interpolate<const T: usize, P: Pel>(
-    lines: &[&[P]],
+    src: &[P],
+    stride: usize,
     tmp: &mut [i16],
     t: &Taps<T>,
     w: usize,
@@ -152,7 +94,7 @@ pub(crate) fn interpolate<const T: usize, P: Pel>(
     out: &mut [i16],
 ) {
     if simd::mc::interp::<T, P>(
-        lines,
+        (src, stride),
         tmp,
         (t.fx, t.fy),
         (t.hf, t.vf),
@@ -164,24 +106,25 @@ pub(crate) fn interpolate<const T: usize, P: Pel>(
         return;
     }
     let m = T / 2 - 1;
+    let line = |r: usize| &src[r * stride..];
     if t.fx == 0 && t.fy == 0 {
         for r in 0..h {
-            let line = &lines[r + m][m..m + w];
+            let line = &line(r + m)[m..m + w];
             for (o, &s) in out[r * w..r * w + w].iter_mut().zip(line) {
                 *o = (s.into() << t.shift3) as i16;
             }
         }
     } else if t.fy == 0 {
         for r in 0..h {
-            filt(lines[r + m], 1, t.hf, t.shift1, &mut out[r * w..], w);
+            filt(line(r + m), 1, t.hf, t.shift1, &mut out[r * w..], w);
         }
     } else if t.fx == 0 {
         for r in 0..h {
-            filt_lines(&lines[r..], m, t.vf, t.shift1, &mut out[r * w..], w);
+            filt(&line(r)[m..], stride, t.vf, t.shift1, &mut out[r * w..], w);
         }
     } else {
         for r in 0..h + T - 1 {
-            filt(lines[r], 1, t.hf, t.shift1, &mut tmp[r * WIN..], w);
+            filt(line(r), 1, t.hf, t.shift1, &mut tmp[r * WIN..], w);
         }
         for r in 0..h {
             filt(&tmp[r * WIN..], WIN, t.vf, 6, &mut out[r * w..], w);
@@ -202,15 +145,8 @@ fn predict<const T: usize, P: Pel>(
     out: &mut [i16],
     sc: &mut McScratch<P>,
 ) {
-    let (ww, wh) = (w + T - 1, h + T - 1);
-    let mut lines: [&[P]; WIN] = [&[]; WIN];
-    if !f.lines(plane, x0, y0, ww, wh, &mut lines) {
-        f.window(plane, x0, y0, ww, wh, &mut sc.win, WIN);
-        for (r, l) in lines.iter_mut().enumerate().take(wh) {
-            *l = &sc.win[r * WIN..r * WIN + ww];
-        }
-    }
-    interpolate::<T, P>(&lines[..wh], &mut sc.tmp, taps, w, h, out);
+    let (src, stride) = f.block::<P>(plane, x0, y0, w + T - 1, h + T - 1);
+    interpolate::<T, P>(src, stride, &mut sc.tmp, taps, w, h, out);
 }
 
 crate::hevc::isa::dispatch! {

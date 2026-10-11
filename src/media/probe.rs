@@ -62,7 +62,7 @@ fn known() -> &'static Mutex<HashMap<Key, Known>> {
 }
 
 fn key(path: &Path) -> Result<Key> {
-    let meta = std::fs::metadata(path)?;
+    let meta = std::fs::metadata(path).map_err(|e| Error::at(path, e))?;
     Ok((path.to_path_buf(), meta.len(), meta.modified().ok()))
 }
 

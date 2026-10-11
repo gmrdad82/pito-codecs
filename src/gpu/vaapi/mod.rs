@@ -37,6 +37,8 @@ pub use encode::VaEncoder;
 
 pub const LAG: usize = 3;
 
+pub const HELD: usize = 12;
+
 const HEADER_BYTES: usize = 512;
 
 pub fn header_rbsp(payload: &[u8], full: bool) -> Option<Vec<u8>> {
@@ -134,7 +136,7 @@ fn open_front(codec: Codec, framing: Framing, sets: &[Vec<u8>]) -> Result<(Front
                 Error::Unsupported(format!("H.264 profile_idc {} on the GPU", sps.profile_idc))
             })?;
             let mbs = (sps.pic_width_in_mbs, sps.frame_height_in_mbs());
-            let count = sps.max_dpb_frames().saturating_add(2 + LAG).min(24);
+            let count = sps.max_dpb_frames().saturating_add(2 + LAG + HELD).min(32);
             let geometry = Geometry {
                 crop: sps.crop_rect(),
                 bits: 8,
@@ -165,8 +167,8 @@ fn open_front(codec: Codec, framing: Framing, sets: &[Vec<u8>]) -> Result<(Front
                 ))
             })?;
             let count = (sps.max_dec_pic_buffering as usize)
-                .saturating_add(2 + LAG)
-                .min(24);
+                .saturating_add(2 + LAG + HELD)
+                .min(32);
             let size = (sps.width, sps.height);
             let geometry = Geometry {
                 crop: sps.crop_rect(),

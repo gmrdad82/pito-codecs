@@ -1,8 +1,8 @@
 use super::q::{q_index_for, qstep};
 
 pub const SEGMENTS: usize = 8;
-const SCALE: [f64; SEGMENTS] = [0.62, 0.71, 0.8, 0.89, 1.0, 1.12, 1.26, 1.42];
-const STRENGTH: f64 = 0.25;
+const SCALE: [f64; SEGMENTS] = [0.76, 0.82, 0.88, 0.94, 1.0, 1.06, 1.13, 1.2];
+const STRENGTH: f64 = 0.12;
 
 #[derive(Clone, Debug, Default)]
 pub struct Segmentation {
