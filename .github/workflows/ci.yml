@@ -97,6 +97,6 @@ jobs:
         with:
           tool: nextest
       - run: ffmpeg -hide_banner -version | head -1
-      - run: cargo nextest run --release --all-targets --no-fail-fast
+      - run: cargo nextest run --cargo-profile ci --all-targets --no-fail-fast
       - run: cargo test --release --doc
       - run: cargo build --release
