@@ -10,7 +10,7 @@ Works on Linux x86-64 and arm64, Windows x86-64 and macOS on Apple Silicon; CI t
 
 ## Status
 
-`v1.0.0`: every planned format decodes and encodes, on Linux, Windows and macOS, and the API is settled. Opus speech encoding (SILK and hybrid) is marked experimental below: it decodes clean but doesn't yet sound as good as libopus. It becomes a port of libopus's encoder in `v1.1.0`.
+`v1.0.0`: every format below decodes and encodes, on Linux, Windows and macOS, and the API is settled. Opus speech encoding (SILK and hybrid) is marked experimental below: it decodes clean but doesn't sound as good as libopus.
 
 | Part | Decode | Encode |
 | --- | --- | --- |
@@ -18,14 +18,14 @@ Works on Linux x86-64 and arm64, Windows x86-64 and macOS on Apple Silicon; CI t
 | H.265 | CPU: Main and Main 10, tiles and WPP, bit-exact with ffmpeg. GPU: VA-API and VideoToolbox, Main and Main 10, bit-exact. | GPU only: VA-API Main; VideoToolbox Main and Main 10. Without a GPU HEVC encoder it falls back to H.264 and says why. |
 | VP9 | CPU: profiles 0 to 3 (8, 10 and 12-bit; 4:2:0, 4:2:2 and 4:4:4), tiles, bit-exact with ffmpeg and libvpx. | CPU: profile 0, with motion search, trellis, rate control, AQ and tile threads. ffmpeg and libvpx decode it bit-exact to our reconstruction. |
 | AAC | AAC-LC, mono to 7.1. | AAC-LC, CBR and VBR. |
-| Opus | SILK, CELT, hybrid and multistream; the RFC 8251 conformance vectors decode to the reference's final range on every packet. | CELT, VBR and CBR, 6 to 510 kbps, decoded clean by libopus. **Experimental:** SILK and hybrid for speech decode clean in libopus but sound worse than libopus at low rates until `v1.1.0` ports its SILK encoder. |
+| Opus | SILK, CELT, hybrid and multistream; the RFC 8251 conformance vectors decode to the reference's final range on every packet. | CELT, VBR and CBR, 6 to 510 kbps, decoded clean by libopus. **Experimental:** SILK and hybrid for speech decode clean in libopus but sound worse than libopus at low rates. |
 | MP4 and MOV | Tracks, sample tables, rotation, edit lists, fragmented files. | MP4 or MOV, faststart or fragmented; remux of a time range without re-encoding. |
 | MKV and WebM | Tracks, lacing, Cues, seeking. | H.264, HEVC, VP9, Opus and AAC; WebM's codec rules enforced; remux. |
 | GIF | GIF87a and 89a, interlace, disposal, transparency, loops. | Oklab palettes, ordered or Floyd-Steinberg dither, frame differencing. |
 | WebP | Lossless VP8L and lossy VP8, alpha, animation; bit-exact with libwebp. | Lossless VP8L and lossy VP8, alpha, animation. |
 | Filters | | Scale (bilinear, bicubic, Lanczos), BT.601/709/2020 colour, rotate, flip, crop, pad, fps change, RGBA overlay, resample, downmix, gain, EBU R128 loudness, true-peak limiter, normalise. |
 
-The GPU route is tested on Linux with VA-API, on an AMD Radeon RX 9060 XT with Mesa's radeonsi driver, and on macOS with VideoToolbox on GitHub's Apple Silicon runners, where CI checks its decode bit-exact with ffmpeg and decodes its encodes back on every push. NVENC (Linux and Windows) and Media Foundation (Windows) compile for their targets and pass their unit tests, but CI's runners have no GPU, so they stay untested until they run on their hardware.
+The GPU route is tested on Linux with VA-API, on an AMD Radeon RX 9060 XT with Mesa's radeonsi driver, and on macOS with VideoToolbox on GitHub's Apple Silicon runners, where CI checks its decode bit-exact with ffmpeg and decodes its encodes back on every push. NVENC (Linux and Windows) and Media Foundation (Windows) compile for their targets and pass their unit tests, but CI's runners have no GPU, so they are untested on their hardware.
 
 ## Against ffmpeg
 
@@ -262,17 +262,7 @@ The chart above shows each job as times faster or slower than ffmpeg, on a log s
 | AAC encode, 128 kbps stereo | 209× real time | 124× real time | 1.7× faster |
 | EBU R128 loudness, 48 kHz stereo | 2962× real time | 509× real time | 5.8× faster |
 
-\* libx264 is hand-written assembly; our CPU H.264 encoder has no hand-written SIMD yet. † Our export copies the middle of each piece and re-encodes only around each cut, so it is frame-accurate; a stream copy encodes nothing and cuts only on keyframes.
-
-## Roadmap
-
-After `1.0.0`, each of these is a port of a permissively licensed project, proven bit-exact or quality-equal against it, then made faster:
-
-- **Opus encoders** from libopus 1.6.1: SILK, CELT and hybrid, so speech matches libopus.
-- **VP9 encoder speed** from libvpx 1.17.0: its realtime mode decision, partitioning, motion search, transforms and rate control.
-- **H.264** from openh264: its decoder's IDCT and intra-prediction SIMD, and its encoder.
-- **HEVC on the CPU** from Kvazaar: an encoder, so H.265 no longer needs a GPU to encode.
-- **VP9 decode** with libvpx's SIMD loop filter, and **HEVC decode** threading after dav1d's patterns.
+\* libx264 is hand-written assembly; our CPU H.264 encoder has no hand-written SIMD. † Our export copies the middle of each piece and re-encodes only around each cut, so it is frame-accurate; a stream copy encodes nothing and cuts only on keyframes.
 
 ## Build and test
 

@@ -2,12 +2,12 @@
 
 ## v1.0.0 — 2026-10-11
 
-Every planned format decodes and encodes, on Linux, Windows and macOS. Opus speech encoding (SILK and hybrid) is experimental.
+Every format in the README's Status decodes and encodes, on Linux, Windows and macOS. Opus speech encoding (SILK and hybrid) is experimental.
 
 ### Added
 
 - `pcod` is a real binary (behind the `cli` feature), released for Linux x86-64, Windows x86-64 and macOS on Apple Silicon, with SHA256SUMS, LICENSE, README and NOTICE in each archive.
-- The Opus SILK encoder, experimental: it decodes clean in libopus but doesn't yet sound as good as libopus.
+- The Opus SILK encoder, experimental: it decodes clean in libopus but doesn't sound as good as libopus.
 - An "Against ffmpeg" summary in the README, with every win and loss from one benchmark run.
 - GPU playback through the media front: `decode_video_gpu` keeps VA-API frames on the GPU, scaled there, exported as DRM PRIME, with CPU frames when the route falls back.
 - Ranged audio and a track mix in the media front: `audio_pcm_range` and `audio_mix`.

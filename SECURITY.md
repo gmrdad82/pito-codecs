@@ -2,8 +2,8 @@
 
 ## Supported versions
 
-Fixes land on main and ship in the next release. Only the latest release gets
-them; depend on a newer tag to pick one up.
+Fixes land on main and in a release. Only the latest release gets them;
+depend on a newer tag to pick one up.
 
 ## Reporting a vulnerability
 
@@ -16,5 +16,5 @@ hangs or reads out of bounds on a crafted file is in scope; where you can share
 one, a small input file that shows it helps most.
 
 The report stays private between you and the maintainer until a fix is
-released. You will hear back on the advisory, and the fix and its release are
+released. Replies come on the advisory, and the fix and its release are
 credited to you unless you would rather they were not.
