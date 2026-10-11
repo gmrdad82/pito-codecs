@@ -188,6 +188,31 @@ mod x86 {
         const M: [[u8; 32]; 4] = [mask(T, N, 0), mask(T, N, 1), mask(T, N, 2), mask(T, N, 3)];
     }
 
+    #[inline(always)]
+    unsafe fn mul(a: __m256i, k: __m256i) -> __m256i {
+        unsafe { _mm256_maddubs_epi16(a, k) }
+    }
+
+    #[inline(always)]
+    unsafe fn add(a: __m256i, b: __m256i) -> __m256i {
+        unsafe { _mm256_add_epi16(a, b) }
+    }
+
+    #[inline(always)]
+    unsafe fn taps<const T: usize>(c: &[i8; T], i: usize, quad: bool) -> __m256i {
+        unsafe {
+            if quad && 2 * i + T / 2 + 1 < T {
+                let a = pair(c[2 * i], c[2 * i + 1]) as i32;
+                let b = pair(c[2 * i + T / 2], c[2 * i + T / 2 + 1]) as i32;
+                _mm256_set1_epi32(pack(a, b))
+            } else if !quad && 2 * i + 1 < T {
+                _mm256_set1_epi16(pair(c[2 * i], c[2 * i + 1]))
+            } else {
+                _mm256_setzero_si256()
+            }
+        }
+    }
+
     #[inline]
     #[target_feature(enable = "avx2")]
     unsafe fn h8<const T: usize, const N: usize>(
@@ -197,26 +222,28 @@ mod x86 {
         dst: &impl Fn(usize) -> *mut i16,
     ) {
         unsafe {
-            let terms = if N == 4 { T / 4 } else { T / 2 };
-            let mut sh = [_mm256_setzero_si256(); 4];
-            let mut k = [_mm256_setzero_si256(); 4];
-            for i in 0..terms {
-                sh[i] = _mm256_loadu_si256(Masks::<T, N>::M[i].as_ptr() as *const __m256i);
-                k[i] = if N == 4 {
-                    let a = pair(c[2 * i], c[2 * i + 1]) as i32;
-                    let b = pair(c[2 * i + T / 2], c[2 * i + T / 2 + 1]) as i32;
-                    _mm256_set1_epi32(pack(a, b))
-                } else {
-                    _mm256_set1_epi16(pair(c[2 * i], c[2 * i + 1]))
-                };
-            }
+            let m = &Masks::<T, N>::M;
+            let ms = |i: usize| _mm256_loadu_si256(m[i].as_ptr() as *const __m256i);
+            let (s0, s1, s2, s3) = (ms(0), ms(1), ms(2), ms(3));
+            let q = N == 4;
+            let (k0, k1, k2, k3) = (taps(c, 0, q), taps(c, 1, q), taps(c, 2, q), taps(c, 3, q));
             let sum = |v: __m256i| {
-                let mut acc = _mm256_maddubs_epi16(_mm256_shuffle_epi8(v, sh[0]), k[0]);
-                for i in 1..terms {
-                    let x = _mm256_maddubs_epi16(_mm256_shuffle_epi8(v, sh[i]), k[i]);
-                    acc = _mm256_add_epi16(acc, x);
+                let x = mul(_mm256_shuffle_epi8(v, s0), k0);
+                if N == 4 {
+                    if T == 4 {
+                        return x;
+                    }
+                    return add(x, mul(_mm256_shuffle_epi8(v, s1), k1));
                 }
-                acc
+                let x = add(x, mul(_mm256_shuffle_epi8(v, s1), k1));
+                if T == 4 {
+                    return x;
+                }
+                let y = add(
+                    mul(_mm256_shuffle_epi8(v, s2), k2),
+                    mul(_mm256_shuffle_epi8(v, s3), k3),
+                );
+                add(x, y)
             };
             let ld = |p: *const u8| _mm_loadu_si128(p as *const __m128i);
             let last = rows - 1;
@@ -247,14 +274,21 @@ mod x86 {
                         let s = _mm256_hadd_epi16(a, b);
                         let lo = _mm256_castsi256_si128(s);
                         let hi = _mm256_extracti128_si256::<1>(s);
-                        let q = [
-                            lo,
-                            hi,
-                            _mm_unpackhi_epi64(lo, lo),
-                            _mm_unpackhi_epi64(hi, hi),
-                        ];
-                        for (i, &q) in q.iter().enumerate().take(rows - r) {
-                            _mm_storel_epi64(dst(r + i) as *mut __m128i, q);
+                        _mm_storel_epi64(dst(r) as *mut __m128i, lo);
+                        if r + 1 < rows {
+                            _mm_storel_epi64(dst(r + 1) as *mut __m128i, hi);
+                        }
+                        if r + 2 < rows {
+                            _mm_storel_epi64(
+                                dst(r + 2) as *mut __m128i,
+                                _mm_unpackhi_epi64(lo, lo),
+                            );
+                        }
+                        if r + 3 < rows {
+                            _mm_storel_epi64(
+                                dst(r + 3) as *mut __m128i,
+                                _mm_unpackhi_epi64(hi, hi),
+                            );
                         }
                     }
                 }
@@ -271,102 +305,145 @@ mod x86 {
         dst: &impl Fn(usize) -> *mut i16,
     ) {
         unsafe {
-            let mut k = [_mm256_setzero_si256(); 4];
-            for i in 0..T / 2 {
-                k[i] = _mm256_set1_epi16(pair(c[2 * i], c[2 * i + 1]));
-            }
-            let sum = |p: &[__m256i; 8]| {
-                let mut acc = _mm256_maddubs_epi16(p[0], k[0]);
-                for i in 1..T / 2 {
-                    acc = _mm256_add_epi16(acc, _mm256_maddubs_epi16(p[2 * i], k[i]));
-                }
-                acc
-            };
+            let (k0, k1, k2, k3) = (
+                taps(c, 0, false),
+                taps(c, 1, false),
+                taps(c, 2, false),
+                taps(c, 3, false),
+            );
             let last = rows + T - 2;
             let row = |r: usize| src(r.min(last));
+            let z = _mm256_setzero_si256();
             match N {
                 16 => {
                     let ld = |r: usize| _mm_loadu_si128(row(r) as *const __m128i);
                     let mk = |a: __m128i, b: __m128i| {
                         _mm256_set_m128i(_mm_unpackhi_epi8(a, b), _mm_unpacklo_epi8(a, b))
                     };
-                    let mut pp = [_mm256_setzero_si256(); 8];
-                    let mut prev = ld(0);
-                    for q in 0..T - 2 {
-                        let next = ld(q + 1);
-                        pp[q] = mk(prev, next);
-                        prev = next;
+                    let (r0, r1, r2) = (ld(0), ld(1), ld(2));
+                    let (mut a0, mut a1) = (mk(r0, r1), mk(r1, r2));
+                    let (mut a2, mut a3, mut a4, mut a5) = (z, z, z, z);
+                    let mut prev = r2;
+                    if T == 8 {
+                        let (r3, r4, r5, r6) = (ld(3), ld(4), ld(5), ld(6));
+                        (a2, a3, a4, a5) = (mk(r2, r3), mk(r3, r4), mk(r4, r5), mk(r5, r6));
+                        prev = r6;
                     }
                     for r in 0..rows {
                         let next = ld(r + T - 1);
-                        pp[T - 2] = mk(prev, next);
+                        let n = mk(prev, next);
                         prev = next;
-                        _mm256_storeu_si256(dst(r) as *mut __m256i, sum(&pp));
-                        for q in 0..T - 2 {
-                            pp[q] = pp[q + 1];
-                        }
+                        let s = if T == 8 {
+                            let s =
+                                add(add(mul(a0, k0), mul(a2, k1)), add(mul(a4, k2), mul(n, k3)));
+                            (a0, a1, a2, a3, a4, a5) = (a1, a2, a3, a4, a5, n);
+                            s
+                        } else {
+                            let s = add(mul(a0, k0), mul(n, k1));
+                            (a0, a1) = (a1, n);
+                            s
+                        };
+                        _mm256_storeu_si256(dst(r) as *mut __m256i, s);
                     }
                 }
                 8 => {
                     let ld = |r: usize| _mm_loadl_epi64(row(r) as *const __m128i);
                     let d = |a: __m128i, b: __m128i| _mm_unpacklo_epi8(a, b);
-                    let mut pp = [_mm256_setzero_si256(); 8];
-                    let mut dd = [_mm_setzero_si128(); 2];
-                    let mut prev = ld(0);
-                    for q in 0..T - 2 {
-                        let next = ld(q + 1);
-                        dd[q % 2] = d(prev, next);
-                        prev = next;
-                        if q % 2 == 1 {
-                            pp[q - 1] = _mm256_set_m128i(dd[1], dd[0]);
-                        }
+                    let (r0, r1, r2) = (ld(0), ld(1), ld(2));
+                    let mut e0 = _mm256_set_m128i(d(r1, r2), d(r0, r1));
+                    let (mut e1, mut e2) = (z, z);
+                    let mut prev = r2;
+                    if T == 8 {
+                        let (r3, r4, r5, r6) = (ld(3), ld(4), ld(5), ld(6));
+                        e1 = _mm256_set_m128i(d(r3, r4), d(r2, r3));
+                        e2 = _mm256_set_m128i(d(r5, r6), d(r4, r5));
+                        prev = r6;
                     }
                     for r in (0..rows).step_by(2) {
                         let a = ld(r + T - 1);
                         let b = ld(r + T);
-                        pp[T - 2] = _mm256_set_m128i(d(a, b), d(prev, a));
+                        let n = _mm256_set_m128i(d(a, b), d(prev, a));
                         prev = b;
-                        let s = sum(&pp);
+                        let s = if T == 8 {
+                            let s =
+                                add(add(mul(e0, k0), mul(e1, k1)), add(mul(e2, k2), mul(n, k3)));
+                            (e0, e1, e2) = (e1, e2, n);
+                            s
+                        } else {
+                            let s = add(mul(e0, k0), mul(n, k1));
+                            e0 = n;
+                            s
+                        };
                         _mm_storeu_si128(dst(r) as *mut __m128i, _mm256_castsi256_si128(s));
                         if r + 1 < rows {
                             let hi = _mm256_extracti128_si256::<1>(s);
                             _mm_storeu_si128(dst(r + 1) as *mut __m128i, hi);
                         }
-                        for q in (0..T - 2).step_by(2) {
-                            pp[q] = pp[q + 2];
-                        }
                     }
                 }
                 _ => {
                     let ld = |r: usize| _mm_cvtsi32_si128(read_unaligned(row(r) as *const i32));
-                    let d = |r: usize| _mm_unpacklo_epi8(ld(r), ld(r + 1));
-                    let mut pp = [_mm256_setzero_si256(); 8];
+                    let d = |a: __m128i, b: __m128i| _mm_unpacklo_epi8(a, b);
+                    let f = |a: __m128i, b: __m128i, c: __m128i, e: __m128i, g: __m128i| {
+                        let (x, y, u, v) = (d(a, b), d(b, c), d(c, e), d(e, g));
+                        _mm256_set_m128i(_mm_unpacklo_epi64(u, v), _mm_unpacklo_epi64(x, y))
+                    };
+                    let (mut r0, mut r1, mut r2) = (ld(0), ld(1), ld(2));
+                    let (mut r3, mut r4, mut r5, mut r6) = (ld(3), z0(), z0(), z0());
+                    if T == 8 {
+                        (r4, r5, r6) = (ld(4), ld(5), ld(6));
+                    }
                     for r in (0..rows).step_by(4) {
-                        let mut dq = [_mm_setzero_si128(); 12];
-                        for (q, x) in dq.iter_mut().enumerate().take(T + 2) {
-                            *x = d(r + q);
-                        }
-                        for i in 0..T / 2 {
-                            let a = _mm_unpacklo_epi64(dq[2 * i], dq[2 * i + 1]);
-                            let b = _mm_unpacklo_epi64(dq[2 * i + 2], dq[2 * i + 3]);
-                            pp[2 * i] = _mm256_set_m128i(b, a);
-                        }
-                        let s = sum(&pp);
+                        let s = if T == 8 {
+                            let (r7, r8, r9, r10) = (ld(r + 7), ld(r + 8), ld(r + 9), ld(r + 10));
+                            let s = add(
+                                add(
+                                    mul(f(r0, r1, r2, r3, r4), k0),
+                                    mul(f(r2, r3, r4, r5, r6), k1),
+                                ),
+                                add(
+                                    mul(f(r4, r5, r6, r7, r8), k2),
+                                    mul(f(r6, r7, r8, r9, r10), k3),
+                                ),
+                            );
+                            (r0, r1, r2, r3, r4, r5, r6) = (r4, r5, r6, r7, r8, r9, r10);
+                            s
+                        } else {
+                            let (r4, r5, r6) = (ld(r + 4), ld(r + 5), ld(r + 6));
+                            let s = add(
+                                mul(f(r0, r1, r2, r3, r4), k0),
+                                mul(f(r2, r3, r4, r5, r6), k1),
+                            );
+                            (r0, r1, r2, r3) = (r4, r5, r6, ld(r + 7));
+                            s
+                        };
                         let lo = _mm256_castsi256_si128(s);
                         let hi = _mm256_extracti128_si256::<1>(s);
-                        let q = [
-                            lo,
-                            _mm_unpackhi_epi64(lo, lo),
-                            hi,
-                            _mm_unpackhi_epi64(hi, hi),
-                        ];
-                        for (i, &q) in q.iter().enumerate().take(rows - r) {
-                            _mm_storel_epi64(dst(r + i) as *mut __m128i, q);
+                        _mm_storel_epi64(dst(r) as *mut __m128i, lo);
+                        if r + 1 < rows {
+                            _mm_storel_epi64(
+                                dst(r + 1) as *mut __m128i,
+                                _mm_unpackhi_epi64(lo, lo),
+                            );
+                        }
+                        if r + 2 < rows {
+                            _mm_storel_epi64(dst(r + 2) as *mut __m128i, hi);
+                        }
+                        if r + 3 < rows {
+                            _mm_storel_epi64(
+                                dst(r + 3) as *mut __m128i,
+                                _mm_unpackhi_epi64(hi, hi),
+                            );
                         }
                     }
                 }
             }
         }
+    }
+
+    #[inline(always)]
+    fn z0() -> __m128i {
+        unsafe { _mm_setzero_si128() }
     }
 
     #[inline]
