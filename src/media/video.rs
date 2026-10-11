@@ -170,6 +170,11 @@ pub fn open(
         PixelFormat::Yuv420p8
     };
     let (width, out_height) = size.unwrap_or((p.width, p.height));
+    if width == 0 || out_height == 0 {
+        return Err(Error::Invalid(format!(
+            "a picture of {width}x{out_height}"
+        )));
+    }
     let fps = fps.unwrap_or(p.fps);
     let mut args: Vec<String> = f.decoder_args(src.ffmpeg_codec.as_deref());
     args.extend([

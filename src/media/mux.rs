@@ -41,7 +41,7 @@ struct Mux {
 impl Mux {
     fn push(&mut self, data: &[u8], pts: i64, dts: i64, key: bool, entry: u32) -> Result<()> {
         let dts = match self.last {
-            Some(l) if dts <= l => l + 1,
+            Some(l) if dts <= l => l.saturating_add(1),
             _ => dts,
         };
         if let Some(h) = self.held.take() {
@@ -66,7 +66,7 @@ impl Mux {
             self.w.use_entry(self.track, h.entry)?;
             self.entry = h.entry;
         }
-        let duration = u32::try_from((next - h.dts).max(1)).unwrap_or(u32::MAX);
+        let duration = u32::try_from(next.saturating_sub(h.dts).max(1)).unwrap_or(u32::MAX);
         self.w
             .push_sample(self.track, &h.data, h.pts, h.dts, duration, h.key)?;
         self.spare = h.data;
@@ -75,7 +75,7 @@ impl Mux {
 
     fn close(&mut self) -> Result<()> {
         if let Some(h) = self.held.take() {
-            let next = h.dts + self.step;
+            let next = h.dts.saturating_add(self.step);
             self.write(h, next)?;
         }
         Ok(())
@@ -306,7 +306,7 @@ fn mix(
         let dur = job.seconds(b - a);
         let first = (job.seconds(at) * RATE as f64).round() as usize;
         at += b - a;
-        let n = (job.seconds(at) * RATE as f64).round() as usize - first;
+        let n = ((job.seconds(at) * RATE as f64).round() as usize).saturating_sub(first);
         let mut out = AudioBuffer::new(RATE, 2);
         out.samples = vec![0.0; n * 2];
         for t in &src.probe.audio {
@@ -516,7 +516,7 @@ fn closed_prefix(job: &Job, si: usize, from: i64, frames: i64) -> Result<i64> {
         if n > 0 && t.samples[k].keyframe {
             break;
         }
-        let rel = ((t.presentation(k).unwrap_or(0) - base) as f64 / ft).round() as i64;
+        let rel = (t.presentation(k).unwrap_or(0).saturating_sub(base) as f64 / ft).round() as i64;
         if rel >= frames || rel < 0 {
             break;
         }
@@ -693,17 +693,23 @@ fn smart_video(
                 let v = r.video().ok_or_else(|| Error::Invalid("no video".into()))?;
                 let t = &r.tracks[v];
                 let ka = t.keyframe_before(t.sample_at(t.ticks(job.seconds(from))).unwrap_or(0));
-                let kb = (ka + frames as usize).min(t.samples.len());
+                let kb = ka.saturating_add(frames as usize).min(t.samples.len());
                 let base = t.presentation(ka).unwrap_or(0);
                 let ft = t.timescale as f64 * job.fps.1 as f64 / job.fps.0 as f64;
                 for k in ka..kb {
                     let smp = t.samples[k];
                     let pts = smp.pts.saturating_add(t.edit_offset);
                     let dts = smp.dts.saturating_add(t.edit_offset);
-                    let rp = ((pts - base) as f64 / ft).round() as i64;
-                    let rd = ((dts - base) as f64 / ft).round() as i64;
+                    let rp = (pts.saturating_sub(base) as f64 / ft).round() as i64;
+                    let rd = (dts.saturating_sub(base) as f64 / ft).round() as i64;
                     r.read_into(v, k, &mut buf)?;
-                    mux.push(&buf, (at + rp) * fd, (at + rd) * fd, smp.keyframe, entry)?;
+                    mux.push(
+                        &buf,
+                        at.saturating_add(rp).saturating_mul(fd),
+                        at.saturating_add(rd).saturating_mul(fd),
+                        smp.keyframe,
+                        entry,
+                    )?;
                 }
                 copied += frames as u64;
             }

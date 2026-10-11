@@ -29,6 +29,8 @@ front! {
     mod route;
     mod still;
     mod video;
+    #[cfg(test)]
+    mod malformed;
 
     pub use audio::{audio_mix, audio_pcm, audio_pcm_range};
     pub use export::{ExportOptions, Exported, Overlay, Part, Piece, Progress, Stage, export, parts};
