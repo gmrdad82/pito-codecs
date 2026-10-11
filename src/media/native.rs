@@ -445,23 +445,57 @@ pub fn still_decoder(reader: &Reader, route: Route) -> Result<Decoder> {
     Ok(Decoder::for_route(t, 1, route)?.0)
 }
 
-pub fn audio_pcm(path: &Path, track: usize, rate: u32, mono: bool) -> Result<AudioBuffer> {
+const PAD: f64 = 0.02;
+
+pub fn audio_range(
+    path: &Path,
+    track: usize,
+    from: f64,
+    to: f64,
+    rate: u32,
+    channels: u16,
+) -> Result<AudioBuffer> {
     let r = reader(path)?;
     let ids = r.audio();
     let &i = ids
         .get(track)
         .ok_or_else(|| Error::Invalid(format!("no audio track {track}")))?;
-    let buf = decode_audio(&r, i, 0.0, f64::INFINITY)?;
-    let buf = if mono {
-        crate::aac::mono(&buf)
+    let start = (from.max(0.0) * rate as f64).round() as usize;
+    let pad = start.min((PAD * rate as f64).round() as usize);
+    let t0 = (start - pad) as f64 / rate as f64;
+    let end = to.is_finite().then(|| (to * rate as f64).round() as usize);
+    let t1 = end.map_or(f64::INFINITY, |e| e as f64 / rate as f64 + PAD);
+    let raw = decode_audio(&r, i, t0, t1)?;
+    let shaped = shape(raw, channels)?;
+    let buf = if shaped.rate == rate {
+        shaped
     } else {
-        crate::aac::downmix_stereo(&buf)
+        crate::aac::resample(&shaped, rate)
     };
-    Ok(if buf.rate == rate {
-        buf
-    } else {
-        crate::aac::resample(&buf, rate)
+    Ok(cut(buf, pad, end.map(|e| e.saturating_sub(start))))
+}
+
+pub fn shape(buf: AudioBuffer, channels: u16) -> Result<AudioBuffer> {
+    Ok(match channels {
+        c if c == buf.channels => buf,
+        1 => crate::aac::mono(&buf),
+        2 => crate::aac::downmix_stereo(&buf),
+        c => {
+            return Err(Error::Invalid(format!(
+                "{c} channels from a {}-channel track: ask for 1, 2 or {}",
+                buf.channels, buf.channels
+            )));
+        }
     })
+}
+
+pub fn cut(mut buf: AudioBuffer, skip: usize, want: Option<usize>) -> AudioBuffer {
+    let ch = buf.channels.max(1) as usize;
+    buf.samples.drain(..(skip * ch).min(buf.samples.len()));
+    if let Some(w) = want {
+        buf.samples.resize(w * ch, 0.0);
+    }
+    buf
 }
 
 pub fn decode_audio(r: &Reader, i: usize, from: f64, to: f64) -> Result<AudioBuffer> {
@@ -482,12 +516,9 @@ pub fn decode_audio(r: &Reader, i: usize, from: f64, to: f64) -> Result<AudioBuf
     let channels = dec.channels().max(1);
     let mut out = AudioBuffer::new(rate, channels);
     let from_t = t.ticks(from.max(0.0));
-    let first = (0..t.samples.len())
-        .find(|&k| {
-            t.presentation(k)
-                .is_some_and(|p| p + t.samples[k].duration as i64 > from_t)
-        })
-        .unwrap_or(t.samples.len())
+    let first = t
+        .samples
+        .partition_point(|s| s.pts.saturating_add(t.edit_offset) + s.duration as i64 <= from_t)
         .saturating_sub(1);
     let start_t = t.presentation(first).unwrap_or(0);
     let skip = if from > 0.0 || start_t < 0 {
@@ -497,11 +528,11 @@ pub fn decode_audio(r: &Reader, i: usize, from: f64, to: f64) -> Result<AudioBuf
     } else {
         0
     };
-    let want = if to.is_finite() {
-        Some(((to - from.max(0.0)) * rate as f64).round().max(0.0) as usize)
-    } else {
-        None
-    };
+    let end = t.duration_seconds();
+    let to = if end > 0.0 { to.min(end) } else { to };
+    let want = to
+        .is_finite()
+        .then(|| ((to - from.max(0.0)) * rate as f64).round().max(0.0) as usize);
     let mut buf = Vec::new();
     let mut skipped = 0usize;
     for k in first..t.samples.len() {

@@ -39,7 +39,7 @@ Known gaps in `v0.1.0`, being worked on now:
 - **Containers:** MP4, MOV, MKV and WebM read, write and remux; Ogg Opus.
 - **Images:** GIF and WebP, still and animated.
 - **Filters** between decode and encode (`filter`): scaling, colour, geometry, frame rate, overlays, resampling and loudness.
-- **A front for apps** (`media`), which picks the fastest working route for each call. It can probe a file, give the first frame or stills for a filmstrip, play a file, pull its audio as PCM, and export with smart cuts, which copy the middle of each piece and re-encode only the edges.
+- **A front for apps** (`media`), which picks the fastest working route for each call. It can probe a file, give the first frame or stills for a filmstrip, play a file, pull its audio as PCM over any time range or as a stereo mix of its tracks with a gain each, and export with smart cuts, which copy the middle of each piece and re-encode only the edges.
 
 ## Install
 
