@@ -14,6 +14,14 @@ use super::types::{
     AudioBuffer, Codec, Direction, Error, Frame, Packet, Result, Rgba, Route, TimeBase,
 };
 
+const NO_GPU: &str = if cfg!(target_os = "macos") {
+    "no VideoToolbox hardware decoder or encoder"
+} else if cfg!(target_os = "windows") {
+    "no Media Foundation hardware decoder or NVENC encoder"
+} else {
+    "no VA-API device or driver"
+};
+
 pub fn gpu() -> (Vec<(Codec, Direction)>, Option<String>) {
     static GPU: OnceLock<Vec<(Codec, Direction)>> = OnceLock::new();
     let found = GPU
@@ -34,7 +42,7 @@ pub fn gpu() -> (Vec<(Codec, Direction)>, Option<String>) {
         .clone();
     let why = found
         .is_empty()
-        .then(|| "no VA-API device or driver".to_string());
+        .then(|| NO_GPU.to_string());
     (found, why)
 }
 

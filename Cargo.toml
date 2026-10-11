@@ -8,7 +8,7 @@ license = "MIT"
 repository = "https://github.com/gmrdad82/pito-codecs"
 
 [features]
-default = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter", "opus", "vp9", "webp", "mkv", "gif"]
+default = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter", "opus", "vp9", "webp", "mkv", "gif", "cli"]
 media = []
 h264 = ["media", "dep:rayon"]
 hevc = ["media", "dep:rayon"]
@@ -29,12 +29,14 @@ opus = ["media", "dep:rayon"]
 vp9 = ["media", "dep:rayon"]
 webp = ["media", "filter", "dep:rayon"]
 gif = ["filter", "dep:rayon"]
+cli = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter", "dep:clap"]
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 libloading = { version = "0.8", optional = true }
 
 [dependencies]
 rayon = { version = "1.10", optional = true }
+clap = { version = "4.6.7", features = ["derive"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 libloading = "0.8"
@@ -80,12 +82,12 @@ required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter"]
 name = "bench"
 required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter"]
 
-[[example]]
+[[bin]]
 name = "pcod"
-required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter"]
+path = "src/bin/pcod.rs"
+required-features = ["cli"]
 
 [dev-dependencies]
-clap = { version = "4.6.7", features = ["derive"] }
 png = "0.17"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

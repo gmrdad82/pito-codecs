@@ -6,6 +6,8 @@
 
 pito-codecs is a pure Rust library of fast video, audio and image codecs and containers that run on the CPU and on the GPU. It covers H.264, H.265, VP9, AAC, Opus, MP4, MKV and WebM, GIF and WebP. It is part of [PITO](https://pitomd.com) and ships as one MIT Cargo package with a feature per part. It needs no ffmpeg: none is linked or bundled, and ffmpeg serves only as the test oracle and the benchmark reference.
 
+Works on Linux x86-64 and arm64, Windows x86-64 and macOS on Apple Silicon; CI tests every push on all four.
+
 ## Status
 
 `v0.1.0` is the first release. The H.264, H.265, AAC, MP4 and filter parts and the app front are its stable core. The newer formats work and are tested, and they get faster and fuller in each minor release up to `1.0.0`.
@@ -42,6 +44,45 @@ Known gaps in `v0.1.0`, being worked on now:
 
 ## Install
 
+### pcod, the command line
+
+Each [GitHub Release](https://github.com/gmrdad82/pito-codecs/releases/latest) carries pcod for Linux x86-64, Windows x86-64 and macOS on Apple Silicon. Each archive holds the binary, `LICENSE`, `README.md` and `NOTICE`, and `SHA256SUMS` lists every archive's checksum. Set `v` to the latest release's tag, then download, unpack and put pcod on your `PATH`.
+
+Linux x86-64:
+
+```sh
+v=vX.Y.Z; curl -fsSLO "https://github.com/gmrdad82/pito-codecs/releases/download/$v/pcod-$v-linux-x86_64.tar.gz"
+tar -xzf "pcod-$v-linux-x86_64.tar.gz" pcod && install -Dm755 pcod ~/.local/bin/pcod
+```
+
+macOS on Apple Silicon:
+
+```sh
+v=vX.Y.Z; curl -fsSLO "https://github.com/gmrdad82/pito-codecs/releases/download/$v/pcod-$v-macos-arm64.tar.gz"
+tar -xzf "pcod-$v-macos-arm64.tar.gz" pcod && sudo install -m755 pcod /usr/local/bin/pcod
+```
+
+Windows x86-64, in PowerShell:
+
+```powershell
+$v="vX.Y.Z"; Invoke-WebRequest "https://github.com/gmrdad82/pito-codecs/releases/download/$v/pcod-$v-windows-x86_64.zip" -OutFile pcod.zip
+Expand-Archive pcod.zip "$env:LOCALAPPDATA\pcod" -Force; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";$env:LOCALAPPDATA\pcod", "User")
+```
+
+Or build it from source on any of them, Linux arm64 included, with Rust 1.97 or newer:
+
+```sh
+cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag vX.Y.Z pito-codecs --bin pcod
+```
+
+What each system needs at run time:
+
+- **Linux:** libva and a VA-API driver (Mesa's or Intel's) for the GPU route. libva is loaded at run time, so pcod starts without it and decodes and encodes on the CPU.
+- **macOS:** VideoToolbox, which is part of macOS. Nothing to install.
+- **Windows:** Media Foundation, which is part of Windows. Nothing to install. H.265 decode through Media Foundation needs Microsoft's HEVC Video Extensions, and Windows N editions need the Media Feature Pack; without them pcod decodes on the CPU.
+
+### The library
+
 Add it as a git dependency at a tag, with the features you need (all are on by default):
 
 ```toml
@@ -63,6 +104,7 @@ pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v0.1.2",
 | `webp` | WebP decode and encode. |
 | `gpu` | The GPU routes: VA-API on Linux (libva is loaded at run time, so a binary still starts without it); NVENC, VideoToolbox and Media Foundation behind `cfg(target_os)`. |
 | `filter` | Scale, colour, geometry, fps, overlay, resample, loudness. |
+| `cli` | The `pcod` binary and its clap dependency; leave it out with `default-features = false`. |
 
 Rust 1.97 or newer, edition 2024.
 
@@ -116,7 +158,7 @@ let info = probe("clip.mp4".as_ref(), &prefs)?;
 let still = first_frame("clip.mp4".as_ref(), 240, &prefs)?;
 ```
 
-`examples/pcod.rs` is a small command line over the library, and it is what the GIF above shows: `cargo run --release --example pcod -- decode clip.mp4 --route gpu`.
+`pcod` (`src/bin/pcod.rs`) is a small command line over the library, and it is what the GIF above shows: `pcod decode clip.mp4 --route gpu`, or from a checkout `cargo run --release --bin pcod -- decode clip.mp4 --route gpu`. It is behind the `cli` feature, on by default, so a library user with `default-features = false` never builds clap.
 
 ## Routes
 
