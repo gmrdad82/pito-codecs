@@ -769,10 +769,45 @@ impl<'a> SliceDecoder<'a> {
         };
         let refs = self.refs;
         let col_short_term = refs[1].first().map(|r| !r.long_term).unwrap_or(false);
-        let col_row = refs[1]
+        let col_frame = refs[1]
             .first()
-            .filter(|c| c.frame.mb_w == self.mb_w && self.mb_y < c.frame.mb_h())
-            .and_then(|c| c.frame.col_mb(self.mb_y, self.mb_x));
+            .filter(|c| c.frame.mb_w == self.mb_w && self.mb_y < c.frame.mb_h());
+        let zeroed = |col_zero: bool| {
+            let mut mvs = base_mvs;
+            for l in 0..2 {
+                if direct_zero || base_refs[l] < 0 || (base_refs[l] == 0 && col_zero) {
+                    mvs[l] = [0, 0];
+                }
+            }
+            mvs
+        };
+        let need_col = !direct_zero && col_short_term && (base_refs[0] == 0 || base_refs[1] == 0);
+        if spatial && (!need_col || self.sps.direct_8x8_inference) {
+            let col = if need_col {
+                col_frame.and_then(|c| c.frame.col_mb(self.mb_y, self.mb_x))
+            } else {
+                None
+            };
+            let zero: [bool; 4] = std::array::from_fn(|b8| {
+                need_col && {
+                    let (mv, r, _) = self.colocated(col, (b8 >> 1) * 8 + (b8 & 1) * 2);
+                    r == 0 && (-1..=1).contains(&mv[0]) && (-1..=1).contains(&mv[1])
+                }
+            });
+            if b8_mask == 0xf && zero.iter().all(|&z| z == zero[0]) {
+                self.set_motion(0, 0, 4, 4, base_refs, zeroed(zero[0]));
+            } else {
+                for (b8, &z) in zero.iter().enumerate() {
+                    if b8_mask & (1 << b8) != 0 {
+                        let (x8, y8) = ((b8 & 1) * 2, (b8 >> 1) * 2);
+                        self.set_motion(x8, y8, 2, 2, base_refs, zeroed(z));
+                    }
+                }
+            }
+            self.pic.mbs[self.mb_addr].direct8x8 |= b8_mask;
+            return Ok(());
+        }
+        let col_row = col_frame.and_then(|c| c.frame.col_mb(self.mb_y, self.mb_x));
         for b8 in 0..4 {
             if b8_mask & (1 << b8) == 0 {
                 continue;
@@ -788,13 +823,7 @@ impl<'a> SliceDecoder<'a> {
                         && ref_col == 0
                         && (-1..=1).contains(&mv_col[0])
                         && (-1..=1).contains(&mv_col[1]);
-                    let mut mvs = base_mvs;
-                    for l in 0..2 {
-                        if direct_zero || base_refs[l] < 0 || (base_refs[l] == 0 && col_zero) {
-                            mvs[l] = [0, 0];
-                        }
-                    }
-                    (base_refs, mvs)
+                    (base_refs, zeroed(col_zero))
                 } else {
                     let ref0 = if ref_col < 0 {
                         0
