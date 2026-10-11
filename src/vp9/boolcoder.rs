@@ -1,3 +1,4 @@
+#[derive(Clone, Copy)]
 pub struct BoolDecoder<'a> {
     data: &'a [u8],
     pos: usize,
@@ -53,15 +54,32 @@ impl<'a> BoolDecoder<'a> {
             self.fill();
         }
         let split = 1 + (((self.range - 1) * p as u32) >> 8);
+        self.decide(split)
+    }
+
+    #[inline(always)]
+    pub fn read_half(&mut self) -> bool {
+        if self.count < 8 {
+            self.fill();
+        }
+        let split = (self.range + 1) >> 1;
+        self.decide(split)
+    }
+
+    #[inline(always)]
+    fn decide(&mut self, split: u32) -> bool {
         let bigsplit = (split as u64) << 56;
+        let high = self.range - split;
+        let s0 = (split | 1).leading_zeros() - 24;
+        let s1 = (high | 1).leading_zeros() - 24;
         let bit = self.value >= bigsplit;
-        let m = (bit as u64).wrapping_neg();
-        self.value -= bigsplit & m;
-        let m32 = m as u32;
-        self.range = ((self.range - split) & m32) | (split & !m32);
-        let shift = self.range.leading_zeros() - 24;
-        self.range <<= shift;
-        self.value <<= shift;
+        let (range, value, shift) = if bit {
+            (high, self.value - bigsplit, s1)
+        } else {
+            (split, self.value, s0)
+        };
+        self.range = range << shift;
+        self.value = value << shift;
         self.count -= shift as i32;
         bit
     }
@@ -69,7 +87,7 @@ impl<'a> BoolDecoder<'a> {
     pub fn read_literal(&mut self, n: u32) -> u32 {
         let mut x = 0;
         for _ in 0..n {
-            x = (x << 1) | self.read_bool(128) as u32;
+            x = (x << 1) | self.read_half() as u32;
         }
         x
     }
@@ -161,7 +179,11 @@ mod tests {
             let mut b = SpecDecoder::new(&data);
             for i in 0..len * 12 {
                 let p = (rnd() % 255 + 1) as u8;
-                assert_eq!(a.read_bool(p), b.read(p), "len {len} bit {i}");
+                if p < 64 {
+                    assert_eq!(a.read_half(), b.read(128), "len {len} bit {i}");
+                } else {
+                    assert_eq!(a.read_bool(p), b.read(p), "len {len} bit {i}");
+                }
             }
         }
     }
