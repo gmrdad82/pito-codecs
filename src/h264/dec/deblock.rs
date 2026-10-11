@@ -1,4 +1,4 @@
-use crate::h264::dec::picture::{MbKind, MbState};
+use crate::h264::dec::picture::{MbKind, MbState, uniform_mv};
 use crate::h264::dec::slicedec::{PicState, SliceInfo};
 use crate::h264::dec::tables::{ALPHA, BETA, TC0};
 
@@ -68,7 +68,7 @@ fn pair_bs(p: &MbState, pids: &Ids, rp: usize, q: &MbState, qids: &Ids, rq: usiz
 fn uniform(st: &MbState) -> bool {
     (0..2).all(|l| {
         let r = st.ref_idx[l];
-        r[1] == r[0] && r[2] == r[0] && r[3] == r[0] && st.mv[l] == [st.mv[l][0]; 16]
+        r[1] == r[0] && r[2] == r[0] && r[3] == r[0] && uniform_mv(&st.mv[l])
     })
 }
 

@@ -2,7 +2,7 @@ use crate::h264::bits::{BitReader, annexb_nals, length_prefixed_nals, unescape_r
 use crate::h264::dec::dpb::{Dpb, Output, OutputMeta, RefMark};
 use crate::h264::dec::error::{Error, Result, ensure, invalid, unsupported};
 use crate::h264::dec::params::{Pps, Sps};
-use crate::h264::dec::picture::{Frame, FramePool, FrameRef, MbState, Output3, Planes, RefPic};
+use crate::h264::dec::picture::{Frame, FramePool, FrameRef, Output3, Planes, RefPic};
 use crate::h264::dec::slice::{
     NalHeader, Poc, PocState, SliceHeader, SliceType, is_new_picture, nal_type,
 };
@@ -518,15 +518,8 @@ fn run_job(frame: FrameRef, slices: Vec<SliceJob>, shared: &Shared) {
         Ok(e) => e,
         Err(_) => {
             let fallback = Planes::gray(frame.width, frame.height);
-            let blank = vec![MbState::default(); frame.mb_w * frame.mb_h()];
             for r in 0..frame.mb_h() {
-                if !frame.is_published(r) {
-                    frame.fill(
-                        r,
-                        &fallback,
-                        Frame::make_row(frame.mb_w, r, &blank, &|_, _, _| u32::MAX),
-                    );
-                }
+                frame.fill(r, &fallback);
             }
             pic = PicState::new(frame.clone());
             Some(Error::Invalid(

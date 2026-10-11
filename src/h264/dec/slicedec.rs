@@ -212,12 +212,7 @@ impl PicState {
                     .and_then(|s| s.ref_ids[l].get(ri as usize).copied())
                     .unwrap_or(u32::MAX)
             };
-            let row = if self.reference {
-                Frame::make_row(self.mb_w, 0, self.mbs.row(r), &ids)
-            } else {
-                Frame::empty_row()
-            };
-            self.frame.publish(r, row);
+            self.frame.publish(r, Some(self.mbs.row(r)), &ids);
             self.rows_published += 1;
             self.planes.published_rows(self.rows_published);
         }
@@ -733,20 +728,19 @@ impl<'a> SliceDecoder<'a> {
         }
     }
 
-    fn colocated(&self, m: Option<&FrameRow>, raster: usize) -> ([i16; 2], i8, u32) {
+    fn colocated(&self, m: Option<&ColMb>, raster: usize) -> ([i16; 2], i8, u32) {
         let raster = if self.sps.direct_8x8_inference {
             let (bx, by) = (raster & 3, raster >> 2);
             (if by >= 2 { 12 } else { 0 }) + if bx >= 2 { 3 } else { 0 }
         } else {
             raster
         };
-        let mb = self.mb_x;
-        let Some(m) = m.filter(|m| !m.intra[mb]) else {
+        let Some(m) = m.filter(|m| !m.intra) else {
             return ([0, 0], -1, u32::MAX);
         };
-        let b8 = mb * 4 + (raster >> 3) * 2 + ((raster & 3) >> 1);
+        let b8 = (raster >> 3) * 2 + ((raster & 3) >> 1);
         let l = if m.ref_idx[0][b8] >= 0 { 0 } else { 1 };
-        (m.mv[l][mb * 16 + raster], m.ref_idx[l][b8], m.ref_id[l][b8])
+        (m.mv[l][raster], m.ref_idx[l][b8], m.ref_id[l][b8])
     }
 
     fn spatial_direct_base(&self) -> ([i8; 2], [[i16; 2]; 2], bool) {
@@ -782,12 +776,12 @@ impl<'a> SliceDecoder<'a> {
         } else {
             ([0, 0], [[0, 0]; 2], false)
         };
-        let col_short_term = self.refs[1].first().map(|r| !r.long_term).unwrap_or(false);
-        let col = self.refs[1]
+        let refs = self.refs;
+        let col_short_term = refs[1].first().map(|r| !r.long_term).unwrap_or(false);
+        let col_row = refs[1]
             .first()
             .filter(|c| c.frame.mb_w == self.mb_w && self.mb_y < c.frame.mb_h())
-            .map(|c| c.frame.clone());
-        let col_row = col.as_ref().map(|f| f.row(self.mb_y));
+            .and_then(|c| c.frame.col_mb(self.mb_y, self.mb_x));
         for b8 in 0..4 {
             if b8_mask & (1 << b8) == 0 {
                 continue;
@@ -846,8 +840,8 @@ impl<'a> SliceDecoder<'a> {
         let b = self.nb_motion(0, 0, -1);
         let mv = if self.nb[0].is_none()
             || self.nb[1].is_none()
-            || (a.ref_idx == 0 && a.mv == [0, 0])
-            || (b.ref_idx == 0 && b.mv == [0, 0])
+            || (a.ref_idx == 0 && mv_bits(a.mv) == 0)
+            || (b.ref_idx == 0 && mv_bits(b.mv) == 0)
         {
             [0, 0]
         } else {
@@ -1084,10 +1078,7 @@ impl<'a> SliceDecoder<'a> {
         let st = self.mb();
         (0..2).all(|l| {
             let r = st.ref_idx[l];
-            r[1] == r[0]
-                && r[2] == r[0]
-                && r[3] == r[0]
-                && st.mv[l].iter().all(|m| *m == st.mv[l][0])
+            r[1] == r[0] && r[2] == r[0] && r[3] == r[0] && uniform_mv(&st.mv[l])
         })
     }
 
