@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+pcod=${1:-target/release/pcod}
+if [ -f "$pcod.exe" ]; then
+    pcod="$pcod.exe"
+fi
+dir=tmp/smoke
+mkdir -p "$dir"
+
+fail() {
+    echo "smoke: $*" >&2
+    exit 1
+}
+
+ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i testsrc2=size=640x360:rate=30 \
+    -f lavfi -i sine=frequency=440:sample_rate=48000 \
+    -t 1 -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest "$dir/h264.mp4"
+ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i testsrc2=size=640x360:rate=30 \
+    -t 1 -c:v libx265 -x265-params log-level=error -pix_fmt yuv420p -tag:v hvc1 "$dir/hevc.mp4"
+head -c 4096 "$pcod" > "$dir/bad.mp4"
+
+run() {
+    echo "\$ pcod $*"
+    "$pcod" "$@"
+}
+
+run probe "$dir/h264.mp4" | tee "$dir/probe.txt"
+grep -q '^video *h264 ' "$dir/probe.txt" || fail "probe did not name the H.264 track"
+
+for clip in h264 hevc; do
+    for route in cpu gpu; do
+        run decode "$dir/$clip.mp4" --route "$route" | tee "$dir/decode.txt"
+        grep -q '^decoded 30 frames' "$dir/decode.txt" || fail "$clip on the $route route did not decode 30 frames"
+    done
+    run decode "$dir/$clip.mp4" | tee "$dir/decode.txt"
+    grep -q '^decoded 30 frames' "$dir/decode.txt" || fail "$clip on the default route did not decode 30 frames"
+done
+
+run encode "$dir/h264.mp4" "$dir/cpu.mp4" --route cpu
+run probe "$dir/cpu.mp4"
+run encode "$dir/h264.mp4" "$dir/gpu.mp4" --codec hevc
+run decode "$dir/gpu.mp4" --route cpu | tee "$dir/decode.txt"
+grep -q '^decoded 30 frames' "$dir/decode.txt" || fail "the default-route encode did not decode back to 30 frames"
+
+for file in "$dir/bad.mp4" "$dir/missing.mp4"; do
+    status=0
+    "$pcod" probe "$file" > "$dir/out.txt" 2> "$dir/err.txt" || status=$?
+    [ "$status" -eq 1 ] || fail "pcod probe $file exited $status, not 1"
+    [ ! -s "$dir/out.txt" ] || fail "pcod probe $file wrote to stdout"
+    [ "$(wc -l < "$dir/err.txt")" -eq 1 ] || fail "pcod probe $file wrote more than one line"
+    grep -q '^pcod: ' "$dir/err.txt" || fail "pcod probe $file did not start its line with pcod:"
+    echo "\$ pcod probe $file: $(cat "$dir/err.txt")"
+    status=0
+    "$pcod" decode "$file" > /dev/null 2> "$dir/err.txt" || status=$?
+    [ "$status" -eq 1 ] && [ "$(wc -l < "$dir/err.txt")" -eq 1 ] || fail "pcod decode $file did not fail with one line and exit 1"
+done
+
+status=0
+"$pcod" > /dev/null 2> "$dir/err.txt" || status=$?
+[ "$status" -eq 2 ] || fail "a bare pcod exited $status, not 2"
+grep -Eq "^error: 'pcod(\.exe)?' requires a subcommand" "$dir/err.txt" || fail "a bare pcod did not print clap's error"
+
+echo "smoke ok"

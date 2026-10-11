@@ -198,13 +198,15 @@ impl OggOpus {
         let total = self.samples() as usize;
         let skip = self.head.pre_skip as usize;
         let mut out = AudioBuffer::new(48000, channels as u16);
-        out.samples.reserve((total + skip + 5760) * channels);
+        let most = self.packets.len().saturating_mul(5760);
+        let frames = total.saturating_add(skip).saturating_add(5760).min(most);
+        out.samples.reserve(frames.saturating_mul(channels));
         for i in 0..self.packets.len() {
             dec.decode_into(Some(self.packet(i)), &mut out.samples)?;
         }
         let have = out.samples.len() / channels.max(1);
         out.samples.drain(..skip.min(have) * channels);
-        out.samples.truncate(total * channels);
+        out.samples.truncate(total.saturating_mul(channels));
         Ok(out)
     }
 }

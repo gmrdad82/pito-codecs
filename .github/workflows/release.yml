@@ -1,0 +1,124 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - name: windows-x86_64
+            os: windows-2025
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - name: macos-arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+      ASSET: pcod-${{ github.ref_name }}-${{ matrix.name }}.${{ matrix.archive }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: 1.97.1
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked --bin pcod --target "$TARGET"
+      - run: |
+          mkdir -p stage dist
+          bin=pcod
+          if [ "$RUNNER_OS" = "Windows" ]; then bin=pcod.exe; fi
+          cp "target/$TARGET/release/$bin" LICENSE README.md NOTICE stage/
+          "stage/$bin" --version
+      - if: matrix.archive == 'tar.gz'
+        run: tar -czf "dist/$ASSET" -C stage pcod LICENSE README.md NOTICE
+      - if: matrix.archive == 'zip'
+        shell: pwsh
+        run: Compress-Archive -Path stage/pcod.exe, stage/LICENSE, stage/README.md, stage/NOTICE -DestinationPath "dist/$env:ASSET"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ env.ASSET }}
+          path: dist/${{ env.ASSET }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          path: dist
+          merge-multiple: true
+      - run: |
+          cd dist
+          set -- *
+          [ "$#" -eq 3 ] || { echo "expected three archives, found $*"; exit 1; }
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+      - run: |
+          version=${GITHUB_REF_NAME#v}
+          awk -v v="$version" '
+            /^## / {
+              if (found) exit
+              h = $0
+              sub(/^## +\[?v?/, "", h)
+              c = substr(h, length(v) + 1, 1)
+              if (index(h, v) == 1 && (c == "" || c == "]" || c == " " || c == "\t")) found = 1
+              next
+            }
+            found { print }
+          ' CHANGELOG.md | sed -e '/./,$!d' > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "CHANGELOG.md has no section for $GITHUB_REF_NAME"
+            exit 1
+          fi
+          cat notes.md
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber

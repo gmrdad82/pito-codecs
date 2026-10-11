@@ -240,7 +240,8 @@ impl Encoder {
     }
 
     pub fn flush(&mut self) -> Result<Vec<Packet>> {
-        Ok(self.inner.flush().into_iter().map(packet).collect())
+        let packets = self.inner.flush().map_err(enc_error)?;
+        Ok(packets.into_iter().map(packet).collect())
     }
 }
 
