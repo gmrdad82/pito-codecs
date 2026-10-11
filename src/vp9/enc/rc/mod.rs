@@ -324,7 +324,7 @@ impl RateControl {
     fn boost(&self, kind: FrameKind) -> f64 {
         let still = 1.0 - self.ratio.clamp(0.0, 1.0);
         match kind {
-            FrameKind::Key => 1.3 + 0.6 * still,
+            FrameKind::Key => 1.95 + 0.9 * still,
             FrameKind::Golden | FrameKind::AltRef => 1.12 + 0.3 * still,
             FrameKind::Inter => 1.0,
         }
