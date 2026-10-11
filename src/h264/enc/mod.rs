@@ -7,6 +7,7 @@ mod frame;
 mod intra;
 mod lookahead;
 mod mbinfo;
+mod mbtree;
 mod nal;
 mod picture;
 mod ratecontrol;
@@ -174,10 +175,20 @@ pub struct Packet {
 
 struct Input {
     frame: Frame,
+    low: Arc<LowRes>,
     pts: i64,
     display: u64,
     cplx: Complexity,
     aq: Vec<f32>,
+}
+
+struct La {
+    input: Input,
+    st: SliceType,
+    idr: bool,
+    base: u64,
+    costs: Option<mbtree::Costs>,
+    refs: [Option<u64>; 2],
 }
 
 struct Pool {
@@ -288,7 +299,12 @@ pub struct Encoder {
     pps_nal: Vec<u8>,
     rc: ratecontrol::RateControl,
     pending: VecDeque<Input>,
-    prev_lowres: Option<LowRes>,
+    prev_lowres: Option<Arc<LowRes>>,
+    la: VecDeque<La>,
+    la_depth: usize,
+    la_next: u64,
+    anchor: Option<(u64, Arc<LowRes>)>,
+
     display_count: u64,
     last_idr: u64,
     idr_count: u32,
@@ -315,6 +331,8 @@ pub struct Encoder {
 }
 
 const LOG2_MAX_FRAME_NUM: u32 = 8;
+const LOOKAHEAD: usize = 40;
+const LOOKAHEAD_BYTES: usize = 768 << 20;
 const LOG2_MAX_POC_LSB: u32 = 8;
 
 fn crf_level_kbps(crf: f32, mbw: usize, mbh: usize, fps: f64) -> u32 {
@@ -421,7 +439,7 @@ impl Encoder {
                 me_range: 16,
                 subpel: 2,
                 subpel_rounds: 1,
-                rd: false,
+                rd: true,
                 chroma_qp_offset: 0,
                 decimate: true,
                 adaptive_t8: high,
@@ -554,6 +572,12 @@ impl Encoder {
             cabac_pb: Box::new(tables::cabac_init_pb0()),
         });
         let frame_threads = threads.clamp(1, 64);
+        let frame_bytes = (mbw * 16 + 128) * (mbh * 16 + 128) * 2;
+        let la_depth = if matches!(cfg.rate, RateControl::Qp(_)) {
+            0
+        } else {
+            (LOOKAHEAD_BYTES / frame_bytes).clamp(1, LOOKAHEAD)
+        };
         let workers = Workers::new(ctx.clone(), frame_threads)?;
         Ok(Encoder {
             ctx,
@@ -565,6 +589,11 @@ impl Encoder {
             rc,
             pending: VecDeque::new(),
             prev_lowres: None,
+            la: VecDeque::new(),
+            la_depth,
+            la_next: 0,
+            anchor: None,
+
             display_count: 0,
             last_idr: 0,
             idr_count: 0,
@@ -636,8 +665,8 @@ impl Encoder {
         let (mbw, mbh, strength) = (self.mbw, self.mbh, self.cfg.aq_strength);
         let prev = self.prev_lowres.take();
         let (lowres, cplx, aq) = self.pool.install(|| {
-            let lowres = LowRes::new(&src);
-            let cplx = lookahead::complexity(&lowres, prev.as_ref());
+            let lowres = Arc::new(LowRes::new(&src));
+            let cplx = lookahead::complexity(&lowres, prev.as_deref());
             let aq = if use_aq {
                 lookahead::aq_offsets(&src, mbw, mbh, strength)
             } else {
@@ -645,7 +674,7 @@ impl Encoder {
             };
             (lowres, cplx, aq)
         });
-        self.prev_lowres = Some(lowres);
+        self.prev_lowres = Some(lowres.clone());
         let display = self.display_count;
         self.display_count += 1;
         self.display_pts.push_back(pts);
@@ -654,30 +683,34 @@ impl Encoder {
         }
         let input = Input {
             frame: src,
+            low: lowres,
             pts,
             display,
             cplx,
             aq,
         };
         let since = display - self.last_idr;
-        let fps = self.cfg.fps_num as f64 / self.cfg.fps_den as f64;
-        let min_gap = (fps / 2.0).max(1.0) as u64;
+        let keyint = self.cfg.keyint as u64;
+        let min_gap = (keyint / 10).clamp(1, 25);
+        let span = keyint.saturating_sub(min_gap).max(1) as f64;
+        let bias = 0.01 + 0.39 * (since.saturating_sub(min_gap) as f64 / span).min(1.0);
         let scenecut = self.cfg.scenecut
             && display > 0
             && since >= min_gap
-            && cplx.inter as f64 > 0.75 * cplx.intra as f64;
+            && cplx.inter as f64 >= (1.0 - bias) * cplx.intra as f64;
         let idr = display == 0 || since >= self.cfg.keyint as u64 || scenecut;
         let mut out = Vec::new();
         if idr {
-            self.flush_minigop(&mut out)?;
+            self.flush_minigop();
             self.last_idr = display;
-            self.submit(input, SliceType::I, true, &mut out)?;
+            self.enqueue(input, SliceType::I, true);
         } else {
             self.pending.push_back(input);
             if self.pending.len() > self.cfg.bframes as usize {
-                self.flush_minigop(&mut out)?;
+                self.flush_minigop();
             }
         }
+        self.drain(self.la_depth, &mut out)?;
         Ok(self.release(out, false))
     }
 
@@ -689,7 +722,8 @@ impl Encoder {
 
     fn flush_inner(&mut self) -> Result<Vec<Packet>, Error> {
         let mut out = Vec::new();
-        self.flush_minigop(&mut out)?;
+        self.flush_minigop();
+        self.drain(0, &mut out)?;
         self.collect(0, &mut out)?;
         Ok(self.release(out, true))
     }
@@ -717,16 +751,105 @@ impl Encoder {
         res
     }
 
-    fn flush_minigop(&mut self, out: &mut Vec<Packet>) -> Result<(), Error> {
+    fn flush_minigop(&mut self) {
         let Some(p) = self.pending.pop_back() else {
-            return Ok(());
+            return;
         };
         let bs: Vec<Input> = self.pending.drain(..).collect();
-        self.submit(p, SliceType::P, false, out)?;
+        let prev = self.anchor.clone();
+        self.enqueue(p, SliceType::P, false);
+        let next = self.anchor.clone();
         for b in bs {
-            self.submit(b, SliceType::B, false, out)?;
+            self.enqueue_b(b, prev.clone(), next.clone());
+        }
+    }
+
+    fn tree(&self) -> bool {
+        !matches!(self.cfg.rate, RateControl::Qp(_))
+    }
+
+    fn enqueue(&mut self, input: Input, st: SliceType, idr: bool) {
+        let id = self.la_next;
+        self.la_next += 1;
+        let l0 = if idr { None } else { self.anchor.clone() };
+        let costs = self.tree().then(|| {
+            let (cur, r0) = (&input.low, l0.as_ref().map(|a| &*a.1));
+            self.pool.install(|| mbtree::analyse(cur, r0, None))
+        });
+        self.anchor = Some((id, input.low.clone()));
+        self.la.push_back(La {
+            input,
+            st,
+            idr,
+            base: self.last_idr,
+            costs,
+            refs: [l0.map(|a| a.0), None],
+        });
+    }
+
+    fn enqueue_b(
+        &mut self,
+        input: Input,
+        prev: Option<(u64, Arc<LowRes>)>,
+        next: Option<(u64, Arc<LowRes>)>,
+    ) {
+        self.la_next += 1;
+        let costs = self.tree().then(|| {
+            let cur = &input.low;
+            let (r0, r1) = (prev.as_ref().map(|a| &*a.1), next.as_ref().map(|a| &*a.1));
+            self.pool.install(|| mbtree::analyse(cur, r0, r1))
+        });
+        self.la.push_back(La {
+            input,
+            st: SliceType::B,
+            idr: false,
+            base: self.last_idr,
+            costs,
+            refs: [prev.map(|a| a.0), next.map(|a| a.0)],
+        });
+    }
+
+    fn drain(&mut self, depth: usize, out: &mut Vec<Packet>) -> Result<(), Error> {
+        while self.la.len() > depth {
+            let tree = self.tree_offsets();
+            let Some(mut f) = self.la.pop_front() else {
+                break;
+            };
+            if let Some(t) = tree {
+                if f.input.aq.is_empty() {
+                    f.input.aq = t;
+                } else {
+                    for (a, o) in f.input.aq.iter_mut().zip(t) {
+                        *a += o;
+                    }
+                }
+            }
+            self.submit(f.input, f.st, f.idr, f.base, out)?;
         }
         Ok(())
+    }
+
+    fn tree_offsets(&self) -> Option<Vec<f32>> {
+        let first = self.la.front()?;
+        first.costs.as_ref()?;
+        let start = self.la_next - self.la.len() as u64;
+        let nodes: Vec<mbtree::Node> = self
+            .la
+            .iter()
+            .filter_map(|f| {
+                Some(mbtree::Node {
+                    costs: f.costs.as_ref()?,
+                    refs: f
+                        .refs
+                        .map(|r| r.and_then(|id| id.checked_sub(start)).map(|i| i as usize)),
+                })
+            })
+            .collect();
+        if nodes.len() != self.la.len() {
+            return None;
+        }
+        let prop = mbtree::propagate(&nodes, self.mbw, self.mbh);
+        Some(mbtree::offsets(nodes[0].costs, &prop[0]))
     }
 
     fn import(&mut self, f: &YuvFrame) -> Result<Frame, Error> {
@@ -779,6 +902,7 @@ impl Encoder {
         input: Input,
         mut st: SliceType,
         idr: bool,
+        base: u64,
         out: &mut Vec<Packet>,
     ) -> Result<(), Error> {
         if idr {
@@ -787,7 +911,7 @@ impl Encoder {
             self.next_frame_num = 0;
         }
         self.reclaim();
-        let poc = 2 * (input.display as i64 - self.last_idr as i64) as i32;
+        let poc = 2 * (input.display as i64 - base as i64) as i32;
         let by_id = self
             .dpb
             .iter()
