@@ -107,3 +107,32 @@ pub(crate) fn plane_dims(width: u32, height: u32, index: usize) -> (usize, usize
         (width.div_ceil(2) as usize, height.div_ceil(2) as usize)
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+pub(crate) enum Simd {
+    Plain,
+    #[cfg(target_arch = "x86_64")]
+    Avx2,
+    #[cfg(target_arch = "aarch64")]
+    Neon,
+}
+
+pub(crate) fn simd() -> Simd {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            Simd::Avx2
+        } else {
+            Simd::Plain
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        Simd::Neon
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        Simd::Plain
+    }
+}

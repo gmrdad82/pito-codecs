@@ -13,11 +13,6 @@ pub fn avx2() -> bool {
     *AVX2
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-pub fn avx2() -> bool {
-    false
-}
-
 macro_rules! dispatch {
     ($(#[$m:meta])* $vis:vis fn $name:ident ($($a:ident: $t:ty),* $(,)?) $(-> $r:ty)? $body:block) => {
         $(#[$m])*

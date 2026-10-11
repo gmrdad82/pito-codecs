@@ -3,7 +3,10 @@ mod ffi;
 mod h264;
 mod headers;
 mod hevc;
+mod host;
 mod va;
+#[cfg(feature = "vp9")]
+mod vp9;
 
 #[cfg(test)]
 mod abi_tests;
@@ -60,6 +63,7 @@ pub trait Accel: Send {
         slices: &[(ffi::VASliceParameterBufferHEVC, Vec<u8>)],
     ) -> std::result::Result<(), String>;
     fn read(&mut self, index: usize) -> std::result::Result<Picture, String>;
+    fn prefetch(&mut self, _index: usize) {}
     fn held(&self, index: usize) -> bool;
     fn fill(&mut self, index: usize, from: Option<usize>) -> std::result::Result<(), String>;
 }
@@ -264,7 +268,8 @@ fn profiles_for(codec: Codec) -> &'static [ffi::VAProfile] {
             ffi::VAProfileH264ConstrainedBaseline,
         ],
         Codec::Hevc => &[ffi::VAProfileHEVCMain, ffi::VAProfileHEVCMain10],
-        Codec::Aac | Codec::Vp9 | Codec::Opus => &[],
+        Codec::Vp9 => &[ffi::VAProfileVP9Profile0, ffi::VAProfileVP9Profile2],
+        Codec::Aac | Codec::Opus => &[],
     }
 }
 
@@ -300,7 +305,7 @@ fn check_profile(codec: Codec, direction: Direction) -> Result<()> {
 
 pub fn available() -> Vec<(Codec, Direction)> {
     let mut out = Vec::new();
-    for codec in [Codec::H264, Codec::Hevc] {
+    for codec in [Codec::H264, Codec::Hevc, Codec::Vp9] {
         for direction in [Direction::Decode, Direction::Encode] {
             if check_profile(codec, direction).is_ok() {
                 out.push((codec, direction));
@@ -311,6 +316,10 @@ pub fn available() -> Vec<(Codec, Direction)> {
 }
 
 pub fn decoder(codec: Codec, extradata: &[u8]) -> Result<Box<dyn DecoderBackend>> {
+    #[cfg(feature = "vp9")]
+    if codec == Codec::Vp9 {
+        return Ok(Box::new(vp9::Vp9Decoder::new()?));
+    }
     Ok(Box::new(VaDecoder::new(codec, extradata)?))
 }
 

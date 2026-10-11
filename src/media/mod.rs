@@ -30,7 +30,7 @@ front! {
     mod still;
     mod video;
 
-    pub use audio::audio_pcm;
+    pub use audio::{audio_mix, audio_pcm, audio_pcm_range};
     pub use export::{ExportOptions, Exported, Overlay, Part, Piece, Progress, Stage, export, parts};
     pub use ffmpeg::{Ffmpeg, Listed};
     pub use picture::{
@@ -39,5 +39,5 @@ front! {
     pub use probe::{AudioTrack, Probe, keyframes, probe};
     pub use route::{Caps, Choice, Fallback, Picked, Prefs, UserFfmpeg, pick_decode, pick_encode};
     pub use still::{first_frame, frames_at};
-    pub use video::{Video, decode_video};
+    pub use video::{GpuVideo, IN_FLIGHT, Video, VideoFrame, decode_video, decode_video_gpu};
 }

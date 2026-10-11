@@ -42,6 +42,8 @@ fn ffi_layouts_match_the_libva_headers() {
         VAEncPackedHeaderParameterBuffer { bit_length, has_emulation_bytes, va_reserved }
         VARectangle { y, width, height }
         VADRMPRIMESurfaceDescriptor { width, num_objects, objects, num_layers, layers }
+        VAGenericValue { value }
+        VASurfaceAttrib { flags, value }
         VAProcPipelineParameterBuffer { surface_region, surface_color_standard, output_region, output_background_color, filters, num_filters, forward_references, rotation_state, blend_state, additional_outputs, input_surface_flag, input_color_properties, output_color_properties, processing_mode, output_hdr_metadata, va_reserved }
     };
     let mut c = String::from(

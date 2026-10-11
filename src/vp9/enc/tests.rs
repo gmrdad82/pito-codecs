@@ -40,7 +40,10 @@ fn source(name: &str, w: u32, h: u32, frames: u32) -> Vec<Frame> {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        std::fs::rename(&tmp, &path).unwrap();
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            assert!(std::path::Path::new(&path).exists(), "{e}");
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
     let data = std::fs::read(&path).unwrap();
     let (cw, ch) = (w.div_ceil(2) as usize, h.div_ceil(2) as usize);

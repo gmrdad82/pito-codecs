@@ -258,7 +258,10 @@ fn ensure(f: &Fixture) -> Option<(PathBuf, PathBuf)> {
         mid.extend(args);
         mid.extend(["-f", "hevc"]);
         ff(&["-f", "lavfi"], Path::new(&src), &mid, &tmp);
-        std::fs::rename(&tmp, &hevc).unwrap();
+        if let Err(e) = std::fs::rename(&tmp, &hevc) {
+            assert!(std::path::Path::new(&hevc).exists(), "{e}");
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
     if !yuv.exists() {
         let tmp = scratch(&format!("{}.yuv", f.name));
@@ -275,7 +278,10 @@ fn ensure(f: &Fixture) -> Option<(PathBuf, PathBuf)> {
             ],
             &tmp,
         );
-        std::fs::rename(&tmp, &yuv).unwrap();
+        if let Err(e) = std::fs::rename(&tmp, &yuv) {
+            assert!(std::path::Path::new(&yuv).exists(), "{e}");
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
     if !decodes_clean(&hevc) {
         eprintln!(

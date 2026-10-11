@@ -3,15 +3,14 @@ use crate::media::Result;
 use crate::webp::riff::invalid;
 
 pub(super) const MAX_LEN: usize = 15;
-pub(super) const ROOT: u32 = 8;
-
 #[derive(Clone, Copy)]
 pub(super) struct Code {
     pub start: u32,
+    pub root: u32,
     pub single: Option<u16>,
 }
 
-pub(super) fn build(lengths: &[u8], table: &mut Vec<u32>) -> Result<Code> {
+pub(super) fn build(lengths: &[u8], table: &mut Vec<u32>, root: u32) -> Result<Code> {
     let start = table.len() as u32;
     let mut count = [0u16; MAX_LEN + 1];
     let mut last = 0;
@@ -23,7 +22,9 @@ pub(super) fn build(lengths: &[u8], table: &mut Vec<u32>) -> Result<Code> {
             used += 1;
         }
     }
-    let root_size = 1usize << ROOT;
+    let max_len = lengths.iter().copied().max().unwrap_or(0) as u32;
+    let root = root.min(max_len.max(1));
+    let root_size = 1usize << root;
     if used == 0 {
         return Err(invalid("VP8L prefix code without symbols"));
     }
@@ -31,6 +32,7 @@ pub(super) fn build(lengths: &[u8], table: &mut Vec<u32>) -> Result<Code> {
         table.extend(std::iter::repeat_n((last as u32) << 8, root_size));
         return Ok(Code {
             start,
+            root,
             single: Some(last as u16),
         });
     }
@@ -51,7 +53,7 @@ pub(super) fn build(lengths: &[u8], table: &mut Vec<u32>) -> Result<Code> {
     let mut sym = 0usize;
     let mut num_open: i32 = 1;
     let mut step = 2usize;
-    for (len, &n) in count.iter().enumerate().take(ROOT as usize + 1).skip(1) {
+    for (len, &n) in count.iter().enumerate().take(root as usize + 1).skip(1) {
         num_open <<= 1;
         num_open -= n as i32;
         if num_open < 0 {
@@ -75,7 +77,7 @@ pub(super) fn build(lengths: &[u8], table: &mut Vec<u32>) -> Result<Code> {
     let mut sub_size = 0usize;
     let mut cnt = count;
     step = 2;
-    for len in ROOT as usize + 1..=MAX_LEN {
+    for len in root as usize + 1..=MAX_LEN {
         num_open <<= 1;
         num_open -= count[len] as i32;
         if num_open < 0 {
@@ -84,15 +86,15 @@ pub(super) fn build(lengths: &[u8], table: &mut Vec<u32>) -> Result<Code> {
         while cnt[len] > 0 {
             if key & mask != low {
                 sub += sub_size;
-                let bits = next_table_bits(&cnt, len);
+                let bits = next_table_bits(&cnt, len, root as usize);
                 sub_size = 1 << bits;
                 table.resize(sub + sub_size, 0);
                 low = key & mask;
-                table[base + low] = ((sub - base) as u32) << 8 | (bits as u32 + ROOT);
+                table[base + low] = ((sub - base) as u32) << 8 | (bits as u32 + root);
             }
-            let e = (sorted[sym] as u32) << 8 | (len as u32 - ROOT);
+            let e = (sorted[sym] as u32) << 8 | (len as u32 - root);
             sym += 1;
-            let mut k = key >> ROOT;
+            let mut k = key >> root;
             while k < sub_size {
                 table[sub + k] = e;
                 k += step;
@@ -107,6 +109,7 @@ pub(super) fn build(lengths: &[u8], table: &mut Vec<u32>) -> Result<Code> {
     }
     Ok(Code {
         start,
+        root,
         single: None,
     })
 }
@@ -123,8 +126,8 @@ fn next_key(key: usize, len: usize) -> usize {
     }
 }
 
-fn next_table_bits(count: &[u16; MAX_LEN + 1], mut len: usize) -> usize {
-    let mut left: i32 = 1 << (len - ROOT as usize);
+fn next_table_bits(count: &[u16; MAX_LEN + 1], mut len: usize, root: usize) -> usize {
+    let mut left: i32 = 1 << (len - root);
     while len < MAX_LEN {
         left -= count[len] as i32;
         if left <= 0 {
@@ -133,18 +136,19 @@ fn next_table_bits(count: &[u16; MAX_LEN + 1], mut len: usize) -> usize {
         len += 1;
         left <<= 1;
     }
-    len - ROOT as usize
+    len - root
 }
 
 #[inline(always)]
 pub(super) fn read(table: &[u32], code: Code, bits: &mut Bits) -> u32 {
     let v = bits.peek();
     let base = code.start as usize;
-    let mut e = table[base + (v as usize & ((1 << ROOT) - 1))];
+    let root = code.root;
+    let mut e = table[base + (v as usize & ((1 << root) - 1))];
     let n = e & 0xff;
-    if n > ROOT {
-        bits.consume(ROOT);
-        let sub = (v >> ROOT) as usize & ((1 << (n - ROOT)) - 1);
+    if n > root {
+        bits.consume(root);
+        let sub = (v >> root) as usize & ((1 << (n - root)) - 1);
         e = table[base + (e >> 8) as usize + sub];
     }
     bits.consume(e & 0xff);
@@ -160,6 +164,7 @@ pub(super) fn read_code(
     alphabet: usize,
     lengths: &mut Vec<u8>,
     table: &mut Vec<u32>,
+    root: u32,
 ) -> Result<Code> {
     lengths.clear();
     lengths.resize(alphabet, 0);
@@ -185,7 +190,7 @@ pub(super) fn read_code(
             cl[i] = bits.read(3) as u8;
         }
         let mut cl_table = Vec::with_capacity(256);
-        let cl_code = build(&cl, &mut cl_table)?;
+        let cl_code = build(&cl, &mut cl_table, 7)?;
         let mut max_symbol = if bits.bit() {
             let nbits = 2 + 2 * bits.read(3);
             let m = 2 + bits.read(nbits) as usize;
@@ -226,5 +231,5 @@ pub(super) fn read_code(
             }
         }
     }
-    build(lengths, table)
+    build(lengths, table, root)
 }
