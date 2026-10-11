@@ -2,21 +2,25 @@ mod alloc;
 mod bands;
 mod energy;
 mod mdct;
+mod pitch;
 mod pvq;
+mod tf;
 
 use crate::opus::celt::mode;
 use crate::opus::celt::rate::Mode;
 use crate::opus::celt::tables::*;
-use crate::opus::range::{BITRES, RangeEncoder};
+use crate::opus::range::{BITRES, RangeEncoder, ilog};
 
 use alloc::{AllocChoice, compute_allocation_enc};
 use bands::{Bands, quant_all_bands};
 use energy::{Coarse, quant_coarse_energy, quant_energy_finalise, quant_fine_energy};
 use mdct::{Mdct, MdctScratch};
+use pitch::{MAX_PERIOD, Pf, Pitch, prefilter};
 use pvq::Pvq;
 
-const SPREAD_NORMAL: usize = 2;
 const TRANSIENT_BLOCK: usize = 40;
+const TF_LAMBDA: f32 = 0.02;
+const PF_STRENGTH: f32 = 0.8;
 
 pub struct CeltEncoder {
     m: &'static Mode,
@@ -40,6 +44,12 @@ pub struct CeltEncoder {
     mdct_work: MdctScratch,
     pvq: Pvq,
     tmp: Vec<f32>,
+    spread_avg: f32,
+    raw: Vec<f32>,
+    pre_mem: Vec<f32>,
+    pitch: Pitch,
+    pf: Pf,
+    pf_old: Pf,
 }
 
 #[derive(Default)]
@@ -133,6 +143,12 @@ impl CeltEncoder {
             mdct_work: MdctScratch::default(),
             pvq: Pvq::default(),
             tmp: Vec::new(),
+            spread_avg: 1.0,
+            raw: Vec::new(),
+            pre_mem: vec![0.0; channels * MAX_PERIOD],
+            pitch: Pitch::default(),
+            pf: Pf::default(),
+            pf_old: Pf::default(),
         }
     }
 
@@ -145,6 +161,10 @@ impl CeltEncoder {
         self.consec_transient = 0;
         self.force_intra = true;
         self.vbr = Vbr::default();
+        self.spread_avg = 1.0;
+        self.pre_mem.fill(0.0);
+        self.pf = Pf::default();
+        self.pf_old = Pf::default();
     }
 
     pub fn prime(&mut self, history: &[f32]) {
@@ -160,22 +180,26 @@ impl CeltEncoder {
                 if j + OVERLAP >= n {
                     self.in_mem[ch * OVERLAP + j + OVERLAP - n] = v;
                 }
+                if j + MAX_PERIOD >= n {
+                    self.pre_mem[ch * MAX_PERIOD + j + MAX_PERIOD - n] = v;
+                }
             }
             self.preemph[ch] = mem;
         }
     }
 
-    fn load_input(&mut self, pcm: &[f32], n: usize) -> bool {
+    fn load_input(&mut self, pcm: &[f32], n: usize, allow_pf: bool) -> bool {
         let c = self.channels;
-        let len = n + OVERLAP;
-        self.inbuf.clear();
-        self.inbuf.resize(c * len, 0.0);
+        let rl = MAX_PERIOD + n;
+        self.raw.clear();
+        self.raw.resize(c * rl, 0.0);
         let mut silent = true;
         for ch in 0..c {
-            let buf = &mut self.inbuf[ch * len..(ch + 1) * len];
-            buf[..OVERLAP].copy_from_slice(&self.in_mem[ch * OVERLAP..(ch + 1) * OVERLAP]);
+            let raw = &mut self.raw[ch * rl..(ch + 1) * rl];
+            raw[..MAX_PERIOD]
+                .copy_from_slice(&self.pre_mem[ch * MAX_PERIOD..(ch + 1) * MAX_PERIOD]);
             let mut mem = self.preemph[ch];
-            for (j, o) in buf[OVERLAP..].iter_mut().enumerate() {
+            for (j, o) in raw[MAX_PERIOD..].iter_mut().enumerate() {
                 let x = clean(pcm[j * c + ch]);
                 silent &= x == 0.0;
                 let s = x * 32768.0;
@@ -183,8 +207,31 @@ impl CeltEncoder {
                 mem = PREEMPH * s;
             }
             self.preemph[ch] = mem;
-            self.in_mem[ch * OVERLAP..(ch + 1) * OVERLAP].copy_from_slice(&buf[n..]);
         }
+        self.pf = if allow_pf && !silent {
+            self.pitch
+                .analyse(&self.raw, c, n, &self.pf_old, PF_STRENGTH)
+        } else {
+            Pf::default()
+        };
+        let len = n + OVERLAP;
+        self.inbuf.clear();
+        self.inbuf.resize(c * len, 0.0);
+        for ch in 0..c {
+            let raw = &self.raw[ch * rl..(ch + 1) * rl];
+            let buf = &mut self.inbuf[ch * len..(ch + 1) * len];
+            buf[..OVERLAP].copy_from_slice(&self.in_mem[ch * OVERLAP..(ch + 1) * OVERLAP]);
+            prefilter(
+                raw,
+                &mut buf[OVERLAP..],
+                &self.pf_old,
+                &self.pf,
+                &self.m.window,
+            );
+            self.in_mem[ch * OVERLAP..(ch + 1) * OVERLAP].copy_from_slice(&buf[n..]);
+            self.pre_mem[ch * MAX_PERIOD..(ch + 1) * MAX_PERIOD].copy_from_slice(&raw[n..]);
+        }
+        self.pf_old = self.pf;
         silent
     }
 
@@ -338,9 +385,9 @@ impl CeltEncoder {
         (trim.round() as i32).clamp(0, 10) as usize
     }
 
-    pub fn analyse(&mut self, pcm: &[f32], n: usize, end: usize) -> Analysis {
+    pub fn analyse(&mut self, pcm: &[f32], n: usize, end: usize, allow_pf: bool) -> Analysis {
         let lm = lm_of(n);
-        let silent = self.load_input(pcm, n);
+        let silent = self.load_input(pcm, n, allow_pf);
         let transient = lm > 0 && self.transient_analysis(n);
         self.analyse_bands(n, lm, transient, end);
         self.analysed = (transient, end);
@@ -393,7 +440,18 @@ impl CeltEncoder {
             return;
         }
         if start == 0 && tell + 16 <= total_bits {
-            enc.bit_logp(false, 1);
+            let pf = self.pf;
+            enc.bit_logp(pf.on, 1);
+            if pf.on {
+                let t = pf.period as u32 + 1;
+                let octave = (ilog(t) - 5) as u32;
+                enc.uint(octave, 6);
+                enc.bits(t - (16 << octave), 4 + octave);
+                enc.bits(pf.qg, 3);
+                if enc.tell() + 2 <= total_bits {
+                    enc.icdf(pf.tapset, &TAPSET_ICDF, 2);
+                }
+            }
             tell = enc.tell();
         }
         let short_blocks = if lm > 0 && tell + 3 <= total_bits {
@@ -426,15 +484,43 @@ impl CeltEncoder {
         };
         quant_coarse_energy(&coarse, &mut self.old_band_e, &mut self.error, enc);
 
-        let mut tf_res = [short_blocks as i32; NB_EBANDS];
-        tf_encode(start, end, short_blocks, &mut tf_res, lm, enc, total_bits);
+        let tf = if nbytes >= 15 * c {
+            tf::analyse(
+                &self.freq,
+                n,
+                c,
+                lm,
+                short_blocks,
+                start,
+                end,
+                TF_LAMBDA,
+                &mut self.tmp,
+            )
+        } else {
+            tf::Tf {
+                res: [short_blocks as i32; NB_EBANDS],
+                select: 0,
+            }
+        };
+        let mut tf_res = tf.res;
+        tf_encode(
+            start,
+            end,
+            short_blocks,
+            &mut tf_res,
+            tf.select,
+            lm,
+            enc,
+            total_bits,
+        );
 
         tell = enc.tell();
+        let spread = tf::spread(&self.freq, n, c, lm, end, &mut self.spread_avg);
         let spread = if tell + 4 <= total_bits {
-            enc.icdf(SPREAD_NORMAL, &SPREAD_ICDF, 5);
-            SPREAD_NORMAL
+            enc.icdf(spread, &SPREAD_ICDF, 5);
+            spread
         } else {
-            SPREAD_NORMAL
+            2
         };
 
         let cap = m.init_caps(lm, c);
@@ -467,10 +553,13 @@ impl CeltEncoder {
                 dynalloc_logp = 2.max(dynalloc_logp - 1);
             }
         }
-        let alloc_trim = self.alloc_trim(start, end);
-        if tellf + (6 << BITRES) <= total_frac {
-            enc.icdf(alloc_trim, &TRIM_ICDF, 7);
-        }
+        let alloc_trim = if tellf + (6 << BITRES) <= total_frac {
+            let t = self.alloc_trim(start, end);
+            enc.icdf(t, &TRIM_ICDF, 7);
+            t
+        } else {
+            5
+        };
         let mut bits = ((nbytes as i32 * 8) << BITRES) - enc.tell_frac() as i32 - 1;
         let anti_collapse_rsv = if short_blocks && lm >= 2 && bits >= ((lm as i32 + 2) << BITRES) {
             1 << BITRES
@@ -557,11 +646,13 @@ impl CeltEncoder {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tf_encode(
     start: usize,
     end: usize,
     is_transient: bool,
     tf_res: &mut [i32; NB_EBANDS],
+    tf_select: usize,
     lm: usize,
     enc: &mut RangeEncoder,
     total_bits: i32,
@@ -585,13 +676,15 @@ fn tf_encode(
         logp = if is_transient { 4 } else { 5 };
     }
     let ti = 4 * is_transient as usize;
-    let tf_select = 0usize;
-    if tf_select_rsv
+    let tf_select = if tf_select_rsv
         && TF_SELECT_TABLE[lm][ti + tf_changed as usize]
             != TF_SELECT_TABLE[lm][ti + 2 + tf_changed as usize]
     {
         enc.bit_logp(tf_select != 0, 1);
-    }
+        tf_select
+    } else {
+        0
+    };
     for r in tf_res.iter_mut().take(end).skip(start) {
         *r = TF_SELECT_TABLE[lm][ti + 2 * tf_select + *r as usize] as i32;
     }
