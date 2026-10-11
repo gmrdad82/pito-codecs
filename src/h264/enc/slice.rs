@@ -7,7 +7,8 @@ use crate::h264::enc::intra::{
 };
 use crate::h264::enc::mbinfo::{MbInfo, MbKind, Mv, Part};
 use crate::h264::enc::nal::{SliceHeader, SliceType, nal};
-use crate::h264::enc::picture::{CHROMA_PAD, Frame, LUMA_PAD, RefPic, avg_into};
+use crate::h264::enc::deblock::{BandPlane, DeblockParams, deblock_row};
+use crate::h264::enc::picture::{BandMut, CHROMA_PAD, Frame, LUMA_PAD, RefPic, avg_into};
 use crate::h264::enc::syntax::{MbCode, NbCtx};
 use crate::h264::enc::tables::{BLK4_XY, NUM_CTX, RASTER_TO_BLK4, ZIGZAG4, ZIGZAG8, chroma_qp};
 use crate::h264::enc::transform::{
@@ -42,8 +43,6 @@ pub struct FrameEnc<'a> {
     pub cost_tab: &'a CostTable,
     pub st: SliceType,
     pub src: &'a Frame,
-    pub l0: Option<&'a RefPic>,
-    pub l1: Option<&'a RefPic>,
     pub qp: u8,
     pub aq: &'a [i8],
     pub hdr: SliceHeader,
@@ -83,6 +82,8 @@ pub struct Band<'b> {
     pub v: &'b mut [u8],
     pub ys: usize,
     pub cs: usize,
+    pub ybase: usize,
+    pub cbase: usize,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -191,8 +192,10 @@ pub struct SliceEnc<'a, 'b> {
     f: &'a FrameEnc<'a>,
     band: Band<'b>,
     mbs: &'b mut [MbInfo],
+    mbase: usize,
     y0: usize,
-    y1: usize,
+    refs: [Option<RefPic<'b>>; 2],
+    vlim: isize,
     slice_no: u16,
     last_qp: u8,
     prev_dqp_nz: bool,
@@ -203,20 +206,23 @@ pub struct SliceEnc<'a, 'b> {
 }
 
 impl<'a, 'b> SliceEnc<'a, 'b> {
-    pub fn new(
-        f: &'a FrameEnc<'a>,
-        band: Band<'b>,
-        mbs: &'b mut [MbInfo],
-        y0: usize,
-        y1: usize,
-        slice_no: u16,
-    ) -> Self {
+    pub fn new(f: &'a FrameEnc<'a>, slice_no: u16) -> Self {
         SliceEnc {
             f,
-            band,
-            mbs,
-            y0,
-            y1,
+            band: Band {
+                y: &mut [],
+                u: &mut [],
+                v: &mut [],
+                ys: 0,
+                cs: 0,
+                ybase: 0,
+                cbase: 0,
+            },
+            mbs: &mut [],
+            mbase: 0,
+            y0: 0,
+            refs: [None, None],
+            vlim: 0,
             slice_no,
             last_qp: f.qp,
             prev_dqp_nz: false,
@@ -227,11 +233,10 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
         }
     }
 
-    pub fn encode(mut self) -> SliceOut {
+    pub fn start(&mut self) {
         let f = self.f;
-        let mbw = f.p.mbw;
         let mut hdr = f.hdr.clone();
-        hdr.first_mb = (self.y0 * mbw) as u32;
+        hdr.first_mb = (self.y0 * f.p.mbw) as u32;
         let mut bw = BitWriter::new();
         hdr.write(&mut bw);
         if f.p.cabac {
@@ -243,17 +248,89 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
         } else {
             self.cavlc = Some(bw);
         }
-        for my in self.y0..self.y1 {
-            for mx in 0..mbw {
-                self.encode_mb(mx, my);
-                if let Some(c) = self.cabac.as_mut() {
-                    let last = my + 1 == self.y1 && mx + 1 == mbw;
-                    if !last {
-                        c.terminate(0);
-                    }
-                }
+    }
+
+    pub fn set_band(&mut self, b: BandMut<'b>, ys: usize, cs: usize) {
+        self.band = Band {
+            y: b.y,
+            u: b.u,
+            v: b.v,
+            ys,
+            cs,
+            ybase: b.ybase,
+            cbase: b.cbase,
+        };
+        self.mbs = b.mbs;
+        self.mbase = b.mbase;
+    }
+
+    pub fn clear_band(&mut self) {
+        self.band.y = &mut [];
+        self.band.u = &mut [];
+        self.band.v = &mut [];
+        self.mbs = &mut [];
+    }
+
+    pub fn set_refs(&mut self, refs: [Option<RefPic<'b>>; 2]) {
+        self.vlim = refs
+            .iter()
+            .flatten()
+            .map(|r| r.lim)
+            .min()
+            .unwrap_or(isize::MAX);
+        self.refs = refs;
+    }
+
+    pub fn encode_row(&mut self, my: usize) {
+        let mbw = self.f.p.mbw;
+        let last_row = my + 1 == self.f.p.mbh;
+        for mx in 0..mbw {
+            self.encode_mb(mx, my);
+            if let Some(c) = self.cabac.as_mut()
+                && !(last_row && mx + 1 == mbw)
+            {
+                c.terminate(0);
             }
         }
+    }
+
+    pub fn deblock_row(&mut self, my: usize, dp: &DeblockParams) {
+        let mut y = BandPlane {
+            data: &mut *self.band.y,
+            stride: self.band.ys,
+            pad: LUMA_PAD,
+            base: self.band.ybase,
+        };
+        let mut u = BandPlane {
+            data: &mut *self.band.u,
+            stride: self.band.cs,
+            pad: CHROMA_PAD,
+            base: self.band.cbase,
+        };
+        let mut v = BandPlane {
+            data: &mut *self.band.v,
+            stride: self.band.cs,
+            pad: CHROMA_PAD,
+            base: self.band.cbase,
+        };
+        deblock_row(
+            &mut y,
+            &mut u,
+            &mut v,
+            self.mbs,
+            self.mbase,
+            self.f.p.mbw,
+            my,
+            dp,
+        );
+    }
+
+    pub fn band_mut(&mut self) -> &mut Band<'b> {
+        &mut self.band
+    }
+
+    pub fn finish(mut self) -> SliceOut {
+        let f = self.f;
         let rbsp = if let Some(c) = self.cabac.take() {
             c.finish()
         } else {
@@ -273,7 +350,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
 
     #[inline]
     fn mb(&self, mx: usize, my: usize) -> &MbInfo {
-        &self.mbs[(my - self.y0) * self.f.p.mbw + mx]
+        &self.mbs[(my - self.mbase) * self.f.p.mbw + mx]
     }
 
     fn avail(&self, mx: usize, my: usize) -> Avail {
@@ -288,11 +365,11 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
 
     #[inline]
     fn ry(&self, x: usize, y: usize) -> usize {
-        (y - self.y0 * 16) * self.band.ys + LUMA_PAD + x
+        (y + LUMA_PAD - self.band.ybase) * self.band.ys + LUMA_PAD + x
     }
     #[inline]
     fn rc(&self, x: usize, y: usize) -> usize {
-        (y - self.y0 * 8) * self.band.cs + CHROMA_PAD + x
+        (y + CHROMA_PAD - self.band.cbase) * self.band.cs + CHROMA_PAD + x
     }
 
     fn edges(&self, mx: usize, my: usize, av: Avail) -> MbEdges {
@@ -442,17 +519,16 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
     }
 
     fn mv_ok(&self, x: usize, y: usize, w: usize, h: usize, mv: Mv) -> bool {
-        let pw = (self.f.p.mbw * 16) as i32;
-        let ph = (self.f.p.mbh * 16) as i32;
-        let m = LUMA_PAD as i32 - 20;
-        let x0 = x as i32 + (mv.x as i32 >> 2);
-        let y0 = y as i32 + (mv.y as i32 >> 2);
+        let pw = (self.f.p.mbw * 16) as isize;
+        let m = LUMA_PAD as isize - 20;
+        let x0 = x as isize + (mv.x as isize >> 2);
+        let y0 = y as isize + (mv.y as isize >> 2);
         mv.x.unsigned_abs() < 2000
             && mv.y.unsigned_abs() < 2000
             && x0 >= -m
             && y0 >= -m
-            && x0 + w as i32 <= pw + m
-            && y0 + h as i32 <= ph + m
+            && x0 + w as isize <= pw + m
+            && y0 + h as isize + 1 <= self.vlim
     }
 
     fn encode_mb(&mut self, mx: usize, my: usize) {
@@ -537,7 +613,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
         } else {
             self.stats.inter += 1;
         }
-        let idx = (my - self.y0) * self.f.p.mbw + mx;
+        let idx = (my - self.mbase) * self.f.p.mbw + mx;
         self.mbs[idx] = c.info;
         let av = self.avail(mx, my);
         let left = if av.left {
@@ -580,7 +656,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
 
     fn est_bits(&self, mx: usize, my: usize, c: &Cand, qp: u8) -> u64 {
         let av = self.avail(mx, my);
-        let idx = (my - self.y0) * self.f.p.mbw + mx;
+        let idx = (my - self.mbase) * self.f.p.mbw + mx;
         let left = if av.left {
             Some(&self.mbs[idx - 1])
         } else {
@@ -1585,7 +1661,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
         cands: &[Mv],
         lam: u32,
     ) -> (Mv, u32) {
-        let pl = &r.frame.y;
+        let pl = &r.y;
         let p = self.f.p;
         let fcost = |mv: Mv| -> u32 {
             let i = pl.idx(
@@ -1867,7 +1943,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
         src: &Src,
     ) -> Box<Cand> {
         let f = self.f;
-        let Some(r) = f.l0 else {
+        let Some(r) = self.refs[0] else {
             return self.analyse_intra(mx, my, qp, av, e, src, u64::MAX);
         };
         let lam = f.lam.sad[qp as usize];
@@ -2049,7 +2125,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
                 }
             }
         }
-        let Some(l1) = self.f.l1 else {
+        let Some(l1) = self.refs[1] else {
             return ([[0; 4]; 2], [[Mv::ZERO; 4]; 2]);
         };
         let col = &l1.mbs[my * self.f.p.mbw + mx];
@@ -2092,7 +2168,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
         seeds: [Mv; 2],
     ) -> Option<Box<Cand>> {
         let f = self.f;
-        let rp = [f.l0?, f.l1?];
+        let rp = [self.refs[0]?, self.refs[1]?];
         let (px, py) = (mx * 16, my * 16);
         let mut mvs = [[Mv::ZERO; 4]; 2];
         for l in 0..2 {
@@ -2202,7 +2278,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
         src: &Src,
     ) -> Box<Cand> {
         let f = self.f;
-        let (Some(r0), Some(r1)) = (f.l0, f.l1) else {
+        let (Some(r0), Some(r1)) = (self.refs[0], self.refs[1]) else {
             return self.analyse_intra(mx, my, qp, av, e, src, u64::MAX);
         };
         let lam = f.lam.sad[qp as usize];

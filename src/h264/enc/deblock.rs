@@ -1,23 +1,26 @@
 use crate::h264::enc::mbinfo::{MbInfo, Mv};
 use crate::h264::enc::tables::{ALPHA, BETA, TC0, chroma_qp};
 
+pub const MAX_REFS: usize = 4;
+
 pub struct DeblockParams {
     pub alpha_offset: i32,
     pub beta_offset: i32,
     pub chroma_qp_offset: i32,
-    pub ref_ids: [i32; 2],
+    pub ref_ids: [[i32; MAX_REFS]; 2],
 }
 
 pub struct BandPlane<'a> {
     pub data: &'a mut [u8],
     pub stride: usize,
     pub pad: usize,
+    pub base: usize,
 }
 
 impl BandPlane<'_> {
     #[inline]
     fn idx(&self, x: usize, y: usize) -> usize {
-        y * self.stride + self.pad + x
+        (y + self.pad - self.base) * self.stride + self.pad + x
     }
 }
 
@@ -37,13 +40,13 @@ fn mvdiff(a: Mv, b: Mv) -> bool {
     (a.x as i32 - b.x as i32).abs() >= 4 || (a.y as i32 - b.y as i32).abs() >= 4
 }
 
-fn bs_inter(p: &MbInfo, ip: usize, q: &MbInfo, iq: usize, ids: &[i32; 2]) -> u8 {
+fn bs_inter(p: &MbInfo, ip: usize, q: &MbInfo, iq: usize, ids: &[[i32; MAX_REFS]; 2]) -> u8 {
     if nz8(p, ip) || nz8(q, iq) {
         return 2;
     }
     let rp = [p.ref_at(0, ip), p.ref_at(1, ip)];
     let rq = [q.ref_at(0, iq), q.ref_at(1, iq)];
-    let pic = |r: i8, l: usize| if r >= 0 { ids[l] } else { -1 };
+    let pic = |r: i8, l: usize| if r >= 0 { ids[l][r as usize] } else { -1 };
     let pp = [pic(rp[0], 0), pic(rp[1], 1)];
     let pq = [pic(rq[0], 0), pic(rq[1], 1)];
     let np = (pp[0] >= 0) as u8 + (pp[1] >= 0) as u8;
@@ -87,7 +90,14 @@ fn bs_inter(p: &MbInfo, ip: usize, q: &MbInfo, iq: usize, ids: &[i32; 2]) -> u8 
 }
 
 #[inline]
-fn bs_of(p: &MbInfo, ip: usize, q: &MbInfo, iq: usize, mb_edge: bool, ids: &[i32; 2]) -> u8 {
+fn bs_of(
+    p: &MbInfo,
+    ip: usize,
+    q: &MbInfo,
+    iq: usize,
+    mb_edge: bool,
+    ids: &[[i32; MAX_REFS]; 2],
+) -> u8 {
     if p.kind.is_intra() || q.kind.is_intra() {
         return if mb_edge { 4 } else { 3 };
     }
@@ -178,19 +188,21 @@ fn edge_q(qp_p: i32, qp_q: i32, dp: &DeblockParams) -> EdgeQ {
     }
 }
 
-pub fn deblock_band<'a>(
+pub fn deblock_row<'a>(
     y: &mut BandPlane<'a>,
     u: &mut BandPlane<'a>,
     v: &mut BandPlane<'a>,
     mbs: &[MbInfo],
+    mbase: usize,
     mbw: usize,
-    rows: usize,
+    my: usize,
     dp: &DeblockParams,
 ) {
     let ids = &dp.ref_ids;
-    for my in 0..rows {
+    let at = |mx: usize, my: usize| &mbs[(my - mbase) * mbw + mx];
+    {
         for mx in 0..mbw {
-            let q = &mbs[my * mbw + mx];
+            let q = at(mx, my);
             let cqp = |m: &MbInfo| chroma_qp(m.qp as i32 + dp.chroma_qp_offset) as i32;
             for dir in 0..2 {
                 let mut bs_all = [[0u8; 4]; 4];
@@ -202,11 +214,7 @@ pub fn deblock_band<'a>(
                         continue;
                     }
                     let p_mb = if e == 0 {
-                        if dir == 0 {
-                            &mbs[my * mbw + mx - 1]
-                        } else {
-                            &mbs[(my - 1) * mbw + mx]
-                        }
+                        if dir == 0 { at(mx - 1, my) } else { at(mx, my - 1) }
                     } else {
                         q
                     };
@@ -256,11 +264,7 @@ pub fn deblock_band<'a>(
                         continue;
                     }
                     let p_mb = if e == 0 {
-                        if dir == 0 {
-                            &mbs[my * mbw + mx - 1]
-                        } else {
-                            &mbs[(my - 1) * mbw + mx]
-                        }
+                        if dir == 0 { at(mx - 1, my) } else { at(mx, my - 1) }
                     } else {
                         q
                     };
