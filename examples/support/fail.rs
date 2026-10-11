@@ -1,6 +1,23 @@
 use std::error::Error;
+use std::io::Write;
 use std::panic::{self, AssertUnwindSafe};
 use std::process::ExitCode;
+
+#[allow(unused_macros)]
+macro_rules! say {
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        writeln!(std::io::stdout(), $($t)*)
+    }};
+}
+
+#[allow(unused_macros)]
+macro_rules! note {
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($t)*);
+    }};
+}
 
 pub fn run(bin: &str, body: impl FnOnce() -> Result<(), Box<dyn Error>>) -> ExitCode {
     panic::set_hook(Box::new(|_| {}));
@@ -17,7 +34,7 @@ pub fn run(bin: &str, body: impl FnOnce() -> Result<(), Box<dyn Error>>) -> Exit
             format!("internal error: {what}")
         }
     };
-    eprintln!("{bin}: {}", one_line(&message));
+    let _ = writeln!(std::io::stderr(), "{bin}: {}", one_line(&message));
     ExitCode::FAILURE
 }
 

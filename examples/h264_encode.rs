@@ -1,3 +1,4 @@
+#[macro_use]
 #[path = "support/fail.rs"]
 mod fail;
 
@@ -106,11 +107,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         out.write_all(&p.data)?;
     }
     let secs = t.elapsed().as_secs_f64();
-    println!(
+    say!(
         "{} frames {:.1} fps {} bytes",
         frames.len(),
         frames.len() as f64 / secs,
         bytes
-    );
+    )?;
     Ok(())
 }

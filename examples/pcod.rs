@@ -1,3 +1,4 @@
+#[macro_use]
 #[path = "support/fail.rs"]
 mod fail;
 
@@ -78,55 +79,50 @@ impl Kind {
 fn main() -> ExitCode {
     let matches = Cli::command().arg_required_else_help(false).get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
-    fail::run("pcod", || {
-        let (file, result) = match cli.command {
-            Command::Probe { file } => {
-                let r = show(&file);
-                (file, r)
-            }
-            Command::Decode {
-                file,
-                route,
-                threads,
-            } => {
-                let r = decode(&file, route, threads);
-                (file, r)
-            }
-            Command::Encode {
-                input,
-                output,
-                codec,
-                route,
-                crf,
-                threads,
-            } => {
-                let r = encode(&input, &output, codec, route, crf, threads);
-                (input, r)
-            }
-        };
-        result.map_err(|e| {
-            if file.exists() {
-                e
-            } else {
-                format!("{}: {e}", file.display()).into()
-            }
-        })
+    fail::run("pcod", || match cli.command {
+        Command::Probe { file } => show(&file).map_err(|e| named(e, &[&file])),
+        Command::Decode {
+            file,
+            route,
+            threads,
+        } => decode(&file, route, threads).map_err(|e| named(e, &[&file])),
+        Command::Encode {
+            input,
+            output,
+            codec,
+            route,
+            crf,
+            threads,
+        } => encode(&input, &output, codec, route, crf, threads)
+            .map_err(|e| named(e, &[&input, &output])),
     })
+}
+
+fn named(e: Fail, files: &[&Path]) -> Fail {
+    let text = e.to_string();
+    let shown: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
+    if shown.iter().any(|f| text.contains(f.as_str())) {
+        return e;
+    }
+    match shown.first() {
+        Some(f) => format!("{f}: {text}").into(),
+        None => e,
+    }
 }
 
 fn show(file: &Path) -> Result<(), Fail> {
     let p = probe(file, &Prefs::default())?;
     let (w, h) = p.shown_size();
-    println!("container  MP4");
-    println!("duration   {:.1} s", p.duration);
-    println!(
+    say!("container  MP4")?;
+    say!("duration   {:.1} s", p.duration)?;
+    say!(
         "video      {} {} {w}x{h} {:.2} fps",
         p.video_codec_name,
         p.profile,
         p.fps()
-    );
+    )?;
     for a in &p.audio {
-        println!("audio      {} {} ch {} Hz", a.codec, a.channels, a.rate);
+        say!("audio      {} {} ch {} Hz", a.codec, a.channels, a.rate)?;
     }
     Ok(())
 }
@@ -333,9 +329,9 @@ fn pump(
 fn decode(file: &Path, want: Where, threads: Option<usize>) -> Result<(), Fail> {
     let mut opened = open(file, want, threads_of(threads))?;
     if let Some(note) = &opened.note {
-        println!("{note}");
+        say!("{note}")?;
     }
-    println!("route   {}", opened.label);
+    say!("route   {}", opened.label)?;
     let start = Instant::now();
     let mut frames = 0u64;
     pump(&mut opened, |_| {
@@ -343,10 +339,10 @@ fn decode(file: &Path, want: Where, threads: Option<usize>) -> Result<(), Fail> 
         Ok(())
     })?;
     let seconds = start.elapsed().as_secs_f64();
-    println!(
+    say!(
         "decoded {frames} frames in {seconds:.2} s: {:.0} fps",
         frames as f64 / seconds
-    );
+    )?;
     Ok(())
 }
 
@@ -401,9 +397,9 @@ fn encode(
     }
     let mut opened = open(input, want, threads)?;
     if let Some(note) = &opened.note {
-        println!("{note}");
+        say!("{note}")?;
     }
-    println!("decode  {}", opened.label);
+    say!("decode  {}", opened.label)?;
     let gop = (fps.0 / fps.1).clamp(1, 120) * 2;
     let mut codec = kind.codec();
     let mut gpu_encoder = None;
@@ -433,18 +429,18 @@ fn encode(
                     gpu_encoder = Some(e);
                     break;
                 }
-                Err(e) => println!("no GPU {c} encoder ({e})"),
+                Err(e) => say!("no GPU {c} encoder ({e})")?,
             }
         }
     }
     let mut encoder = match gpu_encoder {
         Some(e) => {
-            println!("encode  {codec} GPU ({})", driver_of(e.backend()));
+            say!("encode  {codec} GPU ({})", driver_of(e.backend()))?;
             Encoder::Gpu(Box::new(e))
         }
         None => {
             if codec != Codec::H264 {
-                println!("{codec} encodes on the GPU only, encoding H.264 on the CPU");
+                say!("{codec} encodes on the GPU only, encoding H.264 on the CPU")?;
             }
             codec = Codec::H264;
             let e = h264::Encoder::new(h264::EncoderConfig {
@@ -459,7 +455,7 @@ fn encode(
                 threads,
                 bitstream: h264::Bitstream::LengthPrefixed,
             })?;
-            println!("encode  {codec} CPU ({threads} threads)");
+            say!("encode  {codec} CPU ({threads} threads)")?;
             Encoder::Cpu(Box::new(e))
         }
     };
@@ -570,14 +566,14 @@ fn encode(
     }
     writer.finish_faststart()?;
     let seconds = start.elapsed().as_secs_f64();
-    println!(
+    say!(
         "encoded {frames} frames in {seconds:.2} s: {:.0} fps",
         frames as f64 / seconds
-    );
-    println!(
+    )?;
+    say!(
         "wrote   {} ({:.1} MB)",
         output.display(),
         std::fs::metadata(output)?.len() as f64 / 1e6
-    );
+    )?;
     Ok(())
 }
