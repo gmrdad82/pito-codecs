@@ -4,6 +4,7 @@ use super::filter::{self, Strength};
 use super::tables::*;
 use super::yuv;
 use crate::media::{Error, Result};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 pub type Probs = [[[[u8; 11]; 3]; 17]; 4];
 
@@ -425,12 +426,63 @@ impl Modes<'_> {
     }
 }
 
-pub struct Tokens<'a> {
-    parts: Vec<BoolDecoder<'a>>,
-    nz_t: Vec<u32>,
+pub struct Tables {
     probs: Probs,
     quant: [Quant; 4],
     strength: [[Strength; 2]; 4],
+}
+
+pub trait Above {
+    fn get(&mut self, mx: usize) -> u32;
+    fn set(&mut self, mx: usize, v: u32);
+}
+
+impl Above for [u32] {
+    #[inline(always)]
+    fn get(&mut self, mx: usize) -> u32 {
+        self[mx]
+    }
+
+    #[inline(always)]
+    fn set(&mut self, mx: usize, v: u32) {
+        self[mx] = v;
+    }
+}
+
+struct Wave<'s> {
+    nz: &'s [AtomicU32],
+    above: Option<&'s AtomicUsize>,
+    mine: &'s AtomicUsize,
+}
+
+impl Above for Wave<'_> {
+    #[inline(always)]
+    fn get(&mut self, mx: usize) -> u32 {
+        if let Some(a) = self.above {
+            let mut spins = 0u32;
+            while a.load(Ordering::Acquire) <= mx {
+                if spins < 64 {
+                    std::hint::spin_loop();
+                    spins += 1;
+                } else {
+                    std::thread::yield_now();
+                }
+            }
+        }
+        self.nz[mx].load(Ordering::Relaxed)
+    }
+
+    #[inline(always)]
+    fn set(&mut self, mx: usize, v: u32) {
+        self.nz[mx].store(v, Ordering::Relaxed);
+        self.mine.store(mx + 1, Ordering::Release);
+    }
+}
+
+pub struct Tokens<'a> {
+    parts: Vec<BoolDecoder<'a>>,
+    nz_t: Vec<u32>,
+    tables: Tables,
 }
 
 impl Tokens<'_> {
@@ -520,32 +572,48 @@ impl Tokens<'_> {
         (ac, any)
     }
 
-    pub fn row(&mut self, my: usize, out: &mut RowData) {
+    fn mb_row<A: Above + ?Sized>(
+        c: &Tables,
+        br: &mut BoolDecoder,
+        above: &mut A,
+        out: &mut RowData,
+    ) {
         let mut nz_l = 0u32;
-        let part = my % self.parts.len();
         for (mx, d) in out.mbs.iter_mut().enumerate() {
             let mb = d.mb;
+            let mut t = above.get(mx);
             let (ac, any) = if mb.skip {
                 let keep = if mb.ymode == B_PRED { 0x100 } else { 0 };
-                self.nz_t[mx] &= keep;
+                t &= keep;
                 nz_l &= keep;
                 (0, false)
             } else {
                 Self::residuals(
-                    &mut self.parts[part],
-                    &self.probs,
-                    &self.quant[mb.segment as usize],
+                    br,
+                    &c.probs,
+                    &c.quant[mb.segment as usize],
                     &mb,
-                    &mut self.nz_t[mx],
+                    &mut t,
                     &mut nz_l,
                     &mut out.coeffs[mx * 384..mx * 384 + 384],
                 )
             };
-            let mut strength = self.strength[mb.segment as usize][(mb.ymode == B_PRED) as usize];
+            above.set(mx, t);
+            let mut strength = c.strength[mb.segment as usize][(mb.ymode == B_PRED) as usize];
             strength.inner |= any;
             d.ac = ac;
             d.strength = strength;
         }
+    }
+
+    pub fn row(&mut self, my: usize, out: &mut RowData) {
+        let part = my % self.parts.len();
+        Self::mb_row(
+            &self.tables,
+            &mut self.parts[part],
+            self.nz_t.as_mut_slice(),
+            out,
+        );
     }
 }
 
@@ -570,9 +638,11 @@ impl<'a> Parser<'a> {
             tokens: Tokens {
                 parts: hdr.parts.iter().map(|p| BoolDecoder::new(p)).collect(),
                 nz_t: vec![0; mb_w],
-                probs: hdr.probs,
-                quant: hdr.quant,
-                strength: hdr.strength,
+                tables: Tables {
+                    probs: hdr.probs,
+                    quant: hdr.quant,
+                    strength: hdr.strength,
+                },
             },
             hdr,
         })
@@ -828,7 +898,7 @@ fn band_end(my: usize, mb_h: usize, height: usize) -> usize {
     if my + 1 == mb_h { height } else { my * 16 + 9 }
 }
 
-const RING: usize = 8;
+const RING: usize = 12;
 
 pub fn decode_rgba(data: &[u8], out: &mut [u8]) -> Result<()> {
     let mut parser = Parser::new(data)?;
@@ -873,32 +943,58 @@ pub fn decode_rgba(data: &[u8], out: &mut [u8]) -> Result<()> {
     }
     let sh = &sh;
     let Parser {
-        mut modes,
-        mut tokens,
-        ..
+        mut modes, tokens, ..
     } = parser;
+    let Tokens { parts, tables, .. } = tokens;
+    let nparts = parts.len();
+    let workers = nparts.min(threads.saturating_sub(3)).max(1);
+    let mut groups: Vec<Vec<BoolDecoder>> = (0..workers).map(|_| Vec::new()).collect();
+    for (p, br) in parts.into_iter().enumerate() {
+        groups[p % workers].push(br);
+    }
+    let nz: Vec<AtomicU32> = (0..mb_w).map(|_| AtomicU32::new(0)).collect();
+    let progress: Vec<AtomicUsize> = (0..mb_h).map(|_| AtomicUsize::new(0)).collect();
+    let (tables, nz, progress) = (&tables, &nz[..], &progress[..]);
     std::thread::scope(|s| {
         use std::sync::mpsc::channel;
         let (free_tx, free_rx) = channel::<RowData>();
-        let (mode_tx, mode_rx) = channel::<(usize, RowData)>();
         let (full_tx, full_rx) = channel::<(usize, RowData)>();
         let (done_tx, done_rx) = channel::<(usize, RowData)>();
         for _ in 0..RING {
             free_tx.send(RowData::new(mb_w)).ok();
         }
-        s.spawn(move || {
-            for (my, mut row) in mode_rx {
-                tokens.row(my, &mut row);
-                if full_tx.send((my, row)).is_err() {
-                    break;
+        let mut work = Vec::with_capacity(workers);
+        for mut group in groups {
+            let (tx, rx) = channel::<(usize, RowData)>();
+            work.push(tx);
+            let full_tx = full_tx.clone();
+            s.spawn(move || {
+                for (my, mut row) in rx {
+                    let mut wave = Wave {
+                        nz,
+                        above: my.checked_sub(1).map(|a| &progress[a]),
+                        mine: &progress[my],
+                    };
+                    let br = &mut group[(my % nparts) / workers];
+                    Tokens::mb_row(tables, br, &mut wave, &mut row);
+                    if full_tx.send((my, row)).is_err() {
+                        break;
+                    }
                 }
-            }
-        });
+            });
+        }
+        drop(full_tx);
         s.spawn(move || {
-            for (my, mut row) in full_rx {
-                unsafe { sh.recon(&mut recon, my, &mut row) };
-                if done_tx.send((my, row)).is_err() {
-                    break;
+            let mut held: Vec<Option<RowData>> = (0..RING).map(|_| None).collect();
+            let mut next = 0;
+            for (my, row) in full_rx {
+                held[my % RING] = Some(row);
+                while let Some(mut row) = held[next % RING].take() {
+                    unsafe { sh.recon(&mut recon, next, &mut row) };
+                    if done_tx.send((next, row)).is_err() {
+                        return;
+                    }
+                    next += 1;
                 }
             }
         });
@@ -915,11 +1011,11 @@ pub fn decode_rgba(data: &[u8], out: &mut [u8]) -> Result<()> {
         for my in 0..mb_h {
             let Ok(mut row) = free_rx.recv() else { break };
             modes.row(&mut row.mbs);
-            if mode_tx.send((my, row)).is_err() {
+            if work[(my % nparts) % workers].send((my, row)).is_err() {
                 break;
             }
         }
-        drop(mode_tx);
+        drop(work);
     });
     Ok(())
 }
