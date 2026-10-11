@@ -5,6 +5,8 @@ const CROSSINGS: f64 = 48.0;
 const ROLLOFF: f64 = 0.93;
 const BETA: f64 = 9.0;
 const MAX_PHASES: u64 = 2048;
+const MAX_RATE: u32 = 1_536_000;
+const MAX_RATIO: u32 = 256;
 
 fn gcd(a: u64, b: u64) -> u64 {
     if b == 0 { a } else { gcd(b, a % b) }
@@ -47,6 +49,11 @@ impl Resampler {
         if from == 0 || to == 0 || channels == 0 {
             return Err(Error::Invalid(format!(
                 "resample {from} Hz to {to} Hz with {channels} channels"
+            )));
+        }
+        if from.max(to) > MAX_RATE || from.max(to) / from.min(to) > MAX_RATIO {
+            return Err(Error::Invalid(format!(
+                "resample {from} Hz to {to} Hz: rates go up to {MAX_RATE} Hz and {MAX_RATIO} to 1"
             )));
         }
         let g = gcd(from as u64, to as u64);

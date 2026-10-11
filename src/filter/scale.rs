@@ -1,5 +1,5 @@
 use super::color::Siting;
-use super::plane::{Sample, Simd, check, plane_dims, reshape, samples, samples_mut, simd};
+use super::plane::{Sample, Simd, check, plane_dims, reshape, samples, samples_mut, simd, sized};
 use crate::media::{Error, Frame, PixelFormat, Result};
 use rayon::prelude::*;
 
@@ -61,6 +61,7 @@ struct Taps {
     start: Vec<usize>,
     coef: Vec<i16>,
     blocks: usize,
+    reach: usize,
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     packed: Vec<i16>,
 }
@@ -101,11 +102,13 @@ impl Taps {
                 packed[(pair * blocks + b) * 16 + side * 8 + k] = coef[j * n + t];
             }
         }
+        let reach = start.iter().max().copied().unwrap_or(0) + blocks * 8;
         Taps {
             n,
             start,
             coef,
             blocks,
+            reach,
             packed,
         }
     }
@@ -157,6 +160,8 @@ impl Scaler {
         if src_width == 0 || src_height == 0 || dst_width == 0 || dst_height == 0 {
             return Err(Error::Invalid("scale needs non-zero sizes".into()));
         }
+        sized(src_width, src_height)?;
+        sized(dst_width, dst_height)?;
         let src = (src_width, src_height);
         let dst = (dst_width, dst_height);
         Ok(Scaler {
@@ -337,8 +342,9 @@ fn vertical_scalar<S: Sample>(
 }
 
 fn horizontal<S: Sample>(tmp: &[i16], taps: &Taps, out: &mut [S], depth: i32, simd: Simd) {
-    let need = taps.start.iter().max().copied().unwrap_or(0) + taps.blocks * 8;
-    assert!(tmp.len() >= need && taps.packed.len() >= out.len().div_ceil(2) * taps.blocks * 16);
+    assert!(
+        tmp.len() >= taps.reach && taps.packed.len() >= out.len().div_ceil(2) * taps.blocks * 16
+    );
     let from = match simd {
         #[cfg(target_arch = "x86_64")]
         Simd::Avx2 => unsafe { x86::horizontal(tmp, taps, out, depth) },
@@ -444,8 +450,6 @@ mod x86 {
         let max = _mm256_set1_epi32((1 << depth) - 1);
         let zero = _mm256_setzero_si256();
         let order = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
-        let need = taps.start.iter().max().copied().unwrap_or(0) + blocks * 8;
-        assert!(tmp.len() >= need && taps.packed.len() >= width.div_ceil(2) * blocks * 16);
         let t = tmp.as_ptr();
         let mut x = 0;
         while x + 8 <= width {

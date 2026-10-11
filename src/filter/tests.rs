@@ -1511,3 +1511,132 @@ fn compare() {
     println!("{md}");
     std::fs::write(dir().join("compare.md"), md).unwrap();
 }
+
+#[test]
+fn hostile_input_returns_errors_instead_of_panicking() {
+    let tb = TimeBase::new(1, 30);
+    let mut frames = Vec::new();
+    for format in [PixelFormat::Yuv420p8, PixelFormat::Yuv420p10] {
+        for (w, h) in [(0, 0), (1, 1), (3, 5), (17, 1), (1, 33)] {
+            frames.push(Frame::new(format, w, h, 0, tb));
+        }
+        let mut short = Frame::new(format, 64, 64, 0, tb);
+        short.planes[1].data.truncate(10);
+        frames.push(short);
+        let mut lying = Frame::new(format, 64, 64, 0, tb);
+        lying.width = u32::MAX;
+        lying.height = u32::MAX;
+        frames.push(lying);
+        let mut wide = Frame::new(format, 8, 8, 0, tb);
+        wide.planes[0].stride = usize::MAX / 2;
+        frames.push(wide);
+    }
+    let mut out = Frame::new(PixelFormat::Yuv420p8, 0, 0, 0, tb);
+    let fill = Fill::black(Range::Limited, PixelFormat::Yuv420p8);
+    for f in &frames {
+        for r in [Rotation::R90, Rotation::R180, Rotation::R270] {
+            let _ = rotate(f, r, &mut out);
+        }
+        let _ = convert_color(
+            f,
+            ColorSpec::BT601,
+            ColorSpec::BT709,
+            PixelFormat::Yuv420p10,
+            &mut out,
+        );
+        let mut rgba = Rgba::new(0, 0);
+        let _ = yuv_to_rgba(f, ColorSpec::BT709, &mut rgba);
+        for k in [Kernel::Bilinear, Kernel::Lanczos] {
+            let _ = scale(f, 7, 3, k);
+            let _ = scale(f, u32::MAX, u32::MAX, k);
+        }
+        let _ = crop(f, 1, 1, 2, 2, &mut out);
+        let _ = pad(f, u32::MAX, u32::MAX, 0, 0, fill, &mut out);
+        let _ = pad(f, 70, 70, 3, 3, fill, &mut out);
+        let mut g = f.clone();
+        let _ = flip_horizontal(&mut g);
+        let _ = flip_vertical(&mut g);
+        let mut packed = vec![0u8; 16];
+        let _ = yuv_to_packed(
+            f,
+            ColorSpec::BT709,
+            Chroma::Bilinear,
+            PackedMut::new(2, 2, Order::Bgra, &mut packed),
+        );
+        let _ = packed_to_yuv(
+            Packed::new(u32::MAX, u32::MAX, Order::Bgrx, &packed),
+            ColorSpec::BT709,
+            f.format,
+            &mut out,
+        );
+        let _ = rgba_to_yuv(
+            &Rgba {
+                width: u32::MAX,
+                height: 2,
+                data: vec![0; 8],
+            },
+            ColorSpec::BT709,
+            f.format,
+            &mut out,
+        );
+        let _ = Overlay::new(
+            &Rgba {
+                width: u32::MAX,
+                height: u32::MAX,
+                data: vec![0; 8],
+            },
+            ColorSpec::BT709,
+            f.format,
+        );
+        if let Ok(o) = Overlay::new(&Rgba::new(5, 3), ColorSpec::BT709, f.format) {
+            let mut g = f.clone();
+            let _ = o.draw(&mut g, -3, i32::MAX);
+            let _ = o.draw(&mut g, i32::MIN, 1);
+        }
+    }
+    let ragged = AudioBuffer {
+        samples: vec![0.5; 7],
+        rate: 48000,
+        channels: 2,
+    };
+    let empty = AudioBuffer::new(44100, 1);
+    let odd = AudioBuffer {
+        samples: vec![f32::NAN, f32::INFINITY, -1.0],
+        rate: 1,
+        channels: 3,
+    };
+    for a in [&ragged, &empty, &odd] {
+        for rate in [0, 1, 8000, 48000, 384000, u32::MAX] {
+            let _ = resample(a, rate);
+            let _ = Resampler::new(a.rate, rate, a.channels);
+        }
+        for ch in [0, 1, 2, 9] {
+            let _ = downmix(a, ch);
+        }
+        if let Ok(mut m) = LoudnessMeter::new(a.rate.max(1), a.channels.max(1)) {
+            let _ = m.process(a);
+            let _ = m.summary();
+        }
+        let mut b = a.clone();
+        let _ = normalize(&mut b, -16.0, -1.0);
+        gain(&mut b, f32::NAN);
+        if let Ok(mut l) = Limiter::new(a.rate, a.channels, -1.0) {
+            let mut o = AudioBuffer::new(a.rate, a.channels);
+            let _ = l.process(a, &mut o);
+            l.flush(&mut o);
+        }
+    }
+    let _ = FpsConverter::new(0, 0);
+    if let Ok(mut c) = FpsConverter::new(30, 1) {
+        for pts in [i64::MAX, i64::MIN, 0, -1] {
+            let _ = c.push(Frame::new(
+                PixelFormat::Yuv420p8,
+                2,
+                2,
+                pts,
+                TimeBase::new(1, 0),
+            ));
+        }
+        let _ = c.flush();
+    }
+}

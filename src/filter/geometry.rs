@@ -1,5 +1,5 @@
 use super::color::{ColorSpec, Range};
-use super::plane::{Sample, check, plane_dims, reshape, samples, samples_mut};
+use super::plane::{Sample, check, plane_dims, reshape, samples, samples_mut, sized};
 use crate::media::{Error, Frame, PixelFormat, Result};
 use rayon::prelude::*;
 
@@ -227,16 +227,20 @@ pub fn flip_horizontal(frame: &mut Frame) -> Result<()> {
     check(frame)?;
     let bytes = frame.format.bytes_per_sample();
     for i in 0..3 {
-        let (w, _) = plane_dims(frame.width, frame.height, i);
+        let (w, h) = plane_dims(frame.width, frame.height, i);
+        if w == 0 || h == 0 {
+            continue;
+        }
         let p = &mut frame.planes[i];
-        let stride = p.stride;
+        let stride = p.stride / bytes;
+        let end = stride * (h - 1) + w;
         if bytes == 1 {
-            p.data
+            p.data[..end]
                 .par_chunks_mut(stride)
                 .for_each(|row| row[..w].reverse());
         } else {
-            samples_mut::<u16>(p)?
-                .par_chunks_mut(stride / 2)
+            samples_mut::<u16>(p)?[..end]
+                .par_chunks_mut(stride)
                 .for_each(|row| row[..w].reverse());
         }
     }
@@ -248,6 +252,9 @@ pub fn flip_vertical(frame: &mut Frame) -> Result<()> {
     let bytes = frame.format.bytes_per_sample();
     for i in 0..3 {
         let (w, h) = plane_dims(frame.width, frame.height, i);
+        if w == 0 || h < 2 {
+            continue;
+        }
         let p = &mut frame.planes[i];
         let stride = p.stride;
         let (top, bottom) = p.data.split_at_mut(stride * (h / 2));
@@ -261,7 +268,11 @@ pub fn flip_vertical(frame: &mut Frame) -> Result<()> {
 
 pub fn crop(src: &Frame, x: u32, y: u32, width: u32, height: u32, out: &mut Frame) -> Result<()> {
     check(src)?;
-    if width == 0 || height == 0 || x + width > src.width || y + height > src.height {
+    if width == 0
+        || height == 0
+        || x as u64 + width as u64 > src.width as u64
+        || y as u64 + height as u64 > src.height as u64
+    {
         return Err(Error::Invalid(format!(
             "crop {width}x{height} at {x},{y} is outside {}x{}",
             src.width, src.height
@@ -293,7 +304,8 @@ pub fn pad(
     out: &mut Frame,
 ) -> Result<()> {
     check(src)?;
-    if x + src.width > width || y + src.height > height {
+    sized(width, height)?;
+    if x as u64 + src.width as u64 > width as u64 || y as u64 + src.height as u64 > height as u64 {
         return Err(Error::Invalid(format!(
             "{}x{} at {x},{y} does not fit in {width}x{height}",
             src.width, src.height
@@ -329,6 +341,9 @@ fn pad_plane<S: Sample>(
     let ds = out.planes[i].stride / S::BYTES;
     let s = samples::<S>(&src.planes[i])?;
     let d = samples_mut::<S>(&mut out.planes[i])?;
+    if dw == 0 {
+        return Ok(());
+    }
     d.par_chunks_mut(ds).enumerate().for_each(|(r, row)| {
         let row = &mut row[..dw];
         if r < oy || r >= oy + sh {

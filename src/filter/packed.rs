@@ -1,5 +1,5 @@
 use super::color::{ColorSpec, FRAC, Rgba, Siting, fixed, rows_job};
-use super::plane::{Sample, Simd, check, reshape, samples, samples_mut, simd};
+use super::plane::{Sample, Simd, check, reshape, samples, samples_mut, simd, sized, span};
 use crate::media::{Error, Frame, PixelFormat, Result};
 use rayon::prelude::*;
 
@@ -78,8 +78,9 @@ impl Rgba {
 }
 
 fn fits(width: u32, height: u32, stride: usize, len: usize) -> Result<()> {
+    sized(width, height)?;
     let (w, h) = (width as usize, height as usize);
-    if stride < w * 4 || (h > 0 && len < stride * (h - 1) + w * 4) {
+    if stride < w * 4 || span(stride, h, w * 4).is_none_or(|n| len < n) {
         return Err(Error::Invalid(format!(
             "packed {width}x{height} with stride {stride} needs more than {len} bytes"
         )));
@@ -153,6 +154,7 @@ fn crow<S: Sample>(p: &[S], s: usize, r: usize, cw: usize, out: &mut Vec<i32>) {
 }
 
 pub fn yuv_to_rgba(frame: &Frame, spec: ColorSpec, out: &mut Rgba) -> Result<()> {
+    check(frame)?;
     out.width = frame.width;
     out.height = frame.height;
     out.data
