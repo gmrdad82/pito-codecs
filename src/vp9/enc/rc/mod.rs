@@ -63,7 +63,7 @@ impl RcConfig {
             keyint: 240,
             min_q: 0,
             max_q: 255,
-            aq: Aq::Variance,
+            aq: Aq::Off,
         }
     }
 }
@@ -96,6 +96,22 @@ pub struct FramePlan {
 }
 
 const QCOMP: f64 = 0.6;
+const EXP: [f64; 3] = [0.85, 1.5, 1.5];
+const K0: [f64; 3] = [7.2, 42.0, 42.0];
+
+fn solve(terms: [(f64, f64); 2], bits: f64) -> f64 {
+    let f = |s: f64| terms.iter().map(|&(a, e)| a * s.powf(-e)).sum::<f64>();
+    let (mut lo, mut hi) = (0.5f64.ln(), 8000f64.ln());
+    for _ in 0..40 {
+        let mid = 0.5 * (lo + hi);
+        if f(mid.exp()) > bits {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    (0.5 * (lo + hi)).exp()
+}
 
 pub struct RateControl {
     cfg: RcConfig,
@@ -121,6 +137,10 @@ pub struct RateControl {
 impl RateControl {
     pub fn new(cfg: RcConfig) -> RateControl {
         let fps = cfg.fps_num.max(1) as f64 / cfg.fps_den.max(1) as f64;
+        let geo = match &cfg.mode {
+            RcMode::TwoPass { stats, .. } => two_pass_geo(stats, cfg.keyint),
+            _ => 1.0,
+        };
         let (frame_bits, buffer_size, remaining, suffix) = match &cfg.mode {
             RcMode::Bitrate { kbps, buffer_ms } => {
                 let b = *kbps as f64 * 1000.0;
@@ -134,14 +154,19 @@ impl RateControl {
             RcMode::TwoPass { kbps, stats } => {
                 let b = *kbps as f64 * 1000.0;
                 let total = b * stats.len() as f64 / fps;
-                (b / fps, b * 2.0, total, two_pass_suffix(stats, cfg.keyint))
+                (
+                    b / fps,
+                    b * 2.0,
+                    total,
+                    two_pass_suffix(stats, cfg.keyint, geo),
+                )
             }
             _ => (0.0, 0.0, 0.0, Vec::new()),
         };
         RateControl {
             analyser: Analyser::new(cfg.width, cfg.height),
             seg: Segmentation::default(),
-            k: [2.0; 3],
+            k: K0,
             seen: [false; 3],
             frame_bits,
             buffer: 0.0,
@@ -153,10 +178,7 @@ impl RateControl {
             a_key: 0.0,
             remaining,
             frame: 0,
-            geo: match &cfg.mode {
-                RcMode::TwoPass { stats, .. } => two_pass_geo(stats, cfg.keyint),
-                _ => 1.0,
-            },
+            geo,
             suffix,
             pending: None,
             cfg,
@@ -193,41 +215,51 @@ impl RateControl {
             RcMode::ConstantQ { q_index } => (qstep(*q_index), 0.0),
             RcMode::Crf { crf } => (step_for(qstep(crf_to_q(*crf))), 0.0),
             RcMode::Bitrate { .. } => {
-                let a_now = self.a_term(kind, cost, g, boost);
-                if kind == FrameKind::Key {
-                    self.a_key = a_now;
-                } else if self.a_inter == 0.0 {
-                    self.a_inter = a_now;
-                } else {
-                    self.a_inter = 0.9 * self.a_inter + 0.1 * a_now;
+                let (ek, ei) = (EXP[0], EXP[1]);
+                match kind {
+                    FrameKind::Key => self.a_key = cost * boost.powf(ek),
+                    _ => {
+                        let a_now = cost * modulation.powf(-ei);
+                        self.a_inter = if self.a_inter == 0.0 {
+                            a_now
+                        } else {
+                            0.9 * self.a_inter + 0.1 * a_now
+                        };
+                    }
                 }
                 let a_inter = if self.a_inter > 0.0 {
                     self.a_inter
                 } else {
-                    a_now
+                    cost * self.ratio.clamp(0.05, 1.0)
                 };
                 let key_share = match self.cfg.keyint {
                     0 => 0.0,
                     n => 1.0 / n as f64,
                 };
-                let a_key = if self.a_key > 0.0 { self.a_key } else { a_now };
-                let a_avg = key_share * a_key + (1.0 - key_share) * a_inter;
                 let fill = (self.buffer / self.buffer_size).clamp(-0.6, 0.6);
-                let s = a_avg / (self.frame_bits * (1.0 + fill)).max(1.0);
+                let want = (self.frame_bits * (1.0 + fill)).max(1.0);
+                let s = solve(
+                    [
+                        (key_share * self.k[0] * self.a_key, ek),
+                        ((1.0 - key_share) * self.k[1] * a_inter, ei),
+                    ],
+                    want,
+                );
                 let st = step_for(s);
-                (st, self.k[kind.slot()] * cost / st)
+                (st, self.model(kind, cost, st))
             }
             RcMode::TwoPass { stats, .. } => {
                 let i = self.frame.min(stats.len().saturating_sub(1));
                 let (sk, si) = self.suffix.get(i).copied().unwrap_or((0.0, 0.0));
-                let g2 = self.geo;
-                let sum_a = self.k[0] * sk + self.k[1] * si * g2.powf(1.0 - QCOMP);
-                let s = sum_a / self.remaining.max(self.frame_bits * 0.25);
+                let s = solve(
+                    [(self.k[0] * sk, EXP[0]), (self.k[1] * si, EXP[1])],
+                    self.remaining.max(self.frame_bits * 0.25),
+                );
                 let st = match kind {
-                    FrameKind::Inter => s * ((cost / g2).powf(1.0 - QCOMP)).clamp(0.5, 2.0),
+                    FrameKind::Inter => s * two_pass_modulation(cost, self.geo),
                     _ => s / boost,
                 };
-                (st, self.k[kind.slot()] * cost / st)
+                (st, self.model(kind, cost, st))
             }
         };
         let mut q = q_index_for(step);
@@ -262,7 +294,7 @@ impl RateControl {
             _ => return,
         };
         let slot = kind.slot();
-        let obs = (bits.max(8) as f64 * qstep(base_q_idx) / cost as f64).max(1e-6);
+        let obs = (bits.max(8) as f64 * qstep(base_q_idx).powf(EXP[slot]) / cost as f64).max(1e-9);
         if self.seen[slot] {
             let r = (obs / self.k[slot]).clamp(0.25, 4.0);
             self.k[slot] *= r.powf(0.4);
@@ -292,18 +324,15 @@ impl RateControl {
     fn boost(&self, kind: FrameKind) -> f64 {
         let still = 1.0 - self.ratio.clamp(0.0, 1.0);
         match kind {
-            FrameKind::Key => 1.3 + 0.6 * still,
+            FrameKind::Key => 1.95 + 0.9 * still,
             FrameKind::Golden | FrameKind::AltRef => 1.12 + 0.3 * still,
             FrameKind::Inter => 1.0,
         }
     }
 
-    fn a_term(&self, kind: FrameKind, cost: f64, g: f64, boost: f64) -> f64 {
-        let k = self.k[kind.slot()];
-        match kind {
-            FrameKind::Inter => k * cost.powf(QCOMP) * g.powf(1.0 - QCOMP),
-            _ => k * cost * boost,
-        }
+    fn model(&self, kind: FrameKind, cost: f64, step: f64) -> f64 {
+        let slot = kind.slot();
+        self.k[slot] * cost / step.powf(EXP[slot])
     }
 }
 
@@ -322,7 +351,11 @@ fn two_pass_geo(stats: &[FrameAnalysis], keyint: u32) -> f64 {
     if n > 0.0 { (s / n).exp() } else { 1.0 }
 }
 
-fn two_pass_suffix(stats: &[FrameAnalysis], keyint: u32) -> Vec<(f64, f64)> {
+fn two_pass_modulation(cost: f64, geo: f64) -> f64 {
+    ((cost / geo).powf(1.0 - QCOMP)).clamp(0.5, 2.0)
+}
+
+fn two_pass_suffix(stats: &[FrameAnalysis], keyint: u32, geo: f64) -> Vec<(f64, f64)> {
     let mut out = vec![(0.0, 0.0); stats.len()];
     let (mut sk, mut si) = (0.0, 0.0);
     let mut ratio = 0.5;
@@ -338,9 +371,10 @@ fn two_pass_suffix(stats: &[FrameAnalysis], keyint: u32) -> Vec<(f64, f64)> {
     for i in (0..stats.len()).rev() {
         if predicted_key(i, keyint) {
             let boost = 1.3 + 0.6 * (1.0 - ratios[i]);
-            sk += stats[i].cost(FrameKind::Key) as f64 * boost;
+            sk += stats[i].cost(FrameKind::Key) as f64 * boost.powf(EXP[0]);
         } else {
-            si += (stats[i].cost(FrameKind::Inter) as f64).powf(QCOMP);
+            let c = stats[i].cost(FrameKind::Inter) as f64;
+            si += c * two_pass_modulation(c, geo).powf(-EXP[1]);
         }
         out[i] = (sk, si);
     }

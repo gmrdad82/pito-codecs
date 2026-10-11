@@ -57,7 +57,7 @@ impl Default for EncoderConfig {
             rate: Rate::Crf(32),
             gop: 240,
             threads: 0,
-            aq: true,
+            aq: false,
         }
     }
 }
@@ -77,6 +77,7 @@ pub struct Encoder {
     wavefront: Wavefront,
     workers: Vec<Workspace>,
     recon_out: Option<Arc<Picture>>,
+    broken: bool,
 }
 
 fn quant(qindex: u8) -> [Quant; 2] {
@@ -139,6 +140,7 @@ impl Encoder {
             wavefront: Wavefront::new(layout),
             workers,
             recon_out: None,
+            broken: false,
         })
     }
 
@@ -155,7 +157,26 @@ impl Encoder {
                 frame.width, frame.height, self.cfg.width, self.cfg.height
             )));
         }
+        if self.broken {
+            return Err(Error::Backend(
+                "vp9 encoder: an earlier frame failed, start a new encoder".into(),
+            ));
+        }
         let (w, h) = (self.cfg.width as usize, self.cfg.height as usize);
+        for (p, fp) in frame.planes.iter().enumerate() {
+            let (pw, ph) = if p == 0 {
+                (w, h)
+            } else {
+                (w.div_ceil(2), h.div_ceil(2))
+            };
+            if fp.stride < pw || fp.data.len() < fp.stride * (ph - 1) + pw {
+                return Err(Error::Invalid(format!(
+                    "vp9 encoder: plane {p} holds {} bytes at stride {} for {pw}x{ph}",
+                    fp.data.len(),
+                    fp.stride
+                )));
+            }
+        }
         let mut src = Picture::new(w, h);
         for p in 0..3 {
             let (pw, ph) = src.visible(p);
@@ -168,7 +189,23 @@ impl Encoder {
         }
         src.extend_borders();
         let key = self.index.is_multiple_of(self.cfg.gop.max(1) as u64);
-        let data = self.encode_picture(&src, key);
+        let data = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.encode_picture(&src, key)
+        })) {
+            Ok(d) => d,
+            Err(e) => {
+                self.broken = true;
+                let why = e
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| e.downcast_ref::<String>().cloned())
+                    .unwrap_or_default();
+                return Err(Error::Backend(format!(
+                    "vp9 encoder: frame {} failed: {why}",
+                    self.index
+                )));
+            }
+        };
         let pts = frame.pts;
         self.index += 1;
         Ok(vec![Packet {
@@ -230,7 +267,7 @@ impl Encoder {
             }
         }
         let seg_map = seg_on.then(|| rseg.map.clone());
-        let tx_mode = 3u8;
+        let tx_mode = TX_MODE_SELECT;
         let allow_hp = false;
         let interp_filter = 0u8;
         let fc = self.contexts[0].clone();
@@ -247,10 +284,15 @@ impl Encoder {
             hp: fc.mv_hp,
         });
         let speed = Speed {
-            intra_modes: &pred::mode::ALL_INTRA,
+            intra_modes: if key {
+                &pred::mode::ALL_INTRA
+            } else {
+                &pred::mode::FAST_INTRA
+            },
             subpel: pred::motion::Subpel::Quarter,
             range: 32,
             intra_margin: 110,
+            tx_depth: 1,
             trellis: true,
         };
         let mut recon = Picture::new(src.width, src.height);
@@ -288,6 +330,7 @@ impl Encoder {
                 speed: &speed,
                 prev_mi,
                 sign_bias: [false; 4],
+                filter: interp_filter,
             };
             let shared = Shared::new(&mut recon, mi.as_mut_slice(), &mut uv, mi_cols);
             let coefs = &self.coefs;
@@ -342,7 +385,7 @@ impl Encoder {
                     })
                     .collect();
                 hs.into_iter()
-                    .map(|h| h.join().unwrap_or_default())
+                    .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
                     .collect()
             });
             let mut c = Counts::default();
@@ -387,7 +430,7 @@ impl Encoder {
                 })
                 .collect();
             hs.into_iter()
-                .map(|h| h.join().unwrap_or_default())
+                .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
                 .collect()
         });
         let hdr = Uncompressed {

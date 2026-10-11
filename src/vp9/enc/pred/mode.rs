@@ -1,4 +1,5 @@
 use super::dist;
+use super::halfpel::HalfPel;
 use super::inter::{self, BlockPos, MvLimits};
 use super::intra::{EdgeFlags, Edges};
 use super::motion::{Search, Subpel, sad_per_bit};
@@ -245,8 +246,10 @@ pub struct InterRef<'a> {
     pub best: Mv,
     pub hints: &'a [Mv],
     pub ref_rate: u32,
+    pub half: Option<&'a HalfPel>,
 }
 
+#[derive(Clone, Copy)]
 pub struct InterChoice<'a> {
     pub src: &'a [u8],
     pub src_stride: usize,
@@ -419,8 +422,12 @@ pub fn best_inter_with(
             range: c.range,
             subpel: c.subpel,
             filter: c.filter,
+            half: r.half,
         };
-        let m = s.run(&cands[..n]);
+        let m = s.run_with(
+            &cands[..n],
+            (&mut scratch.pred[..64 * 64]).try_into().unwrap(),
+        );
         if let Some(f) = found.get_mut(i) {
             *f = (m.mv, m.rate);
         }
@@ -454,4 +461,44 @@ pub fn best_inter_with(
         }
     }
     out
+}
+
+pub fn best_filter(
+    c: &InterChoice,
+    d: &Decision,
+    filter_rates: &[u32; 3],
+    scratch: &mut InterScratch,
+) -> (u8, u32, u64) {
+    if scratch.pred.is_empty() {
+        *scratch = InterScratch {
+            pred: vec![0; 64 * 64],
+            pred2: vec![0; 64 * 64],
+            avg: vec![0; 64 * 64],
+        };
+    }
+    let spb = sad_per_bit(c.lambda);
+    let p = &c.pos;
+    let limits = MvLimits::new(p.mi_row, p.mi_col, p.bsize, p.mi_rows, p.mi_cols);
+    let find = |f: i8| c.refs.iter().find(|r| r.frame == f);
+    let Some(a) = find(d.ref_frame[0]) else {
+        return (d.interp_filter, d.dist, u64::MAX);
+    };
+    let b = if d.ref_frame[1] > INTRA_FRAME {
+        find(d.ref_frame[1])
+    } else {
+        None
+    };
+    let mut best = (d.interp_filter, d.dist, u64::MAX);
+    for f in [EIGHTTAP, EIGHTTAP_SMOOTH, EIGHTTAP_SHARP] {
+        let cf = InterChoice { filter: f, ..*c };
+        let dist = match b {
+            Some(b) => predict_satd(&cf, &limits, &[a, b], &d.mv, scratch),
+            None => predict_satd(&cf, &limits, &[a], &d.mv[..1], scratch),
+        };
+        let j = cost(dist, filter_rates[f as usize], spb);
+        if j < best.2 {
+            best = (f, dist, j);
+        }
+    }
+    best
 }
