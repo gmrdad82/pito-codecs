@@ -778,101 +778,164 @@ fn per_frame_quality_stays_flat_across_a_gop() {
     }
 }
 
+fn ffmpeg_vaapi_args(codec: Codec, rate: Rate, gop: u32) -> Vec<String> {
+    let encoder = if codec == Codec::Hevc {
+        "hevc_vaapi"
+    } else {
+        "h264_vaapi"
+    };
+    let mut args: Vec<String> = ["-c:v", encoder, "-bf", "0", "-g"]
+        .map(String::from)
+        .to_vec();
+    args.push(gop.to_string());
+    let rate: Vec<String> = match rate {
+        Rate::Qp(q) => vec!["-rc_mode".into(), "CQP".into(), "-qp".into(), q.to_string()],
+        Rate::Crf(q) => vec!["-rc_mode".into(), "CQP".into(), "-qp".into(), q.to_string()],
+        Rate::Bitrate(k) => vec![
+            "-rc_mode".into(),
+            "CBR".into(),
+            "-b:v".into(),
+            format!("{k}k"),
+        ],
+        Rate::Vbr { kbps, max_kbps } => vec![
+            "-rc_mode".into(),
+            "VBR".into(),
+            "-b:v".into(),
+            format!("{kbps}k"),
+            "-maxrate".into(),
+            format!("{max_kbps}k"),
+        ],
+    };
+    args.extend(rate);
+    args
+}
+
+fn decoded_psnr(path: &Path, frames: &[Frame], w: u32, h: u32) -> Vec<f64> {
+    let decoded = path.with_extension("yuv");
+    run(&[
+        "-i",
+        path.to_str().unwrap(),
+        "-fps_mode",
+        "passthrough",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "yuv420p",
+        decoded.to_str().unwrap(),
+    ]);
+    let data = std::fs::read(&decoded).unwrap();
+    let luma = (w * h) as usize;
+    data.chunks_exact(luma * 3 / 2)
+        .zip(frames)
+        .map(|(d, f)| plane_psnr(&d[..luma], &f.planes[0].data))
+        .collect()
+}
+
+fn summary(db: &[f64]) -> String {
+    let mean = db.iter().sum::<f64>() / db.len().max(1) as f64;
+    let min = db.iter().copied().fold(f64::INFINITY, f64::min);
+    let steps = db
+        .iter()
+        .step_by((db.len() / 12).max(1))
+        .map(|d| format!("{d:.1}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("mean {mean:.2} min {min:.2} | {steps}")
+}
+
 #[test]
 #[ignore]
-fn quality_on_sample() {
+fn quality_against_ffmpeg_vaapi() {
     let sample = std::env::var("PITO_GPU_SAMPLE").unwrap_or_default();
-    let (w, h, n) = (2560, 1440, 60);
-    let input = format!("movie={sample}");
-    let frames = source_frames_from(&input, "-sample", w, h, n, PixelFormat::Yuv420p8);
-    for (codec, rate) in [
-        (Codec::H264, Rate::Qp(23)),
-        (Codec::H264, Rate::Bitrate(8000)),
-        (
-            Codec::H264,
-            Rate::Vbr {
-                kbps: 8000,
-                max_kbps: 12000,
-            },
-        ),
-        (Codec::Hevc, Rate::Bitrate(8000)),
-    ] {
-        let profile = if codec == Codec::Hevc {
-            Profile::Main
-        } else {
-            Profile::High
-        };
-        let config = EncoderConfig {
-            width: w,
-            height: h,
-            fps: (60, 1),
-            profile,
-            rate,
-            gop: 60,
-            b_frames: 0,
-            bitstream: Bitstream::LengthPrefixed,
-        };
-        let db = per_frame_psnr(
-            codec,
-            &config,
-            &frames,
-            &format!("sample-{codec:?}-{rate:?}"),
-        );
-        eprintln!(
-            "{codec:?} {rate:?}: {}",
-            db.iter()
-                .step_by(5)
-                .map(|d| format!("{d:.1}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
+    if sample.is_empty() || !ffmpeg() {
+        return;
     }
+    let size = std::env::var("PITO_GPU_SIZE").unwrap_or_else(|_| "1920x1080".into());
+    let (w, h) = size
+        .split_once('x')
+        .map(|(a, b)| (a.parse().unwrap(), b.parse().unwrap()))
+        .unwrap();
+    let n: usize = std::env::var("PITO_GPU_FRAMES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(300);
+    let gop = 250;
+    let input = format!("movie={sample},scale={w}:{h}:flags=lanczos,fps=60");
+    let tag = format!(
+        "-q{}",
+        Path::new(&sample)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("sample")
+    );
+    let frames = source_frames_from(&input, &tag, w, h, n, PixelFormat::Yuv420p8);
+    let raw = dir().join(format!("source{tag}-{w}x{h}-{n}-yuv420p.yuv"));
+    let kbps = std::env::var("PITO_GPU_KBPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8000u32);
     for codec in [Codec::H264, Codec::Hevc] {
-        let profile = if codec == Codec::Hevc {
-            Profile::Main
-        } else {
-            Profile::High
-        };
-        let config = EncoderConfig {
-            width: w,
-            height: h,
-            fps: (60, 1),
-            profile,
-            rate: Rate::Qp(23),
-            gop: 60,
-            b_frames: 0,
-            bitstream: Bitstream::LengthPrefixed,
-        };
-        let (packets, extradata, _) =
-            transcode(Codec::H264, &dir().join("sample.h264"), codec, &config, n);
-        let ext = if codec == Codec::Hevc { "hevc" } else { "h264" };
-        let path = dir().join(format!("sample-transcode-{codec:?}.{ext}"));
-        std::fs::write(&path, annexb_stream(codec, &packets, &extradata)).unwrap();
-        let decoded = path.with_extension("yuv");
-        run(&[
-            "-i",
-            path.to_str().unwrap(),
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "yuv420p",
-            decoded.to_str().unwrap(),
-        ]);
-        let data = std::fs::read(&decoded).unwrap();
-        let luma = (w * h) as usize;
-        let db: Vec<f64> = data
-            .chunks_exact(luma * 3 / 2)
-            .zip(&frames)
-            .map(|(d, f)| plane_psnr(&d[..luma], &f.planes[0].data))
-            .collect();
-        eprintln!(
-            "transcode {codec:?}: {}",
-            db.iter()
-                .step_by(5)
-                .map(|d| format!("{d:.1}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
+        if !has(codec, Direction::Encode) {
+            continue;
+        }
+        for rate in [
+            Rate::Qp(23),
+            Rate::Bitrate(kbps),
+            Rate::Vbr {
+                kbps,
+                max_kbps: kbps * 3 / 2,
+            },
+        ] {
+            let profile = if codec == Codec::Hevc {
+                Profile::Main
+            } else {
+                Profile::High
+            };
+            let config = EncoderConfig {
+                width: w,
+                height: h,
+                fps: (60, 1),
+                profile,
+                rate,
+                gop,
+                b_frames: 0,
+                bitstream: Bitstream::LengthPrefixed,
+            };
+            let ext = if codec == Codec::Hevc { "hevc" } else { "h264" };
+            let (packets, extradata, _) = encode_all(codec, &config, &frames);
+            let ours = dir().join(format!("q-ours-{codec:?}-{rate:?}.{ext}"));
+            std::fs::write(&ours, annexb_stream(codec, &packets, &extradata)).unwrap();
+            let theirs = dir().join(format!("q-ffmpeg-{codec:?}-{rate:?}.{ext}"));
+            let mut args: Vec<String> = [
+                "-vaapi_device",
+                "/dev/dri/renderD128",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "yuv420p",
+                "-s",
+                &size,
+                "-framerate",
+                "60",
+                "-i",
+                raw.to_str().unwrap(),
+                "-vf",
+                "format=nv12,hwupload",
+            ]
+            .map(String::from)
+            .to_vec();
+            args.extend(ffmpeg_vaapi_args(codec, rate, gop));
+            args.push(theirs.to_str().unwrap().into());
+            run(&args.iter().map(String::as_str).collect::<Vec<_>>());
+            let bytes = |p: &Path| std::fs::metadata(p).map_or(0, |m| m.len());
+            eprintln!(
+                "{codec:?} {rate:?}\n  ours   {:>9} B  {}\n  ffmpeg {:>9} B  {}",
+                bytes(&ours),
+                summary(&decoded_psnr(&ours, &frames, w, h)),
+                bytes(&theirs),
+                summary(&decoded_psnr(&theirs, &frames, w, h)),
+            );
+        }
     }
 }
 
