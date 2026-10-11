@@ -1,4 +1,6 @@
-use super::plane::{Sample, Simd, check, reshape, samples, samples_mut, simd};
+#[cfg(target_arch = "x86_64")]
+use super::plane::Simd;
+use super::plane::{Sample, check, reshape, samples, samples_mut, simd};
 use crate::media::{Frame, PixelFormat, Result};
 use rayon::prelude::*;
 
