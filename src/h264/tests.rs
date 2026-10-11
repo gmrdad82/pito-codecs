@@ -673,3 +673,42 @@ fn corrupt_streams_never_panic() {
         kinds.join("\n")
     );
 }
+
+#[test]
+fn tiny_and_odd_sizes_encode_without_crashing() {
+    for (w, h) in [(2, 2), (18, 34), (34, 18), (66, 2), (2, 66)] {
+        for threads in [1, 4] {
+            let mut enc = Encoder::new(EncoderConfig {
+                width: w,
+                height: h,
+                gop: 4,
+                b_frames: 2,
+                threads,
+                ..EncoderConfig::default()
+            })
+            .unwrap();
+            let mut n = 0;
+            for i in 0..7i64 {
+                let mut f = Frame::new(PixelFormat::Yuv420p8, w, h, i, TimeBase::new(1, 30));
+                for (k, p) in f.planes.iter_mut().enumerate() {
+                    for (j, b) in p.data.iter_mut().enumerate() {
+                        *b = ((j as i64 * 7 + i * 13 + k as i64 * 50) % 251) as u8;
+                    }
+                }
+                n += enc.encode(&f).unwrap().len();
+            }
+            n += enc.flush().unwrap().len();
+            assert_eq!(n, 7, "{w}x{h} with {threads} threads");
+        }
+    }
+    for (w, h) in [(3, 2), (2, 3), (0, 16), (16, 0), (16386, 16)] {
+        assert!(
+            Encoder::new(EncoderConfig {
+                width: w,
+                height: h,
+                ..EncoderConfig::default()
+            })
+            .is_err()
+        );
+    }
+}

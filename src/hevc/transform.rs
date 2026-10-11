@@ -91,6 +91,9 @@ pub fn dequant(
     round: i64,
     bd_shift: u32,
 ) {
+    if simd::itx::dequant(coeffs, n, max_x, max_y, m, scale, round, bd_shift) {
+        return;
+    }
     for y in 0..=max_y {
         for x in 0..=max_x {
             let v = coeffs[y * n + x];

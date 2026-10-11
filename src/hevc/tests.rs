@@ -531,6 +531,14 @@ fn decode_speed() {
         Some(t) => vec![t],
         None => vec![1, cores],
     };
+    if let Ok(file) = std::env::var("HEVC_FILE") {
+        let data = std::fs::read(&file).unwrap();
+        if std::env::var_os("HEVC_CHECK").is_some() {
+            check_file(&file, &data);
+        }
+        time_units(&file, &data, &threads);
+        return;
+    }
     for f in BENCH
         .iter()
         .filter(|f| only.as_deref().is_none_or(|o| o == f.name))
@@ -547,28 +555,75 @@ fn decode_speed() {
             &std::fs::read(yuv).unwrap(),
             f,
         );
-        for &threads in &threads {
-            let mut best = f64::MAX;
-            let mut frames = 0;
-            for _ in 0..3 {
-                let mut dec = Decoder::with_threads(threads);
-                let t0 = Instant::now();
-                frames = 0;
-                for (i, u) in units.iter().enumerate() {
-                    for f in dec.decode(&packet(u.clone(), i)).unwrap() {
-                        frames += 1;
-                        dec.recycle(f);
-                    }
+        time_units(f.name, &data, &threads);
+    }
+}
+
+fn time_units(name: &str, data: &[u8], threads: &[usize]) {
+    let units: Vec<Vec<u8>> = access_units(data).into_iter().map(<[u8]>::to_vec).collect();
+    for &threads in threads {
+        let mut best = f64::MAX;
+        let mut frames = 0;
+        for _ in 0..3 {
+            let mut dec = Decoder::with_threads(threads);
+            let t0 = Instant::now();
+            frames = 0;
+            for (i, u) in units.iter().enumerate() {
+                for f in dec.decode(&packet(u.clone(), i)).unwrap() {
+                    frames += 1;
+                    dec.recycle(f);
                 }
-                frames += dec.flush().unwrap().len();
-                best = best.min(t0.elapsed().as_secs_f64());
             }
-            println!(
-                "{} ({} KB): {threads} thread(s): {frames} frames in {best:.3}s = {:.1} fps",
-                f.name,
-                data.len() / 1024,
-                frames as f64 / best
+            frames += dec.flush().unwrap().len();
+            best = best.min(t0.elapsed().as_secs_f64());
+        }
+        println!(
+            "{} ({} KB): {threads} thread(s): {frames} frames in {best:.3}s = {:.1} fps",
+            name,
+            data.len() / 1024,
+            frames as f64 / best
+        );
+    }
+}
+
+fn check_file(file: &str, data: &[u8]) {
+    let units: Vec<Vec<u8>> = access_units(data).into_iter().map(<[u8]>::to_vec).collect();
+    let frames = decode_units(&mut Decoder::new(), &units);
+    let Some(first) = frames.first() else {
+        panic!("{file}: no frames");
+    };
+    let pix = if first.format == PixelFormat::Yuv420p10 {
+        "yuv420p10le"
+    } else {
+        "yuv420p"
+    };
+    let out = Command::new("ffmpeg")
+        .args([
+            "-v", "error", "-i", file, "-f", "rawvideo", "-pix_fmt", pix, "-",
+        ])
+        .output()
+        .unwrap();
+    let mut at = 0;
+    for (i, f) in frames.iter().enumerate() {
+        for p in &f.planes {
+            let n = p.width * p.height * if pix == "yuv420p" { 1 } else { 2 };
+            let ours: Vec<u8> = p
+                .data
+                .chunks(p.stride)
+                .flat_map(|r| &r[..n / p.height])
+                .copied()
+                .collect();
+            assert!(
+                out.stdout.get(at..at + n) == Some(&ours[..]),
+                "{file}: frame {i} differs from ffmpeg"
             );
+            at += n;
         }
     }
+    assert_eq!(
+        at,
+        out.stdout.len(),
+        "{file}: frame count differs from ffmpeg"
+    );
+    println!("{file}: {} frames bit-exact against ffmpeg", frames.len());
 }

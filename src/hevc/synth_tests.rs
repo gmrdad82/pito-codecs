@@ -721,3 +721,25 @@ fn slices_without_tiles() {
     ];
     run("slices", None, false, segs);
 }
+
+#[test]
+fn row_aligned_slices_decode_in_parallel() {
+    let segs = vec![
+        Segment {
+            start: 0,
+            len: 12,
+            dependent: false,
+        },
+        Segment {
+            start: 12,
+            len: 6,
+            dependent: false,
+        },
+        Segment {
+            start: 18,
+            len: 6,
+            dependent: false,
+        },
+    ];
+    run("row_slices", None, false, segs);
+}

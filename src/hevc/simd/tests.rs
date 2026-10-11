@@ -44,6 +44,66 @@ fn kernels_match_scalar() {
     mc::<u16>(&mut rng, 10);
     put::<u8>(&mut rng, 8);
     put::<u16>(&mut rng, 10);
+    deblock::<u8>(&mut rng, 8);
+    deblock::<u16>(&mut rng, 10);
+}
+
+fn deblock<P: Pel>(rng: &mut Rng, bd: u32) {
+    use super::dbk::{self, Edge4};
+    let max = (1i32 << bd) - 1;
+    for _ in 0..20000 {
+        let vertical = rng.below(2) == 0;
+        let stride = 24 + rng.below(8);
+        let base = rng.below(max as usize + 1) as i32;
+        let lim = rng.pick(&[2, 8, 40, 200]);
+        let step = rng.i16(lim) as i32;
+        let noise = rng.pick(&[0, 1, 3, 12]);
+        let plane: Vec<P> = (0..stride * 24)
+            .map(|i| {
+                let (x, y) = (i % stride, i / stride);
+                let side = if vertical { x >= 8 } else { y >= 8 };
+                let v = base + if side { step } else { 0 } + rng.i16(noise) as i32;
+                P::from_i32(v.clamp(0, max))
+            })
+            .collect();
+        let mut e = Edge4::default();
+        for k in 0..4 {
+            if rng.below(5) > 0 {
+                let q = rng.below(52) as i32;
+                let bs = 1 + rng.below(2) as i32;
+                let qt = (q + 2 * (bs - 1)).clamp(0, 53) as usize;
+                e.tc[k] = ((crate::hevc::spec_tables::TC_TABLE[qt] as i32) << (bd - 8)) as i16;
+                e.beta[k] =
+                    ((crate::hevc::spec_tables::BETA_TABLE[q as usize] as i32) << (bd - 8)) as i16;
+                e.nfp[k] = rng.below(8) == 0;
+                e.nfq[k] = rng.below(8) == 0;
+            }
+        }
+        let o = 8 * stride + 8;
+        let (a, b) = both(|| {
+            let mut s = plane.clone();
+            let ok = if vertical {
+                dbk::luma_v(&mut s, o, stride, &e, bd)
+            } else {
+                dbk::luma_h(&mut s, o, stride, &e, bd)
+            };
+            if !ok {
+                for k in 0..4 {
+                    let (at, st, al) = if vertical {
+                        (o + 4 * k * stride, 1, stride)
+                    } else {
+                        (o + 4 * k, stride, 1)
+                    };
+                    let (tc, beta) = (e.tc[k] as i32, e.beta[k] as i32);
+                    crate::hevc::filter::filter_luma(
+                        &mut s, at, st, al, tc, beta, e.nfp[k], e.nfq[k], bd,
+                    );
+                }
+            }
+            s
+        });
+        assert_eq!(a, b, "deblock vertical={vertical} bd={bd}");
+    }
 }
 
 fn transforms(rng: &mut Rng) {
@@ -60,7 +120,28 @@ fn transforms(rng: &mut Rng) {
                 }
             }
         }
-        let bd_shift = 20 - rng.pick(&[8, 10]);
+        let bd = rng.pick(&[8u32, 10]);
+        let qp = rng.below(52 + 6 * (bd as usize - 8)) as i32;
+        let scale = ([40i64, 45, 51, 57, 64, 72][(qp % 6) as usize]) << (qp / 6);
+        let m: Option<Vec<u8>> =
+            (rng.below(2) == 0).then(|| (0..n * n).map(|_| 1 + rng.below(255) as u8).collect());
+        let qshift = bd + n.trailing_zeros() - 5;
+        let (a, b) = both(|| {
+            let mut c = c.clone();
+            transform::dequant(
+                &mut c,
+                n,
+                mx,
+                my,
+                m.as_deref(),
+                scale,
+                1 << (qshift - 1),
+                qshift,
+            );
+            c
+        });
+        assert_eq!(a, b, "dequant {n}x{n} qp={qp} m={}", m.is_some());
+        let bd_shift = 20 - bd;
         let (a, b) = both(|| {
             let mut c = c.clone();
             transform::inverse_transform(&mut c, n, dst, mx, my, bd_shift);
@@ -120,14 +201,11 @@ fn interp<const T: usize, P: Pel>(
     fx: usize,
     fy: usize,
 ) {
-    let rows: Vec<Vec<P>> = (0..h + T - 1)
-        .map(|_| {
-            (0..w + T - 1)
-                .map(|_| P::from_i32(rng.below(1 << bd) as i32))
-                .collect()
-        })
+    let stride = w + T - 1 + rng.below(20);
+    let slack = rng.pick(&[0, 16]);
+    let src: Vec<P> = (0..(h + T - 2) * stride + w + T - 1 + slack)
+        .map(|_| P::from_i32(rng.below(1 << bd) as i32))
         .collect();
-    let lines: Vec<&[P]> = rows.iter().map(|r| r.as_slice()).collect();
     let taps = Taps {
         fx,
         fy,
@@ -139,7 +217,7 @@ fn interp<const T: usize, P: Pel>(
     let (a, b) = both(|| {
         let mut tmp = vec![0i16; 71 * 71];
         let mut out = vec![0i16; w * h];
-        inter::interpolate::<T, P>(&lines, &mut tmp, &taps, w, h, &mut out);
+        inter::interpolate::<T, P>(&src, stride, &mut tmp, &taps, w, h, &mut out);
         out
     });
     assert_eq!(a, b, "interp T={T} {w}x{h} f=({fx},{fy}) bd={bd}");
@@ -242,14 +320,11 @@ fn kernel_speed() {
             }
         });
     }
-    let plane: Vec<Vec<u8>> = (0..80)
-        .map(|_| (0..128).map(|_| rng.below(256) as u8).collect())
-        .collect();
+    let plane: Vec<u8> = (0..80 * 128).map(|_| rng.below(256) as u8).collect();
     let mut tmp = vec![0i16; 71 * 71];
     let mut out = vec![0i16; 64 * 64];
     for (w, h) in [(8, 8), (16, 16), (32, 32), (64, 64)] {
         for (fx, fy) in [(0, 0), (2, 0), (0, 2), (1, 3)] {
-            let lines: Vec<&[u8]> = plane.iter().take(h + 7).map(|l| &l[..w + 7]).collect();
             let taps = Taps {
                 fx,
                 fy,
@@ -260,13 +335,12 @@ fn kernel_speed() {
             };
             race(&format!("luma {w}x{h} f=({fx},{fy})"), || {
                 for _ in 0..64 {
-                    luma(&lines, &mut tmp, &taps, w, h, &mut out);
+                    luma(&plane, &mut tmp, &taps, w, h, &mut out);
                 }
             });
         }
     }
     for (w, h) in [(4, 4), (8, 8), (16, 16)] {
-        let lines: Vec<&[u8]> = plane.iter().take(h + 3).map(|l| &l[..w + 3]).collect();
         let taps = Taps {
             fx: 3,
             fy: 5,
@@ -277,7 +351,70 @@ fn kernel_speed() {
         };
         race(&format!("chroma {w}x{h} f=(3,5)"), || {
             for _ in 0..64 {
-                chroma(&lines, &mut tmp, &taps, w, h, &mut out);
+                chroma(&plane, &mut tmp, &taps, w, h, &mut out);
+            }
+        });
+    }
+    {
+        use super::dbk::{self, Edge4};
+        let stride = 64;
+        let base: Vec<u8> = (0..stride * 24)
+            .map(|i| (100 + (i % stride >= 8) as usize * 6 + rng.below(3)) as u8)
+            .collect();
+        let e = Edge4 {
+            tc: [4; 4],
+            beta: [30; 4],
+            nfp: [false; 4],
+            nfq: [false; 4],
+        };
+        let mut s = base.clone();
+        race("deblock_v 4 segs", || {
+            for _ in 0..256 {
+                s.copy_from_slice(&base);
+                if !dbk::luma_v(&mut s, 8 * stride + 8, stride, &e, 8) {
+                    for k in 0..4 {
+                        crate::hevc::filter::filter_luma(
+                            &mut s,
+                            8 * stride + 8 + 4 * k * stride,
+                            1,
+                            stride,
+                            4,
+                            30,
+                            false,
+                            false,
+                            8,
+                        );
+                    }
+                }
+            }
+        });
+        let base: Vec<u8> = (0..stride * 24)
+            .map(|i| (100 + (i / stride >= 8) as usize * 6 + rng.below(3)) as u8)
+            .collect();
+        race("deblock_h 4 segs", || {
+            for _ in 0..256 {
+                s.copy_from_slice(&base);
+                if !dbk::luma_h(&mut s, 8 * stride + 8, stride, &e, 8) {
+                    for k in 0..4 {
+                        crate::hevc::filter::filter_luma(
+                            &mut s,
+                            8 * stride + 8 + 4 * k,
+                            stride,
+                            1,
+                            4,
+                            30,
+                            false,
+                            false,
+                            8,
+                        );
+                    }
+                }
+            }
+        });
+        let mut s = base.clone();
+        race("copy only", || {
+            for _ in 0..256 {
+                s.copy_from_slice(&base);
             }
         });
     }
@@ -299,13 +436,13 @@ fn kernel_speed() {
 }
 
 crate::hevc::isa::dispatch! {
-fn luma(lines: &[&[u8]], tmp: &mut [i16], taps: &Taps<8>, w: usize, h: usize, out: &mut [i16]) {
-    inter::interpolate::<8, u8>(lines, tmp, taps, w, h, out);
+fn luma(src: &[u8], tmp: &mut [i16], taps: &Taps<8>, w: usize, h: usize, out: &mut [i16]) {
+    inter::interpolate::<8, u8>(src, 128, tmp, taps, w, h, out);
 }
 }
 
 crate::hevc::isa::dispatch! {
-fn chroma(lines: &[&[u8]], tmp: &mut [i16], taps: &Taps<4>, w: usize, h: usize, out: &mut [i16]) {
-    inter::interpolate::<4, u8>(lines, tmp, taps, w, h, out);
+fn chroma(src: &[u8], tmp: &mut [i16], taps: &Taps<4>, w: usize, h: usize, out: &mut [i16]) {
+    inter::interpolate::<4, u8>(src, 128, tmp, taps, w, h, out);
 }
 }
