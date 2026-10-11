@@ -15,7 +15,7 @@ type Fail = Box<dyn Error>;
 
 #[derive(Parser)]
 #[command(
-    name = "pcodec",
+    name = "pcod",
     version,
     about = "Probe, decode and encode with pito-codecs"
 )]
@@ -103,11 +103,11 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) if !file.exists() => {
-            eprintln!("pcodec: {}: {e}", file.display());
+            eprintln!("pcod: {}: {e}", file.display());
             ExitCode::FAILURE
         }
         Err(e) => {
-            eprintln!("pcodec: {e}");
+            eprintln!("pcod: {e}");
             ExitCode::FAILURE
         }
     }
