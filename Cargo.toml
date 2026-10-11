@@ -25,7 +25,7 @@ gpu = [
 ]
 filter = ["media", "dep:rayon"]
 mkv = ["media", "mp4"]
-opus = ["media"]
+opus = ["media", "dep:rayon"]
 vp9 = ["media", "dep:rayon"]
 webp = ["media", "filter", "dep:rayon"]
 gif = ["filter", "dep:rayon"]
