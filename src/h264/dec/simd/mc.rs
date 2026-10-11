@@ -1,4 +1,6 @@
+use crate::h264::dec::inter;
 use crate::h264::dec::inter::Weight;
+use crate::h264::dec::simd::mc_avx2;
 use std::arch::x86_64::*;
 
 #[inline(always)]
@@ -140,7 +142,7 @@ fn tap32(h: &[__m128i]) -> __m128i {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn mc_luma(
+pub fn mc_luma_sse2(
     src: &[u8],
     ss: usize,
     fx: u32,
@@ -212,7 +214,7 @@ pub fn mc_luma(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn mc_chroma(
+pub fn mc_chroma_sse2(
     src: &[u8],
     ss: usize,
     fx: u32,
@@ -255,7 +257,7 @@ pub fn mc_chroma(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn weighted_store(
+pub fn weighted_store_sse2(
     dst: &mut [u8],
     ds: usize,
     p0: Option<&[u8]>,
@@ -350,6 +352,134 @@ pub fn weighted_store(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn mc_luma(
+    src: &[u8],
+    ss: usize,
+    fx: u32,
+    fy: u32,
+    bw: usize,
+    bh: usize,
+    out: &mut [u8],
+    os: usize,
+) {
+    if super::avx2() {
+        unsafe { mc_avx2::mc_luma::<false>(src, ss, fx, fy, bw, bh, out, os) }
+    } else {
+        mc_luma_sse2(src, ss, fx, fy, bw, bh, out, os)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn mc_chroma(
+    src: &[u8],
+    ss: usize,
+    fx: u32,
+    fy: u32,
+    bw: usize,
+    bh: usize,
+    out: &mut [u8],
+    os: usize,
+) {
+    if super::avx2() {
+        unsafe { mc_avx2::mc_chroma(src, ss, fx, fy, bw, bh, out, os) }
+    } else {
+        mc_chroma_sse2(src, ss, fx, fy, bw, bh, out, os)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn mc_luma_avg(
+    src: &[u8],
+    ss: usize,
+    fx: u32,
+    fy: u32,
+    bw: usize,
+    bh: usize,
+    out: &mut [u8],
+    os: usize,
+) {
+    if super::avx2() {
+        unsafe { mc_avx2::mc_luma::<true>(src, ss, fx, fy, bw, bh, out, os) }
+    } else {
+        let mut t = [0u8; 256];
+        mc_luma_sse2(src, ss, fx, fy, bw, bh, &mut t, 16);
+        inter::avg_into(out, os, &t, 16, bw, bh);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn chroma2<const AVG: bool>(
+    src: [&[u8]; 2],
+    ss: usize,
+    fx: u32,
+    fy: u32,
+    bw: usize,
+    bh: usize,
+    out: [&mut [u8]; 2],
+    os: usize,
+) {
+    if super::avx2() {
+        return unsafe { mc_avx2::mc_chroma2::<AVG>(src, ss, fx, fy, bw, bh, out, os) };
+    }
+    for (s, o) in src.into_iter().zip(out) {
+        if AVG {
+            let mut t = [0u8; 64];
+            mc_chroma_sse2(s, ss, fx, fy, bw, bh, &mut t, 8);
+            inter::avg_into(o, os, &t, 8, bw, bh);
+        } else {
+            mc_chroma_sse2(s, ss, fx, fy, bw, bh, o, os);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn mc_chroma2(
+    src: [&[u8]; 2],
+    ss: usize,
+    fx: u32,
+    fy: u32,
+    bw: usize,
+    bh: usize,
+    out: [&mut [u8]; 2],
+    os: usize,
+) {
+    chroma2::<false>(src, ss, fx, fy, bw, bh, out, os)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn mc_chroma2_avg(
+    src: [&[u8]; 2],
+    ss: usize,
+    fx: u32,
+    fy: u32,
+    bw: usize,
+    bh: usize,
+    out: [&mut [u8]; 2],
+    os: usize,
+) {
+    chroma2::<true>(src, ss, fx, fy, bw, bh, out, os)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn weighted_store(
+    dst: &mut [u8],
+    ds: usize,
+    p0: Option<&[u8]>,
+    p1: Option<&[u8]>,
+    ps: usize,
+    bw: usize,
+    bh: usize,
+    w: Weight,
+) {
+    if super::avx2() {
+        unsafe { mc_avx2::weighted_store(dst, ds, p0, p1, ps, bw, bh, w) }
+    } else {
+        weighted_store_sse2(dst, ds, p0, p1, ps, bw, bh, w)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,18 +504,83 @@ mod tests {
             for (bw, bh) in [(16, 16), (16, 8), (8, 16), (8, 8), (8, 4), (4, 8), (4, 4)] {
                 for fx in 0..4 {
                     for fy in 0..4 {
-                        let (mut a, mut b) = (vec![0u8; 16 * 16], vec![0u8; 16 * 16]);
-                        mc_luma(&src, 40, fx, fy, bw, bh, &mut a, 16);
+                        let mut b = vec![0u8; 16 * 16];
                         inter::mc_luma_win_scalar(&src, 40, fx, fy, bw, bh, &mut b, 16);
-                        assert_eq!(a, b, "luma {bw}x{bh} {fx},{fy}");
+                        let tight = &src[..(bh + 4) * 40 + bw + 5];
+                        for (k, f) in [mc_luma, mc_luma_sse2].iter().enumerate() {
+                            for s in [&src[..], tight] {
+                                let mut a = vec![0u8; 16 * 16];
+                                f(s, 40, fx, fy, bw, bh, &mut a, 16);
+                                assert_eq!(a, b, "luma {k} {bw}x{bh} {fx},{fy}");
+                            }
+                        }
+                    }
+                }
+                for fx in 0..4 {
+                    for fy in 0..4 {
+                        let base = noise(16 * 16, &mut seed);
+                        let mut b = base.clone();
+                        inter::mc_luma_win_avg_scalar(&src, 40, fx, fy, bw, bh, &mut b, 16);
+                        let tight = &src[..(bh + 4) * 40 + bw + 5];
+                        for s in [&src[..], tight] {
+                            let mut a = base.clone();
+                            mc_luma_avg(s, 40, fx, fy, bw, bh, &mut a, 16);
+                            assert_eq!(a, b, "luma avg {bw}x{bh} {fx},{fy}");
+                        }
                     }
                 }
                 for fx in 0..8 {
                     for fy in 0..8 {
-                        let (mut a, mut b) = (vec![0u8; 8 * 8], vec![0u8; 8 * 8]);
-                        mc_chroma(&src, 40, fx, fy, bw / 2, bh / 2, &mut a, 8);
-                        inter::mc_chroma_win_scalar(&src, 40, fx, fy, bw / 2, bh / 2, &mut b, 8);
-                        assert_eq!(a, b, "chroma {bw}x{bh} {fx},{fy}");
+                        let (cw, ch) = (bw / 2, bh / 2);
+                        let other = noise(40 * 30, &mut seed);
+                        let base = noise(2 * 64, &mut seed);
+                        let (mut b0, mut b1) = (base[..64].to_vec(), base[64..].to_vec());
+                        inter::mc_chroma_win2_scalar(
+                            [&src, &other],
+                            40,
+                            fx,
+                            fy,
+                            cw,
+                            ch,
+                            [&mut b0, &mut b1],
+                            8,
+                        );
+                        let (mut a0, mut a1) = (base[..64].to_vec(), base[64..].to_vec());
+                        mc_chroma2(
+                            [&src, &other[..ch * 40 + cw + 1]],
+                            40,
+                            fx,
+                            fy,
+                            cw,
+                            ch,
+                            [&mut a0, &mut a1],
+                            8,
+                        );
+                        assert_eq!((&a0, &a1), (&b0, &b1), "chroma2 {cw}x{ch} {fx},{fy}");
+                        let (mut b0, mut b1) = (base[..64].to_vec(), base[64..].to_vec());
+                        inter::mc_chroma_win2_avg_scalar(
+                            [&src, &other],
+                            40,
+                            fx,
+                            fy,
+                            cw,
+                            ch,
+                            [&mut b0, &mut b1],
+                            8,
+                        );
+                        let (mut a0, mut a1) = (base[..64].to_vec(), base[64..].to_vec());
+                        mc_chroma2_avg([&src, &other], 40, fx, fy, cw, ch, [&mut a0, &mut a1], 8);
+                        assert_eq!((&a0, &a1), (&b0, &b1), "chroma2 avg {cw}x{ch} {fx},{fy}");
+                        let mut b = vec![0u8; 8 * 8];
+                        inter::mc_chroma_win_scalar(&src, 40, fx, fy, cw, ch, &mut b, 8);
+                        let tight = &src[..ch * 40 + cw + 1];
+                        for (k, f) in [mc_chroma, mc_chroma_sse2].iter().enumerate() {
+                            for s in [&src[..], tight] {
+                                let mut a = vec![0u8; 8 * 8];
+                                f(s, 40, fx, fy, cw, ch, &mut a, 8);
+                                assert_eq!(a, b, "chroma {k} {cw}x{ch} {fx},{fy}");
+                            }
+                        }
                     }
                 }
                 let p0 = noise(16 * 16, &mut seed);
@@ -410,12 +605,15 @@ mod tests {
                 ];
                 for wt in weights {
                     for (u0, u1) in [(true, true), (true, false), (false, true)] {
-                        let (mut a, mut b) = (vec![0u8; 16 * 16], vec![0u8; 16 * 16]);
+                        let mut b = vec![0u8; 16 * 16];
                         let q0 = u0.then_some(&p0[..]);
                         let q1 = u1.then_some(&p1[..]);
-                        weighted_store(&mut a, 16, q0, q1, 16, bw, bh, wt);
                         inter::weighted_store_scalar(&mut b, 16, q0, q1, 16, bw, bh, wt);
-                        assert_eq!(a, b, "weighted {bw}x{bh} {wt:?} {u0} {u1}");
+                        for (k, f) in [weighted_store, weighted_store_sse2].iter().enumerate() {
+                            let mut a = vec![0u8; 16 * 16];
+                            f(&mut a, 16, q0, q1, 16, bw, bh, wt);
+                            assert_eq!(a, b, "weighted {k} {bw}x{bh} {wt:?} {u0} {u1}");
+                        }
                     }
                 }
             }

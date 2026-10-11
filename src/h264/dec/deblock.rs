@@ -2,16 +2,11 @@ use crate::h264::dec::picture::{MbKind, MbState};
 use crate::h264::dec::slicedec::{PicState, SliceInfo};
 use crate::h264::dec::tables::{ALPHA, BETA, TC0};
 
-#[derive(Clone, Copy)]
-struct Motion {
-    ids: [u32; 2],
-    mv: [[i16; 2]; 2],
-    count: u8,
-}
+type Ids = [[u32; 4]; 2];
 
-fn ref_ids8(st: &MbState, sl: &SliceInfo) -> [[u32; 2]; 4] {
-    std::array::from_fn(|b8| {
-        std::array::from_fn(|l| {
+fn ref_ids8(st: &MbState, sl: &SliceInfo) -> Ids {
+    std::array::from_fn(|l| {
+        std::array::from_fn(|b8| {
             let r = st.ref_idx[l][b8];
             if r >= 0 {
                 sl.ref_ids[l]
@@ -25,65 +20,107 @@ fn ref_ids8(st: &MbState, sl: &SliceInfo) -> [[u32; 2]; 4] {
     })
 }
 
+#[derive(Clone, Copy)]
+struct Blk {
+    ids: [u32; 2],
+    mv: [[i16; 2]; 2],
+}
+
 #[inline(always)]
-fn block_motion(st: &MbState, ids8: &[[u32; 2]; 4], raster: usize) -> Motion {
+fn blk(st: &MbState, ids: &Ids, raster: usize) -> Blk {
     let b8 = (raster >> 3) * 2 + ((raster & 3) >> 1);
-    let ids = ids8[b8];
-    let count = (ids[0] != u32::MAX) as u8 + (ids[1] != u32::MAX) as u8;
-    Motion {
+    let ids = [ids[0][b8], ids[1][b8]];
+    let mv = |l: usize| {
+        let m = -((ids[l] != u32::MAX) as i16);
+        [st.mv[l][raster][0] & m, st.mv[l][raster][1] & m]
+    };
+    Blk {
         ids,
-        mv: [st.mv[0][raster], st.mv[1][raster]],
-        count,
+        mv: [mv(0), mv(1)],
     }
 }
 
 #[inline(always)]
-fn mv_far(a: [i16; 2], b: [i16; 2]) -> bool {
-    (a[0] as i32 - b[0] as i32).abs() >= 4 || (a[1] as i32 - b[1] as i32).abs() >= 4
+fn near_mv(a: [i16; 2], b: [i16; 2]) -> bool {
+    ((a[0] as i32 - b[0] as i32 + 3) as u32) < 7 && ((a[1] as i32 - b[1] as i32 + 3) as u32) < 7
 }
 
-#[inline]
-fn motion_bs(p: &Motion, q: &Motion) -> u8 {
-    if p.ids == q.ids && p.mv == q.mv {
-        return 0;
-    }
-    if p.count != q.count {
-        return 1;
-    }
-    if p.count == 1 {
-        let (pi, pm) = if p.ids[0] != u32::MAX {
-            (p.ids[0], p.mv[0])
-        } else {
-            (p.ids[1], p.mv[1])
-        };
-        let (qi, qm) = if q.ids[0] != u32::MAX {
-            (q.ids[0], q.mv[0])
-        } else {
-            (q.ids[1], q.mv[1])
-        };
-        if pi != qi {
-            return 1;
+#[inline(always)]
+fn motion_bs(p: Blk, q: Blk) -> u8 {
+    let same = (p.ids[0] == q.ids[0])
+        & (p.ids[1] == q.ids[1])
+        & near_mv(p.mv[0], q.mv[0])
+        & near_mv(p.mv[1], q.mv[1]);
+    let cross = (p.ids[0] == q.ids[1])
+        & (p.ids[1] == q.ids[0])
+        & near_mv(p.mv[0], q.mv[1])
+        & near_mv(p.mv[1], q.mv[0]);
+    !(same | cross) as u8
+}
+
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+fn bs_bytes_scalar(nz: [u16; 2], mot: [u16; 2], keep: [u16; 2]) -> [[[u8; 4]; 4]; 2] {
+    let mut bs = [[[0u8; 4]; 4]; 2];
+    for dir in 0..2 {
+        for e in 0..4 {
+            for k in 0..4 {
+                let r = if dir == 0 { k * 4 + e } else { e * 4 + k };
+                let bit = |m: u16| (m >> r) & (keep[dir] >> r) & 1;
+                bs[dir][e][k] = if bit(nz[dir]) != 0 {
+                    2
+                } else {
+                    bit(mot[dir]) as u8
+                };
+            }
         }
-        return mv_far(pm, qm) as u8;
     }
-    if p.count == 0 {
-        return 0;
+    bs
+}
+
+#[inline(always)]
+fn bs_bytes(nz: [u16; 2], mot: [u16; 2], keep: [u16; 2]) -> [[[u8; 4]; 4]; 2] {
+    #[cfg(target_arch = "x86_64")]
+    if crate::h264::dec::simd::avx2() {
+        return unsafe { crate::h264::dec::simd::deblock::bs_bytes(nz, mot, keep) };
     }
-    let same_set = (p.ids[0] == q.ids[0] && p.ids[1] == q.ids[1])
-        || (p.ids[0] == q.ids[1] && p.ids[1] == q.ids[0]);
-    if !same_set {
-        return 1;
-    }
-    if p.ids[0] != p.ids[1] {
-        if p.ids[0] == q.ids[0] {
-            (mv_far(p.mv[0], q.mv[0]) || mv_far(p.mv[1], q.mv[1])) as u8
-        } else {
-            (mv_far(p.mv[0], q.mv[1]) || mv_far(p.mv[1], q.mv[0])) as u8
+    bs_bytes_scalar(nz, mot, keep)
+}
+
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+fn motion_lanes_scalar(q: &MbState, ext: &[Option<&MbState>; 2]) -> [u16; 2] {
+    let mut out = [0u16; 2];
+    for (dir, o) in out.iter_mut().enumerate() {
+        for r in 0..16 {
+            let (first, rp) = if dir == 0 {
+                (r & 3 == 0, if r & 3 == 0 { r + 3 } else { r - 1 })
+            } else {
+                (r < 4, (r + 12) % 16)
+            };
+            let p = match (first, ext[dir]) {
+                (true, Some(p)) => p,
+                (true, None) => continue,
+                (false, _) => q,
+            };
+            *o |= (motion_bs(blk(p, &p.ids, rp), blk(q, &q.ids, r)) as u16) << r;
         }
-    } else {
-        ((mv_far(p.mv[0], q.mv[0]) || mv_far(p.mv[1], q.mv[1]))
-            && (mv_far(p.mv[0], q.mv[1]) || mv_far(p.mv[1], q.mv[0]))) as u8
     }
+    out
+}
+
+#[inline(always)]
+fn motion_lanes(q: &MbState, ext: &[Option<&MbState>; 2]) -> [u16; 2] {
+    #[cfg(target_arch = "x86_64")]
+    if crate::h264::dec::simd::avx2() {
+        use crate::h264::dec::simd::deblock::{BsMb, motion_masks};
+        fn mb(p: &MbState) -> BsMb<'_> {
+            BsMb {
+                ids: &p.ids,
+                mv: &p.mv,
+            }
+        }
+        return unsafe { motion_masks(mb(q), mb(ext[0].unwrap_or(q)), mb(ext[1].unwrap_or(q))) };
+    }
+    motion_lanes_scalar(q, ext)
 }
 
 struct EdgeParams {
@@ -91,6 +128,19 @@ struct EdgeParams {
     tc0: [i32; 4],
     alpha: i32,
     beta: i32,
+}
+
+impl EdgeParams {
+    #[cfg(target_arch = "x86_64")]
+    fn lane_tc(&self) -> [i16; 4] {
+        std::array::from_fn(|k| {
+            if self.bs[k] == 0 {
+                -1
+            } else {
+                self.tc0[k] as i16
+            }
+        })
+    }
 }
 
 #[inline(always)]
@@ -250,11 +300,12 @@ fn filter_horizontal<const N: usize>(
 
 #[allow(clippy::needless_range_loop)]
 pub fn deblock_mb(pic: &mut PicState, addr: usize, mb_w: usize) {
-    let q = &pic.mbs[addr];
-    if q.slice_num == u32::MAX {
+    let sn = pic.mbs[addr].slice_num;
+    let Some(sq) = pic.slices.get(sn as usize) else {
         return;
-    }
-    let sq = &pic.slices[q.slice_num as usize];
+    };
+    pic.mbs[addr].ids = ref_ids8(&pic.mbs[addr], sq);
+    let q = &pic.mbs[addr];
     if sq.disable_deblocking_filter_idc == 1 {
         return;
     }
@@ -269,15 +320,15 @@ pub fn deblock_mb(pic: &mut PicState, addr: usize, mb_w: usize) {
         }
         Some(n)
     };
-    let left = usable(if mx > 0 { Some(addr - 1) } else { None });
-    let top = usable(if my > 0 { Some(addr - mb_w) } else { None });
-    let alpha_off = sq.alpha_offset;
-    let beta_off = sq.beta_offset;
+    let nbs = [
+        usable(if mx > 0 { Some(addr - 1) } else { None }),
+        usable(if my > 0 { Some(addr - mb_w) } else { None }),
+    ];
     let t8 = q.transform_8x8;
     let mut bs = [[[0u8; 4]; 4]; 2];
     if q.kind.is_intra() {
         for dir in 0..2 {
-            if (if dir == 0 { left } else { top }).is_some() {
+            if nbs[dir].is_some() {
                 bs[dir][0] = [4; 4];
             }
             for e in 1..4 {
@@ -287,56 +338,39 @@ pub fn deblock_mb(pic: &mut PicState, addr: usize, mb_w: usize) {
             }
         }
     } else {
-        let qids = ref_ids8(q, sq);
-        let q_uniform = (0..2).all(|l| {
-            let r = q.ref_idx[l];
-            r[1] == r[0] && r[2] == r[0] && r[3] == r[0] && q.mv[l].iter().all(|m| *m == q.mv[l][0])
-        });
-        let qm: [Motion; 16] = std::array::from_fn(|r| block_motion(q, &qids, r));
+        let mut ext: [Option<&MbState>; 2] = [None, None];
+        let mut intra_nb = [false; 2];
         for dir in 0..2 {
-            let neighbor = if dir == 0 { left } else { top };
-            if let Some(n) = neighbor {
-                let p = &pic.mbs[n];
-                if p.kind.is_intra() {
-                    bs[dir][0] = [4; 4];
-                } else {
-                    let pids = ref_ids8(p, &pic.slices[p.slice_num as usize]);
-                    for k in 0..4 {
-                        let (rq, rp) = if dir == 0 {
-                            (k * 4, k * 4 + 3)
-                        } else {
-                            (k, 12 + k)
-                        };
-                        bs[dir][0][k] = if (p.nz_mask >> rp) & 1 != 0 || (q.nz_mask >> rq) & 1 != 0
-                        {
-                            2
-                        } else {
-                            motion_bs(&block_motion(p, &pids, rp), &qm[rq])
-                        };
-                    }
-                }
-            }
-            if q_uniform && q.nz_mask == 0 {
+            let Some(n) = nbs[dir] else {
                 continue;
-            }
-            for e in 1..4 {
-                if t8 && e % 2 == 1 {
-                    continue;
-                }
-                for k in 0..4 {
-                    let (rq, rp) = if dir == 0 {
-                        (k * 4 + e, k * 4 + e - 1)
-                    } else {
-                        (e * 4 + k, e * 4 + k - 4)
-                    };
-                    bs[dir][e][k] = if (q.nz_mask >> rp) & 1 != 0 || (q.nz_mask >> rq) & 1 != 0 {
-                        2
-                    } else {
-                        motion_bs(&qm[rp], &qm[rq])
-                    };
-                }
+            };
+            let p = &pic.mbs[n];
+            if p.kind.is_intra() {
+                intra_nb[dir] = true;
+            } else {
+                ext[dir] = Some(p);
             }
         }
+        let mot = motion_lanes(q, &ext);
+        let nzq = q.nz_mask;
+        let nz = [
+            nzq | ((nzq << 1) & 0xeeee) | ext[0].map_or(0, |p| (p.nz_mask >> 3) & 0x1111),
+            nzq | (nzq << 4) | ext[1].map_or(0, |p| p.nz_mask >> 12),
+        ];
+        let odd = if t8 { [0xaaaa, 0xf0f0] } else { [0, 0] };
+        let keep = [
+            !odd[0] & if ext[0].is_none() { !0x1111 } else { 0xffff },
+            !odd[1] & if ext[1].is_none() { !0x000f } else { 0xffff },
+        ];
+        bs = bs_bytes(nz, mot, keep);
+        for dir in 0..2 {
+            if intra_nb[dir] {
+                bs[dir][0] = [4; 4];
+            }
+        }
+    }
+    if bs == [[[0; 4]; 4]; 2] {
+        return;
     }
     let qp_of = |st: &MbState| {
         if st.kind == MbKind::IPcm {
@@ -346,11 +380,9 @@ pub fn deblock_mb(pic: &mut PicState, addr: usize, mb_w: usize) {
         }
     };
     let q_qp = qp_of(q);
-    let q_qpc = q.qpc;
-    let p_qp = [
-        left.map(|n| (qp_of(&pic.mbs[n]), pic.mbs[n].qpc)),
-        top.map(|n| (qp_of(&pic.mbs[n]), pic.mbs[n].qpc)),
-    ];
+    let q_qpc = q.qpc.map(|v| v as i32);
+    let p_qp = nbs.map(|n| n.map(|n| (qp_of(&pic.mbs[n]), pic.mbs[n].qpc.map(|v| v as i32))));
+    let (alpha_off, beta_off) = (sq.alpha_offset, sq.beta_offset);
     let params = |qpp: i32, qpq: i32, b: [u8; 4]| {
         let qpav = (qpp + qpq + 1) >> 1;
         let index_a = (qpav + alpha_off).clamp(0, 51) as usize;
@@ -369,6 +401,8 @@ pub fn deblock_mb(pic: &mut PicState, addr: usize, mb_w: usize) {
             beta: BETA[index_b] as i32,
         }
     };
+    #[cfg(target_arch = "x86_64")]
+    let fast = crate::h264::dec::simd::avx2();
     let width = pic.planes.width;
     let cwidth = pic.planes.cwidth;
     for dir in 0..2 {
@@ -385,44 +419,219 @@ pub fn deblock_mb(pic: &mut PicState, addr: usize, mb_w: usize) {
             if ep.alpha == 0 || ep.beta == 0 {
                 continue;
             }
+            let (p, yy) = pic.planes.y.near(width, my * 16 + dir * e * 4);
+            let x = mx * 16 + (1 - dir) * e * 4;
+            #[cfg(target_arch = "x86_64")]
+            if fast {
+                use crate::h264::dec::simd::deblock as d;
+                unsafe {
+                    let l = d::Lanes::luma(ep.alpha, ep.beta, ep.lane_tc());
+                    if dir == 0 {
+                        d::luma_vertical(p, width, x, yy, &l, ep.bs[0] >= 4);
+                    } else {
+                        d::luma_horizontal(p, width, x, yy, &l, ep.bs[0] >= 4);
+                    }
+                }
+                continue;
+            }
             if dir == 0 {
-                let (p, yy) = pic.planes.y.near(width, my * 16);
-                filter_vertical::<16>(p, width, mx * 16 + e * 4, yy, &ep, false);
+                filter_vertical::<16>(p, width, x, yy, &ep, false);
             } else {
-                let (p, yy) = pic.planes.y.near(width, my * 16 + e * 4);
-                filter_horizontal::<16>(p, width, mx * 16, yy, &ep, false);
+                filter_horizontal::<16>(p, width, x, yy, &ep, false);
             }
         }
     }
-    for c in 0..2 {
-        for dir in 0..2 {
-            for ce in 0..2 {
-                let e = ce * 2;
-                if bs[dir][e] == [0; 4] {
-                    continue;
-                }
+    for dir in 0..2 {
+        for ce in 0..2 {
+            let e = ce * 2;
+            if bs[dir][e] == [0; 4] {
+                continue;
+            }
+            let ep: [EdgeParams; 2] = std::array::from_fn(|c| {
                 let qpp = if e == 0 {
                     p_qp[dir].map(|p| p.1[c]).unwrap_or(q_qpc[c])
                 } else {
                     q_qpc[c]
-                } as i32;
-                let ep = params(qpp, q_qpc[c] as i32, bs[dir][e]);
-                if ep.alpha == 0 || ep.beta == 0 {
+                };
+                params(qpp, q_qpc[c], bs[dir][e])
+            });
+            let off = |ep: &EdgeParams| ep.alpha == 0 || ep.beta == 0;
+            if off(&ep[0]) && off(&ep[1]) {
+                continue;
+            }
+            let y = my * 8 + dir * ce * 4;
+            let x = mx * 8 + (1 - dir) * ce * 4;
+            let (cb, yy) = pic.planes.cb.near(cwidth, y);
+            let (cr, _) = pic.planes.cr.near(cwidth, y);
+            #[cfg(target_arch = "x86_64")]
+            if fast {
+                use crate::h264::dec::simd::deblock as d;
+                unsafe {
+                    let l = d::Lanes::chroma(
+                        [ep[0].alpha, ep[1].alpha],
+                        [ep[0].beta, ep[1].beta],
+                        [ep[0].lane_tc(), ep[1].lane_tc()],
+                    );
+                    if dir == 0 {
+                        d::chroma_vertical(cb, cr, cwidth, x, yy, &l, ep[0].bs[0] >= 4);
+                    } else {
+                        d::chroma_horizontal(cb, cr, cwidth, x, yy, &l, ep[0].bs[0] >= 4);
+                    }
+                }
+                continue;
+            }
+            for (c, plane) in [cb, cr].into_iter().enumerate() {
+                if off(&ep[c]) {
                     continue;
                 }
-                let plane = if c == 0 {
-                    &mut pic.planes.cb
-                } else {
-                    &mut pic.planes.cr
-                };
                 if dir == 0 {
-                    let (p, yy) = plane.near(cwidth, my * 8);
-                    filter_vertical::<8>(p, cwidth, mx * 8 + ce * 4, yy, &ep, true);
+                    filter_vertical::<8>(plane, cwidth, x, yy, &ep[c], true);
                 } else {
-                    let (p, yy) = plane.near(cwidth, my * 8 + ce * 4);
-                    filter_horizontal::<8>(p, cwidth, mx * 8, yy, &ep, true);
+                    filter_horizontal::<8>(plane, cwidth, x, yy, &ep[c], true);
                 }
             }
+        }
+    }
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+    use crate::h264::dec::simd::{self, deblock as d};
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self, n: u32) -> u32 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            ((self.0 >> 24) % n as u64) as u32
+        }
+    }
+
+    fn plane(r: &mut Rng, n: usize) -> Vec<u8> {
+        let base = r.next(200) as i32 + 20;
+        let amp = r.next(24) as i32 + 1;
+        let step = r.next(40) as i32 - 20;
+        (0..n * n)
+            .map(|i| {
+                let s = if (i % n) >= n / 2 || (i / n) >= n / 2 {
+                    step
+                } else {
+                    0
+                };
+                (base + s + r.next(amp as u32) as i32 - amp / 2).clamp(0, 255) as u8
+            })
+            .collect()
+    }
+
+    fn edge(r: &mut Rng) -> EdgeParams {
+        let ia = 16 + r.next(36) as usize;
+        let ib = 16 + r.next(36) as usize;
+        let bs = if r.next(4) == 0 {
+            [4; 4]
+        } else {
+            std::array::from_fn(|_| r.next(4) as u8)
+        };
+        EdgeParams {
+            bs,
+            tc0: bs.map(|b| {
+                if (1..4).contains(&b) {
+                    TC0[ia][b as usize - 1] as i32
+                } else {
+                    0
+                }
+            }),
+            alpha: ALPHA[ia] as i32,
+            beta: BETA[ib] as i32,
+        }
+    }
+
+    #[test]
+    fn avx2_boundary_strength_matches_scalar() {
+        if !simd::avx2() {
+            return;
+        }
+        let mut r = Rng(0x9e37_79b9_7f4a_7c15);
+        let mb = |r: &mut Rng| {
+            let mut st = MbState::default();
+            for l in 0..2 {
+                for b in 0..4 {
+                    match r.next(4) {
+                        0 => {}
+                        k => {
+                            st.ref_idx[l][b] = k as i8;
+                            st.ids[l][b] = 7 + r.next(3);
+                        }
+                    }
+                }
+                let spread = [2, 8, 40000][r.next(3) as usize];
+                let base = [r.next(64) as i16 - 32, r.next(64) as i16 - 32];
+                for m in st.mv[l].iter_mut() {
+                    *m = if r.next(3) == 0 {
+                        base
+                    } else {
+                        [0, 1].map(|c| {
+                            (base[c] as i32 + r.next(spread) as i32 - spread as i32 / 2) as i16
+                        })
+                    };
+                }
+            }
+            st
+        };
+        for _ in 0..20000 {
+            let q = mb(&mut r);
+            let (left, top) = (mb(&mut r), mb(&mut r));
+            let ext = [Some(&left), Some(&top)];
+            assert_eq!(motion_lanes(&q, &ext), motion_lanes_scalar(&q, &ext));
+            let m = |r: &mut Rng| [r.next(65536) as u16, r.next(65536) as u16];
+            let (nz, mot, keep) = (m(&mut r), m(&mut r), m(&mut r));
+            assert_eq!(bs_bytes(nz, mot, keep), bs_bytes_scalar(nz, mot, keep));
+        }
+    }
+
+    #[test]
+    fn avx2_filters_match_scalar() {
+        if !simd::avx2() {
+            return;
+        }
+        let mut r = Rng(0x2545_f491_4f6c_dd1d);
+        for _ in 0..4000 {
+            let ep = edge(&mut r);
+            let strong = ep.bs[0] >= 4;
+            let l = unsafe { d::Lanes::luma(ep.alpha, ep.beta, ep.lane_tc()) };
+            let src = plane(&mut r, 32);
+            let (mut a, mut b) = (src.clone(), src.clone());
+            filter_vertical::<16>(&mut a, 32, 16, 8, &ep, false);
+            unsafe { d::luma_vertical(&mut b, 32, 16, 8, &l, strong) };
+            assert_eq!(a, b, "luma vertical");
+            let (mut a, mut b) = (src.clone(), src);
+            filter_horizontal::<16>(&mut a, 32, 8, 16, &ep, false);
+            unsafe { d::luma_horizontal(&mut b, 32, 8, 16, &l, strong) };
+            assert_eq!(a, b, "luma horizontal");
+
+            let mut ep2 = edge(&mut r);
+            ep2.bs = ep.bs;
+            ep2.tc0 = ep.tc0;
+            let l = unsafe {
+                d::Lanes::chroma(
+                    [ep.alpha, ep2.alpha],
+                    [ep.beta, ep2.beta],
+                    [ep.lane_tc(), ep2.lane_tc()],
+                )
+            };
+            let (cb, cr) = (plane(&mut r, 16), plane(&mut r, 16));
+            let (mut a0, mut a1, mut b0, mut b1) = (cb.clone(), cr.clone(), cb.clone(), cr.clone());
+            filter_vertical::<8>(&mut a0, 16, 8, 4, &ep, true);
+            filter_vertical::<8>(&mut a1, 16, 8, 4, &ep2, true);
+            unsafe { d::chroma_vertical(&mut b0, &mut b1, 16, 8, 4, &l, strong) };
+            assert_eq!((&a0, &a1), (&b0, &b1), "chroma vertical");
+            let (mut a0, mut a1, mut b0, mut b1) = (cb.clone(), cr.clone(), cb, cr);
+            filter_horizontal::<8>(&mut a0, 16, 4, 8, &ep, true);
+            filter_horizontal::<8>(&mut a1, 16, 4, 8, &ep2, true);
+            unsafe { d::chroma_horizontal(&mut b0, &mut b1, 16, 4, 8, &l, strong) };
+            assert_eq!((&a0, &a1), (&b0, &b1), "chroma horizontal");
         }
     }
 }
