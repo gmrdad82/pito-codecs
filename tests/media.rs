@@ -13,8 +13,8 @@ use std::process::Command;
 use std::sync::{Arc, OnceLock};
 
 use pito_codecs::media::{
-    Codec, ExportOptions, Piece, Prefs, Rgba, audio_pcm, decode_video, export, first_frame,
-    frames_at, probe,
+    Choice, Codec, ExportOptions, Frame, IN_FLIGHT, Piece, Prefs, Rgba, VideoFrame, audio_pcm,
+    decode_video, decode_video_gpu, export, first_frame, frames_at, probe,
 };
 
 fn have_ffmpeg() -> bool {
@@ -386,4 +386,83 @@ fn adoption_through_every_available_route() {
         let psnr = min_psnr(&out, &sample, &[(240, 270), (480, 504), (240, 270)]);
         assert!(psnr > 40.0, "{name}: {psnr}");
     }
+}
+
+fn luma_diff(a: &Frame, b: &Frame) -> f64 {
+    let (pa, pb) = (&a.planes[0], &b.planes[0]);
+    let mut sum = 0u64;
+    for y in 0..pa.height {
+        let ra = &pa.data[y * pa.stride..y * pa.stride + pa.width];
+        let rb = &pb.data[y * pb.stride..y * pb.stride + pb.width];
+        sum += ra
+            .iter()
+            .zip(rb)
+            .map(|(x, y)| x.abs_diff(*y) as u64)
+            .sum::<u64>();
+    }
+    sum as f64 / (pa.width * pa.height) as f64
+}
+
+#[test]
+fn gpu_playback_keeps_frames_on_the_gpu_and_falls_back_to_the_cpu() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let gpu = pito_codecs::gpu::available()
+        .iter()
+        .any(|&(c, d, _)| c == Codec::H264 && d == pito_codecs::gpu::Direction::Decode);
+    let cpu = Prefs {
+        decode: Choice::Cpu,
+        ..Prefs::default()
+    };
+    for (prefs, on_gpu) in [(Prefs::default(), gpu), (cpu.clone(), false)] {
+        let mut video = decode_video_gpu(clip(), 3.0, Some((640, 360)), &prefs).unwrap();
+        assert_eq!(video.on_gpu(), on_gpu, "{:?}", video.reasons);
+        assert_eq!((video.color.matrix, video.color.full_range), (1, false));
+        let mut held = Vec::new();
+        let mut n = 0;
+        while let Some(f) = video.next() {
+            let f = f.unwrap();
+            assert_eq!(
+                (f.on_gpu(), f.size(), f.pts()),
+                (on_gpu, (640, 360), 180 + n)
+            );
+            #[cfg(target_os = "linux")]
+            if let VideoFrame::Gpu(g) = &f {
+                let d = g.dmabuf(false).unwrap();
+                assert_eq!((d.fourcc, d.crop), (0x3231_564e, (0, 0, 640, 360)));
+            }
+            n += 1;
+            held.push(f);
+            if held.len() == IN_FLIGHT {
+                for f in held.drain(..) {
+                    video.recycle(f);
+                }
+            }
+        }
+        assert_eq!(n, 180);
+    }
+    if !gpu {
+        return;
+    }
+    let ours = decode_video_gpu(clip(), 1.0, None, &Prefs::default())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    let VideoFrame::Gpu(ours) = ours else {
+        panic!("a native-size frame left the GPU");
+    };
+    let ours = ours.download().unwrap();
+    let cpu = decode_video(clip(), 1.0, None, &cpu)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (ours.width, ours.height, ours.pts),
+        (cpu.width, cpu.height, cpu.pts)
+    );
+    let diff = luma_diff(&ours, &cpu);
+    assert!(diff < 1.0, "{diff}");
 }

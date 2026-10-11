@@ -131,6 +131,29 @@ pub fn driver(backend: Backend) -> Result<String> {
     }
 }
 
+pub(crate) fn color(codec: Codec, extradata: &[u8]) -> Option<(u8, bool)> {
+    let sets = nal::parse_extradata(codec, extradata).ok()?.parameter_sets;
+    match codec {
+        Codec::H264 => {
+            let nal = sets
+                .iter()
+                .find(|n| n.first().is_some_and(|h| h & 0x1f == 7))?;
+            let rbsp = syntax::bits::unescape_rbsp(nal.get(1..)?);
+            let vui = syntax::h264::params::Sps::parse(&rbsp).ok()?.vui?;
+            Some((vui.matrix_coefficients, vui.full_range))
+        }
+        Codec::Hevc => {
+            let nal = sets
+                .iter()
+                .find(|n| n.first().is_some_and(|h| (h >> 1) & 0x3f == 33))?;
+            let rbsp = syntax::bits::unescape_rbsp(nal.get(2..)?);
+            let vui = syntax::hevc::params::Sps::parse(&rbsp).ok()?.vui?;
+            Some((vui.matrix_coefficients, vui.full_range))
+        }
+        _ => None,
+    }
+}
+
 pub(crate) trait DecoderBackend: Send {
     fn backend(&self) -> Backend;
     fn name(&self) -> &str;
@@ -335,19 +358,32 @@ impl GpuFrame {
         }
     }
 
-    pub(crate) fn into_cpu(self) -> std::result::Result<Frame, Self> {
+    pub(crate) fn into_cpu(self) -> Option<Frame> {
         match self.inner {
-            GpuInner::Cpu(f) => Ok(f),
+            GpuInner::Cpu(f) => Some(f),
             #[cfg(target_os = "linux")]
-            inner => Err(Self {
-                inner,
-                time_base: self.time_base,
-            }),
+            GpuInner::VaApi(_) => None,
         }
     }
 
     pub fn on_gpu(&self) -> bool {
         !matches!(self.inner, GpuInner::Cpu(_))
+    }
+
+    pub fn surface(&self) -> Option<(u64, u32)> {
+        match &self.inner {
+            GpuInner::Cpu(_) => None,
+            #[cfg(target_os = "linux")]
+            GpuInner::VaApi(g) => Some(g.key()),
+        }
+    }
+
+    pub fn sync(&self) -> Result<()> {
+        match &self.inner {
+            GpuInner::Cpu(_) => Ok(()),
+            #[cfg(target_os = "linux")]
+            GpuInner::VaApi(g) => g.sync().map_err(Error::Backend),
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -381,13 +417,18 @@ pub struct GpuScaler {
 
 impl GpuScaler {
     pub fn new(width: u32, height: u32, ten_bit: bool) -> Result<Self> {
+        Self::with_frames(width, height, ten_bit, 8)
+    }
+
+    pub fn with_frames(width: u32, height: u32, ten_bit: bool, frames: usize) -> Result<Self> {
         if width == 0 || height == 0 {
             return Err(Error::Invalid("scaler size must be set".into()));
         }
         #[cfg(target_os = "linux")]
         {
             let bits = if ten_bit { 10 } else { 8 };
-            let inner = vaapi::Scaler::new((width, height), bits, 8).map_err(Error::Backend)?;
+            let inner =
+                vaapi::Scaler::new((width, height), bits, frames).map_err(Error::Backend)?;
             Ok(Self {
                 inner,
                 size: (width, height),
@@ -395,7 +436,7 @@ impl GpuScaler {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = ten_bit;
+            let _ = (ten_bit, frames);
             Err(Error::Unsupported("no GPU scaler on this system".into()))
         }
     }
