@@ -201,14 +201,11 @@ fn interp<const T: usize, P: Pel>(
     fx: usize,
     fy: usize,
 ) {
-    let rows: Vec<Vec<P>> = (0..h + T - 1)
-        .map(|_| {
-            (0..w + T - 1)
-                .map(|_| P::from_i32(rng.below(1 << bd) as i32))
-                .collect()
-        })
+    let stride = w + T - 1 + rng.below(20);
+    let slack = rng.pick(&[0, 16]);
+    let src: Vec<P> = (0..(h + T - 2) * stride + w + T - 1 + slack)
+        .map(|_| P::from_i32(rng.below(1 << bd) as i32))
         .collect();
-    let lines: Vec<&[P]> = rows.iter().map(|r| r.as_slice()).collect();
     let taps = Taps {
         fx,
         fy,
@@ -220,7 +217,7 @@ fn interp<const T: usize, P: Pel>(
     let (a, b) = both(|| {
         let mut tmp = vec![0i16; 71 * 71];
         let mut out = vec![0i16; w * h];
-        inter::interpolate::<T, P>(&lines, &mut tmp, &taps, w, h, &mut out);
+        inter::interpolate::<T, P>(&src, stride, &mut tmp, &taps, w, h, &mut out);
         out
     });
     assert_eq!(a, b, "interp T={T} {w}x{h} f=({fx},{fy}) bd={bd}");
@@ -323,14 +320,11 @@ fn kernel_speed() {
             }
         });
     }
-    let plane: Vec<Vec<u8>> = (0..80)
-        .map(|_| (0..128).map(|_| rng.below(256) as u8).collect())
-        .collect();
+    let plane: Vec<u8> = (0..80 * 128).map(|_| rng.below(256) as u8).collect();
     let mut tmp = vec![0i16; 71 * 71];
     let mut out = vec![0i16; 64 * 64];
     for (w, h) in [(8, 8), (16, 16), (32, 32), (64, 64)] {
         for (fx, fy) in [(0, 0), (2, 0), (0, 2), (1, 3)] {
-            let lines: Vec<&[u8]> = plane.iter().take(h + 7).map(|l| &l[..w + 7]).collect();
             let taps = Taps {
                 fx,
                 fy,
@@ -341,13 +335,12 @@ fn kernel_speed() {
             };
             race(&format!("luma {w}x{h} f=({fx},{fy})"), || {
                 for _ in 0..64 {
-                    luma(&lines, &mut tmp, &taps, w, h, &mut out);
+                    luma(&plane, &mut tmp, &taps, w, h, &mut out);
                 }
             });
         }
     }
     for (w, h) in [(4, 4), (8, 8), (16, 16)] {
-        let lines: Vec<&[u8]> = plane.iter().take(h + 3).map(|l| &l[..w + 3]).collect();
         let taps = Taps {
             fx: 3,
             fy: 5,
@@ -358,7 +351,7 @@ fn kernel_speed() {
         };
         race(&format!("chroma {w}x{h} f=(3,5)"), || {
             for _ in 0..64 {
-                chroma(&lines, &mut tmp, &taps, w, h, &mut out);
+                chroma(&plane, &mut tmp, &taps, w, h, &mut out);
             }
         });
     }
@@ -443,13 +436,13 @@ fn kernel_speed() {
 }
 
 crate::hevc::isa::dispatch! {
-fn luma(lines: &[&[u8]], tmp: &mut [i16], taps: &Taps<8>, w: usize, h: usize, out: &mut [i16]) {
-    inter::interpolate::<8, u8>(lines, tmp, taps, w, h, out);
+fn luma(src: &[u8], tmp: &mut [i16], taps: &Taps<8>, w: usize, h: usize, out: &mut [i16]) {
+    inter::interpolate::<8, u8>(src, 128, tmp, taps, w, h, out);
 }
 }
 
 crate::hevc::isa::dispatch! {
-fn chroma(lines: &[&[u8]], tmp: &mut [i16], taps: &Taps<4>, w: usize, h: usize, out: &mut [i16]) {
-    inter::interpolate::<4, u8>(lines, tmp, taps, w, h, out);
+fn chroma(src: &[u8], tmp: &mut [i16], taps: &Taps<4>, w: usize, h: usize, out: &mut [i16]) {
+    inter::interpolate::<4, u8>(src, 128, tmp, taps, w, h, out);
 }
 }

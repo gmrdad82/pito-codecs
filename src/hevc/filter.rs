@@ -1,5 +1,5 @@
 use crate::hevc::pel::Pel;
-use crate::hevc::picture::{ColMv, Part};
+use crate::hevc::picture::ColMv;
 use crate::hevc::simd;
 use crate::hevc::slicedec::Progress;
 use crate::hevc::slicedec::{
@@ -545,9 +545,8 @@ fn filter_chroma<P: Pel>(
 }
 
 crate::hevc::isa::dispatch! {
-fn sao_row<P: Pel>(pic: &PicState<P>, r: usize, bottom: bool) -> [Vec<P>; 3] {
+fn sao_row<P: Pel>(pic: &PicState<P>, r: usize, bottom: bool) {
     let ctb = 1usize << pic.log2_ctb;
-    let mut out: [Vec<P>; 3] = [Vec::new(), Vec::new(), Vec::new()];
     for c in 0..3 {
         let (w, h, cs) = if c == 0 {
             (pic.width, pic.height, ctb)
@@ -556,25 +555,19 @@ fn sao_row<P: Pel>(pic: &PicState<P>, r: usize, bottom: bool) -> [Vec<P>; 3] {
         };
         let y0 = r * cs;
         let y1 = (y0 + cs).min(h);
-        let (top, rest) = pic.frame.part_lines(r, c.min(1));
-        let (ly0, ly1) = if bottom {
-            (y0 + top, y0 + top + rest)
-        } else {
-            (y0, y0 + top)
-        };
+        let (ly0, ly1) = pic.frame.part_range(r, c, bottom);
+        if ly0 == ly1 {
+            continue;
+        }
         let (lo, hi) = (ly0.saturating_sub(1) * w, (ly1 + 1).min(h) * w);
         let plane = Lines {
             data: pic.planes[c].slice(lo..hi),
             base: lo,
         };
-        let mut buf = pic.frame.row_buffer::<P>();
-        buf.clear();
-        buf.extend_from_slice(&plane[ly0 * w..ly1 * w]);
-        if ly0 == ly1 {
-            out[c] = buf;
-            continue;
+        let (dst, ds) = pic.frame.rows_mut::<P>(c, ly0, ly1);
+        for (y, line) in (ly0..ly1).zip(dst.chunks_mut(ds)) {
+            line[..w].copy_from_slice(&plane[y * w..y * w + w]);
         }
-        out[c] = buf;
         for rx in (0..pic.wctb).filter(|_| !pic.draft) {
             let rs = r * pic.wctb + rx;
             let si = pic.ctb_slice.get(rs);
@@ -601,11 +594,11 @@ fn sao_row<P: Pel>(pic: &PicState<P>, r: usize, bottom: bool) -> [Vec<P>; 3] {
                 (ly0, ly1),
                 (w, h),
                 &p,
-                &mut out[c],
+                (&mut *dst, ds),
             );
         }
+        pic.frame.pad_rows::<P>(c, ly0, ly1);
     }
-    out
 }
 }
 
@@ -621,7 +614,7 @@ fn sao_ctb<P: Pel>(
     (ly0, ly1): (usize, usize),
     (w, h): (usize, usize),
     p: &crate::hevc::slicedec::SaoParams,
-    dst: &mut [P],
+    (dst, ds): (&mut [P], usize),
 ) {
     let bd = if c == 0 { pic.bd_y } else { pic.bd_c };
     let max = (1i32 << bd) - 1;
@@ -654,7 +647,7 @@ fn sao_ctb<P: Pel>(
                 let band = (p.band_pos[c] as i32, offs);
                 sao_band_run(
                     &plane[y * w + x0..y * w + x1],
-                    &mut dst[(y - ly0) * w + x0..(y - ly0) * w + x1],
+                    &mut dst[(y - ly0) * ds + x0..(y - ly0) * ds + x1],
                     shift,
                     band,
                     max,
@@ -666,7 +659,7 @@ fn sao_ctb<P: Pel>(
                     continue;
                 }
                 let v: i32 = plane[y * w + x].into();
-                dst[(y - ly0) * w + x] =
+                dst[(y - ly0) * ds + x] =
                     P::from_i32((v + table[(v >> shift) as usize]).clamp(0, max));
             }
         }
@@ -736,14 +729,14 @@ fn sao_ctb<P: Pel>(
         if !inner_row {
             for x in x0..x1 {
                 if let Some(v) = general(x, y) {
-                    dst[(y - ly0) * w + x] = v;
+                    dst[(y - ly0) * ds + x] = v;
                 }
             }
             continue;
         }
         for x in (x0..x0 + mx).chain(x1 - mx..x1) {
             if let Some(v) = general(x, y) {
-                dst[(y - ly0) * w + x] = v;
+                dst[(y - ly0) * ds + x] = v;
             }
         }
         let (ya, yb) = ((y as i32 + vp[0]) as usize, (y as i32 + vp[1]) as usize);
@@ -752,7 +745,7 @@ fn sao_ctb<P: Pel>(
         let cur = &plane[y * w + x0 + mx..][..n];
         let na = &plane[ya * w + xa as usize..][..n];
         let nb = &plane[yb * w + xb as usize..][..n];
-        let out = &mut dst[(y - ly0) * w + x0 + mx..][..n];
+        let out = &mut dst[(y - ly0) * ds + x0 + mx..][..n];
         sao_edge_run(cur, na, nb, out, &by_sum, max);
     }
 }
@@ -874,22 +867,12 @@ fn publish_top<P: Pel>(pic: &PicState<P>, r: usize) {
             col[j * w16 + i] = cm;
         }
     }
-    let [oy, ocb, ocr] = sao_row(pic, r, false);
+    sao_row(pic, r, false);
     let _ = (w, cw, c0, c1);
-    let part = Part {
-        y: P::wrap(oy),
-        cb: P::wrap(ocb),
-        cr: P::wrap(ocr),
-    };
-    pic.frame.publish_top(r, part, col.into());
+    pic.frame.publish_top(r, col.into());
 }
 
 fn publish_bottom<P: Pel>(pic: &PicState<P>, r: usize) {
-    let [oy, ocb, ocr] = sao_row(pic, r, true);
-    let part = Part {
-        y: P::wrap(oy),
-        cb: P::wrap(ocb),
-        cr: P::wrap(ocr),
-    };
-    pic.frame.publish_bottom(r, part);
+    sao_row(pic, r, true);
+    pic.frame.publish_bottom(r);
 }

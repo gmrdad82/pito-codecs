@@ -3,7 +3,7 @@ use crate::hevc::dpb::{Dpb, Output, OutputMeta, PocState, RefPicSet, build_ref_l
 use crate::hevc::error::{Error, Result, ensure, invalid};
 use crate::hevc::params::{Layout, Pps, Sps, Vps};
 use crate::hevc::pel::Pel;
-use crate::hevc::picture::{Frame, FrameRef, RowPool};
+use crate::hevc::picture::{Frame, FrameRef, PlanePool};
 use crate::hevc::slice::{NalHeader, SliceHeader, nal_type};
 use crate::hevc::slicedec::{PicState, Pool, Scaling, SliceDecoder, SliceJob, SliceRun};
 use crate::hevc::{ColorInfo, Hvcc};
@@ -32,7 +32,7 @@ struct Shared {
     error: Mutex<Option<Error>>,
     pool8: Pool<u8>,
     pool16: Pool<u16>,
-    rows: RowPool,
+    rows: PlanePool,
     images: Mutex<Vec<Vec<u8>>>,
 }
 

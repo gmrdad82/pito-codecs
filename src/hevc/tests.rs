@@ -525,6 +525,11 @@ fn decode_speed() {
         Some(t) => vec![t],
         None => vec![1, cores],
     };
+    if let Ok(file) = std::env::var("HEVC_FILE") {
+        let data = std::fs::read(&file).unwrap();
+        time_units(&file, &data, &threads);
+        return;
+    }
     for f in BENCH
         .iter()
         .filter(|f| only.as_deref().is_none_or(|o| o == f.name))
@@ -541,28 +546,33 @@ fn decode_speed() {
             &std::fs::read(yuv).unwrap(),
             f,
         );
-        for &threads in &threads {
-            let mut best = f64::MAX;
-            let mut frames = 0;
-            for _ in 0..3 {
-                let mut dec = Decoder::with_threads(threads);
-                let t0 = Instant::now();
-                frames = 0;
-                for (i, u) in units.iter().enumerate() {
-                    for f in dec.decode(&packet(u.clone(), i)).unwrap() {
-                        frames += 1;
-                        dec.recycle(f);
-                    }
+        time_units(f.name, &data, &threads);
+    }
+}
+
+fn time_units(name: &str, data: &[u8], threads: &[usize]) {
+    let units: Vec<Vec<u8>> = access_units(data).into_iter().map(<[u8]>::to_vec).collect();
+    for &threads in threads {
+        let mut best = f64::MAX;
+        let mut frames = 0;
+        for _ in 0..3 {
+            let mut dec = Decoder::with_threads(threads);
+            let t0 = Instant::now();
+            frames = 0;
+            for (i, u) in units.iter().enumerate() {
+                for f in dec.decode(&packet(u.clone(), i)).unwrap() {
+                    frames += 1;
+                    dec.recycle(f);
                 }
-                frames += dec.flush().unwrap().len();
-                best = best.min(t0.elapsed().as_secs_f64());
             }
-            println!(
-                "{} ({} KB): {threads} thread(s): {frames} frames in {best:.3}s = {:.1} fps",
-                f.name,
-                data.len() / 1024,
-                frames as f64 / best
-            );
+            frames += dec.flush().unwrap().len();
+            best = best.min(t0.elapsed().as_secs_f64());
         }
+        println!(
+            "{} ({} KB): {threads} thread(s): {frames} frames in {best:.3}s = {:.1} fps",
+            name,
+            data.len() / 1024,
+            frames as f64 / best
+        );
     }
 }
