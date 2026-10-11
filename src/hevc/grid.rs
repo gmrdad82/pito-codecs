@@ -42,6 +42,10 @@ impl<T> Grid<T> {
         unsafe { Vec::from_raw_parts(me.ptr, me.len, me.cap) }
     }
 
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
     fn check(&self, r: &Range<usize>) {
         assert!(
             r.start <= r.end && r.end <= self.len,

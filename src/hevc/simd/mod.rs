@@ -1,3 +1,4 @@
+pub(crate) mod dbk;
 pub(crate) mod itx;
 pub(crate) mod mc;
 #[cfg(all(test, target_arch = "x86_64"))]

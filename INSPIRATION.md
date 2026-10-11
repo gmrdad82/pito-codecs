@@ -24,6 +24,7 @@ The codecs here are written in Rust. Parts are adapted from permissively license
 - RFC 9649 (WebP: the container, VP8L lossless and ALPH, written from it alone) and RFC 6386 (VP8 lossy) for `src/webp/`.
 - CompuServe's GIF89a specification (1990), the only source for `src/gif/`.
 - ITU-R BS.1770-4 and EBU Tech 3341 and 3342 (loudness), and ITU-R BT.601, BT.709 and BT.2020 (colour).
+- The paper "A novel macroblock-tree algorithm for high-performance optimization of dependent video coding in H.264/AVC" (2009), whose published description is the only source for the lookahead QP offsets in `src/h264/enc/mbtree.rs`.
 
 ## Read, never copied
 

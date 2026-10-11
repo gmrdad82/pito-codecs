@@ -1,12 +1,12 @@
 use crate::hevc::pel::Pel;
-use crate::hevc::picture::{ColMv, FrameRow};
+use crate::hevc::picture::ColMv;
+use crate::hevc::simd;
 use crate::hevc::slicedec::Progress;
 use crate::hevc::slicedec::{
     E_PU_H, E_PU_V, E_TU_H, E_TU_V, F_CBF, F_CODED, F_INTRA, F_NOFILTER, MvField, PicState,
 };
 use crate::hevc::spec_tables::{BETA_TABLE, TC_TABLE};
 use crate::hevc::tables::qpc_420;
-use std::ops::{Index, Range, RangeFrom};
 use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
 
@@ -48,9 +48,15 @@ fn advance<P: Pel>(pic: &PicState<P>, st: &mut Progress, all: bool) {
             st.rows_deblocked += 1;
             continue;
         }
+        let r = st.rows_topped;
+        if r < h && st.rows_deblocked > r {
+            publish_top(pic, r);
+            st.rows_topped += 1;
+            continue;
+        }
         let r = st.rows_published;
-        if r < h && st.rows_deblocked >= (r + 2).min(h) {
-            publish_row(pic, r);
+        if r < st.rows_topped && st.rows_deblocked >= (r + 2).min(h) {
+            publish_bottom(pic, r);
             st.rows_published += 1;
             continue;
         }
@@ -65,32 +71,6 @@ pub fn finish<P: Pel>(pic: &PicState<P>) {
     advance(pic, &mut st, true);
 }
 
-struct Lines<'a, P> {
-    data: &'a [P],
-    base: usize,
-}
-
-impl<P> Index<usize> for Lines<'_, P> {
-    type Output = P;
-    fn index(&self, i: usize) -> &P {
-        &self.data[i - self.base]
-    }
-}
-
-impl<P> Index<Range<usize>> for Lines<'_, P> {
-    type Output = [P];
-    fn index(&self, r: Range<usize>) -> &[P] {
-        &self.data[r.start - self.base..r.end - self.base]
-    }
-}
-
-impl<P> Index<RangeFrom<usize>> for Lines<'_, P> {
-    type Output = [P];
-    fn index(&self, r: RangeFrom<usize>) -> &[P] {
-        &self.data[r.start - self.base..]
-    }
-}
-
 #[inline]
 fn tc_beta(q: i32, bs: i32, tc_off: i32, beta_off: i32, bd: u32) -> (i32, i32) {
     let qb = (q + beta_off).clamp(0, 51);
@@ -101,7 +81,13 @@ fn tc_beta(q: i32, bs: i32, tc_off: i32, beta_off: i32, bd: u32) -> (i32, i32) {
     )
 }
 
-fn boundary_strength<P: Pel>(pic: &PicState<P>, pi: usize, qi: usize, tu_edge: bool) -> i32 {
+fn boundary_strength<P: Pel>(
+    pic: &PicState<P>,
+    pi: usize,
+    qi: usize,
+    tu_edge: bool,
+    (ps, qs): (u32, u32),
+) -> i32 {
     let (p, q) = (pic.blk.get(pi), pic.blk.get(qi));
     if (p.flags | q.flags) & F_INTRA != 0 {
         return 2;
@@ -110,13 +96,10 @@ fn boundary_strength<P: Pel>(pic: &PicState<P>, pi: usize, qi: usize, tu_edge: b
         return 1;
     }
     let (mp, mq) = (pic.mvf.get(pi), pic.mvf.get(qi));
-    motion_bs(pic, pi, &mp, qi, &mq)
+    motion_bs(pic, ps, &mp, qs, &mq)
 }
 
-fn ref_id<P: Pel>(pic: &PicState<P>, blk: usize, f: &MvField, l: usize) -> u32 {
-    let (x, y) = ((blk % pic.w4) * 4, (blk / pic.w4) * 4);
-    let ctb = (y >> pic.log2_ctb) * pic.wctb + (x >> pic.log2_ctb);
-    let s = pic.ctb_slice.get(ctb);
+fn ref_id<P: Pel>(pic: &PicState<P>, s: u32, f: &MvField, l: usize) -> u32 {
     if s == u32::MAX {
         return u32::MAX;
     }
@@ -126,7 +109,7 @@ fn ref_id<P: Pel>(pic: &PicState<P>, blk: usize, f: &MvField, l: usize) -> u32 {
         .unwrap_or(u32::MAX - 1)
 }
 
-fn motion_bs<P: Pel>(pic: &PicState<P>, pi: usize, p: &MvField, qi: usize, q: &MvField) -> i32 {
+fn motion_bs<P: Pel>(pic: &PicState<P>, ps: u32, p: &MvField, qs: u32, q: &MvField) -> i32 {
     let np = p.pred(0) as u32 + p.pred(1) as u32;
     let nq = q.pred(0) as u32 + q.pred(1) as u32;
     if np != nq {
@@ -138,13 +121,13 @@ fn motion_bs<P: Pel>(pic: &PicState<P>, pi: usize, p: &MvField, qi: usize, q: &M
     if np == 1 {
         let lp = if p.pred(0) { 0 } else { 1 };
         let lq = if q.pred(0) { 0 } else { 1 };
-        if ref_id(pic, pi, p, lp) != ref_id(pic, qi, q, lq) {
+        if ref_id(pic, ps, p, lp) != ref_id(pic, qs, q, lq) {
             return 1;
         }
         return far(p.mv[lp], q.mv[lq]) as i32;
     }
-    let (p0, p1) = (ref_id(pic, pi, p, 0), ref_id(pic, pi, p, 1));
-    let (q0, q1) = (ref_id(pic, qi, q, 0), ref_id(pic, qi, q, 1));
+    let (p0, p1) = (ref_id(pic, ps, p, 0), ref_id(pic, ps, p, 1));
+    let (q0, q1) = (ref_id(pic, qs, q, 0), ref_id(pic, qs, q, 1));
     if !((p0 == q0 && p1 == q1) || (p0 == q1 && p1 == q0)) {
         return 1;
     }
@@ -192,6 +175,71 @@ fn edge_params<P: Pel>(
     Some((sq.tc_offset, sq.beta_offset))
 }
 
+#[derive(Clone, Copy, Default)]
+struct Seg {
+    on: bool,
+    tc: i32,
+    beta: i32,
+    nfp: bool,
+    nfq: bool,
+}
+
+impl Seg {
+    fn new(tc: i32, beta: i32, pf: u8, qf: u8) -> Self {
+        Seg {
+            on: true,
+            tc,
+            beta,
+            nfp: pf & F_NOFILTER != 0,
+            nfq: qf & F_NOFILTER != 0,
+        }
+    }
+}
+
+#[inline(always)]
+fn luma_edges<P: Pel>(
+    s: &mut [P],
+    segs: &[Seg],
+    at: impl Fn(usize) -> usize,
+    step: usize,
+    along: usize,
+    bd: u32,
+    mut batch: impl FnMut(&mut [P], usize, &simd::dbk::Edge4) -> bool,
+) {
+    let full = segs.len() / 4 * 4;
+    for (c, four) in segs[..full].chunks_exact(4).enumerate() {
+        if !four.iter().any(|g| g.on) {
+            continue;
+        }
+        let mut e = simd::dbk::Edge4::default();
+        for (k, g) in four.iter().enumerate().filter(|(_, g)| g.on) {
+            e.tc[k] = g.tc as i16;
+            e.beta[k] = g.beta as i16;
+            e.nfp[k] = g.nfp;
+            e.nfq[k] = g.nfq;
+        }
+        if batch(s, at(4 * c), &e) {
+            continue;
+        }
+        for (k, g) in four.iter().enumerate().filter(|(_, g)| g.on) {
+            filter_luma(
+                s,
+                at(4 * c + k),
+                step,
+                along,
+                g.tc,
+                g.beta,
+                g.nfp,
+                g.nfq,
+                bd,
+            );
+        }
+    }
+    for (i, g) in segs.iter().enumerate().skip(full).filter(|(_, g)| g.on) {
+        filter_luma(s, at(i), step, along, g.tc, g.beta, g.nfp, g.nfq, bd);
+    }
+}
+
 crate::hevc::isa::dispatch! {
 fn deblock_row<P: Pel>(pic: &PicState<P>, r: usize) {
     if !pic.deblocking_enabled_anywhere || pic.draft {
@@ -200,43 +248,63 @@ fn deblock_row<P: Pel>(pic: &PicState<P>, r: usize) {
     let ctb = 1usize << pic.log2_ctb;
     let y0 = r * ctb;
     let y1 = (y0 + ctb).min(pic.height);
-    let lbase = y0.saturating_sub(4) * pic.width;
-    let luma = pic.planes[0].slice_mut(lbase..y1 * pic.width);
-    let cbase = (y0 / 2).saturating_sub(2) * pic.cwidth;
-    let cend = (y1 / 2).min(pic.cheight) * pic.cwidth;
+    let (w, cw) = (pic.stride[0], pic.stride[1]);
+    let lbase = y0.saturating_sub(4) * w;
+    let lend = (y1 - 1) * w + pic.width;
+    let luma = pic.plane(0).slice_mut(pic.org[0] + lbase..pic.org[0] + lend);
+    let cbase = (y0 / 2).saturating_sub(2) * cw;
+    let cend = ((y1 / 2).min(pic.cheight) - 1) * cw + pic.cwidth;
     let chroma = [
-        pic.planes[1].slice_mut(cbase..cend),
-        pic.planes[2].slice_mut(cbase..cend),
+        pic.plane(1).slice_mut(pic.org[1] + cbase..pic.org[1] + cend),
+        pic.plane(2).slice_mut(pic.org[2] + cbase..pic.org[2] + cend),
     ];
-    let (w, w4) = (pic.width, pic.w4);
+    let w4 = pic.w4;
     let (bd, bdc) = (pic.bd_y, pic.bd_c);
     let (cb_off, cr_off) = (pic.pps.cb_qp_offset, pic.pps.cr_qp_offset);
-    let mut bs_v = vec![0i8; w4 * ((y1 - y0) / 4)];
-    for by in y0 / 4..y1 / 4 {
-        for bx in (2..w4).step_by(2) {
+    let ctb_params: Vec<Option<(i32, i32)>> = (0..pic.wctb)
+        .map(|cx| edge_params(pic, cx << pic.log2_ctb, y0, cx << pic.log2_ctb, y0))
+        .collect();
+    let rows4 = (y1 - y0) / 4;
+    let ry = r;
+    let mut segs = vec![Seg::default(); w4.max(rows4)];
+    let mut bs_v = vec![0i8; w4 * rows4];
+    for bx in (2..w4).step_by(2) {
+        let x = bx * 4;
+        for (i, by) in (y0 / 4..y1 / 4).enumerate() {
+            segs[i].on = false;
             let qi = by * w4 + bx;
             let qb = pic.blk.get(qi);
             let e = qb.edges;
             if e & (E_TU_V | E_PU_V) == 0 || qb.flags & F_CODED == 0 {
                 continue;
             }
-            let (x, y) = (bx * 4, by * 4);
-            let Some((tc_off, beta_off)) = edge_params(pic, x - 1, y, x, y) else {
+            let y = by * 4;
+            let params = if x & (ctb - 1) != 0 {
+                ctb_params[x >> pic.log2_ctb]
+            } else {
+                edge_params(pic, x - 1, y, x, y)
+            };
+            let Some((tc_off, beta_off)) = params else {
                 continue;
             };
-            let bs = boundary_strength(pic, qi - 1, qi, e & E_TU_V != 0);
-            bs_v[(by - y0 / 4) * w4 + bx] = bs as i8;
+            let cq = ry * pic.wctb + (x >> pic.log2_ctb);
+            let cp = ry * pic.wctb + ((x - 1) >> pic.log2_ctb);
+            let sl = (pic.ctb_slice.get(cp), pic.ctb_slice.get(cq));
+            let bs = boundary_strength(pic, qi - 1, qi, e & E_TU_V != 0, sl);
+            bs_v[i * w4 + bx] = bs as i8;
             if bs == 0 {
                 continue;
             }
             let (p, q) = (pic.blk.get(qi - 1), qb);
             let qpl = (p.qp as i32 + q.qp as i32 + 1) >> 1;
             let (tc, beta) = tc_beta(qpl, bs, tc_off, beta_off, bd);
-            let (nfp, nfq) = (p.flags & F_NOFILTER != 0, q.flags & F_NOFILTER != 0);
-            filter_luma(luma, y * w + x - lbase, 1, w, tc, beta, nfp, nfq, bd);
+            segs[i] = Seg::new(tc, beta, p.flags, q.flags);
         }
+        let at = |i: usize| (y0 + 4 * i) * w + x - lbase;
+        luma_edges(luma, &segs[..rows4], at, 1, w, bd, |s, o, e| {
+            simd::dbk::luma_v(s, o, w, e, bd)
+        });
     }
-    let cw = pic.cwidth;
     for by in (y0 / 4..y1 / 4).step_by(2) {
         for bx in (4..w4).step_by(4) {
             if bs_v[(by - y0 / 4) * w4 + bx] != 2 {
@@ -266,21 +334,31 @@ fn deblock_row<P: Pel>(pic: &PicState<P>, r: usize) {
             }
         }
     }
-    let mut bs_h = vec![0i8; w4 * ((y1 - y0) / 4)];
+    let mut bs_h = vec![0i8; w4 * rows4];
     for by in (y0 / 4..y1 / 4).filter(|b| b % 2 == 0 && *b > 0) {
+        let y = by * 4;
         for bx in 0..w4 {
+            segs[bx].on = false;
             let qi = by * w4 + bx;
             let qb = pic.blk.get(qi);
             let e = qb.edges;
             if e & (E_TU_H | E_PU_H) == 0 || qb.flags & F_CODED == 0 {
                 continue;
             }
-            let (x, y) = (bx * 4, by * 4);
-            let Some((tc_off, beta_off)) = edge_params(pic, x, y - 1, x, y) else {
+            let x = bx * 4;
+            let params = if y & (ctb - 1) != 0 {
+                ctb_params[x >> pic.log2_ctb]
+            } else {
+                edge_params(pic, x, y - 1, x, y)
+            };
+            let Some((tc_off, beta_off)) = params else {
                 continue;
             };
             let pi = qi - w4;
-            let bs = boundary_strength(pic, pi, qi, e & E_TU_H != 0);
+            let cq = (y >> pic.log2_ctb) * pic.wctb + (x >> pic.log2_ctb);
+            let cp = ((y - 1) >> pic.log2_ctb) * pic.wctb + (x >> pic.log2_ctb);
+            let sl = (pic.ctb_slice.get(cp), pic.ctb_slice.get(cq));
+            let bs = boundary_strength(pic, pi, qi, e & E_TU_H != 0, sl);
             bs_h[(by - y0 / 4) * w4 + bx] = bs as i8;
             if bs == 0 {
                 continue;
@@ -288,9 +366,12 @@ fn deblock_row<P: Pel>(pic: &PicState<P>, r: usize) {
             let (p, q) = (pic.blk.get(pi), qb);
             let qpl = (p.qp as i32 + q.qp as i32 + 1) >> 1;
             let (tc, beta) = tc_beta(qpl, bs, tc_off, beta_off, bd);
-            let (nfp, nfq) = (p.flags & F_NOFILTER != 0, q.flags & F_NOFILTER != 0);
-            filter_luma(luma, y * w + x - lbase, w, 1, tc, beta, nfp, nfq, bd);
+            segs[bx] = Seg::new(tc, beta, p.flags, q.flags);
         }
+        let at = |i: usize| y * w + 4 * i - lbase;
+        luma_edges(luma, &segs[..w4], at, w, 1, bd, |s, o, e| {
+            simd::dbk::luma_h(s, o, w, e, bd)
+        });
     }
     for by in (y0 / 4..y1 / 4).filter(|b| b % 4 == 0 && *b > 0) {
         for bx in (0..w4).step_by(2) {
@@ -326,7 +407,7 @@ fn deblock_row<P: Pel>(pic: &PicState<P>, r: usize) {
 
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn filter_luma<P: Pel>(
+pub(crate) fn filter_luma<P: Pel>(
     s: &mut [P],
     o: usize,
     step: usize,
@@ -437,10 +518,18 @@ fn filter_chroma<P: Pel>(
     }
 }
 
+struct SaoCtb {
+    x0: usize,
+    x1: usize,
+    nofilter: bool,
+    p: crate::hevc::slicedec::SaoParams,
+    edge_rows: [bool; 2],
+    near: [[bool; 3]; 3],
+}
+
 crate::hevc::isa::dispatch! {
-fn sao_row<P: Pel>(pic: &PicState<P>, r: usize) -> [Vec<P>; 3] {
+fn sao_row<P: Pel>(pic: &PicState<P>, r: usize, bottom: bool) {
     let ctb = 1usize << pic.log2_ctb;
-    let mut out: [Vec<P>; 3] = [Vec::new(), Vec::new(), Vec::new()];
     for c in 0..3 {
         let (w, h, cs) = if c == 0 {
             (pic.width, pic.height, ctb)
@@ -449,186 +538,285 @@ fn sao_row<P: Pel>(pic: &PicState<P>, r: usize) -> [Vec<P>; 3] {
         };
         let y0 = r * cs;
         let y1 = (y0 + cs).min(h);
-        let (lo, hi) = (y0.saturating_sub(1) * w, (y1 + 1).min(h) * w);
-        let plane = Lines {
-            data: pic.planes[c].slice(lo..hi),
-            base: lo,
-        };
-        let mut buf = pic.frame.row_buffer::<P>();
-        buf.clear();
-        buf.extend_from_slice(&plane[y0 * w..y1 * w]);
-        out[c] = buf;
-        for rx in (0..pic.wctb).filter(|_| !pic.draft) {
-            let rs = r * pic.wctb + rx;
-            let si = pic.ctb_slice.get(rs);
-            if si == u32::MAX {
-                continue;
-            }
-            let sl = &pic.slices[si as usize];
-            if !(if c == 0 { sl.sao_luma } else { sl.sao_chroma }) {
-                continue;
-            }
-            let p = pic.sao.get(rs);
-            if p.type_idx[c] == 0 {
-                continue;
-            }
-            let x0 = rx * cs;
-            let x1 = (x0 + cs).min(w);
-            sao_ctb(pic, &plane, c, rs, x0, x1, y0, y1, w, h, &p, &mut out[c]);
+        let (ly0, ly1) = pic.frame.part_range(r, c, bottom);
+        if ly0 == ly1 {
+            continue;
         }
+        let g = pic.plane(c);
+        let (st, org) = (pic.stride[c], pic.org[c]);
+        let line = |y: usize| g.slice(org + y * st..org + y * st + w);
+        let edges = &pic.sao_edges[c];
+        if !bottom {
+            edges.slice_mut(2 * r * w..2 * r * w + w).copy_from_slice(line(ly0));
+            edges
+                .slice_mut((2 * r + 1) * w..(2 * r + 2) * w)
+                .copy_from_slice(line(ly1 - 1));
+        }
+        let ctbs: Vec<SaoCtb> = (0..pic.wctb)
+            .filter(|_| !pic.draft)
+            .filter_map(|rx| {
+                let rs = r * pic.wctb + rx;
+                let si = pic.ctb_slice.get(rs);
+                let sl = pic.slices.get(si as usize)?;
+                if !(if c == 0 { sl.sao_luma } else { sl.sao_chroma }) {
+                    return None;
+                }
+                let p = pic.sao.get(rs);
+                if p.type_idx[c] == 0 {
+                    return None;
+                }
+                let x0 = rx * cs;
+                let x1 = (x0 + cs).min(w);
+                Some(sao_prepare(pic, c, rs, (x0, x1), (y0, y1), (w, h), p))
+            })
+            .collect();
+        if !ctbs.is_empty() {
+            let above0: &[P] = if !bottom {
+                if ly0 > 0 { line(ly0 - 1) } else { &[] }
+            } else {
+                edges.slice((2 * r + 1) * w..(2 * r + 2) * w)
+            };
+            let below1: &[P] = if !bottom {
+                if ly1 < h { line(ly1) } else { &[] }
+            } else if ly1 < h {
+                edges.slice(2 * (r + 1) * w..2 * (r + 1) * w + w)
+            } else {
+                &[]
+            };
+            let mut prev: Vec<P> = vec![P::default(); w];
+            let mut cur: Vec<P> = vec![P::default(); w];
+            for y in ly0..ly1 {
+                cur.copy_from_slice(line(y));
+                let above = if y == ly0 { above0 } else { &prev[..] };
+                let below = if y + 1 == ly1 { below1 } else { line(y + 1) };
+                let dst = g.slice_mut(org + y * st..org + y * st + w);
+                for k in &ctbs {
+                    sao_line(pic, c, k, (y0, y1), (w, h), y, [above, &cur, below], dst);
+                }
+                std::mem::swap(&mut prev, &mut cur);
+            }
+        }
+        pic.frame.pad_rows::<P>(c, ly0, ly1);
+        pic.frame.emit::<P>(c, ly0, ly1);
     }
-    out
 }
 }
 
-#[allow(clippy::too_many_arguments)]
-#[inline(always)]
-fn sao_ctb<P: Pel>(
-    pic: &PicState<P>,
-    plane: &Lines<P>,
-    c: usize,
-    rs: usize,
-    x0: usize,
-    x1: usize,
-    y0: usize,
-    y1: usize,
-    w: usize,
-    h: usize,
-    p: &crate::hevc::slicedec::SaoParams,
-    dst: &mut [P],
-) {
-    let bd = if c == 0 { pic.bd_y } else { pic.bd_c };
-    let max = (1i32 << bd) - 1;
-    let sc = if c == 0 { 0 } else { 1 };
-    let offs = p.offsets[c].map(|v| v as i32);
-    let nofilter = |pic: &PicState<P>, x: usize, y: usize| {
-        pic.blk
-            .get(((y << sc) >> 2) * pic.w4 + ((x << sc) >> 2))
-            .flags
-            & F_NOFILTER
-            != 0
-    };
-    let any_nofilter = {
-        let mut a = false;
-        for by in ((y0 << sc) >> 2)..(((y1 << sc) + 3) >> 2).min(pic.h4) {
-            for bx in ((x0 << sc) >> 2)..(((x1 << sc) + 3) >> 2).min(pic.w4) {
-                a |= pic.blk.get(by * pic.w4 + bx).flags & F_NOFILTER != 0;
-            }
-        }
-        a
-    };
-    if p.type_idx[c] == 1 {
-        let shift = bd - 5;
-        let mut table = [0i32; 32];
-        for k in 0..4 {
-            table[(k + p.band_pos[c] as usize) & 31] = offs[k];
-        }
-        for y in y0..y1 {
-            if !any_nofilter {
-                let band = (p.band_pos[c] as i32, offs);
-                sao_band_run(
-                    &plane[y * w + x0..y * w + x1],
-                    &mut dst[(y - y0) * w + x0..(y - y0) * w + x1],
-                    shift,
-                    band,
-                    max,
-                );
-                continue;
-            }
-            for x in x0..x1 {
-                if nofilter(pic, x, y) {
-                    continue;
-                }
-                let v: i32 = plane[y * w + x].into();
-                dst[(y - y0) * w + x] =
-                    P::from_i32((v + table[(v >> shift) as usize]).clamp(0, max));
-            }
-        }
-        return;
+fn cross_ok<P: Pel>(pic: &PicState<P>, c: usize, rs: usize, xn: usize, yn: usize) -> bool {
+    let s = pic.log2_ctb as usize - if c == 0 { 0 } else { 1 };
+    let nrs = (yn >> s) * pic.wctb + (xn >> s);
+    if nrs == rs {
+        return true;
     }
-    let (hp, vp): ([i32; 2], [i32; 2]) = match p.eo_class[c] {
+    let ns = pic.ctb_slice.get(nrs);
+    let Some(nsl) = pic.slices.get(ns as usize) else {
+        return false;
+    };
+    let cur_ts = pic.layout.rs_to_ts[rs];
+    if pic.ctb_addr.get(nrs) != pic.ctb_addr.get(rs) {
+        let nts = pic.layout.rs_to_ts[nrs];
+        let lf_cur = pic
+            .slices
+            .get(pic.ctb_slice.get(rs) as usize)
+            .is_some_and(|s| s.lf_across);
+        if nts < cur_ts && !lf_cur {
+            return false;
+        }
+        if cur_ts < nts && !nsl.lf_across {
+            return false;
+        }
+    }
+    pic.pps.loop_filter_across_tiles
+        || pic.layout.tile_id[pic.layout.rs_to_ts[nrs] as usize]
+            == pic.layout.tile_id[cur_ts as usize]
+}
+
+fn eo_dirs(class: u8) -> ([i32; 2], [i32; 2]) {
+    match class {
         0 => ([-1, 1], [0, 0]),
         1 => ([0, 0], [-1, 1]),
         2 => ([-1, 1], [-1, 1]),
         _ => ([1, -1], [-1, 1]),
-    };
-    let s = pic.log2_ctb as usize - sc;
-    let cur_slice = pic.ctb_slice.get(rs);
-    let lf_cur = pic.slices[cur_slice as usize].lf_across;
-    let cur_ts = pic.layout.rs_to_ts[rs];
-    let cross_ok = |pic: &PicState<P>, xn: usize, yn: usize| -> bool {
-        let nrs = (yn >> s) * pic.wctb + (xn >> s);
-        if nrs == rs {
-            return true;
+    }
+}
+
+#[inline(always)]
+fn sao_nofilter<P: Pel>(pic: &PicState<P>, c: usize, x: usize, y: usize) -> bool {
+    let sc = if c == 0 { 0 } else { 1 };
+    pic.blk
+        .get(((y << sc) >> 2) * pic.w4 + ((x << sc) >> 2))
+        .flags
+        & F_NOFILTER
+        != 0
+}
+
+fn sao_prepare<P: Pel>(
+    pic: &PicState<P>,
+    c: usize,
+    rs: usize,
+    (x0, x1): (usize, usize),
+    (y0, y1): (usize, usize),
+    (w, h): (usize, usize),
+    p: crate::hevc::slicedec::SaoParams,
+) -> SaoCtb {
+    let sc = if c == 0 { 0 } else { 1 };
+    let mut nofilter = false;
+    if pic.nofilter_possible {
+        for by in ((y0 << sc) >> 2)..(((y1 << sc) + 3) >> 2).min(pic.h4) {
+            for bx in ((x0 << sc) >> 2)..(((x1 << sc) + 3) >> 2).min(pic.w4) {
+                nofilter |= pic.blk.get(by * pic.w4 + bx).flags & F_NOFILTER != 0;
+            }
         }
-        let ns = pic.ctb_slice.get(nrs);
-        if ns == u32::MAX {
+    }
+    let (hp, vp) = eo_dirs(p.eo_class[c]);
+    let mx = (hp[0] != 0) as usize;
+    let vert_ok = |yn: i32| -> bool {
+        if yn < 0 || yn >= h as i32 {
             return false;
         }
-        if pic.ctb_addr.get(nrs) != pic.ctb_addr.get(rs) {
-            let nts = pic.layout.rs_to_ts[nrs];
-            if nts < cur_ts && !lf_cur {
-                return false;
-            }
-            if cur_ts < nts && !pic.slices[ns as usize].lf_across {
-                return false;
-            }
-        }
-        if !pic.pps.loop_filter_across_tiles
-            && pic.layout.tile_id[pic.layout.rs_to_ts[nrs] as usize]
-                != pic.layout.tile_id[cur_ts as usize]
-        {
-            return false;
-        }
-        true
+        let yn = yn as usize;
+        (y0..y1).contains(&yn) || cross_ok(pic, c, rs, x0 + mx, yn)
     };
+    let edge_rows = [y0, y1 - 1]
+        .map(|y| vp[0] == 0 || (vert_ok(y as i32 + vp[0]) && vert_ok(y as i32 + vp[1])));
+    let mut near = [[false; 3]; 3];
+    for (i, row) in near.iter_mut().enumerate() {
+        for (j, ok) in row.iter_mut().enumerate() {
+            let xn = [x0 as i32 - 1, x0 as i32, x1 as i32][j];
+            let yn = [y0 as i32 - 1, y0 as i32, y1 as i32][i];
+            *ok = xn >= 0
+                && yn >= 0
+                && (yn as usize) < h
+                && (xn as usize) < w
+                && cross_ok(pic, c, rs, xn as usize, yn as usize);
+        }
+    }
+    SaoCtb {
+        x0,
+        x1,
+        nofilter,
+        p,
+        edge_rows,
+        near,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn sao_line<P: Pel>(
+    pic: &PicState<P>,
+    c: usize,
+    k: &SaoCtb,
+    (y0, y1): (usize, usize),
+    (w, h): (usize, usize),
+    y: usize,
+    lines: [&[P]; 3],
+    dst: &mut [P],
+) {
+    let (x0, x1, p) = (k.x0, k.x1, &k.p);
+    let bd = if c == 0 { pic.bd_y } else { pic.bd_c };
+    let max = (1i32 << bd) - 1;
+    let offs = p.offsets[c].map(|v| v as i32);
+    let cur = lines[1];
+    if p.type_idx[c] == 1 {
+        let shift = bd - 5;
+        if !k.nofilter {
+            let band = (p.band_pos[c] as i32, offs);
+            sao_band_run(&cur[x0..x1], &mut dst[x0..x1], shift, band, max);
+            return;
+        }
+        let mut table = [0i32; 32];
+        for j in 0..4 {
+            table[(j + p.band_pos[c] as usize) & 31] = offs[j];
+        }
+        for x in x0..x1 {
+            if sao_nofilter(pic, c, x, y) {
+                continue;
+            }
+            let v: i32 = cur[x].into();
+            dst[x] = P::from_i32((v + table[(v >> shift) as usize]).clamp(0, max));
+        }
+        return;
+    }
+    let (hp, vp) = eo_dirs(p.eo_class[c]);
     let edge_map = [1usize, 2, 0, 3, 4];
     let by_sum = edge_map.map(|e| if e == 0 { 0 } else { offs[e - 1] });
-    let general = |x: usize, y: usize| -> Option<P> {
-        if any_nofilter && nofilter(pic, x, y) {
+    let general = |x: usize| -> Option<P> {
+        if k.nofilter && sao_nofilter(pic, c, x, y) {
             return None;
         }
         let mut sum = 0i32;
-        let v: i32 = plane[y * w + x].into();
-        for k in 0..2 {
-            let xn = x as i32 + hp[k];
-            let yn = y as i32 + vp[k];
+        let v: i32 = cur[x].into();
+        for j in 0..2 {
+            let xn = x as i32 + hp[j];
+            let yn = y as i32 + vp[j];
             if xn < 0 || yn < 0 || xn >= w as i32 || yn >= h as i32 {
                 return None;
             }
             let (xn, yn) = (xn as usize, yn as usize);
-            if (xn < x0 || xn >= x1 || yn < y0 || yn >= y1) && !cross_ok(pic, xn, yn) {
+            let ni = if yn < y0 {
+                0
+            } else if yn >= y1 {
+                2
+            } else {
+                1
+            };
+            let nj = if xn < x0 {
+                0
+            } else if xn >= x1 {
+                2
+            } else {
+                1
+            };
+            if !k.near[ni][nj] {
                 return None;
             }
-            sum += (v - plane[yn * w + xn].into()).signum();
+            let n = lines[(1 + vp[j]) as usize].get(xn).copied()?;
+            sum += (v - n.into()).signum();
         }
         Some(P::from_i32((v + by_sum[(2 + sum) as usize]).clamp(0, max)))
     };
-    let (mx, my) = ((hp[0] != 0) as usize, (vp[0] != 0) as usize);
-    for y in y0..y1 {
-        let inner_row = !any_nofilter && y >= y0 + my && y + my < y1 && x1 - x0 > 2 * mx;
-        if !inner_row {
-            for x in x0..x1 {
-                if let Some(v) = general(x, y) {
-                    dst[(y - y0) * w + x] = v;
+    let mx = (hp[0] != 0) as usize;
+    let run_ok = if y == y0 {
+        k.edge_rows[0]
+    } else if y == y1 - 1 {
+        k.edge_rows[1]
+    } else {
+        true
+    };
+    let inner = !k.nofilter && x1 - x0 > 2 * mx;
+    if !inner {
+        for x in x0..x1 {
+            if let Some(v) = general(x) {
+                dst[x] = v;
+            }
+        }
+        return;
+    }
+    let edge = y == y0 || y == y1 - 1;
+    let (mut lo, mut hi) = (x0 + mx, x1 - mx);
+    if mx == 1 {
+        if edge {
+            for x in [x0, x1 - 1] {
+                if let Some(v) = general(x) {
+                    dst[x] = v;
                 }
             }
-            continue;
+        } else {
+            lo -= k.near[1][0] as usize;
+            hi += k.near[1][2] as usize;
         }
-        for x in (x0..x0 + mx).chain(x1 - mx..x1) {
-            if let Some(v) = general(x, y) {
-                dst[(y - y0) * w + x] = v;
-            }
-        }
-        let (ya, yb) = ((y as i32 + vp[0]) as usize, (y as i32 + vp[1]) as usize);
-        let (xa, xb) = (x0 as i32 + mx as i32 + hp[0], x0 as i32 + mx as i32 + hp[1]);
-        let n = x1 - x0 - 2 * mx;
-        let cur = &plane[y * w + x0 + mx..][..n];
-        let na = &plane[ya * w + xa as usize..][..n];
-        let nb = &plane[yb * w + xb as usize..][..n];
-        let out = &mut dst[(y - y0) * w + x0 + mx..][..n];
-        sao_edge_run(cur, na, nb, out, &by_sum, max);
     }
+    if !run_ok {
+        return;
+    }
+    let n = hi - lo;
+    let (xa, xb) = ((lo as i32 + hp[0]) as usize, (lo as i32 + hp[1]) as usize);
+    let (la, lb) = (lines[(1 + vp[0]) as usize], lines[(1 + vp[1]) as usize]);
+    let (Some(na), Some(nb)) = (la.get(xa..xa + n), lb.get(xb..xb + n)) else {
+        return;
+    };
+    sao_edge_run(&cur[lo..hi], na, nb, &mut dst[lo..hi], &by_sum, max);
 }
 
 const SAO_LANES: usize = 16;
@@ -705,7 +893,7 @@ fn sao_band_run<P: Pel>(
     }
 }
 
-fn publish_row<P: Pel>(pic: &PicState<P>, r: usize) {
+fn publish_top<P: Pel>(pic: &PicState<P>, r: usize) {
     let ctb = 1usize << pic.log2_ctb;
     let (y0, y1) = (r * ctb, ((r + 1) * ctb).min(pic.height));
     let (c0, c1) = (y0 / 2, y1.div_ceil(2));
@@ -748,13 +936,12 @@ fn publish_row<P: Pel>(pic: &PicState<P>, r: usize) {
             col[j * w16 + i] = cm;
         }
     }
-    let [oy, ocb, ocr] = sao_row(pic, r);
+    sao_row(pic, r, false);
     let _ = (w, cw, c0, c1);
-    let row = FrameRow {
-        y: P::wrap(oy),
-        cb: P::wrap(ocb),
-        cr: P::wrap(ocr),
-        col: col.into(),
-    };
-    pic.frame.publish(r, row);
+    pic.frame.publish_top(r, col.into());
+}
+
+fn publish_bottom<P: Pel>(pic: &PicState<P>, r: usize) {
+    sao_row(pic, r, true);
+    pic.frame.publish_bottom(r);
 }

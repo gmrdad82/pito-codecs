@@ -145,6 +145,98 @@ impl SliceJob {
     }
 }
 
+pub struct SliceRun {
+    next: AtomicUsize,
+    finished: AtomicUsize,
+    count: usize,
+    error: Mutex<Option<Error>>,
+}
+
+impl SliceRun {
+    pub fn plan<P: Pel>(pic: &PicState<P>, jobs: &[SliceJob]) -> Option<SliceRun> {
+        let first = jobs.first()?;
+        let pps = &first.pps;
+        if jobs.len() < 2
+            || pps.tiles_enabled
+            || pps.entropy_coding_sync
+            || pps.dependent_slice_segments_enabled
+        {
+            return None;
+        }
+        let total = pic.wctb * pic.hctb;
+        let mut prev: Option<usize> = None;
+        for j in jobs {
+            let addr = j.sh.segment_address as usize;
+            if j.sh.dependent
+                || !Arc::ptr_eq(&j.pps, pps)
+                || !addr.is_multiple_of(pic.wctb)
+                || addr >= total
+                || prev.is_some_and(|p| p >= addr)
+            {
+                return None;
+            }
+            prev = Some(addr);
+        }
+        for (k, j) in jobs.iter().enumerate() {
+            let start = j.sh.segment_address as usize;
+            let end = jobs
+                .get(k + 1)
+                .map_or(total, |n| n.sh.segment_address as usize);
+            for rs in start..end {
+                pic.ctb_addr.set(rs, start as u32);
+            }
+        }
+        Some(SliceRun {
+            next: AtomicUsize::new(0),
+            finished: AtomicUsize::new(0),
+            count: jobs.len(),
+            error: Mutex::new(None),
+        })
+    }
+
+    pub fn slices(&self) -> usize {
+        self.count
+    }
+
+    pub fn done(&self) -> bool {
+        self.finished.load(Ordering::SeqCst) >= self.count
+    }
+
+    pub fn take_error(&self) -> Option<Error> {
+        self.error
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
+
+    pub fn work<P: Pel>(&self, pic: &PicState<P>, jobs: &[SliceJob]) {
+        loop {
+            let i = self.next.fetch_add(1, Ordering::SeqCst);
+            let Some(job) = jobs.get(i).filter(|_| i < self.count) else {
+                return;
+            };
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                SliceDecoder::decode(pic, job, i)
+            }));
+            let e = match r {
+                Ok(Ok(())) => None,
+                Ok(Err(e)) => Some(e),
+                Err(_) => Some(Error::Invalid(
+                    "internal error while decoding a slice".into(),
+                )),
+            };
+            if let Some(e) = e {
+                self.error
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get_or_insert(e);
+            }
+            self.finished.fetch_add(1, Ordering::SeqCst);
+            pic.signal.notify();
+        }
+    }
+}
+
 pub struct RowRun {
     next: AtomicUsize,
     finished: AtomicUsize,
@@ -211,6 +303,7 @@ impl RowRun {
 pub struct Progress {
     pub rows_complete: usize,
     pub rows_deblocked: usize,
+    pub rows_topped: usize,
     pub rows_published: usize,
 }
 
@@ -306,8 +399,10 @@ pub struct PicState<P: Pel> {
     pub hctb: usize,
     pub bd_y: u32,
     pub bd_c: u32,
-    pub planes: [Grid<P>; 3],
+    pub stride: [usize; 3],
+    pub org: [usize; 3],
     pub saved: [Grid<P>; 3],
+    pub sao_edges: [Grid<P>; 3],
     pub blk: Grid<Blk>,
     pub mvf: Grid<MvField>,
     pub ctb_slice: Grid<u32>,
@@ -323,12 +418,13 @@ pub struct PicState<P: Pel> {
     pub ds_ctx: Mutex<Option<(Box<Contexts>, i32)>>,
     pub scaling: Scaling,
     pub deblocking_enabled_anywhere: bool,
+    pub nofilter_possible: bool,
     pub draft: bool,
     pool: Option<Pool<P>>,
 }
 
 pub struct Buffers<P: Pel> {
-    planes: [Vec<P>; 3],
+    sao_edges: [Vec<P>; 3],
     saved: [Vec<P>; 3],
     blk: Vec<Blk>,
     mvf: Vec<MvField>,
@@ -340,7 +436,7 @@ pub struct Buffers<P: Pel> {
 impl<P: Pel> Default for Buffers<P> {
     fn default() -> Self {
         Buffers {
-            planes: Default::default(),
+            sao_edges: Default::default(),
             saved: Default::default(),
             blk: Vec::new(),
             mvf: Vec::new(),
@@ -415,9 +511,12 @@ impl<P: Pel> PicState<P> {
             sps.pic_height_in_ctbs() as usize,
         );
         let (bd_y, bd_c) = (sps.bit_depth_luma, sps.bit_depth_chroma);
-        sized(&mut b.planes[0], width * height);
-        sized(&mut b.planes[1], cwidth * cheight);
-        sized(&mut b.planes[2], cwidth * cheight);
+        sized(&mut b.sao_edges[0], 2 * width * hctb);
+        sized(&mut b.sao_edges[1], 2 * cwidth * hctb);
+        sized(&mut b.sao_edges[2], 2 * cwidth * hctb);
+        frame.grids::<P>();
+        let stride = [0, 1, 2].map(|c| frame.stride(c));
+        let org = [0, 1, 2].map(|c| frame.origin(c));
         sized(&mut b.saved[0], width * hctb);
         sized(&mut b.saved[1], cwidth * hctb);
         sized(&mut b.saved[2], cwidth * hctb);
@@ -428,7 +527,8 @@ impl<P: Pel> PicState<P> {
         reset(&mut b.sao, wctb * hctb, SaoParams::default());
         let (slices, slice_of_job) = slice_infos(jobs);
         let deblocking_enabled_anywhere = slices.iter().any(|s| !s.deblock_disabled);
-        let [p0, p1, p2] = b.planes;
+        let nofilter_possible = pps.transquant_bypass || sps.pcm_loop_filter_disabled;
+        let [p0, p1, p2] = b.sao_edges;
         let [s0, s1, s2] = b.saved;
         PicState {
             poc: frame.poc,
@@ -446,7 +546,9 @@ impl<P: Pel> PicState<P> {
             hctb,
             bd_y,
             bd_c,
-            planes: [p0.into(), p1.into(), p2.into()],
+            stride,
+            org,
+            sao_edges: [p0.into(), p1.into(), p2.into()],
             saved: [s0.into(), s1.into(), s2.into()],
             blk: b.blk.into(),
             mvf: b.mvf.into(),
@@ -463,6 +565,7 @@ impl<P: Pel> PicState<P> {
             ds_ctx: Mutex::new(None),
             scaling,
             deblocking_enabled_anywhere,
+            nofilter_possible,
             draft,
             pool,
         }
@@ -484,12 +587,23 @@ impl<P: Pel> PicState<P> {
                 let (x0, y0) = if c == 0 { (x0, y0) } else { (x0 / 2, y0 / 2) };
                 let (x1, y1) = ((x0 + s).min(w), (y0 + s).min(h));
                 for y in y0..y1 {
-                    self.planes[c]
-                        .slice_mut(y * w + x0..y * w + x1)
+                    let at = self.at(c, x0, y);
+                    self.plane(c)
+                        .slice_mut(at..at + x1 - x0)
                         .fill(P::from_i32(1 << (bd - 1)));
                 }
             }
         }
+    }
+
+    #[inline(always)]
+    pub fn plane(&self, c: usize) -> &Grid<P> {
+        &self.frame.grids::<P>()[c]
+    }
+
+    #[inline(always)]
+    pub fn at(&self, c: usize, x: usize, y: usize) -> usize {
+        self.org[c] + y * self.stride[c] + x
     }
 
     pub fn lines_mut(&self, c: usize, y0: usize, n: usize) -> &mut [P] {
@@ -499,7 +613,12 @@ impl<P: Pel> PicState<P> {
             (self.cwidth, self.cheight)
         };
         let y1 = (y0 + n).min(h);
-        self.planes[c].slice_mut(y0 * w..y1.max(y0) * w)
+        if y1 <= y0 {
+            return &mut [];
+        }
+        let at = self.at(c, 0, y0);
+        self.plane(c)
+            .slice_mut(at..at + (y1 - y0 - 1) * self.stride[c] + w)
     }
 
     #[inline]
@@ -535,10 +654,10 @@ impl<P: Pel> Drop for PicState<P> {
         let Some(pool) = self.pool.take() else { return };
         let take = |g: &mut Grid<P>| std::mem::take(g).into_vec();
         let b = Buffers {
-            planes: [
-                take(&mut self.planes[0]),
-                take(&mut self.planes[1]),
-                take(&mut self.planes[2]),
+            sao_edges: [
+                take(&mut self.sao_edges[0]),
+                take(&mut self.sao_edges[1]),
+                take(&mut self.sao_edges[2]),
             ],
             saved: [
                 take(&mut self.saved[0]),
@@ -801,7 +920,9 @@ impl<'a, P: Pel> SliceDecoder<'a, P> {
             self.ctb_x = rx * ctb;
             self.ctb_y = ry * ctb;
             self.pic.ctb_slice.set(rs as usize, self.slice_idx);
-            self.pic.ctb_addr.set(rs as usize, self.slice_addr);
+            if self.pic.ctb_addr.get(rs as usize) != self.slice_addr {
+                self.pic.ctb_addr.set(rs as usize, self.slice_addr);
+            }
             let first_in_tile =
                 ts == 0 || layout.tile_id[ts as usize] != layout.tile_id[ts as usize - 1];
             let wpp_row_start = self.pps.entropy_coding_sync
@@ -915,7 +1036,8 @@ impl<'a, P: Pel> SliceDecoder<'a, P> {
             let x0 = rx * s;
             let x1 = (x0 + s).min(w);
             let line = (ry + 1) * s - 1;
-            let src = pic.planes[c].slice(line * w + x0..line * w + x1);
+            let at = pic.at(c, x0, line);
+            let src = pic.plane(c).slice(at..at + x1 - x0);
             pic.saved[c]
                 .slice_mut(ry * w + x0..ry * w + x1)
                 .copy_from_slice(src);
@@ -1303,23 +1425,21 @@ impl<'a, P: Pel> SliceDecoder<'a, P> {
         );
         let mut r = crate::hevc::bits::BitReader::new(&data[start..]);
         let (sy, sc) = (self.pic.bd_y - bl, self.pic.bd_c - bc);
-        let w = self.pic.width;
         for y in 0..n {
             for x in 0..n {
                 let v = r.read_bits(bl)? as u16;
-                self.pic.planes[0].set(
-                    (y0 as usize + y) * w + x0 as usize + x,
+                self.pic.plane(0).set(
+                    self.pic.at(0, x0 as usize + x, y0 as usize + y),
                     P::from_i32((v << sy) as i32),
                 );
             }
         }
-        let cw = self.pic.cwidth;
         for c in 1..3 {
             for y in 0..n / 2 {
                 for x in 0..n / 2 {
                     let v = r.read_bits(bc)? as u16;
-                    self.pic.planes[c].set(
-                        (y0 as usize / 2 + y) * cw + x0 as usize / 2 + x,
+                    self.pic.plane(c).set(
+                        self.pic.at(c, x0 as usize / 2 + x, y0 as usize / 2 + y),
                         P::from_i32((v << sc) as i32),
                     );
                 }
@@ -1555,7 +1675,8 @@ impl<'a, P: Pel> SliceDecoder<'a, P> {
         let sc = if c == 0 { 1 } else { 2 };
         let (xl, yl) = (x0 * sc, y0 * sc);
         let unit = 4 / sc as usize;
-        let stride = if c == 0 {
+        let stride = self.pic.stride[c];
+        let width = if c == 0 {
             self.pic.width
         } else {
             self.pic.cwidth
@@ -1568,13 +1689,14 @@ impl<'a, P: Pel> SliceDecoder<'a, P> {
             pic.zavail(xl, yl, xn, yn, addr)
                 && (!constrained || pic.blk_at(xn, yn).flags & F_INTRA != 0)
         };
-        let plane = &self.pic.planes[c];
+        let plane = self.pic.plane(c);
+        let org = self.pic.org[c];
         let ctb_lines = (1usize << self.pic.log2_ctb) / sc as usize;
         let above = (y0 as usize).wrapping_sub(1);
         let (top_src, top_base) = if y0 > 0 && (y0 as usize).is_multiple_of(ctb_lines) {
-            (&self.pic.saved[c], above / ctb_lines * stride)
+            (&self.pic.saved[c], above / ctb_lines * width)
         } else {
-            (plane, above.wrapping_mul(stride))
+            (plane, org.wrapping_add(above.wrapping_mul(stride)))
         };
         let top_line = |x: usize| top_src.get(top_base.wrapping_add(x));
         let r = &mut self.refs_buf;
@@ -1592,7 +1714,7 @@ impl<'a, P: Pel> SliceDecoder<'a, P> {
                 for i in 0..unit {
                     al[1 + k + i] = true;
                     r.left[1 + k + i] = plane
-                        .get((yn as usize + i) * stride + (x0 - 1) as usize)
+                        .get(org + (yn as usize + i) * stride + (x0 - 1) as usize)
                         .into() as u16;
                 }
             }
@@ -1920,14 +2042,7 @@ impl<'a, P: Pel> SliceDecoder<'a, P> {
             }
         }
         let _ = dc_only;
-        let (stride, max) = (
-            if c == 0 {
-                self.pic.width
-            } else {
-                self.pic.cwidth
-            },
-            (1i32 << bd) - 1,
-        );
+        let (stride, max) = (self.pic.stride[c], (1i32 << bd) - 1);
         let dst = self.pic.lines_mut(c, y0 as usize, n);
         transform::add_residual(&mut dst[x0 as usize..], stride, n, coeffs, max);
         Ok(())
@@ -2118,11 +2233,7 @@ impl<'a, P: Pel> SliceDecoder<'a, P> {
                     inter::mc_chroma(frame, c - 1, x, y, f.mv[l], bw, bh, buf, &mut self.mc);
                 }
             }
-            let stride = if c == 0 {
-                self.pic.width
-            } else {
-                self.pic.cwidth
-            };
+            let stride = self.pic.stride[c];
             let dst = &mut self.pic.lines_mut(c, y as usize, bh)[x as usize..];
             let Some(pwt) = self.sh.pwt.as_ref().filter(|_| weighted) else {
                 if bi {
