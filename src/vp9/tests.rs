@@ -662,3 +662,60 @@ fn decode_speed() {
         }
     }
 }
+
+#[cfg(all(feature = "gpu", target_os = "linux"))]
+#[test]
+fn vaapi_matches_ffmpeg() {
+    use crate::gpu::{Backend, Direction, HwDecoder, available};
+    use crate::media::Codec;
+    if !available().contains(&(Codec::Vp9, Direction::Decode, Backend::VaApi)) {
+        eprintln!("SKIPPED: no VA-API VP9 decoder");
+        return;
+    }
+    for f in CONFORMANCE.iter().filter(|f| is_420(f)) {
+        let Some((ivf, yuv)) = ensure(f) else { return };
+        let data = std::fs::read(ivf).unwrap();
+        let reference = std::fs::read(yuv).unwrap();
+        let chunks = ivf_frames(&data);
+        let mut dec = HwDecoder::new(Codec::Vp9, &[]).unwrap();
+        assert_eq!(dec.backend(), Backend::VaApi);
+        let start = Instant::now();
+        let mut frames = Vec::new();
+        for (i, c) in chunks.iter().enumerate() {
+            frames.extend(
+                dec.decode(&packet(c, i))
+                    .unwrap_or_else(|e| panic!("{}: chunk {i}: {e}", f.name)),
+            );
+        }
+        frames.extend(dec.flush().unwrap());
+        let secs = start.elapsed().as_secs_f64();
+        let size = frame_bytes(f);
+        assert_eq!(
+            frames.len(),
+            reference.len() / size,
+            "{}: frame count",
+            f.name
+        );
+        for (i, (fr, want)) in frames.iter().zip(reference.chunks(size)).enumerate() {
+            let bps = fr.format.bytes_per_sample();
+            let got: Vec<u8> = fr
+                .planes
+                .iter()
+                .flat_map(|p| {
+                    (0..p.height).flat_map(move |y| {
+                        p.data[y * p.stride..y * p.stride + p.width * bps]
+                            .iter()
+                            .copied()
+                    })
+                })
+                .collect();
+            mismatch(&format!("{} on VA-API", f.name), i, &got, want);
+        }
+        eprintln!(
+            "{} on VA-API: {} frames bit-exact, {:.0} fps with read-back",
+            f.name,
+            frames.len(),
+            frames.len() as f64 / secs
+        );
+    }
+}
