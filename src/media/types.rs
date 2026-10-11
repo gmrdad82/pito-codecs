@@ -204,7 +204,7 @@ impl fmt::Display for Error {
 }
 
 impl Error {
-    pub(crate) fn at(path: &std::path::Path, e: std::io::Error) -> Self {
+    pub fn at(path: &std::path::Path, e: std::io::Error) -> Self {
         let text = e.to_string();
         let cause = match text.rfind(" (os error ") {
             Some(i) if text.ends_with(')') => &text[..i],
