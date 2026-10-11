@@ -81,7 +81,10 @@ fn clip() -> &'static Path {
             .unwrap()
             .success();
         assert!(ok);
-        std::fs::rename(&part, &out).unwrap();
+        if let Err(e) = std::fs::rename(&part, &out) {
+            assert!(std::path::Path::new(&out).exists(), "{e}");
+            let _ = std::fs::remove_file(&part);
+        }
         out
     })
 }
@@ -164,12 +167,13 @@ fn min_psnr(out: &Path, src: &Path, ranges: &[(i64, i64)]) -> f64 {
         joined.push_str(&format!("[p{i}]"));
     }
     let log = out.with_extension("psnr");
+    let name = log.file_name().unwrap().to_str().unwrap();
     graph.push_str(&format!(
-        "{joined}concat=n={}:v=1:a=0[ref];[0:v]setpts=PTS-STARTPTS[o];[o][ref]psnr=stats_file={}",
+        "{joined}concat=n={}:v=1:a=0[ref];[0:v]setpts=PTS-STARTPTS[o];[o][ref]psnr=stats_file={name}",
         ranges.len(),
-        log.display()
     ));
     let ok = Command::new("ffmpeg")
+        .current_dir(log.parent().unwrap())
         .args(["-v", "error", "-i"])
         .arg(out)
         .arg("-i")
