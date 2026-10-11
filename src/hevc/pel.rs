@@ -72,10 +72,20 @@ impl Pel for u16 {
     }
 
     fn extend_bytes(out: &mut Vec<u8>, src: &[u16]) {
-        out.extend(src.iter().flat_map(|s| s.to_le_bytes()));
+        let at = out.len();
+        out.resize(at + src.len() * 2, 0);
+        Self::write_bytes(&mut out[at..], src);
     }
 
     fn write_bytes(out: &mut [u8], src: &[u16]) {
+        #[cfg(target_endian = "little")]
+        {
+            let bytes =
+                unsafe { std::slice::from_raw_parts(src.as_ptr() as *const u8, src.len() * 2) };
+            let n = out.len().min(bytes.len());
+            out[..n].copy_from_slice(&bytes[..n]);
+        }
+        #[cfg(not(target_endian = "little"))]
         for (d, s) in out.chunks_exact_mut(2).zip(src) {
             d.copy_from_slice(&s.to_le_bytes());
         }
