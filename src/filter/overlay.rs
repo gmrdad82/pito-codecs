@@ -76,6 +76,7 @@ impl Overlay {
     pub fn new(image: &Rgba, spec: ColorSpec, format: PixelFormat) -> Result<Self> {
         let w = image.width as usize;
         let h = image.height as usize;
+        super::plane::sized(image.width, image.height)?;
         if image.data.len() < w * h * 4 {
             return Err(Error::Invalid(
                 "overlay data is shorter than its size".into(),
