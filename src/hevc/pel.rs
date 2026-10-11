@@ -1,7 +1,16 @@
-#[derive(Clone)]
-pub enum Samples {
-    U8(Box<[u8]>),
-    U16(Box<[u16]>),
+use crate::hevc::grid::Grid;
+
+use std::sync::OnceLock;
+
+pub enum Store {
+    U8([Grid<u8>; 3]),
+    U16([Grid<u16>; 3]),
+}
+
+#[derive(Default)]
+pub struct Slots {
+    pub u8: OnceLock<[Grid<u8>; 3]>,
+    pub u16: OnceLock<[Grid<u16>; 3]>,
 }
 
 pub(crate) trait Pel:
@@ -9,10 +18,10 @@ pub(crate) trait Pel:
 {
     const BYTES: usize;
     fn from_i32(v: i32) -> Self;
-    fn view(s: &Samples) -> &[Self];
-    fn wrap(v: Vec<Self>) -> Samples;
-    fn take(s: Samples) -> Option<Vec<Self>>;
+    fn slot(s: &Slots) -> &OnceLock<[Grid<Self>; 3]>;
+    fn unstore(s: Store) -> Option<[Grid<Self>; 3]>;
     fn extend_bytes(out: &mut Vec<u8>, src: &[Self]);
+    fn write_bytes(out: &mut [u8], src: &[Self]);
 }
 
 impl Pel for u8 {
@@ -23,26 +32,23 @@ impl Pel for u8 {
         v as u8
     }
 
-    fn view(s: &Samples) -> &[u8] {
-        match s {
-            Samples::U8(v) => v,
-            Samples::U16(_) => &[],
-        }
+    fn slot(s: &Slots) -> &OnceLock<[Grid<u8>; 3]> {
+        &s.u8
     }
 
-    fn wrap(v: Vec<u8>) -> Samples {
-        Samples::U8(v.into())
-    }
-
-    fn take(s: Samples) -> Option<Vec<u8>> {
+    fn unstore(s: Store) -> Option<[Grid<u8>; 3]> {
         match s {
-            Samples::U8(v) => Some(v.into_vec()),
-            Samples::U16(_) => None,
+            Store::U8(g) => Some(g),
+            Store::U16(_) => None,
         }
     }
 
     fn extend_bytes(out: &mut Vec<u8>, src: &[u8]) {
         out.extend_from_slice(src);
+    }
+
+    fn write_bytes(out: &mut [u8], src: &[u8]) {
+        out.copy_from_slice(src);
     }
 }
 
@@ -54,25 +60,24 @@ impl Pel for u16 {
         v as u16
     }
 
-    fn view(s: &Samples) -> &[u16] {
-        match s {
-            Samples::U16(v) => v,
-            Samples::U8(_) => &[],
-        }
+    fn slot(s: &Slots) -> &OnceLock<[Grid<u16>; 3]> {
+        &s.u16
     }
 
-    fn wrap(v: Vec<u16>) -> Samples {
-        Samples::U16(v.into())
-    }
-
-    fn take(s: Samples) -> Option<Vec<u16>> {
+    fn unstore(s: Store) -> Option<[Grid<u16>; 3]> {
         match s {
-            Samples::U16(v) => Some(v.into_vec()),
-            Samples::U8(_) => None,
+            Store::U16(g) => Some(g),
+            Store::U8(_) => None,
         }
     }
 
     fn extend_bytes(out: &mut Vec<u8>, src: &[u16]) {
         out.extend(src.iter().flat_map(|s| s.to_le_bytes()));
+    }
+
+    fn write_bytes(out: &mut [u8], src: &[u16]) {
+        for (d, s) in out.chunks_exact_mut(2).zip(src) {
+            d.copy_from_slice(&s.to_le_bytes());
+        }
     }
 }

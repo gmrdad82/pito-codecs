@@ -45,6 +45,40 @@ pub(crate) fn add_residual<P: Pel>(
     false
 }
 
+pub(crate) fn dequant(
+    c: &mut [i16],
+    n: usize,
+    max_x: usize,
+    max_y: usize,
+    m: Option<&[u8]>,
+    scale: i64,
+    round: i64,
+    bd_shift: u32,
+) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    if super::on()
+        && matches!(n, 4 | 8 | 16 | 32)
+        && max_x < n
+        && max_y < n
+        && c.len() >= n * n
+        && m.is_none_or(|m| m.len() >= n * n)
+        && (1..=31).contains(&bd_shift)
+        && (0..1 << 26).contains(&scale)
+        && round == 1 << (bd_shift - 1)
+    {
+        let f = if m.is_some() { 255 } else { 16 };
+        let peak = 32768 * f * scale + round;
+        if peak < 1 << 31
+            || unsafe { x86::peak(c, n, max_x, max_y) } as i64 * f * scale + round < 1 << 31
+        {
+            unsafe { x86::dequant(c, n, max_x, max_y, m, scale as i32, bd_shift) };
+            return true;
+        }
+    }
+    let _ = (c, n, max_x, max_y, m, scale, round, bd_shift);
+    false
+}
+
 #[cfg(target_arch = "x86_64")]
 mod x86 {
     use super::super::x86::{gather, scatter_pel};
@@ -478,6 +512,71 @@ mod x86 {
                     }
                 }
             }
+        }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn region(n: usize, max_x: usize, max_y: usize, mut f: impl FnMut(usize)) {
+        if n == 4 {
+            f(0);
+            if max_y >= 2 {
+                f(8);
+            }
+            return;
+        }
+        for y in 0..=max_y {
+            for x in (0..=max_x).step_by(8) {
+                f(y * n + x);
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn peak(c: &[i16], n: usize, max_x: usize, max_y: usize) -> i32 {
+        unsafe {
+            let p = c.as_ptr();
+            let mut m = _mm_setzero_si128();
+            region(n, max_x, max_y, |o| {
+                let v = _mm_loadu_si128(p.add(o) as *const __m128i);
+                m = _mm_max_epu16(m, _mm_abs_epi16(v));
+            });
+            let m = _mm_max_epu16(m, _mm_unpackhi_epi64(m, m));
+            let m = _mm_max_epu16(m, _mm_shuffle_epi32::<1>(m));
+            let m = _mm_max_epu16(m, _mm_shufflelo_epi16::<1>(m));
+            _mm_extract_epi16::<0>(m)
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn dequant(
+        c: &mut [i16],
+        n: usize,
+        max_x: usize,
+        max_y: usize,
+        m: Option<&[u8]>,
+        scale: i32,
+        bd_shift: u32,
+    ) {
+        unsafe {
+            let p = c.as_mut_ptr();
+            let k = _mm256_set1_epi32(scale);
+            let k16 = _mm256_set1_epi32(16 * scale);
+            let rnd = _mm256_set1_epi32(1 << (bd_shift - 1));
+            let sh = _mm_cvtsi32_si128(bd_shift as i32);
+            region(n, max_x, max_y, |o| {
+                let v = _mm256_cvtepi16_epi32(_mm_loadu_si128(p.add(o) as *const __m128i));
+                let f = match m {
+                    Some(m) => _mm256_mullo_epi32(
+                        _mm256_cvtepu8_epi32(_mm_loadl_epi64(m.as_ptr().add(o) as *const __m128i)),
+                        k,
+                    ),
+                    None => k16,
+                };
+                let r = _mm256_sra_epi32(_mm256_add_epi32(_mm256_mullo_epi32(v, f), rnd), sh);
+                let r = _mm256_packs_epi32(r, _mm256_permute2x128_si256::<0x11>(r, r));
+                _mm_storeu_si128(p.add(o) as *mut __m128i, _mm256_castsi256_si128(r));
+            });
         }
     }
 }

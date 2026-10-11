@@ -205,19 +205,7 @@ impl PicState {
         };
         while self.rows_published < publish_limit {
             let r = self.rows_published;
-            let slices = &self.slices;
-            let ids = |st: &MbState, l: usize, ri: i8| {
-                slices
-                    .get(st.slice_num as usize)
-                    .and_then(|s| s.ref_ids[l].get(ri as usize).copied())
-                    .unwrap_or(u32::MAX)
-            };
-            let row = if self.reference {
-                Frame::make_row(self.mb_w, 0, self.mbs.row(r), &ids)
-            } else {
-                Frame::empty_row()
-            };
-            self.frame.publish(r, row);
+            self.frame.publish(r, Some(self.mbs.row(r)));
             self.rows_published += 1;
             self.planes.published_rows(self.rows_published);
         }
@@ -322,33 +310,44 @@ fn predict_block(
     y: (&mut [u8], usize),
     c: [&mut [u8]; 2],
     cs: usize,
+    avg: bool,
 ) {
     const LW: usize = 24;
+    let luma = if avg {
+        inter::mc_luma_win_avg
+    } else {
+        inter::mc_luma_win
+    };
     let x0 = px as i32 + (mv[0] as i32 >> 2) - 2;
     let y0 = py as i32 + (mv[1] as i32 >> 2) - 2;
     let (fx, fy) = ((mv[0] & 3) as u32, (mv[1] & 3) as u32);
     if x0 >= 0 && y0 >= 0 && x0 as usize + bw + 5 <= f.width && y0 as usize + bh + 5 <= f.height {
         let src = f.luma(y0 as usize, y0 as usize + bh + 5);
-        inter::mc_luma_win(&src[x0 as usize..], f.width, fx, fy, bw, bh, y.0, y.1);
+        luma(&src[x0 as usize..], f.width, fx, fy, bw, bh, y.0, y.1);
     } else {
         let mut win = [0u8; LW * 21];
         f.luma_window(x0, y0, bw + 5, bh + 5, &mut win, LW);
-        inter::mc_luma_win(&win, LW, fx, fy, bw, bh, y.0, y.1);
+        luma(&win, LW, fx, fy, bw, bh, y.0, y.1);
     }
+    let chroma = if avg {
+        inter::mc_chroma_win2_avg
+    } else {
+        inter::mc_chroma_win2
+    };
     let cx = (px / 2) as i32 + (mv[0] as i32 >> 3);
     let cy = (py / 2) as i32 + (mv[1] as i32 >> 3);
     let (cw, ch) = (bw / 2, bh / 2);
     let (fx, fy) = ((mv[0] & 7) as u32, (mv[1] & 7) as u32);
-    let inside = cx >= 0 && cy >= 0 && cx as usize + cw < f.cwidth && cy as usize + ch < f.cheight;
-    for (comp, out) in c.into_iter().enumerate() {
-        if inside {
-            let src = f.chroma(comp, cy as usize, cy as usize + ch + 1);
-            inter::mc_chroma_win(&src[cx as usize..], f.cwidth, fx, fy, cw, ch, out, cs);
-        } else {
-            let mut w = [0u8; 16 * 9];
-            f.chroma_window(comp, cx, cy, cw + 1, ch + 1, &mut w, 16);
-            inter::mc_chroma_win(&w, 16, fx, fy, cw, ch, out, cs);
+    if cx >= 0 && cy >= 0 && cx as usize + cw < f.cwidth && cy as usize + ch < f.cheight {
+        let (x, y) = (cx as usize, cy as usize);
+        let src = [0, 1].map(|comp| &f.chroma(comp, y, y + ch + 1)[x..]);
+        chroma(src, f.cwidth, fx, fy, cw, ch, c, cs);
+    } else {
+        let mut w = [[0u8; 16 * 9]; 2];
+        for (comp, w) in w.iter_mut().enumerate() {
+            f.chroma_window(comp, cx, cy, cw + 1, ch + 1, w, 16);
         }
+        chroma([&w[0], &w[1]], 16, fx, fy, cw, ch, c, cs);
     }
 }
 
@@ -483,10 +482,15 @@ impl<'a> SliceDecoder<'a> {
         w
     }
 
-    pub fn start_mb(&mut self, addr: usize) {
+    pub fn start_mb(&mut self, addr: usize) -> Result<()> {
         self.mb_addr = addr;
         self.mb_x = addr % self.mb_w;
         self.mb_y = addr / self.mb_w;
+        let published = self.pic.rows_published;
+        ensure!(
+            self.mb_y > published || (self.mb_y == 0 && published == 0),
+            "macroblock {addr} lies in a finished row"
+        );
         self.pic.mbs.enter_row(self.mb_y, self.pic.rows_published);
         if self.mb_x & 3 == 0 {
             self.pic.planes.prefetch_mb(self.mb_x + 4, self.mb_y);
@@ -521,6 +525,7 @@ impl<'a> SliceDecoder<'a> {
             slice_num: sn,
             ..MbState::default()
         };
+        Ok(())
     }
 
     #[inline]
@@ -722,20 +727,19 @@ impl<'a> SliceDecoder<'a> {
         }
     }
 
-    fn colocated(&self, m: Option<&FrameRow>, raster: usize) -> ([i16; 2], i8, u32) {
+    fn colocated(&self, m: Option<&ColMb>, raster: usize) -> ([i16; 2], i8, u32) {
         let raster = if self.sps.direct_8x8_inference {
             let (bx, by) = (raster & 3, raster >> 2);
             (if by >= 2 { 12 } else { 0 }) + if bx >= 2 { 3 } else { 0 }
         } else {
             raster
         };
-        let mb = self.mb_x;
-        let Some(m) = m.filter(|m| !m.intra[mb]) else {
+        let Some(m) = m.filter(|m| !m.intra) else {
             return ([0, 0], -1, u32::MAX);
         };
-        let b8 = mb * 4 + (raster >> 3) * 2 + ((raster & 3) >> 1);
+        let b8 = (raster >> 3) * 2 + ((raster & 3) >> 1);
         let l = if m.ref_idx[0][b8] >= 0 { 0 } else { 1 };
-        (m.mv[l][mb * 16 + raster], m.ref_idx[l][b8], m.ref_id[l][b8])
+        (m.mv[l][raster], m.ref_idx[l][b8], m.ref_id[l][b8])
     }
 
     fn spatial_direct_base(&self) -> ([i8; 2], [[i16; 2]; 2], bool) {
@@ -771,12 +775,12 @@ impl<'a> SliceDecoder<'a> {
         } else {
             ([0, 0], [[0, 0]; 2], false)
         };
-        let col_short_term = self.refs[1].first().map(|r| !r.long_term).unwrap_or(false);
-        let col = self.refs[1]
+        let refs = self.refs;
+        let col_short_term = refs[1].first().map(|r| !r.long_term).unwrap_or(false);
+        let col_row = refs[1]
             .first()
             .filter(|c| c.frame.mb_w == self.mb_w && self.mb_y < c.frame.mb_h())
-            .map(|c| c.frame.clone());
-        let col_row = col.as_ref().map(|f| f.row(self.mb_y));
+            .and_then(|c| c.frame.col_mb(self.mb_y, self.mb_x));
         for b8 in 0..4 {
             if b8_mask & (1 << b8) == 0 {
                 continue;
@@ -835,8 +839,8 @@ impl<'a> SliceDecoder<'a> {
         let b = self.nb_motion(0, 0, -1);
         let mv = if self.nb[0].is_none()
             || self.nb[1].is_none()
-            || (a.ref_idx == 0 && a.mv == [0, 0])
-            || (b.ref_idx == 0 && b.mv == [0, 0])
+            || (a.ref_idx == 0 && mv_bits(a.mv) == 0)
+            || (b.ref_idx == 0 && mv_bits(b.mv) == 0)
         {
             [0, 0]
         } else {
@@ -990,24 +994,30 @@ impl<'a> SliceDecoder<'a> {
         let ys = self.pic.planes.width;
         let cs = self.pic.planes.cwidth;
         let (cx, cy) = (px / 2, py / 2);
-        if use0 != use1 && wts.iter().all(|w| *w == Weight::Default) {
-            let l = if use0 { 0 } else { 1 };
-            let f = &self.refs[l][refs[l] as usize].frame;
+        if (use0 || use1) && wts.iter().all(|w| *w == Weight::Default) {
             let planes = &mut self.pic.planes;
-            predict_block(
-                f,
-                mvs[l],
-                px,
-                py,
-                bw,
-                bh,
-                (&mut planes.y[py * ys + px..], ys),
-                [
-                    &mut planes.cb[cy * cs + cx..],
-                    &mut planes.cr[cy * cs + cx..],
-                ],
-                cs,
-            );
+            let mut avg = false;
+            for l in 0..2 {
+                if !(if l == 0 { use0 } else { use1 }) {
+                    continue;
+                }
+                predict_block(
+                    &self.refs[l][refs[l] as usize].frame,
+                    mvs[l],
+                    px,
+                    py,
+                    bw,
+                    bh,
+                    (&mut planes.y[py * ys + px..], ys),
+                    [
+                        &mut planes.cb[cy * cs + cx..],
+                        &mut planes.cr[cy * cs + cx..],
+                    ],
+                    cs,
+                    avg,
+                );
+                avg = true;
+            }
             return;
         }
         let s = &mut *self.s;
@@ -1029,6 +1039,7 @@ impl<'a> SliceDecoder<'a> {
                 (&mut s.pred[l][..], 16),
                 [&mut pc0[..], &mut pc1[..]],
                 8,
+                false,
             );
         }
         inter::weighted_store(
@@ -1066,10 +1077,7 @@ impl<'a> SliceDecoder<'a> {
         let st = self.mb();
         (0..2).all(|l| {
             let r = st.ref_idx[l];
-            r[1] == r[0]
-                && r[2] == r[0]
-                && r[3] == r[0]
-                && st.mv[l].iter().all(|m| *m == st.mv[l][0])
+            r[1] == r[0] && r[2] == r[0] && r[3] == r[0] && uniform_mv(&st.mv[l])
         })
     }
 
@@ -1802,7 +1810,7 @@ impl<'a> SliceDecoder<'a> {
                 let run = r.read_ue()? as usize;
                 ensure!(addr + run <= total, "mb_skip_run out of range");
                 for _ in 0..run {
-                    self.start_mb(addr);
+                    self.start_mb(addr)?;
                     self.decode_skip()?;
                     self.pic.mb_done(addr);
                     addr += 1;
@@ -1812,7 +1820,7 @@ impl<'a> SliceDecoder<'a> {
                 }
                 ensure!(addr < total, "macroblock address {addr} out of range");
             }
-            self.start_mb(addr);
+            self.start_mb(addr)?;
             self.decode_mb_cavlc(r)?;
             self.pic.mb_done(addr);
             addr += 1;

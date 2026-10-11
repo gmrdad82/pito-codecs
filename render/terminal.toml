@@ -7,8 +7,8 @@ typing = "30ms"
 setup = "sh {app}/render/terminal/clip.sh {scratch}/demo"
 
 [build]
-command = "cargo build --release --locked --example pcod"
-bin_dir = "{target}/release/examples"
+command = "cargo build --release --locked --bin pcod"
+bin_dir = "{target}/release"
 
 [env]
 HOME = "home"

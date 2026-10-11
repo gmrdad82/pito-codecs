@@ -186,4 +186,6 @@ impl Encoder {
 }
 
 #[cfg(test)]
+mod malformed;
+#[cfg(test)]
 mod tests;

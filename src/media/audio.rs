@@ -91,6 +91,9 @@ pub fn audio_mix(
     rate: u32,
     prefs: &Prefs,
 ) -> Result<AudioBuffer> {
+    if from.is_nan() || to.is_nan() || to < from {
+        return Err(Error::Invalid(format!("the range {from} to {to}")));
+    }
     let tracks: Vec<(usize, f32)> = probe(path, prefs)?
         .audio
         .iter()
@@ -107,7 +110,10 @@ pub fn audio_mix(
         decoded.iter().map(|(b, _)| b.frames()).max().unwrap_or(0)
     };
     let mut out = AudioBuffer::new(rate, 2);
-    out.samples = vec![0.0; frames * 2];
+    let samples = frames
+        .checked_mul(2)
+        .ok_or_else(|| Error::Invalid(format!("the range {from} to {to}")))?;
+    out.samples = vec![0.0; samples];
     for (b, g) in &decoded {
         for (o, s) in out.samples.iter_mut().zip(&b.samples) {
             *o += s * g;

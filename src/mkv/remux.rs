@@ -39,7 +39,7 @@ fn video_range(t: &Track, from: f64, to: f64, snap: Snap) -> Result<(Range<usize
                 .map_or(n, |j| keys[j]);
             let a = keys[ja];
             let copied_end = (a..b)
-                .map(|i| pts(i) + t.samples[i].duration as i64)
+                .map(|i| pts(i).saturating_add(t.samples[i].duration as i64))
                 .max()
                 .unwrap_or(0);
             Ok((a..b, from_t.max(pts(a)), to_t.min(copied_end)))
@@ -70,7 +70,12 @@ fn audio_range(t: &Track, start: f64, end: f64) -> Range<usize> {
     let (s, e) = (t.ticks(start), t.ticks(end));
     let n = t.samples.len();
     let first = (0..n)
-        .position(|i| t.samples[i].pts + t.samples[i].duration as i64 > s)
+        .position(|i| {
+            t.samples[i]
+                .pts
+                .saturating_add(t.samples[i].duration as i64)
+                > s
+        })
         .unwrap_or(n);
     let first = if first < n && t.samples[first].pts < s {
         first.saturating_sub(1)
@@ -117,10 +122,17 @@ pub fn copy<S: ByteSource, W: Write + Seek>(
     let mut map = Vec::new();
     let mut origin_ns = i64::MAX;
     for (src, range) in &cut.tracks {
-        let t = &reader.tracks[*src];
+        let t = reader
+            .tracks
+            .get(*src)
+            .ok_or_else(|| Error::Invalid(format!("no track {src}")))?;
+        let samples = t
+            .samples
+            .get(range.clone())
+            .ok_or_else(|| Error::Invalid(format!("no samples {range:?} in track {src}")))?;
         map.push(writer.add_track(TrackConfig::from_track(t))?);
-        if let Some(first) = t.samples[range.clone()].iter().map(|s| s.pts).min() {
-            origin_ns = origin_ns.min(t.nanos(first) + t.codec_delay as i64);
+        if let Some(first) = samples.iter().map(|s| s.pts).min() {
+            origin_ns = origin_ns.min(t.nanos(first).saturating_add(t.codec_delay as i64));
         }
     }
     if origin_ns == i64::MAX {
@@ -146,9 +158,12 @@ pub fn copy<S: ByteSource, W: Write + Seek>(
         let s = t.samples[i];
         let shift =
             origin_ns as i128 * t.time_base.den as i128 / (t.time_base.num as i128 * 1_000_000_000);
-        let pts = s.pts - shift as i64;
+        let pts = s.pts.saturating_sub(shift as i64);
         let prefix = t.stripped_header().unwrap_or(&[]);
-        let end = offset + s.size as u64;
+        let end = offset
+            .checked_add(s.size as u64)
+            .filter(|&e| e <= len)
+            .ok_or_else(|| Error::Invalid("truncated Matroska data".into()))?;
         let data: &[u8] = if prefix.is_empty() && s.size as u64 <= WINDOW {
             if offset < window_start || end > window_start + window.len() as u64 {
                 let n = (len.saturating_sub(offset)).min(WINDOW.max(s.size as u64));
@@ -223,7 +238,7 @@ pub fn remux_mp4(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> Result<()> {
         let (i, dst) = tracks[k];
         let t = &reader.tracks[i];
         reader.read_into(i, n, &mut data)?;
-        let pts = t.presentation(n).unwrap_or(0) - shift[k];
+        let pts = t.presentation(n).unwrap_or(0).saturating_sub(shift[k]);
         writer.push_sample(dst, &data, pts, None, t.samples[n].keyframe)?;
     }
     writer.finish()?;

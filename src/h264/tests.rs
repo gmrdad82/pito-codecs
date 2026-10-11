@@ -574,3 +574,141 @@ fn bench_encoder() {
         );
     }
 }
+
+#[test]
+fn corrupt_streams_never_panic() {
+    if !ffmpeg_present() {
+        return;
+    }
+    let streams = [
+        x264(
+            "fuzz_cavlc",
+            "176x144",
+            10,
+            &["-profile:v", "baseline", "-g", "5", "-slices", "2"],
+        ),
+        x264(
+            "fuzz_cabac",
+            "176x144",
+            10,
+            &[
+                "-profile:v",
+                "high",
+                "-bf",
+                "2",
+                "-g",
+                "5",
+                "-x264-params",
+                "ref=3:weightp=2:direct=temporal",
+            ],
+        ),
+    ];
+    let me = std::thread::current().id();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let log = seen.clone();
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let t = std::thread::current();
+        if t.id() == me || t.name().is_some_and(|n| n.starts_with("h264-")) {
+            if let Ok(mut l) = log.lock() {
+                l.push(info.to_string());
+            }
+        } else {
+            prev(info);
+        }
+    }));
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut next = |n: usize| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 11) as usize % n.max(1)
+    };
+    for path in &streams {
+        let data = std::fs::read(path).unwrap();
+        for round in 0..300 {
+            let mut d = data.clone();
+            match round % 4 {
+                0 => {
+                    for _ in 0..1 + next(8) {
+                        let i = 4 + next(d.len() - 4);
+                        d[i] ^= 1 << next(8);
+                    }
+                }
+                1 => d.truncate(4 + next(d.len() - 4)),
+                2 => {
+                    let i = 4 + next(d.len() - 4);
+                    let n = next(64).min(d.len() - i);
+                    d[i..i + n].fill(next(256) as u8);
+                }
+                _ => {
+                    let i = 4 + next(d.len() - 4);
+                    let n = next(400).min(d.len() - i);
+                    d.drain(i..i + n);
+                }
+            }
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut dec = Decoder::with_threads(1 + round % 2 * 3);
+                for (i, au) in access_units(&d).into_iter().enumerate() {
+                    let _ = dec.decode(&Packet {
+                        data: au.to_vec(),
+                        pts: i as i64,
+                        dts: i as i64,
+                        keyframe: false,
+                    });
+                }
+                let _ = dec.flush();
+            }));
+        }
+    }
+    drop(std::panic::take_hook());
+    let seen = seen.lock().unwrap();
+    let mut kinds: Vec<&str> = seen.iter().map(|s| s.as_str()).collect();
+    kinds.sort();
+    kinds.dedup();
+    assert!(
+        seen.is_empty(),
+        "{} panics:\n{}",
+        seen.len(),
+        kinds.join("\n")
+    );
+}
+
+#[test]
+fn tiny_and_odd_sizes_encode_without_crashing() {
+    for (w, h) in [(2, 2), (18, 34), (34, 18), (66, 2), (2, 66)] {
+        for threads in [1, 4] {
+            let mut enc = Encoder::new(EncoderConfig {
+                width: w,
+                height: h,
+                gop: 4,
+                b_frames: 2,
+                threads,
+                ..EncoderConfig::default()
+            })
+            .unwrap();
+            let mut n = 0;
+            for i in 0..7i64 {
+                let mut f = Frame::new(PixelFormat::Yuv420p8, w, h, i, TimeBase::new(1, 30));
+                for (k, p) in f.planes.iter_mut().enumerate() {
+                    for (j, b) in p.data.iter_mut().enumerate() {
+                        *b = ((j as i64 * 7 + i * 13 + k as i64 * 50) % 251) as u8;
+                    }
+                }
+                n += enc.encode(&f).unwrap().len();
+            }
+            n += enc.flush().unwrap().len();
+            assert_eq!(n, 7, "{w}x{h} with {threads} threads");
+        }
+    }
+    for (w, h) in [(3, 2), (2, 3), (0, 16), (16, 0), (16386, 16)] {
+        assert!(
+            Encoder::new(EncoderConfig {
+                width: w,
+                height: h,
+                ..EncoderConfig::default()
+            })
+            .is_err()
+        );
+    }
+}
