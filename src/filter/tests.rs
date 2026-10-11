@@ -1290,7 +1290,7 @@ fn compare() {
     let src_name = source_1440p();
     let src_path = path(&src_name);
     let src = read_yuv(&src_name, PixelFormat::Yuv420p8, 2560, 1440);
-    let frames = 120usize;
+    let frames = 480usize;
     let frames_s = frames.to_string();
     let yuv_in = [
         "-f",
@@ -1425,9 +1425,20 @@ fn compare() {
         let (buf, file) = input;
         let rate = buf.rate.to_string();
         let ch = buf.channels.to_string();
-        let args = ["-f", "f32le", "-ar", &rate, "-ac", &ch, "-i", file];
+        let args = [
+            "-stream_loop",
+            "9",
+            "-f",
+            "f32le",
+            "-ar",
+            &rate,
+            "-ac",
+            &ch,
+            "-i",
+            file,
+        ];
         let ours = ours_rate(seconds, 3, &mut *f);
-        let ff = ffmpeg_rate(&args, ("-af", af), 1, seconds);
+        let ff = ffmpeg_rate(&args, ("-af", af), 1, seconds * 10.0);
         println!("{label}: ours {ours:.0}x, ffmpeg {ff:.0}x real time");
         rows.push((
             label.to_string(),
