@@ -1,5 +1,5 @@
 use super::color::{ColorSpec, FRAC, Rgba, Siting, fixed, rows_job};
-use super::plane::{Sample, Simd, check, reshape, samples, samples_mut, simd};
+use super::plane::{Sample, Simd, check, reshape, samples, samples_mut, simd, sized, span};
 use crate::media::{Error, Frame, PixelFormat, Result};
 use rayon::prelude::*;
 
@@ -78,8 +78,9 @@ impl Rgba {
 }
 
 fn fits(width: u32, height: u32, stride: usize, len: usize) -> Result<()> {
+    sized(width, height)?;
     let (w, h) = (width as usize, height as usize);
-    if stride < w * 4 || (h > 0 && len < stride * (h - 1) + w * 4) {
+    if stride < w * 4 || span(stride, h, w * 4).is_none_or(|n| len < n) {
         return Err(Error::Invalid(format!(
             "packed {width}x{height} with stride {stride} needs more than {len} bytes"
         )));
@@ -106,9 +107,54 @@ struct Terms {
     b: Vec<i32>,
     u: Vec<i32>,
     v: Vec<i32>,
+    near: [Vec<i32>; 4],
+}
+
+impl Terms {
+    fn nearest<S: Sample>(&mut self, u: &[S], v: &[S], k: ToPacked, simd: Simd) {
+        match simd {
+            #[cfg(target_arch = "x86_64")]
+            Simd::Avx2 => unsafe { self.nearest_avx2(u, v, k) },
+            _ => self.nearest_plain(u, v, k),
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn nearest_avx2<S: Sample>(&mut self, u: &[S], v: &[S], k: ToPacked) {
+        self.nearest_plain(u, v, k);
+    }
+
+    #[inline(always)]
+    fn nearest_plain<S: Sample>(&mut self, u: &[S], v: &[S], k: ToPacked) {
+        let n = u.len();
+        for t in [&mut self.r, &mut self.g, &mut self.b] {
+            t.clear();
+            t.resize(n, 0);
+        }
+        for ((((r, g), b), &u), &v) in self
+            .r
+            .iter_mut()
+            .zip(self.g.iter_mut())
+            .zip(self.b.iter_mut())
+            .zip(u)
+            .zip(v)
+        {
+            let (u, v) = (u.get() - k.c_off, v.get() - k.c_off);
+            *r = k.rv * v;
+            *g = k.gu * u + k.gv * v;
+            *b = k.bu * u;
+        }
+    }
+}
+
+fn crow<S: Sample>(p: &[S], s: usize, r: usize, cw: usize, out: &mut Vec<i32>) {
+    out.clear();
+    out.extend(p[r * s..r * s + cw].iter().map(|v| v.get()));
 }
 
 pub fn yuv_to_rgba(frame: &Frame, spec: ColorSpec, out: &mut Rgba) -> Result<()> {
+    check(frame)?;
     out.width = frame.width;
     out.height = frame.height;
     out.data
@@ -185,54 +231,44 @@ fn to_packed_with<S: Sample>(
         .par_chunks_mut(stride * 2)
         .enumerate()
         .with_min_len(rows_job(ch))
-        .for_each_init(Terms::default, |t, (cy, pair)| {
-            let crow = |p: &'_ [S], s: usize, r: usize| -> Vec<i32> {
-                p[r * s..r * s + cw].iter().map(|v| v.get()).collect()
-            };
-            match chroma {
-                Chroma::Nearest => {
-                    let u = &up[cy * us..cy * us + cw];
-                    let v = &vp[cy * vs..cy * vs + cw];
+        .for_each_init(Terms::default, |t, (cy, pair)| match chroma {
+            Chroma::Nearest => {
+                let u = &up[cy * us..cy * us + cw];
+                let v = &vp[cy * vs..cy * vs + cw];
+                t.nearest(u, v, k, simd);
+                for (r, row) in pair.chunks_mut(stride).enumerate() {
+                    let y = cy * 2 + r;
+                    let luma = &yp[y * ys..y * ys + w];
+                    pixels::<S, true>(luma, &t.r, &t.g, &t.b, &mut row[..w * 4], k, simd);
+                }
+            }
+            Chroma::Bilinear => {
+                for (r, row) in pair.chunks_mut(stride).enumerate() {
+                    let y = cy * 2 + r;
+                    let near = if r == 0 {
+                        cy.saturating_sub(1)
+                    } else {
+                        (cy + 1).min(ch - 1)
+                    };
+                    let [ua, ub, va, vb] = &mut t.near;
+                    crow(up, us, cy, cw, ua);
+                    crow(up, us, near, cw, ub);
+                    crow(vp, vs, cy, cw, va);
+                    crow(vp, vs, near, cw, vb);
+                    upsample(ua, ub, w, siting, &mut t.u);
+                    upsample(va, vb, w, siting, &mut t.v);
                     t.r.clear();
                     t.g.clear();
                     t.b.clear();
-                    for (&u, &v) in u.iter().zip(v) {
-                        let (u, v) = (u.get() - k.c_off, v.get() - k.c_off);
-                        t.r.push(k.rv * v);
-                        t.g.push(k.gu * u + k.gv * v);
-                        t.b.push(k.bu * u);
+                    let off = 16 * k.c_off;
+                    for (&u, &v) in t.u.iter().zip(&t.v) {
+                        let (u, v) = (u - off, v - off);
+                        t.r.push((k.rv * v + 8) >> 4);
+                        t.g.push((k.gu * u + k.gv * v + 8) >> 4);
+                        t.b.push((k.bu * u + 8) >> 4);
                     }
-                    for (r, row) in pair.chunks_mut(stride).enumerate() {
-                        let y = cy * 2 + r;
-                        let luma = &yp[y * ys..y * ys + w];
-                        pixels::<S, true>(luma, &t.r, &t.g, &t.b, &mut row[..w * 4], k, simd);
-                    }
-                }
-                Chroma::Bilinear => {
-                    for (r, row) in pair.chunks_mut(stride).enumerate() {
-                        let y = cy * 2 + r;
-                        let near = if r == 0 {
-                            cy.saturating_sub(1)
-                        } else {
-                            (cy + 1).min(ch - 1)
-                        };
-                        let (ua, ub) = (crow(up, us, cy), crow(up, us, near));
-                        let (va, vb) = (crow(vp, vs, cy), crow(vp, vs, near));
-                        upsample(&ua, &ub, w, siting, &mut t.u);
-                        upsample(&va, &vb, w, siting, &mut t.v);
-                        t.r.clear();
-                        t.g.clear();
-                        t.b.clear();
-                        let off = 16 * k.c_off;
-                        for (&u, &v) in t.u.iter().zip(&t.v) {
-                            let (u, v) = (u - off, v - off);
-                            t.r.push((k.rv * v + 8) >> 4);
-                            t.g.push((k.gu * u + k.gv * v + 8) >> 4);
-                            t.b.push((k.bu * u + 8) >> 4);
-                        }
-                        let luma = &yp[y * ys..y * ys + w];
-                        pixels::<S, false>(luma, &t.r, &t.g, &t.b, &mut row[..w * 4], k, simd);
-                    }
+                    let luma = &yp[y * ys..y * ys + w];
+                    pixels::<S, false>(luma, &t.r, &t.g, &t.b, &mut row[..w * 4], k, simd);
                 }
             }
         });

@@ -832,6 +832,35 @@ fn resample_round_trip_keeps_the_band_and_drops_aliases() {
         .collect();
     let snr = rms_db(&want[edge..40000]) - rms_db(&err);
     assert!(snr > 60.0, "48000 to 47999 SNR {snr:.1} dB");
+
+    for (from, to, ch) in [(44100, 48000, 2u16), (48000, 16000, 1), (48000, 47999, 2)] {
+        let input = AudioBuffer {
+            samples: (0..from as usize * ch as usize / 3)
+                .map(|i| ((i * 7919) % 2003) as f32 / 1001.0 - 1.0)
+                .collect(),
+            rate: from,
+            channels: ch,
+        };
+        let mut rs = Resampler::new(from, to, ch).unwrap();
+        let mut streamed = AudioBuffer::new(to, ch);
+        let mut part = AudioBuffer::new(to, ch);
+        for c in input.samples.chunks(999 * ch as usize) {
+            let piece = AudioBuffer {
+                samples: c.to_vec(),
+                rate: from,
+                channels: ch,
+            };
+            rs.process(&piece, &mut part).unwrap();
+            streamed.samples.extend_from_slice(&part.samples);
+        }
+        rs.flush(&mut part);
+        streamed.samples.extend_from_slice(&part.samples);
+        assert_eq!(
+            resample(&input, to).unwrap().samples,
+            streamed.samples,
+            "{from} to {to}"
+        );
+    }
 }
 
 #[test]
@@ -891,6 +920,44 @@ fn fps_change_drops_and_repeats_by_pts() {
             "{from:?} to {to:?}: gaps"
         );
         assert_eq!(out[0].time_base, conv.time_base());
+    }
+}
+
+#[test]
+fn rotation_matches_a_plain_transpose_at_odd_sizes() {
+    for format in [PixelFormat::Yuv420p8, PixelFormat::Yuv420p10] {
+        let (w, h) = (150usize, 86usize);
+        let mut f = Frame::new(format, w as u32, h as u32, 0, TimeBase::new(1, 30));
+        for p in f.planes.iter_mut() {
+            for (i, v) in p.data.iter_mut().enumerate() {
+                *v = (i * 31 + i / 7) as u8;
+            }
+        }
+        let b = format.bytes_per_sample();
+        for rotation in [Rotation::R90, Rotation::R270] {
+            let mut r = Frame::new(format, 0, 0, 0, f.time_base);
+            rotate(&f, rotation, &mut r).unwrap();
+            for i in 0..3 {
+                let (pw, ph) = if i == 0 { (w, h) } else { (w / 2, h / 2) };
+                let (s, d) = (&f.planes[i], &r.planes[i]);
+                for y in 0..pw {
+                    for x in 0..ph {
+                        let (sy, sx) = match rotation {
+                            Rotation::R90 => (ph - 1 - x, y),
+                            _ => (x, pw - 1 - y),
+                        };
+                        let at = |p: &crate::media::Plane, row: usize, col: usize| {
+                            p.data[row * p.stride + col * b..row * p.stride + col * b + b].to_vec()
+                        };
+                        assert_eq!(
+                            at(d, y, x),
+                            at(s, sy, sx),
+                            "{format:?} {rotation:?} plane {i} at {x},{y}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1251,7 +1318,7 @@ fn compare() {
     let src_name = source_1440p();
     let src_path = path(&src_name);
     let src = read_yuv(&src_name, PixelFormat::Yuv420p8, 2560, 1440);
-    let frames = 120usize;
+    let frames = 480usize;
     let frames_s = frames.to_string();
     let yuv_in = [
         "-f",
@@ -1386,9 +1453,20 @@ fn compare() {
         let (buf, file) = input;
         let rate = buf.rate.to_string();
         let ch = buf.channels.to_string();
-        let args = ["-f", "f32le", "-ar", &rate, "-ac", &ch, "-i", file];
+        let args = [
+            "-stream_loop",
+            "9",
+            "-f",
+            "f32le",
+            "-ar",
+            &rate,
+            "-ac",
+            &ch,
+            "-i",
+            file,
+        ];
         let ours = ours_rate(seconds, 3, &mut *f);
-        let ff = ffmpeg_rate(&args, ("-af", af), 1, seconds);
+        let ff = ffmpeg_rate(&args, ("-af", af), 1, seconds * 10.0);
         println!("{label}: ours {ours:.0}x, ffmpeg {ff:.0}x real time");
         rows.push((
             label.to_string(),
@@ -1471,4 +1549,133 @@ fn compare() {
     );
     println!("{md}");
     std::fs::write(dir().join("compare.md"), md).unwrap();
+}
+
+#[test]
+fn hostile_input_returns_errors_instead_of_panicking() {
+    let tb = TimeBase::new(1, 30);
+    let mut frames = Vec::new();
+    for format in [PixelFormat::Yuv420p8, PixelFormat::Yuv420p10] {
+        for (w, h) in [(0, 0), (1, 1), (3, 5), (17, 1), (1, 33)] {
+            frames.push(Frame::new(format, w, h, 0, tb));
+        }
+        let mut short = Frame::new(format, 64, 64, 0, tb);
+        short.planes[1].data.truncate(10);
+        frames.push(short);
+        let mut lying = Frame::new(format, 64, 64, 0, tb);
+        lying.width = u32::MAX;
+        lying.height = u32::MAX;
+        frames.push(lying);
+        let mut wide = Frame::new(format, 8, 8, 0, tb);
+        wide.planes[0].stride = usize::MAX / 2;
+        frames.push(wide);
+    }
+    let mut out = Frame::new(PixelFormat::Yuv420p8, 0, 0, 0, tb);
+    let fill = Fill::black(Range::Limited, PixelFormat::Yuv420p8);
+    for f in &frames {
+        for r in [Rotation::R90, Rotation::R180, Rotation::R270] {
+            let _ = rotate(f, r, &mut out);
+        }
+        let _ = convert_color(
+            f,
+            ColorSpec::BT601,
+            ColorSpec::BT709,
+            PixelFormat::Yuv420p10,
+            &mut out,
+        );
+        let mut rgba = Rgba::new(0, 0);
+        let _ = yuv_to_rgba(f, ColorSpec::BT709, &mut rgba);
+        for k in [Kernel::Bilinear, Kernel::Lanczos] {
+            let _ = scale(f, 7, 3, k);
+            let _ = scale(f, u32::MAX, u32::MAX, k);
+        }
+        let _ = crop(f, 1, 1, 2, 2, &mut out);
+        let _ = pad(f, u32::MAX, u32::MAX, 0, 0, fill, &mut out);
+        let _ = pad(f, 70, 70, 3, 3, fill, &mut out);
+        let mut g = f.clone();
+        let _ = flip_horizontal(&mut g);
+        let _ = flip_vertical(&mut g);
+        let mut packed = vec![0u8; 16];
+        let _ = yuv_to_packed(
+            f,
+            ColorSpec::BT709,
+            Chroma::Bilinear,
+            PackedMut::new(2, 2, Order::Bgra, &mut packed),
+        );
+        let _ = packed_to_yuv(
+            Packed::new(u32::MAX, u32::MAX, Order::Bgrx, &packed),
+            ColorSpec::BT709,
+            f.format,
+            &mut out,
+        );
+        let _ = rgba_to_yuv(
+            &Rgba {
+                width: u32::MAX,
+                height: 2,
+                data: vec![0; 8],
+            },
+            ColorSpec::BT709,
+            f.format,
+            &mut out,
+        );
+        let _ = Overlay::new(
+            &Rgba {
+                width: u32::MAX,
+                height: u32::MAX,
+                data: vec![0; 8],
+            },
+            ColorSpec::BT709,
+            f.format,
+        );
+        if let Ok(o) = Overlay::new(&Rgba::new(5, 3), ColorSpec::BT709, f.format) {
+            let mut g = f.clone();
+            let _ = o.draw(&mut g, -3, i32::MAX);
+            let _ = o.draw(&mut g, i32::MIN, 1);
+        }
+    }
+    let ragged = AudioBuffer {
+        samples: vec![0.5; 7],
+        rate: 48000,
+        channels: 2,
+    };
+    let empty = AudioBuffer::new(44100, 1);
+    let odd = AudioBuffer {
+        samples: vec![f32::NAN, f32::INFINITY, -1.0],
+        rate: 1,
+        channels: 3,
+    };
+    for a in [&ragged, &empty, &odd] {
+        for rate in [0, 1, 8000, 48000, 384000, u32::MAX] {
+            let _ = resample(a, rate);
+            let _ = Resampler::new(a.rate, rate, a.channels);
+        }
+        for ch in [0, 1, 2, 9] {
+            let _ = downmix(a, ch);
+        }
+        if let Ok(mut m) = LoudnessMeter::new(a.rate.max(1), a.channels.max(1)) {
+            let _ = m.process(a);
+            let _ = m.summary();
+        }
+        let mut b = a.clone();
+        let _ = normalize(&mut b, -16.0, -1.0);
+        gain(&mut b, f32::NAN);
+        if let Ok(mut l) = Limiter::new(a.rate, a.channels, -1.0) {
+            let mut o = AudioBuffer::new(a.rate, a.channels);
+            let _ = l.process(a, &mut o);
+            l.flush(&mut o);
+        }
+    }
+    let _ = FpsConverter::new(0, 0);
+    if let Ok(mut c) = FpsConverter::new(30, 1) {
+        for pts in [i64::MAX, i64::MIN, 0, -1] {
+            let _ = c.push(Frame::new(
+                PixelFormat::Yuv420p8,
+                2,
+                2,
+                pts,
+                TimeBase::new(1, 0),
+            ));
+        }
+        let _ = c.flush();
+    }
 }
