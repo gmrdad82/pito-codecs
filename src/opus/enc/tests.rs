@@ -348,3 +348,29 @@ fn speed() {
         );
     }
 }
+
+#[test]
+fn voip_speech_goes_through_silk_and_lines_up_in_libopus() {
+    for (channels, bitrate) in [(1u16, 16_000u32), (2, 24_000)] {
+        let c = channels as usize;
+        let mono = super::silk::tests::speechlike(2.0, 48000);
+        let pcm: Vec<f32> = mono
+            .iter()
+            .flat_map(|&v| std::iter::repeat_n(v, c))
+            .collect();
+        let mut cfg = EncoderConfig::new(channels, bitrate);
+        cfg.application = Application::Voip;
+        let file = ogg(cfg, &pcm);
+        let ours = crate::opus::ogg::decode(&file).unwrap();
+        assert_eq!(ours.samples.len(), pcm.len());
+        let path = tmp_dir().join(format!("silk_{c}_{bitrate}.opus"));
+        std::fs::write(&path, file).unwrap();
+        let Some(dec) = ffmpeg_decode(&path, c) else {
+            return;
+        };
+        assert_eq!(dec.len(), pcm.len(), "trimmed length");
+        let snr = snr_db(&pcm, &dec);
+        eprintln!("silk c{c} {bitrate}: snr at lag 0 {snr:.2} dB");
+        assert!(snr > 4.0, "snr {snr}");
+    }
+}

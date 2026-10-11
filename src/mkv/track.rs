@@ -61,8 +61,12 @@ impl VideoInfo {
     }
 
     pub fn pixel_aspect(&self) -> (u32, u32) {
-        let pw = self.pixel_width.saturating_sub(self.crop.2 + self.crop.3) as u64;
-        let ph = self.pixel_height.saturating_sub(self.crop.0 + self.crop.1) as u64;
+        let pw = self
+            .pixel_width
+            .saturating_sub(self.crop.2.saturating_add(self.crop.3)) as u64;
+        let ph = self
+            .pixel_height
+            .saturating_sub(self.crop.0.saturating_add(self.crop.1)) as u64;
         let (Some(dw), Some(dh)) = (self.display_width, self.display_height) else {
             return (1, 1);
         };
@@ -255,14 +259,14 @@ impl Track {
     pub fn end(&self) -> i64 {
         self.samples
             .iter()
-            .map(|s| s.pts + s.duration as i64)
+            .map(|s| s.pts.saturating_add(s.duration as i64))
             .max()
             .unwrap_or(0)
     }
 
     pub fn duration_seconds(&self) -> f64 {
         let start = self.samples.iter().map(|s| s.pts).min().unwrap_or(0).min(0);
-        self.seconds(self.end() - start)
+        self.seconds(self.end().saturating_sub(start))
     }
 
     pub fn fps(&self) -> f64 {
@@ -270,7 +274,9 @@ impl Track {
             return 1e9 / d as f64;
         }
         let n = self.samples.len();
-        let span = self.end() - self.samples.iter().map(|s| s.pts).min().unwrap_or(0);
+        let span = self
+            .end()
+            .saturating_sub(self.samples.iter().map(|s| s.pts).min().unwrap_or(0));
         if n == 0 || span <= 0 {
             0.0
         } else {

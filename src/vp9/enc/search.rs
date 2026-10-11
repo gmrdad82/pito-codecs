@@ -14,6 +14,7 @@ use super::tx::{self, Quant};
 
 pub struct Speed {
     pub intra_modes: &'static [u8],
+    pub tx_depth: u8,
     pub subpel: Subpel,
     pub range: i32,
     pub intra_margin: u64,
@@ -36,6 +37,7 @@ pub struct FrameEnv<'a> {
     pub speed: &'a Speed,
     pub prev_mi: Option<&'a [MiInfo]>,
     pub sign_bias: [bool; 4],
+    pub filter: u8,
 }
 
 pub struct Shared {
@@ -126,12 +128,13 @@ impl Default for Workspace {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct Choice {
     y_mode: u8,
     uv_mode: u8,
     mv: Mv,
     inter: bool,
+    tx: u8,
 }
 
 pub struct SbEncoder<'a> {
@@ -251,11 +254,14 @@ impl<'a> SbEncoder<'a> {
         let none_ok = has_rows && has_cols;
         let split_ok = bsize > BLOCK_8X8;
         let mut j_none = u64::MAX;
+        let mut none_skip = false;
         if none_ok {
             let rate = if bsize > BLOCK_8X8 { pc[0] } else { 0 };
-            j_none = self.block(r, c, bsize) + rdcost(lambda, rate, 0);
+            let (j, skip) = self.block(r, c, bsize);
+            j_none = j + rdcost(lambda, rate, 0);
+            none_skip = skip && !env.key;
         }
-        if !split_ok {
+        if !split_ok || none_skip {
             return j_none;
         }
         if none_ok {
@@ -342,50 +348,87 @@ impl<'a> SbEncoder<'a> {
         MAX_TXSIZE[bsize as usize].min(TX_MODE_TO_BIGGEST_TX_SIZE[self.env.tx_mode as usize])
     }
 
-    fn block(&mut self, r: usize, c: usize, bsize: u8) -> u64 {
+    fn block(&mut self, r: usize, c: usize, bsize: u8) -> (u64, bool) {
         let env = self.env;
         self.seg = self.seg_at(r, c);
         let above = (r > 0).then(|| self.mi(r - 1, c));
         let left = (c > self.tile_start).then(|| self.mi(r, c - 1));
         let skip_ctx = above.map_or(0, |m| m.skip as usize) + left.map_or(0, |m| m.skip as usize);
-        let mut best: Option<(u64, Choice)> = None;
-        let mut refs = None;
-        let mut inter_cost = u64::MAX;
+        let max_tx = self.tx_size(bsize);
+        let min_tx = if env.tx_mode == TX_MODE_SELECT {
+            max_tx.saturating_sub(env.speed.tx_depth)
+        } else {
+            max_tx
+        };
+        let mut inter = None;
         if !env.key {
             let rm = self.mv_refs(r, c, bsize);
             if let Some(d) = self.best_inter(r, c, bsize, &rm, above, left) {
-                inter_cost = d.cost;
                 let ch = Choice {
                     y_mode: d.mode,
                     uv_mode: DC_PRED,
                     mv: fmv(d.mv[0]),
                     inter: true,
+                    tx: max_tx,
                 };
-                let (j, ch, _) =
-                    self.eval(r, c, bsize, ch, Some(&rm), above, left, skip_ctx, false);
-                best = Some((j, ch));
+                inter = Some((d.cost, ch, rm));
             }
-            refs = Some(rm);
         }
+        let inter_cost = inter.as_ref().map_or(u64::MAX, |i| i.0);
         let d = self.best_intra(r, c, bsize, above, left);
-        if env.key || d.cost.saturating_mul(100) < inter_cost.saturating_mul(env.speed.intra_margin)
-        {
-            let ch = Choice {
-                y_mode: d.mode,
-                uv_mode: d.uv_mode,
-                mv: Mv::ZERO,
-                inter: false,
-            };
-            let (j, ch, _) = self.eval(r, c, bsize, ch, None, above, left, skip_ctx, false);
-            if best.is_none_or(|b| j < b.0) {
-                best = Some((j, ch));
+        let intra = (inter.is_none()
+            || d.cost.saturating_mul(100) < inter_cost.saturating_mul(env.speed.intra_margin))
+        .then_some(Choice {
+            y_mode: d.mode,
+            uv_mode: d.uv_mode,
+            mv: Mv::ZERO,
+            inter: false,
+            tx: max_tx,
+        });
+        let rm = inter.as_ref().map(|i| i.2);
+        let mut best: Option<(u64, Choice, bool)> = None;
+        let mut last = None;
+        for ch in [intra, inter.map(|i| i.1)].into_iter().flatten() {
+            let refs = ch.inter.then_some(rm.as_ref()).flatten();
+            for tx in (min_tx..=max_tx).rev() {
+                let ch = Choice { tx, ..ch };
+                let (j, ch, skip) = self.eval(r, c, bsize, ch, refs, above, left, skip_ctx);
+                last = Some(ch);
+                if best.is_none_or(|b| j < b.0) {
+                    best = Some((j, ch, skip));
+                }
+                if skip && ch.inter {
+                    break;
+                }
             }
         }
-        let Some((_, ch)) = best else {
-            return u64::MAX / 4;
+        let Some((mut j, ch, mut skip)) = best else {
+            return (u64::MAX / 4, false);
         };
-        let refs = if ch.inter { refs } else { None };
-        self.commit(r, c, bsize, ch, refs.as_ref(), above, left, skip_ctx)
+        if last.is_none_or(|l| l != ch) {
+            let refs = ch.inter.then_some(rm.as_ref()).flatten();
+            (j, _, skip) = self.eval(r, c, bsize, ch, refs, above, left, skip_ctx);
+        }
+        self.finish(r, c, bsize, ch, skip);
+        (j, skip && ch.inter)
+    }
+
+    fn tx_rate(&self, bsize: u8, tx: u8, above: Option<MiInfo>, left: Option<MiInfo>) -> u32 {
+        if self.env.tx_mode != TX_MODE_SELECT || bsize < BLOCK_8X8 {
+            return 0;
+        }
+        let max_tx = MAX_TXSIZE[bsize as usize];
+        let ctx_of = |m: MiInfo| if m.skip { max_tx } else { m.tx_size };
+        let mut a = above.map_or(max_tx, ctx_of);
+        let mut l = left.map_or(max_tx, ctx_of);
+        if left.is_none() {
+            l = a;
+        }
+        if above.is_none() {
+            a = l;
+        }
+        let ctx = ((a + l) > max_tx) as usize;
+        self.env.costs.tx[max_tx as usize][ctx][tx as usize]
     }
 
     fn mv_refs(&self, r: usize, c: usize, bsize: u8) -> RefMvs {
@@ -503,7 +546,6 @@ impl<'a> SbEncoder<'a> {
         tx_size: u8,
         mode: Option<u8>,
         inter: bool,
-        store: bool,
     ) -> (u64, u32, bool) {
         let env = self.env;
         let s = (p > 0) as usize;
@@ -583,12 +625,9 @@ impl<'a> SbEncoder<'a> {
                 rate += out.rate;
                 any |= eob > 0;
                 self.set_nz(p, x4, y4, step, (eob > 0) as u8);
-                if store {
-                    let lx = x4 - ((self.sb_c * 16) >> s);
-                    let ly = y4 - ((self.sb_r * 16) >> s);
-                    let lv = self.ws.levels;
-                    self.coefs.put(p, lx, ly, &lv[..eob]);
-                }
+                let lx = x4 - ((self.sb_c * 16) >> s);
+                let ly = y4 - ((self.sb_r * 16) >> s);
+                self.coefs.put(p, lx, ly, &self.ws.levels[..eob]);
             }
         }
         (dist, rate, any)
@@ -641,7 +680,7 @@ impl<'a> SbEncoder<'a> {
                 &[pmv(mv)],
                 &pos,
                 p,
-                0,
+                env.filter,
                 &mut w.buf[o..],
                 WIN[p],
             );
@@ -689,6 +728,7 @@ impl<'a> SbEncoder<'a> {
             best: pmv(refs.best),
             hints: &[],
             ref_rate: costs.single_ref[rctx][0][0],
+            half: None,
         }];
         let choice = InterChoice {
             src: self.src_slice(0, c * 8, r * 8),
@@ -707,7 +747,7 @@ impl<'a> SbEncoder<'a> {
             is_inter_rate: costs.is_inter[ictx][1],
             mv_cost: env.mv_cost,
             allow_hp: env.allow_hp,
-            filter: 0,
+            filter: env.filter,
             lambda: self.lambda(),
             range: env.speed.range,
             subpel: env.speed.subpel,
@@ -783,21 +823,21 @@ impl<'a> SbEncoder<'a> {
         above: Option<MiInfo>,
         left: Option<MiInfo>,
         skip_ctx: usize,
-        store: bool,
     ) -> (u64, Choice, bool) {
         let env = self.env;
-        let tx = self.tx_size(bsize);
+        let tx = ch.tx;
         let uv_tx = tx.min(MAX_TXSIZE[SS_SIZE_LOOKUP[bsize as usize][1][1] as usize]);
         let (mut dist, mut rate, mut any);
         let mrate = self.mode_rate(ch, bsize, refs, above, left);
+        let txr = self.tx_rate(bsize, tx, above, left);
         if ch.inter {
             self.inter_pred(r, c, bsize, ch.mv, 0..3);
             let sse: u64 = (0..3).map(|p| self.sse_plane(p, r, c, bsize)).sum();
-            let (d0, r0, a0) = self.code_plane(0, r, c, bsize, tx, None, true, store);
-            let (d1, r1, a1) = self.code_plane(1, r, c, bsize, uv_tx, None, true, store);
-            let (d2, r2, a2) = self.code_plane(2, r, c, bsize, uv_tx, None, true, store);
+            let (d0, r0, a0) = self.code_plane(0, r, c, bsize, tx, None, true);
+            let (d1, r1, a1) = self.code_plane(1, r, c, bsize, uv_tx, None, true);
+            let (d2, r2, a2) = self.code_plane(2, r, c, bsize, uv_tx, None, true);
             dist = d0 + d1 + d2;
-            rate = r0 + r1 + r2;
+            rate = r0 + r1 + r2 + txr;
             any = a0 || a1 || a2;
             let coded = rdcost(
                 self.lambda(),
@@ -814,32 +854,18 @@ impl<'a> SbEncoder<'a> {
                 rate = 0;
             }
         } else {
-            let (d0, r0, a0) = self.code_plane(0, r, c, bsize, tx, Some(ch.y_mode), false, store);
-            let (d1, r1, a1) =
-                self.code_plane(1, r, c, bsize, uv_tx, Some(ch.uv_mode), false, store);
-            let (d2, r2, a2) =
-                self.code_plane(2, r, c, bsize, uv_tx, Some(ch.uv_mode), false, store);
+            let (d0, r0, a0) = self.code_plane(0, r, c, bsize, tx, Some(ch.y_mode), false);
+            let (d1, r1, a1) = self.code_plane(1, r, c, bsize, uv_tx, Some(ch.uv_mode), false);
+            let (d2, r2, a2) = self.code_plane(2, r, c, bsize, uv_tx, Some(ch.uv_mode), false);
             dist = d0 + d1 + d2;
-            rate = r0 + r1 + r2;
+            rate = r0 + r1 + r2 + txr;
             any = a0 || a1 || a2;
         }
         rate += mrate + env.costs.skip[skip_ctx][!any as usize];
         (rdcost(self.lambda(), rate, dist), ch, !any)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn commit(
-        &mut self,
-        r: usize,
-        c: usize,
-        bsize: u8,
-        ch: Choice,
-        refs: Option<&RefMvs>,
-        above: Option<MiInfo>,
-        left: Option<MiInfo>,
-        skip_ctx: usize,
-    ) -> u64 {
-        let (j, ch, skip) = self.eval(r, c, bsize, ch, refs, above, left, skip_ctx, true);
+    fn finish(&mut self, r: usize, c: usize, bsize: u8, ch: Choice, skip: bool) {
         if skip {
             for p in 0..3 {
                 let s = (p > 0) as usize;
@@ -850,7 +876,11 @@ impl<'a> SbEncoder<'a> {
         let mut mi = MiInfo {
             sb_size: bsize,
             skip,
-            tx_size: self.tx_size(bsize),
+            tx_size: if skip && ch.inter {
+                self.tx_size(bsize)
+            } else {
+                ch.tx
+            },
             y_mode: ch.y_mode,
             sub_modes: [ch.y_mode; 4],
             seg_id: self.seg,
@@ -859,6 +889,7 @@ impl<'a> SbEncoder<'a> {
         if ch.inter {
             mi.sub_modes = [DC_PRED; 4];
             mi.ref_frame = [LAST_FRAME, NONE];
+            mi.interp_filter = self.env.filter;
             mi.mv[0] = [ch.mv; 4];
         }
         let n = NUM_8X8_WIDE[bsize as usize] as usize;
@@ -868,7 +899,6 @@ impl<'a> SbEncoder<'a> {
                 self.sh.uv.set(r + i, c + k, ch.uv_mode);
             }
         }
-        j
     }
 }
 

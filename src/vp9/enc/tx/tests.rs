@@ -255,8 +255,14 @@ fn speed() {
     };
     let mut rng = Rng(5);
     let w = 256usize;
+    let noise: i32 = std::env::var("NOISE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(12);
     let src: Vec<u8> = (0..w * w)
-        .map(|i| ((i % w) as i32 / 3 + (i / w) as i32 / 2 + rng.range(-12, 12)).clamp(0, 255) as u8)
+        .map(|i| {
+            ((i % w) as i32 / 3 + (i / w) as i32 / 2 + rng.range(-noise, noise)).clamp(0, 255) as u8
+        })
         .collect();
     let pred: Vec<u8> = (0..w * w)
         .map(|i| ((i % w) as i32 / 3 + (i / w) as i32 / 2 + rng.range(-3, 3)).clamp(0, 255) as u8)
@@ -307,8 +313,9 @@ fn speed() {
                 }
                 let s = t.elapsed().as_secs_f64();
                 println!(
-                    "{} {n:2}x{n:<2} type {tx_type} lambda {lambda:3}: {:7.1} Mpx/s  {:6.0} fps at 1080p  (eob avg {:.1})",
+                    "{} {n:2}x{n:<2} type {tx_type} lambda {lambda:3}: {:6.0} ns/call {:7.1} Mpx/s  {:6.0} fps at 1080p  (eob avg {:.1})",
                     if simd { "avx2  " } else { "scalar" },
+                    s * 1e9 / (px / (n * n)) as f64,
                     px as f64 / s / 1e6,
                     px as f64 / s / (1920.0 * 1080.0 * 1.5),
                     nz as f64 * (n * n) as f64 / px as f64

@@ -187,8 +187,7 @@ impl Wavefront {
         match workers {
             [] => {}
             [w] => work(w),
-            _ => rayon::in_place_scope(|s| {
-                let (first, rest) = workers.split_first_mut().unwrap();
+            [first, rest @ ..] => rayon::in_place_scope(|s| {
                 for w in rest {
                     let work = &work;
                     s.spawn(move |_| work(w));
