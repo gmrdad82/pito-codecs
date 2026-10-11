@@ -1,9 +1,9 @@
 use std::collections::VecDeque;
 
-use crate::gpu::biplanar::Geometry;
 use super::ffi::{self, VAProfile, VASurfaceID};
 use super::va::Session;
 use super::{Accel, LAG, Picture};
+use crate::gpu::biplanar::Geometry;
 use crate::gpu::{Backend, DecoderBackend, GpuFrame};
 use crate::media::{Error, Frame, Packet, Result};
 use crate::vp9::decoder::segment_quant;
@@ -11,9 +11,7 @@ use crate::vp9::header::{
     FrameHeader, HeaderState, KEY_FRAME, RefInfo, parse_uncompressed, split_superframe,
 };
 use crate::vp9::loopfilter::LfFrame;
-use crate::vp9::tables::{
-    ALTREF_FRAME, GOLDEN_FRAME, LAST_FRAME, SEG_LVL_REF_FRAME, SEG_LVL_SKIP,
-};
+use crate::vp9::tables::{ALTREF_FRAME, GOLDEN_FRAME, LAST_FRAME, SEG_LVL_REF_FRAME, SEG_LVL_SKIP};
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -163,9 +161,8 @@ impl Vp9Decoder {
         let refs: [Option<RefInfo>; 8] = std::array::from_fn(|i| self.slots[i].map(|s| s.1));
         let h = parse_uncompressed(data, &mut self.st, &refs).map_err(Error::from)?;
         if h.show_existing_frame {
-            let (index, _) = self.slots[h.frame_to_show_map_idx as usize].ok_or_else(|| {
-                Error::Invalid("VP9 show_existing_frame of an empty slot".into())
-            })?;
+            let (index, _) = self.slots[h.frame_to_show_map_idx as usize]
+                .ok_or_else(|| Error::Invalid("VP9 show_existing_frame of an empty slot".into()))?;
             out.extend(self.drain_all()?);
             out.push(self.read(index, pts)?);
             return Ok(());
@@ -271,7 +268,12 @@ impl Vp9Decoder {
             p.chroma_ac_quant_scale = q[s][1][1] as i16;
         }
         session
-            .decode_picture(target, &pic, None::<&PictureParams>, &[(slice, data.to_vec())])
+            .decode_picture(
+                target,
+                &pic,
+                None::<&PictureParams>,
+                &[(slice, data.to_vec())],
+            )
             .map_err(backend)?;
         for i in 0..8 {
             if (h.refresh_frame_flags >> i) & 1 == 1 {
@@ -352,7 +354,10 @@ mod tests {
     fn layouts_match_va_dec_vp9_h() {
         assert_eq!(std::mem::size_of::<PictureParams>(), 92);
         assert_eq!(std::mem::offset_of!(PictureParams, pic_fields), 36);
-        assert_eq!(std::mem::offset_of!(PictureParams, first_partition_size), 46);
+        assert_eq!(
+            std::mem::offset_of!(PictureParams, first_partition_size),
+            46
+        );
         assert_eq!(std::mem::offset_of!(PictureParams, profile), 58);
         assert_eq!(std::mem::size_of::<SegmentParams>(), 36);
         assert_eq!(std::mem::offset_of!(SegmentParams, luma_ac_quant_scale), 10);

@@ -95,6 +95,14 @@ impl MiGrid {
     pub fn into_vec(self) -> Vec<MiInfo> {
         self.mi
     }
+
+    pub fn as_slice(&self) -> &[MiInfo] {
+        &self.mi
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [MiInfo] {
+        &mut self.mi
+    }
 }
 
 pub struct RowSync {

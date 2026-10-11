@@ -613,10 +613,7 @@ pub(crate) mod simd {
                 _mm256_max_epi32(_mm256_add_epi32(px, r), _mm256_setzero_si256()),
                 _mm256_set1_epi32(p.max),
             );
-            let o = _mm_packus_epi32(
-                _mm256_castsi256_si128(s),
-                _mm256_extracti128_si256::<1>(s),
-            );
+            let o = _mm_packus_epi32(_mm256_castsi256_si128(s), _mm256_extracti128_si256::<1>(s));
             _mm_storeu_si128(d.as_mut_ptr().cast(), o);
         }
     }
@@ -1123,7 +1120,11 @@ pub(crate) mod tests {
                 if case % 5 == 0 {
                     wide_coefs.fill(0);
                     let k = rnd() as usize % (rows * N);
-                    wide_coefs[k] = if case % 2 == 0 { WIDE_L1 as i32 } else { -(WIDE_L1 as i32) };
+                    wide_coefs[k] = if case % 2 == 0 {
+                        WIDE_L1 as i32
+                    } else {
+                        -(WIDE_L1 as i32)
+                    };
                 }
                 let pw = TxParams { max: 1023, ..p };
                 let base10: Vec<u16> = base_c.iter().map(|v| v * 4).collect();
@@ -1180,7 +1181,12 @@ pub(crate) mod tests {
         };
         for tx in 0..4u8 {
             let n = 4usize << tx;
-            for (k, adst) in [(n, false), (n.min(8), false), (n.min(4), false), (n, tx < 3)] {
+            for (k, adst) in [
+                (n, false),
+                (n.min(8), false),
+                (n.min(4), false),
+                (n, tx < 3),
+            ] {
                 let coefs: Vec<i32> = (0..n * n)
                     .map(|i| {
                         if i / n < k && i % n < k && rnd() % 2 == 0 {
@@ -1209,10 +1215,15 @@ pub(crate) mod tests {
                 let a = t.elapsed().as_nanos() as f64 / iters as f64;
                 let t = Instant::now();
                 for _ in 0..iters {
-                    unsafe { simd::itx::<true>(black_box(&coefs), tx, &p, black_box(&mut dst), stride) };
+                    unsafe {
+                        simd::itx::<true>(black_box(&coefs), tx, &p, black_box(&mut dst), stride)
+                    };
                 }
                 let b = t.elapsed().as_nanos() as f64 / iters as f64;
-                println!("{n}x{n} k {k} adst {adst}: old {a:.1} ns, new {b:.1} ns, x{:.2}", a / b);
+                println!(
+                    "{n}x{n} k {k} adst {adst}: old {a:.1} ns, new {b:.1} ns, x{:.2}",
+                    a / b
+                );
             }
         }
     }

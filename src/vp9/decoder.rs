@@ -2,8 +2,8 @@ use crate::media::{Frame as Image, Packet, PixelFormat, TimeBase};
 use crate::vp9::error::{Error, Result, ensure};
 use crate::vp9::frame::{Frame, FrameInfo, MiGrid, MiInfo, Pools, RowSync};
 use crate::vp9::header::{
-    FrameHeader, HeaderState, Segmentation, KEY_FRAME, RefInfo, parse_compressed, parse_uncompressed,
-    split_superframe,
+    FrameHeader, HeaderState, KEY_FRAME, RefInfo, Segmentation, parse_compressed,
+    parse_uncompressed, split_superframe,
 };
 use crate::vp9::loopfilter::{LfFrame, PlaneView, filter_superblock};
 use crate::vp9::probs::{Counts, adapt_coef_probs, adapt_noncoef_probs};
