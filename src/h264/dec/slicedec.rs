@@ -2,7 +2,7 @@ use crate::h264::bits::BitReader;
 use crate::h264::dec::cavlc;
 use crate::h264::dec::deblock;
 use crate::h264::dec::error::{Result, ensure, invalid};
-use crate::h264::dec::inter::{self, Weight};
+use crate::h264::dec::inter::{Mc, Weight};
 use crate::h264::dec::intra::{self, Avail};
 use crate::h264::dec::mbtypes::*;
 use crate::h264::dec::params::{Pps, Sps};
@@ -299,8 +299,8 @@ pub struct SliceDecoder<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[inline]
-fn predict_block(
+#[inline(always)]
+fn predict_block<M: Mc, const AVG: bool>(
     f: &Frame,
     mv: [i16; 2],
     px: usize,
@@ -310,44 +310,36 @@ fn predict_block(
     y: (&mut [u8], usize),
     c: [&mut [u8]; 2],
     cs: usize,
-    avg: bool,
 ) {
     const LW: usize = 24;
-    let luma = if avg {
-        inter::mc_luma_win_avg
-    } else {
-        inter::mc_luma_win
-    };
+    let (width, height) = (f.width, f.height);
     let x0 = px as i32 + (mv[0] as i32 >> 2) - 2;
     let y0 = py as i32 + (mv[1] as i32 >> 2) - 2;
+    let last = (y0 + bh as i32 + 4).clamp(0, height as i32 - 1) as usize;
+    let [luma, cb, cr] = f.planes_upto(last >> 4);
     let (fx, fy) = ((mv[0] & 3) as u32, (mv[1] & 3) as u32);
-    if x0 >= 0 && y0 >= 0 && x0 as usize + bw + 5 <= f.width && y0 as usize + bh + 5 <= f.height {
-        let src = f.luma(y0 as usize, y0 as usize + bh + 5);
-        luma(&src[x0 as usize..], f.width, fx, fy, bw, bh, y.0, y.1);
+    if x0 >= 0 && y0 >= 0 && x0 as usize + bw + 5 <= width && y0 as usize + bh + 5 <= height {
+        let src = &luma[y0 as usize * width + x0 as usize..];
+        M::luma::<AVG>(src, width, fx, fy, bw, bh, y.0, y.1);
     } else {
         let mut win = [0u8; LW * 21];
-        f.luma_window(x0, y0, bw + 5, bh + 5, &mut win, LW);
-        luma(&win, LW, fx, fy, bw, bh, y.0, y.1);
+        window::<LW>(luma, width, height, x0, y0, bw + 5, bh + 5, &mut win, LW);
+        M::luma::<AVG>(&win, LW, fx, fy, bw, bh, y.0, y.1);
     }
-    let chroma = if avg {
-        inter::mc_chroma_win2_avg
-    } else {
-        inter::mc_chroma_win2
-    };
+    let (cwidth, cheight) = (f.cwidth, f.cheight);
     let cx = (px / 2) as i32 + (mv[0] as i32 >> 3);
     let cy = (py / 2) as i32 + (mv[1] as i32 >> 3);
     let (cw, ch) = (bw / 2, bh / 2);
     let (fx, fy) = ((mv[0] & 7) as u32, (mv[1] & 7) as u32);
-    if cx >= 0 && cy >= 0 && cx as usize + cw < f.cwidth && cy as usize + ch < f.cheight {
-        let (x, y) = (cx as usize, cy as usize);
-        let src = [0, 1].map(|comp| &f.chroma(comp, y, y + ch + 1)[x..]);
-        chroma(src, f.cwidth, fx, fy, cw, ch, c, cs);
+    if cx >= 0 && cy >= 0 && cx as usize + cw < cwidth && cy as usize + ch < cheight {
+        let o = cy as usize * cwidth + cx as usize;
+        M::chroma2::<AVG>([&cb[o..], &cr[o..]], cwidth, fx, fy, cw, ch, c, cs);
     } else {
         let mut w = [[0u8; 16 * 9]; 2];
-        for (comp, w) in w.iter_mut().enumerate() {
-            f.chroma_window(comp, cx, cy, cw + 1, ch + 1, w, 16);
+        for (plane, w) in [cb, cr].into_iter().zip(w.iter_mut()) {
+            window::<16>(plane, cwidth, cheight, cx, cy, cw + 1, ch + 1, w, 16);
         }
-        chroma([&w[0], &w[1]], 16, fx, fy, cw, ch, c, cs);
+        M::chroma2::<AVG>([&w[0], &w[1]], 16, fx, fy, cw, ch, c, cs);
     }
 }
 
@@ -975,7 +967,8 @@ impl<'a> SliceDecoder<'a> {
         }
     }
 
-    fn mc_rect(&mut self, x4: usize, y4: usize, w4: usize, h4: usize) {
+    #[inline(always)]
+    fn mc_rect<M: Mc>(&mut self, x4: usize, y4: usize, w4: usize, h4: usize) {
         let st = &self.pic.mbs[self.mb_addr];
         let r = y4 * 4 + x4;
         let b8 = (y4 >> 1) * 2 + (x4 >> 1);
@@ -1001,21 +994,17 @@ impl<'a> SliceDecoder<'a> {
                 if !(if l == 0 { use0 } else { use1 }) {
                     continue;
                 }
-                predict_block(
-                    &self.refs[l][refs[l] as usize].frame,
-                    mvs[l],
-                    px,
-                    py,
-                    bw,
-                    bh,
-                    (&mut planes.y[py * ys + px..], ys),
-                    [
-                        &mut planes.cb[cy * cs + cx..],
-                        &mut planes.cr[cy * cs + cx..],
-                    ],
-                    cs,
-                    avg,
-                );
+                let f = &self.refs[l][refs[l] as usize].frame;
+                let y = (&mut planes.y[py * ys + px..], ys);
+                let c = [
+                    &mut planes.cb[cy * cs + cx..],
+                    &mut planes.cr[cy * cs + cx..],
+                ];
+                if avg {
+                    predict_block::<M, true>(f, mvs[l], px, py, bw, bh, y, c, cs);
+                } else {
+                    predict_block::<M, false>(f, mvs[l], px, py, bw, bh, y, c, cs);
+                }
                 avg = true;
             }
             return;
@@ -1029,7 +1018,7 @@ impl<'a> SliceDecoder<'a> {
                 continue;
             };
             let [pc0, pc1] = &mut s.pred_c[l];
-            predict_block(
+            predict_block::<M, false>(
                 &rp.frame,
                 mvs[l],
                 px,
@@ -1039,10 +1028,9 @@ impl<'a> SliceDecoder<'a> {
                 (&mut s.pred[l][..], 16),
                 [&mut pc0[..], &mut pc1[..]],
                 8,
-                false,
             );
         }
-        inter::weighted_store(
+        M::weighted(
             &mut self.pic.planes.y[py * ys + px..],
             ys,
             if use0 { Some(&s.pred[0][..]) } else { None },
@@ -1069,7 +1057,7 @@ impl<'a> SliceDecoder<'a> {
             } else {
                 &mut self.pic.planes.cr
             };
-            inter::weighted_store(&mut plane[cy * cs + cx..], cs, a, b, 8, bw / 2, bh / 2, wc);
+            M::weighted(&mut plane[cy * cs + cx..], cs, a, b, 8, bw / 2, bh / 2, wc);
         }
     }
 
@@ -1081,7 +1069,7 @@ impl<'a> SliceDecoder<'a> {
         })
     }
 
-    pub fn prefetch_refs(&self, from: i32, to: i32) {
+    pub fn prefetch_refs(&self) {
         let st = self.mb();
         let (px, py) = ((self.mb_x * 16) as i32, (self.mb_y * 16) as i32);
         for l in 0..2 {
@@ -1091,26 +1079,44 @@ impl<'a> SliceDecoder<'a> {
             }
             if let Some(rp) = self.refs[l].get(ri as usize) {
                 let mv = st.mv[l][0];
-                for k in from..=to {
-                    rp.frame
-                        .prefetch(px + 16 * k + (mv[0] as i32 >> 2), py + (mv[1] as i32 >> 2));
-                }
+                rp.frame
+                    .prefetch(px + (mv[0] as i32 >> 2), py + (mv[1] as i32 >> 2));
             }
         }
     }
 
     pub fn predict_inter(&mut self) {
+        self.prefetch_refs();
+        #[cfg(target_arch = "x86_64")]
+        {
+            if crate::h264::dec::simd::avx2() {
+                return unsafe { self.predict_inter_avx2() };
+            }
+            self.predict_with::<crate::h264::dec::simd::Sse2>()
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        self.predict_with::<crate::h264::dec::inter::Scalar>()
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn predict_inter_avx2(&mut self) {
+        self.predict_with::<crate::h264::dec::simd::Avx2>()
+    }
+
+    #[inline(always)]
+    fn predict_with<M: Mc>(&mut self) {
         let info = self.cur.info;
         let direct_unit = if self.sps.direct_8x8_inference { 2 } else { 1 };
         match info.kind {
-            MbKind::PSkip => self.mc_rect(0, 0, 4, 4),
+            MbKind::PSkip => self.mc_rect::<M>(0, 0, 4, 4),
             MbKind::BSkip | MbKind::BDirect16x16 if self.uniform_motion() => {
-                self.mc_rect(0, 0, 4, 4)
+                self.mc_rect::<M>(0, 0, 4, 4)
             }
             MbKind::BSkip | MbKind::BDirect16x16 => {
                 for y in (0..4).step_by(direct_unit) {
                     for x in (0..4).step_by(direct_unit) {
-                        self.mc_rect(x, y, direct_unit, direct_unit);
+                        self.mc_rect::<M>(x, y, direct_unit, direct_unit);
                     }
                 }
             }
@@ -1118,7 +1124,7 @@ impl<'a> SliceDecoder<'a> {
                 if info.part != Part::P8x8 {
                     for p in 0..info.part.num_parts() {
                         let (x, y, w, h) = info.part.rect(p);
-                        self.mc_rect(x, y, w, h);
+                        self.mc_rect::<M>(x, y, w, h);
                     }
                 } else {
                     for p in 0..4 {
@@ -1127,13 +1133,13 @@ impl<'a> SliceDecoder<'a> {
                         if sub.direct {
                             for y in (0..2).step_by(direct_unit) {
                                 for x in (0..2).step_by(direct_unit) {
-                                    self.mc_rect(x8 + x, y8 + y, direct_unit, direct_unit);
+                                    self.mc_rect::<M>(x8 + x, y8 + y, direct_unit, direct_unit);
                                 }
                             }
                         } else {
                             for j in 0..sub.shape.num_parts() {
                                 let (sx, sy, w, h) = sub.shape.rect(j);
-                                self.mc_rect(x8 + sx, y8 + sy, w, h);
+                                self.mc_rect::<M>(x8 + sx, y8 + sy, w, h);
                             }
                         }
                     }
@@ -1535,7 +1541,6 @@ impl<'a> SliceDecoder<'a> {
             ensure!(!self.refs[0].is_empty(), "P_Skip with empty reference list");
             self.derive_p_skip();
         }
-        self.prefetch_refs(1, 1);
         self.predict_inter();
         self.prev_qp_delta_nz = false;
         Ok(())
@@ -1704,7 +1709,6 @@ impl<'a> SliceDecoder<'a> {
         }
         if !info.kind.is_intra() {
             self.derive_inter_motion()?;
-            self.prefetch_refs(0, 1);
         }
         if cbp != 0 || info.kind == MbKind::I16x16 {
             let d = r.read_se()?;

@@ -709,7 +709,6 @@ impl SliceDecoder<'_> {
         }
         if !intra {
             self.derive_inter_motion()?;
-            self.prefetch_refs(0, 1);
         }
         if cbp != 0 || info.kind == MbKind::I16x16 {
             let d = self.decode_qp_delta(c)?;

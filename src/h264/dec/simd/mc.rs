@@ -352,6 +352,7 @@ pub fn weighted_store_sse2(
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn mc_luma(
     src: &[u8],
@@ -370,8 +371,8 @@ pub fn mc_luma(
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn mc_chroma(
     src: &[u8],
     ss: usize,
@@ -389,6 +390,7 @@ pub fn mc_chroma(
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn mc_luma_avg(
     src: &[u8],
@@ -409,6 +411,7 @@ pub fn mc_luma_avg(
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn chroma2<const AVG: bool>(
     src: [&[u8]; 2],
@@ -434,6 +437,7 @@ fn chroma2<const AVG: bool>(
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn mc_chroma2(
     src: [&[u8]; 2],
@@ -448,6 +452,7 @@ pub fn mc_chroma2(
     chroma2::<false>(src, ss, fx, fy, bw, bh, out, os)
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn mc_chroma2_avg(
     src: [&[u8]; 2],
@@ -462,6 +467,7 @@ pub fn mc_chroma2_avg(
     chroma2::<true>(src, ss, fx, fy, bw, bh, out, os)
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn weighted_store(
     dst: &mut [u8],
@@ -477,6 +483,112 @@ pub fn weighted_store(
         unsafe { mc_avx2::weighted_store(dst, ds, p0, p1, ps, bw, bh, w) }
     } else {
         weighted_store_sse2(dst, ds, p0, p1, ps, bw, bh, w)
+    }
+}
+
+pub struct Sse2;
+
+impl inter::Mc for Sse2 {
+    #[inline(always)]
+    fn luma<const AVG: bool>(
+        src: &[u8],
+        ss: usize,
+        fx: u32,
+        fy: u32,
+        bw: usize,
+        bh: usize,
+        out: &mut [u8],
+        os: usize,
+    ) {
+        if AVG {
+            let mut t = [0u8; 256];
+            mc_luma_sse2(src, ss, fx, fy, bw, bh, &mut t, 16);
+            inter::avg_into(out, os, &t, 16, bw, bh);
+        } else {
+            mc_luma_sse2(src, ss, fx, fy, bw, bh, out, os)
+        }
+    }
+
+    #[inline(always)]
+    fn chroma2<const AVG: bool>(
+        src: [&[u8]; 2],
+        ss: usize,
+        fx: u32,
+        fy: u32,
+        bw: usize,
+        bh: usize,
+        out: [&mut [u8]; 2],
+        os: usize,
+    ) {
+        for (s, o) in src.into_iter().zip(out) {
+            if AVG {
+                let mut t = [0u8; 64];
+                mc_chroma_sse2(s, ss, fx, fy, bw, bh, &mut t, 8);
+                inter::avg_into(o, os, &t, 8, bw, bh);
+            } else {
+                mc_chroma_sse2(s, ss, fx, fy, bw, bh, o, os);
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn weighted(
+        dst: &mut [u8],
+        ds: usize,
+        p0: Option<&[u8]>,
+        p1: Option<&[u8]>,
+        ps: usize,
+        bw: usize,
+        bh: usize,
+        w: Weight,
+    ) {
+        weighted_store_sse2(dst, ds, p0, p1, ps, bw, bh, w)
+    }
+}
+
+pub struct Avx2;
+
+impl inter::Mc for Avx2 {
+    #[inline(always)]
+    fn luma<const AVG: bool>(
+        src: &[u8],
+        ss: usize,
+        fx: u32,
+        fy: u32,
+        bw: usize,
+        bh: usize,
+        out: &mut [u8],
+        os: usize,
+    ) {
+        unsafe { mc_avx2::mc_luma::<AVG>(src, ss, fx, fy, bw, bh, out, os) }
+    }
+
+    #[inline(always)]
+    fn chroma2<const AVG: bool>(
+        src: [&[u8]; 2],
+        ss: usize,
+        fx: u32,
+        fy: u32,
+        bw: usize,
+        bh: usize,
+        out: [&mut [u8]; 2],
+        os: usize,
+    ) {
+        unsafe { mc_avx2::mc_chroma2::<AVG>(src, ss, fx, fy, bw, bh, out, os) }
+    }
+
+    #[inline(always)]
+    fn weighted(
+        dst: &mut [u8],
+        ds: usize,
+        p0: Option<&[u8]>,
+        p1: Option<&[u8]>,
+        ps: usize,
+        bw: usize,
+        bh: usize,
+        w: Weight,
+    ) {
+        unsafe { mc_avx2::weighted_store(dst, ds, p0, p1, ps, bw, bh, w) }
     }
 }
 
