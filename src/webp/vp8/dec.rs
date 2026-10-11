@@ -197,7 +197,9 @@ pub fn header(data: &[u8]) -> Result<Header<'_>> {
                     l += mode_delta;
                 }
             }
-            *st = filter::strength(l, sharpness, i4 == 1);
+            if level > 0 {
+                *st = filter::strength(l, sharpness, i4 == 1);
+            }
         }
     }
     Ok(Header {
