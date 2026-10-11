@@ -15,7 +15,7 @@ pub(crate) fn info(data: &[u8]) -> Result<(u32, u32)> {
     Ok((w as u32, h as u32))
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) fn decode_yuv(data: &[u8]) -> Result<dec::Frame> {
     dec::decode(data)
 }
