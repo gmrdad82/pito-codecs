@@ -456,6 +456,8 @@ fn encode_gpu(frames: &[Frame], w: u32, h: u32, codec: Codec) -> Res<(f64, Vec<u
     Ok((t.elapsed().as_secs_f64(), out, name))
 }
 
+const BT709: &str = "setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709";
+
 fn psnr(dir: &Path, stream: &Path, format: &str, raw: &Path, w: u32, h: u32) -> Option<f64> {
     let size = format!("{w}x{h}");
     let (_, log) = ffmpeg_run(
@@ -477,7 +479,9 @@ fn psnr(dir: &Path, stream: &Path, format: &str, raw: &Path, w: u32, h: u32) -> 
             "-i",
             raw.to_str()?,
             "-lavfi",
-            "[0:v]setpts=N/(60*TB)[a];[1:v]setpts=N/(60*TB)[b];[a][b]psnr",
+            &format!(
+                "[0:v]setpts=N/(60*TB),{BT709}[a];[1:v]setpts=N/(60*TB),{BT709}[b];[a][b]psnr"
+            ),
             "-f",
             "null",
             "-",
