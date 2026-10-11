@@ -7,7 +7,6 @@ use crate::hevc::slicedec::{
 };
 use crate::hevc::spec_tables::{BETA_TABLE, TC_TABLE};
 use crate::hevc::tables::qpc_420;
-use std::ops::{Index, Range, RangeFrom};
 use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
 
@@ -70,32 +69,6 @@ pub fn finish<P: Pel>(pic: &PicState<P>) {
     let mut st = pic.filter.lock().unwrap_or_else(PoisonError::into_inner);
     st.rows_complete = pic.hctb;
     advance(pic, &mut st, true);
-}
-
-struct Lines<'a, P> {
-    data: &'a [P],
-    base: usize,
-}
-
-impl<P> Index<usize> for Lines<'_, P> {
-    type Output = P;
-    fn index(&self, i: usize) -> &P {
-        &self.data[i - self.base]
-    }
-}
-
-impl<P> Index<Range<usize>> for Lines<'_, P> {
-    type Output = [P];
-    fn index(&self, r: Range<usize>) -> &[P] {
-        &self.data[r.start - self.base..r.end - self.base]
-    }
-}
-
-impl<P> Index<RangeFrom<usize>> for Lines<'_, P> {
-    type Output = [P];
-    fn index(&self, r: RangeFrom<usize>) -> &[P] {
-        &self.data[r.start - self.base..]
-    }
 }
 
 #[inline]
@@ -275,15 +248,17 @@ fn deblock_row<P: Pel>(pic: &PicState<P>, r: usize) {
     let ctb = 1usize << pic.log2_ctb;
     let y0 = r * ctb;
     let y1 = (y0 + ctb).min(pic.height);
-    let lbase = y0.saturating_sub(4) * pic.width;
-    let luma = pic.planes[0].slice_mut(lbase..y1 * pic.width);
-    let cbase = (y0 / 2).saturating_sub(2) * pic.cwidth;
-    let cend = (y1 / 2).min(pic.cheight) * pic.cwidth;
+    let (w, cw) = (pic.stride[0], pic.stride[1]);
+    let lbase = y0.saturating_sub(4) * w;
+    let lend = (y1 - 1) * w + pic.width;
+    let luma = pic.plane(0).slice_mut(pic.org[0] + lbase..pic.org[0] + lend);
+    let cbase = (y0 / 2).saturating_sub(2) * cw;
+    let cend = ((y1 / 2).min(pic.cheight) - 1) * cw + pic.cwidth;
     let chroma = [
-        pic.planes[1].slice_mut(cbase..cend),
-        pic.planes[2].slice_mut(cbase..cend),
+        pic.plane(1).slice_mut(pic.org[1] + cbase..pic.org[1] + cend),
+        pic.plane(2).slice_mut(pic.org[2] + cbase..pic.org[2] + cend),
     ];
-    let (w, w4) = (pic.width, pic.w4);
+    let w4 = pic.w4;
     let (bd, bdc) = (pic.bd_y, pic.bd_c);
     let (cb_off, cr_off) = (pic.pps.cb_qp_offset, pic.pps.cr_qp_offset);
     let ctb_params: Vec<Option<(i32, i32)>> = (0..pic.wctb)
@@ -330,7 +305,6 @@ fn deblock_row<P: Pel>(pic: &PicState<P>, r: usize) {
             simd::dbk::luma_v(s, o, w, e, bd)
         });
     }
-    let cw = pic.cwidth;
     for by in (y0 / 4..y1 / 4).step_by(2) {
         for bx in (4..w4).step_by(4) {
             if bs_v[(by - y0 / 4) * w4 + bx] != 2 {
@@ -544,6 +518,15 @@ fn filter_chroma<P: Pel>(
     }
 }
 
+struct SaoCtb {
+    x0: usize,
+    x1: usize,
+    nofilter: bool,
+    p: crate::hevc::slicedec::SaoParams,
+    edge_rows: [bool; 2],
+    near: [[bool; 3]; 3],
+}
+
 crate::hevc::isa::dispatch! {
 fn sao_row<P: Pel>(pic: &PicState<P>, r: usize, bottom: bool) {
     let ctb = 1usize << pic.log2_ctb;
@@ -559,43 +542,59 @@ fn sao_row<P: Pel>(pic: &PicState<P>, r: usize, bottom: bool) {
         if ly0 == ly1 {
             continue;
         }
-        let (lo, hi) = (ly0.saturating_sub(1) * w, (ly1 + 1).min(h) * w);
-        let plane = Lines {
-            data: pic.planes[c].slice(lo..hi),
-            base: lo,
-        };
-        let (dst, ds) = pic.frame.rows_mut::<P>(c, ly0, ly1);
-        for (y, line) in (ly0..ly1).zip(dst.chunks_mut(ds)) {
-            line[..w].copy_from_slice(&plane[y * w..y * w + w]);
+        let g = pic.plane(c);
+        let (st, org) = (pic.stride[c], pic.org[c]);
+        let line = |y: usize| g.slice(org + y * st..org + y * st + w);
+        let edges = &pic.sao_edges[c];
+        if !bottom {
+            edges.slice_mut(2 * r * w..2 * r * w + w).copy_from_slice(line(ly0));
+            edges
+                .slice_mut((2 * r + 1) * w..(2 * r + 2) * w)
+                .copy_from_slice(line(ly1 - 1));
         }
-        for rx in (0..pic.wctb).filter(|_| !pic.draft) {
-            let rs = r * pic.wctb + rx;
-            let si = pic.ctb_slice.get(rs);
-            if si == u32::MAX {
-                continue;
+        let ctbs: Vec<SaoCtb> = (0..pic.wctb)
+            .filter(|_| !pic.draft)
+            .filter_map(|rx| {
+                let rs = r * pic.wctb + rx;
+                let si = pic.ctb_slice.get(rs);
+                let sl = pic.slices.get(si as usize)?;
+                if !(if c == 0 { sl.sao_luma } else { sl.sao_chroma }) {
+                    return None;
+                }
+                let p = pic.sao.get(rs);
+                if p.type_idx[c] == 0 {
+                    return None;
+                }
+                let x0 = rx * cs;
+                let x1 = (x0 + cs).min(w);
+                Some(sao_prepare(pic, c, rs, (x0, x1), (y0, y1), (w, h), p))
+            })
+            .collect();
+        if !ctbs.is_empty() {
+            let above0: &[P] = if !bottom {
+                if ly0 > 0 { line(ly0 - 1) } else { &[] }
+            } else {
+                edges.slice((2 * r + 1) * w..(2 * r + 2) * w)
+            };
+            let below1: &[P] = if !bottom {
+                if ly1 < h { line(ly1) } else { &[] }
+            } else if ly1 < h {
+                edges.slice(2 * (r + 1) * w..2 * (r + 1) * w + w)
+            } else {
+                &[]
+            };
+            let mut prev: Vec<P> = vec![P::default(); w];
+            let mut cur: Vec<P> = vec![P::default(); w];
+            for y in ly0..ly1 {
+                cur.copy_from_slice(line(y));
+                let above = if y == ly0 { above0 } else { &prev[..] };
+                let below = if y + 1 == ly1 { below1 } else { line(y + 1) };
+                let dst = g.slice_mut(org + y * st..org + y * st + w);
+                for k in &ctbs {
+                    sao_line(pic, c, k, (y0, y1), (w, h), y, [above, &cur, below], dst);
+                }
+                std::mem::swap(&mut prev, &mut cur);
             }
-            let sl = &pic.slices[si as usize];
-            if !(if c == 0 { sl.sao_luma } else { sl.sao_chroma }) {
-                continue;
-            }
-            let p = pic.sao.get(rs);
-            if p.type_idx[c] == 0 {
-                continue;
-            }
-            let x0 = rx * cs;
-            let x1 = (x0 + cs).min(w);
-            sao_ctb(
-                pic,
-                &plane,
-                c,
-                rs,
-                (x0, x1),
-                (y0, y1),
-                (ly0, ly1),
-                (w, h),
-                &p,
-                (&mut *dst, ds),
-            );
         }
         pic.frame.pad_rows::<P>(c, ly0, ly1);
         pic.frame.emit::<P>(c, ly0, ly1);
@@ -603,176 +602,221 @@ fn sao_row<P: Pel>(pic: &PicState<P>, r: usize, bottom: bool) {
 }
 }
 
-#[allow(clippy::too_many_arguments)]
-#[inline(always)]
-fn sao_ctb<P: Pel>(
-    pic: &PicState<P>,
-    plane: &Lines<P>,
-    c: usize,
-    rs: usize,
-    (x0, x1): (usize, usize),
-    (y0, y1): (usize, usize),
-    (ly0, ly1): (usize, usize),
-    (w, h): (usize, usize),
-    p: &crate::hevc::slicedec::SaoParams,
-    (dst, ds): (&mut [P], usize),
-) {
-    let bd = if c == 0 { pic.bd_y } else { pic.bd_c };
-    let max = (1i32 << bd) - 1;
-    let sc = if c == 0 { 0 } else { 1 };
-    let offs = p.offsets[c].map(|v| v as i32);
-    let nofilter = |pic: &PicState<P>, x: usize, y: usize| {
-        pic.blk
-            .get(((y << sc) >> 2) * pic.w4 + ((x << sc) >> 2))
-            .flags
-            & F_NOFILTER
-            != 0
-    };
-    let any_nofilter = {
-        let mut a = false;
-        for by in ((y0 << sc) >> 2)..(((y1 << sc) + 3) >> 2).min(pic.h4) {
-            for bx in ((x0 << sc) >> 2)..(((x1 << sc) + 3) >> 2).min(pic.w4) {
-                a |= pic.blk.get(by * pic.w4 + bx).flags & F_NOFILTER != 0;
-            }
-        }
-        a
-    };
-    if p.type_idx[c] == 1 {
-        let shift = bd - 5;
-        let mut table = [0i32; 32];
-        for k in 0..4 {
-            table[(k + p.band_pos[c] as usize) & 31] = offs[k];
-        }
-        for y in ly0..ly1 {
-            if !any_nofilter {
-                let band = (p.band_pos[c] as i32, offs);
-                sao_band_run(
-                    &plane[y * w + x0..y * w + x1],
-                    &mut dst[(y - ly0) * ds + x0..(y - ly0) * ds + x1],
-                    shift,
-                    band,
-                    max,
-                );
-                continue;
-            }
-            for x in x0..x1 {
-                if nofilter(pic, x, y) {
-                    continue;
-                }
-                let v: i32 = plane[y * w + x].into();
-                dst[(y - ly0) * ds + x] =
-                    P::from_i32((v + table[(v >> shift) as usize]).clamp(0, max));
-            }
-        }
-        return;
+fn cross_ok<P: Pel>(pic: &PicState<P>, c: usize, rs: usize, xn: usize, yn: usize) -> bool {
+    let s = pic.log2_ctb as usize - if c == 0 { 0 } else { 1 };
+    let nrs = (yn >> s) * pic.wctb + (xn >> s);
+    if nrs == rs {
+        return true;
     }
-    let (hp, vp): ([i32; 2], [i32; 2]) = match p.eo_class[c] {
+    let ns = pic.ctb_slice.get(nrs);
+    let Some(nsl) = pic.slices.get(ns as usize) else {
+        return false;
+    };
+    let cur_ts = pic.layout.rs_to_ts[rs];
+    if pic.ctb_addr.get(nrs) != pic.ctb_addr.get(rs) {
+        let nts = pic.layout.rs_to_ts[nrs];
+        let lf_cur = pic
+            .slices
+            .get(pic.ctb_slice.get(rs) as usize)
+            .is_some_and(|s| s.lf_across);
+        if nts < cur_ts && !lf_cur {
+            return false;
+        }
+        if cur_ts < nts && !nsl.lf_across {
+            return false;
+        }
+    }
+    pic.pps.loop_filter_across_tiles
+        || pic.layout.tile_id[pic.layout.rs_to_ts[nrs] as usize]
+            == pic.layout.tile_id[cur_ts as usize]
+}
+
+fn eo_dirs(class: u8) -> ([i32; 2], [i32; 2]) {
+    match class {
         0 => ([-1, 1], [0, 0]),
         1 => ([0, 0], [-1, 1]),
         2 => ([-1, 1], [-1, 1]),
         _ => ([1, -1], [-1, 1]),
-    };
-    let s = pic.log2_ctb as usize - sc;
-    let cur_slice = pic.ctb_slice.get(rs);
-    let lf_cur = pic.slices[cur_slice as usize].lf_across;
-    let cur_ts = pic.layout.rs_to_ts[rs];
-    let cross_ok = |pic: &PicState<P>, xn: usize, yn: usize| -> bool {
-        let nrs = (yn >> s) * pic.wctb + (xn >> s);
-        if nrs == rs {
-            return true;
-        }
-        let ns = pic.ctb_slice.get(nrs);
-        if ns == u32::MAX {
-            return false;
-        }
-        if pic.ctb_addr.get(nrs) != pic.ctb_addr.get(rs) {
-            let nts = pic.layout.rs_to_ts[nrs];
-            if nts < cur_ts && !lf_cur {
-                return false;
+    }
+}
+
+#[inline(always)]
+fn sao_nofilter<P: Pel>(pic: &PicState<P>, c: usize, x: usize, y: usize) -> bool {
+    let sc = if c == 0 { 0 } else { 1 };
+    pic.blk
+        .get(((y << sc) >> 2) * pic.w4 + ((x << sc) >> 2))
+        .flags
+        & F_NOFILTER
+        != 0
+}
+
+fn sao_prepare<P: Pel>(
+    pic: &PicState<P>,
+    c: usize,
+    rs: usize,
+    (x0, x1): (usize, usize),
+    (y0, y1): (usize, usize),
+    (w, h): (usize, usize),
+    p: crate::hevc::slicedec::SaoParams,
+) -> SaoCtb {
+    let sc = if c == 0 { 0 } else { 1 };
+    let mut nofilter = false;
+    if pic.nofilter_possible {
+        for by in ((y0 << sc) >> 2)..(((y1 << sc) + 3) >> 2).min(pic.h4) {
+            for bx in ((x0 << sc) >> 2)..(((x1 << sc) + 3) >> 2).min(pic.w4) {
+                nofilter |= pic.blk.get(by * pic.w4 + bx).flags & F_NOFILTER != 0;
             }
-            if cur_ts < nts && !pic.slices[ns as usize].lf_across {
-                return false;
-            }
         }
-        if !pic.pps.loop_filter_across_tiles
-            && pic.layout.tile_id[pic.layout.rs_to_ts[nrs] as usize]
-                != pic.layout.tile_id[cur_ts as usize]
-        {
-            return false;
-        }
-        true
-    };
-    let edge_map = [1usize, 2, 0, 3, 4];
-    let by_sum = edge_map.map(|e| if e == 0 { 0 } else { offs[e - 1] });
-    let general = |x: usize, y: usize| -> Option<P> {
-        if any_nofilter && nofilter(pic, x, y) {
-            return None;
-        }
-        let mut sum = 0i32;
-        let v: i32 = plane[y * w + x].into();
-        for k in 0..2 {
-            let xn = x as i32 + hp[k];
-            let yn = y as i32 + vp[k];
-            if xn < 0 || yn < 0 || xn >= w as i32 || yn >= h as i32 {
-                return None;
-            }
-            let (xn, yn) = (xn as usize, yn as usize);
-            if (xn < x0 || xn >= x1 || yn < y0 || yn >= y1) && !cross_ok(pic, xn, yn) {
-                return None;
-            }
-            sum += (v - plane[yn * w + xn].into()).signum();
-        }
-        Some(P::from_i32((v + by_sum[(2 + sum) as usize]).clamp(0, max)))
-    };
-    let (mx, my) = ((hp[0] != 0) as usize, (vp[0] != 0) as usize);
+    }
+    let (hp, vp) = eo_dirs(p.eo_class[c]);
+    let mx = (hp[0] != 0) as usize;
     let vert_ok = |yn: i32| -> bool {
         if yn < 0 || yn >= h as i32 {
             return false;
         }
         let yn = yn as usize;
-        (y0..y1).contains(&yn) || cross_ok(pic, x0 + mx, yn)
+        (y0..y1).contains(&yn) || cross_ok(pic, c, rs, x0 + mx, yn)
     };
-    let edge_rows =
-        [y0, y1 - 1].map(|y| my == 0 || (vert_ok(y as i32 + vp[0]) && vert_ok(y as i32 + vp[1])));
-    for y in ly0..ly1 {
-        let inner_row = !any_nofilter && x1 - x0 > 2 * mx;
-        let run_ok = if y == y0 {
-            edge_rows[0]
-        } else if y == y1 - 1 {
-            edge_rows[1]
-        } else {
-            true
-        };
-        if inner_row && !run_ok {
-            for x in (x0..x0 + mx).chain(x1 - mx..x1) {
-                if let Some(v) = general(x, y) {
-                    dst[(y - ly0) * ds + x] = v;
-                }
-            }
-            continue;
+    let edge_rows = [y0, y1 - 1]
+        .map(|y| vp[0] == 0 || (vert_ok(y as i32 + vp[0]) && vert_ok(y as i32 + vp[1])));
+    let mut near = [[false; 3]; 3];
+    for (i, row) in near.iter_mut().enumerate() {
+        for (j, ok) in row.iter_mut().enumerate() {
+            let xn = [x0 as i32 - 1, x0 as i32, x1 as i32][j];
+            let yn = [y0 as i32 - 1, y0 as i32, y1 as i32][i];
+            *ok = xn >= 0
+                && yn >= 0
+                && (yn as usize) < h
+                && (xn as usize) < w
+                && cross_ok(pic, c, rs, xn as usize, yn as usize);
         }
-        if !inner_row {
-            for x in x0..x1 {
-                if let Some(v) = general(x, y) {
-                    dst[(y - ly0) * ds + x] = v;
-                }
-            }
-            continue;
-        }
-        for x in (x0..x0 + mx).chain(x1 - mx..x1) {
-            if let Some(v) = general(x, y) {
-                dst[(y - ly0) * ds + x] = v;
-            }
-        }
-        let (ya, yb) = ((y as i32 + vp[0]) as usize, (y as i32 + vp[1]) as usize);
-        let (xa, xb) = (x0 as i32 + mx as i32 + hp[0], x0 as i32 + mx as i32 + hp[1]);
-        let n = x1 - x0 - 2 * mx;
-        let cur = &plane[y * w + x0 + mx..][..n];
-        let na = &plane[ya * w + xa as usize..][..n];
-        let nb = &plane[yb * w + xb as usize..][..n];
-        let out = &mut dst[(y - ly0) * ds + x0 + mx..][..n];
-        sao_edge_run(cur, na, nb, out, &by_sum, max);
     }
+    SaoCtb {
+        x0,
+        x1,
+        nofilter,
+        p,
+        edge_rows,
+        near,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn sao_line<P: Pel>(
+    pic: &PicState<P>,
+    c: usize,
+    k: &SaoCtb,
+    (y0, y1): (usize, usize),
+    (w, h): (usize, usize),
+    y: usize,
+    lines: [&[P]; 3],
+    dst: &mut [P],
+) {
+    let (x0, x1, p) = (k.x0, k.x1, &k.p);
+    let bd = if c == 0 { pic.bd_y } else { pic.bd_c };
+    let max = (1i32 << bd) - 1;
+    let offs = p.offsets[c].map(|v| v as i32);
+    let cur = lines[1];
+    if p.type_idx[c] == 1 {
+        let shift = bd - 5;
+        if !k.nofilter {
+            let band = (p.band_pos[c] as i32, offs);
+            sao_band_run(&cur[x0..x1], &mut dst[x0..x1], shift, band, max);
+            return;
+        }
+        let mut table = [0i32; 32];
+        for j in 0..4 {
+            table[(j + p.band_pos[c] as usize) & 31] = offs[j];
+        }
+        for x in x0..x1 {
+            if sao_nofilter(pic, c, x, y) {
+                continue;
+            }
+            let v: i32 = cur[x].into();
+            dst[x] = P::from_i32((v + table[(v >> shift) as usize]).clamp(0, max));
+        }
+        return;
+    }
+    let (hp, vp) = eo_dirs(p.eo_class[c]);
+    let edge_map = [1usize, 2, 0, 3, 4];
+    let by_sum = edge_map.map(|e| if e == 0 { 0 } else { offs[e - 1] });
+    let general = |x: usize| -> Option<P> {
+        if k.nofilter && sao_nofilter(pic, c, x, y) {
+            return None;
+        }
+        let mut sum = 0i32;
+        let v: i32 = cur[x].into();
+        for j in 0..2 {
+            let xn = x as i32 + hp[j];
+            let yn = y as i32 + vp[j];
+            if xn < 0 || yn < 0 || xn >= w as i32 || yn >= h as i32 {
+                return None;
+            }
+            let (xn, yn) = (xn as usize, yn as usize);
+            let ni = if yn < y0 {
+                0
+            } else if yn >= y1 {
+                2
+            } else {
+                1
+            };
+            let nj = if xn < x0 {
+                0
+            } else if xn >= x1 {
+                2
+            } else {
+                1
+            };
+            if !k.near[ni][nj] {
+                return None;
+            }
+            let n = lines[(1 + vp[j]) as usize].get(xn).copied()?;
+            sum += (v - n.into()).signum();
+        }
+        Some(P::from_i32((v + by_sum[(2 + sum) as usize]).clamp(0, max)))
+    };
+    let mx = (hp[0] != 0) as usize;
+    let run_ok = if y == y0 {
+        k.edge_rows[0]
+    } else if y == y1 - 1 {
+        k.edge_rows[1]
+    } else {
+        true
+    };
+    let inner = !k.nofilter && x1 - x0 > 2 * mx;
+    if !inner {
+        for x in x0..x1 {
+            if let Some(v) = general(x) {
+                dst[x] = v;
+            }
+        }
+        return;
+    }
+    let edge = y == y0 || y == y1 - 1;
+    let (mut lo, mut hi) = (x0 + mx, x1 - mx);
+    if mx == 1 {
+        if edge {
+            for x in [x0, x1 - 1] {
+                if let Some(v) = general(x) {
+                    dst[x] = v;
+                }
+            }
+        } else {
+            lo -= k.near[1][0] as usize;
+            hi += k.near[1][2] as usize;
+        }
+    }
+    if !run_ok {
+        return;
+    }
+    let n = hi - lo;
+    let (xa, xb) = ((lo as i32 + hp[0]) as usize, (lo as i32 + hp[1]) as usize);
+    let (la, lb) = (lines[(1 + vp[0]) as usize], lines[(1 + vp[1]) as usize]);
+    let (Some(na), Some(nb)) = (la.get(xa..xa + n), lb.get(xb..xb + n)) else {
+        return;
+    };
+    sao_edge_run(&cur[lo..hi], na, nb, &mut dst[lo..hi], &by_sum, max);
 }
 
 const SAO_LANES: usize = 16;

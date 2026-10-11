@@ -111,7 +111,7 @@ impl Frame {
         (self.plane_size(plane).0 + 2 * pad(plane) + 16).next_multiple_of(64)
     }
 
-    fn origin(&self, plane: usize) -> usize {
+    pub fn origin(&self, plane: usize) -> usize {
         pad(plane) * self.stride(plane) + pad(plane)
     }
 
@@ -119,7 +119,7 @@ impl Frame {
         self.stride(plane) * (self.plane_size(plane).1 + 2 * pad(plane)) + SLACK
     }
 
-    fn grids<P: Pel>(&self) -> &[Grid<P>; 3] {
+    pub fn grids<P: Pel>(&self) -> &[Grid<P>; 3] {
         P::slot(&self.store).get_or_init(|| {
             let lens = [0, 1, 2].map(|p| self.plane_len(p));
             let reused = self
