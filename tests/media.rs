@@ -81,7 +81,10 @@ fn clip() -> &'static Path {
             .unwrap()
             .success();
         assert!(ok);
-        std::fs::rename(&part, &out).unwrap();
+        if let Err(e) = std::fs::rename(&part, &out) {
+            assert!(std::path::Path::new(&out).exists(), "{e}");
+            let _ = std::fs::remove_file(&part);
+        }
         out
     })
 }
@@ -164,12 +167,13 @@ fn min_psnr(out: &Path, src: &Path, ranges: &[(i64, i64)]) -> f64 {
         joined.push_str(&format!("[p{i}]"));
     }
     let log = out.with_extension("psnr");
+    let name = log.file_name().unwrap().to_str().unwrap();
     graph.push_str(&format!(
-        "{joined}concat=n={}:v=1:a=0[ref];[0:v]setpts=PTS-STARTPTS[o];[o][ref]psnr=stats_file={}",
+        "{joined}concat=n={}:v=1:a=0[ref];[0:v]setpts=PTS-STARTPTS[o];[o][ref]psnr=stats_file={name}",
         ranges.len(),
-        log.display()
     ));
     let ok = Command::new("ffmpeg")
+        .current_dir(log.parent().unwrap())
         .args(["-v", "error", "-i"])
         .arg(out)
         .arg("-i")
@@ -480,7 +484,7 @@ fn gpu_playback_keeps_frames_on_the_gpu_and_falls_back_to_the_cpu() {
             let f = f.unwrap();
             assert_eq!(
                 (f.on_gpu(), f.size(), f.pts()),
-                (on_gpu, (640, 360), 180 + n)
+                (on_gpu && cfg!(target_os = "linux"), (640, 360), 180 + n)
             );
             #[cfg(target_os = "linux")]
             if let VideoFrame::Gpu(g) = &f {
@@ -505,10 +509,15 @@ fn gpu_playback_keeps_frames_on_the_gpu_and_falls_back_to_the_cpu() {
         .next()
         .unwrap()
         .unwrap();
-    let VideoFrame::Gpu(ours) = ours else {
-        panic!("a native-size frame left the GPU");
+    assert_eq!(
+        ours.on_gpu(),
+        cfg!(target_os = "linux"),
+        "a native-size frame left the GPU"
+    );
+    let ours = match ours {
+        VideoFrame::Gpu(g) => g.download().unwrap(),
+        VideoFrame::Cpu(f) => f,
     };
-    let ours = ours.download().unwrap();
     let cpu = decode_video(clip(), 1.0, None, &cpu)
         .unwrap()
         .next()
