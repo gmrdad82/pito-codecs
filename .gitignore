@@ -2,7 +2,9 @@ tmp/
 target/
 node_modules/
 .claude/
-/.dev/
+/.dev
 /AGENTS.md
 /CLAUDE.md
 /prompts
+/pito-app.toml
+/bin/install

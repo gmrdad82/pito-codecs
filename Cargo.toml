@@ -76,7 +76,7 @@ name = "bench"
 required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter"]
 
 [[example]]
-name = "pcodec"
+name = "pcod"
 required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter"]
 
 [dev-dependencies]
