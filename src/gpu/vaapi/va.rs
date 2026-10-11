@@ -833,7 +833,12 @@ struct Staging {
 }
 
 impl Staging {
-    fn new(display: Arc<Display>, geometry: Geometry, count: usize) -> Result<Self, String> {
+    fn new(
+        display: Arc<Display>,
+        geometry: Geometry,
+        surface: (u32, u32),
+        count: usize,
+    ) -> Result<Self, String> {
         let (rt_format, _, _) = formats(geometry.bits)?;
         let drm_format = if geometry.bits > 8 {
             ffi::DRM_FORMAT_P010
@@ -845,6 +850,11 @@ impl Staging {
             geometry.crop.2.next_multiple_of(2),
             geometry.crop.3.next_multiple_of(2),
         );
+        if geometry.crop.0.saturating_add(w) > surface.0
+            || geometry.crop.1.saturating_add(h) > surface.1
+        {
+            return Err("the picture has no even-sized area to copy".into());
+        }
         let pitch = (w as usize * bps).next_multiple_of(256);
         let chroma = pitch * h as usize;
         let len = chroma + pitch * (h as usize / 2);
@@ -916,7 +926,8 @@ impl Staging {
             return Err("no staging surfaces".into());
         };
         slot.holds = None;
-        self.vpp.copy(src, crop, slot.surface, self.size)?;
+        let region = (crop.0, crop.1, self.size.0, self.size.1);
+        self.vpp.copy(src, region, slot.surface, self.size)?;
         self.order += 1;
         slot.holds = Some(index);
         slot.order = self.order;
@@ -1009,6 +1020,7 @@ impl Session {
             }
         }
         let config = config.ok_or(why)?;
+        let size = (size.0.next_multiple_of(2), size.1.next_multiple_of(2));
         let pool = match Pool::new(display.clone(), rt_format, size, count) {
             Ok(p) => p,
             Err(e) => {
@@ -1185,7 +1197,7 @@ impl Accel for Session {
             return;
         };
         if self.staging.is_none() {
-            match Staging::new(self.display.clone(), self.geometry, LAG + 2) {
+            match Staging::new(self.display.clone(), self.geometry, self.size, LAG + 2) {
                 Ok(s) => self.staging = Some(s),
                 Err(_) => {
                     self.staged = false;
