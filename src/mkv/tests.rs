@@ -63,7 +63,10 @@ fn generate(name: &str, args: &[&str]) -> PathBuf {
             .status()
             .unwrap();
         assert!(st.success());
-        std::fs::rename(&tmp, &path).unwrap();
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            assert!(std::path::Path::new(&path).exists(), "{e}");
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
     path
 }
@@ -82,7 +85,10 @@ fn streamed(name: &str) -> PathBuf {
         assert!(out.status.success());
         let tmp = dir().join(format!(".{}-{name}", std::process::id()));
         std::fs::write(&tmp, out.stdout).unwrap();
-        std::fs::rename(&tmp, &path).unwrap();
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            assert!(std::path::Path::new(&path).exists(), "{e}");
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
     path
 }
@@ -270,7 +276,10 @@ fn mp4_to_mkv() {
             .status()
             .unwrap();
         assert!(st.success());
-        std::fs::rename(&tmp, &mp4).unwrap();
+        if let Err(e) = std::fs::rename(&tmp, &mp4) {
+            assert!(std::path::Path::new(&mp4).exists(), "{e}");
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
     let out = dir().join("from-mp4.mkv");
     remux_mp4(&mp4, &out).unwrap();

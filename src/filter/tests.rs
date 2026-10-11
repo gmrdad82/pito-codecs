@@ -32,6 +32,25 @@ fn ffmpeg(args: &[&str]) -> String {
     err
 }
 
+fn zscale_present() -> bool {
+    let ok = has_filter("zscale");
+    if !ok {
+        eprintln!("this ffmpeg has no zscale (built without zimg), skipping");
+    }
+    ok
+}
+
+fn has_filter(name: &str) -> bool {
+    Command::new("ffmpeg")
+        .args(["-hide_banner", "-filters"])
+        .output()
+        .is_ok_and(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .any(|w| w == name)
+        })
+}
+
 fn path(name: &str) -> String {
     dir().join(name).to_string_lossy().into_owned()
 }
@@ -67,7 +86,10 @@ fn write_yuv(name: &str, frame: &Frame) {
     }
     let part = format!("{}.part-{}", path(name), std::process::id());
     std::fs::write(&part, bytes).unwrap();
-    std::fs::rename(&part, path(name)).unwrap();
+    if let Err(e) = std::fs::rename(&part, path(name)) {
+        assert!(std::path::Path::new(&path(name)).exists(), "{e}");
+        let _ = std::fs::remove_file(&part);
+    }
 }
 
 fn ffmpeg_version() -> &'static str {
@@ -99,7 +121,10 @@ fn make(label: &str, args: &[&str]) -> String {
         full.extend_from_slice(args);
         full.push(&part);
         ffmpeg(&full);
-        std::fs::rename(&part, path(&name)).unwrap();
+        if let Err(e) = std::fs::rename(&part, path(&name)) {
+            assert!(std::path::Path::new(&path(&name)).exists(), "{e}");
+            let _ = std::fs::remove_file(&part);
+        }
     }
     name
 }
@@ -259,6 +284,9 @@ fn r128_matches_ffmpeg_ebur128() {
 #[test]
 fn scale_matches_zscale() {
     if !ffmpeg_present() {
+        return;
+    }
+    if !zscale_present() {
         return;
     }
     let src = &source_1440p();
@@ -583,7 +611,7 @@ fn zscale_rgba(src: &str, chroma: &str) -> String {
 
 #[test]
 fn orders_and_siting_match_ffmpeg() {
-    if !ffmpeg_present() {
+    if !ffmpeg_present() || !zscale_present() {
         return;
     }
     let src = &source_1440p();
