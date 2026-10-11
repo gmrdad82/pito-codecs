@@ -322,33 +322,44 @@ fn predict_block(
     y: (&mut [u8], usize),
     c: [&mut [u8]; 2],
     cs: usize,
+    avg: bool,
 ) {
     const LW: usize = 24;
+    let luma = if avg {
+        inter::mc_luma_win_avg
+    } else {
+        inter::mc_luma_win
+    };
     let x0 = px as i32 + (mv[0] as i32 >> 2) - 2;
     let y0 = py as i32 + (mv[1] as i32 >> 2) - 2;
     let (fx, fy) = ((mv[0] & 3) as u32, (mv[1] & 3) as u32);
     if x0 >= 0 && y0 >= 0 && x0 as usize + bw + 5 <= f.width && y0 as usize + bh + 5 <= f.height {
         let src = f.luma(y0 as usize, y0 as usize + bh + 5);
-        inter::mc_luma_win(&src[x0 as usize..], f.width, fx, fy, bw, bh, y.0, y.1);
+        luma(&src[x0 as usize..], f.width, fx, fy, bw, bh, y.0, y.1);
     } else {
         let mut win = [0u8; LW * 21];
         f.luma_window(x0, y0, bw + 5, bh + 5, &mut win, LW);
-        inter::mc_luma_win(&win, LW, fx, fy, bw, bh, y.0, y.1);
+        luma(&win, LW, fx, fy, bw, bh, y.0, y.1);
     }
+    let chroma = if avg {
+        inter::mc_chroma_win2_avg
+    } else {
+        inter::mc_chroma_win2
+    };
     let cx = (px / 2) as i32 + (mv[0] as i32 >> 3);
     let cy = (py / 2) as i32 + (mv[1] as i32 >> 3);
     let (cw, ch) = (bw / 2, bh / 2);
     let (fx, fy) = ((mv[0] & 7) as u32, (mv[1] & 7) as u32);
-    let inside = cx >= 0 && cy >= 0 && cx as usize + cw < f.cwidth && cy as usize + ch < f.cheight;
-    for (comp, out) in c.into_iter().enumerate() {
-        if inside {
-            let src = f.chroma(comp, cy as usize, cy as usize + ch + 1);
-            inter::mc_chroma_win(&src[cx as usize..], f.cwidth, fx, fy, cw, ch, out, cs);
-        } else {
-            let mut w = [0u8; 16 * 9];
-            f.chroma_window(comp, cx, cy, cw + 1, ch + 1, &mut w, 16);
-            inter::mc_chroma_win(&w, 16, fx, fy, cw, ch, out, cs);
+    if cx >= 0 && cy >= 0 && cx as usize + cw < f.cwidth && cy as usize + ch < f.cheight {
+        let (x, y) = (cx as usize, cy as usize);
+        let src = [0, 1].map(|comp| &f.chroma(comp, y, y + ch + 1)[x..]);
+        chroma(src, f.cwidth, fx, fy, cw, ch, c, cs);
+    } else {
+        let mut w = [[0u8; 16 * 9]; 2];
+        for (comp, w) in w.iter_mut().enumerate() {
+            f.chroma_window(comp, cx, cy, cw + 1, ch + 1, w, 16);
         }
+        chroma([&w[0], &w[1]], 16, fx, fy, cw, ch, c, cs);
     }
 }
 
@@ -990,24 +1001,30 @@ impl<'a> SliceDecoder<'a> {
         let ys = self.pic.planes.width;
         let cs = self.pic.planes.cwidth;
         let (cx, cy) = (px / 2, py / 2);
-        if use0 != use1 && wts.iter().all(|w| *w == Weight::Default) {
-            let l = if use0 { 0 } else { 1 };
-            let f = &self.refs[l][refs[l] as usize].frame;
+        if (use0 || use1) && wts.iter().all(|w| *w == Weight::Default) {
             let planes = &mut self.pic.planes;
-            predict_block(
-                f,
-                mvs[l],
-                px,
-                py,
-                bw,
-                bh,
-                (&mut planes.y[py * ys + px..], ys),
-                [
-                    &mut planes.cb[cy * cs + cx..],
-                    &mut planes.cr[cy * cs + cx..],
-                ],
-                cs,
-            );
+            let mut avg = false;
+            for l in 0..2 {
+                if !(if l == 0 { use0 } else { use1 }) {
+                    continue;
+                }
+                predict_block(
+                    &self.refs[l][refs[l] as usize].frame,
+                    mvs[l],
+                    px,
+                    py,
+                    bw,
+                    bh,
+                    (&mut planes.y[py * ys + px..], ys),
+                    [
+                        &mut planes.cb[cy * cs + cx..],
+                        &mut planes.cr[cy * cs + cx..],
+                    ],
+                    cs,
+                    avg,
+                );
+                avg = true;
+            }
             return;
         }
         let s = &mut *self.s;
@@ -1029,6 +1046,7 @@ impl<'a> SliceDecoder<'a> {
                 (&mut s.pred[l][..], 16),
                 [&mut pc0[..], &mut pc1[..]],
                 8,
+                false,
             );
         }
         inter::weighted_store(
