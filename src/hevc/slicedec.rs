@@ -145,6 +145,98 @@ impl SliceJob {
     }
 }
 
+pub struct SliceRun {
+    next: AtomicUsize,
+    finished: AtomicUsize,
+    count: usize,
+    error: Mutex<Option<Error>>,
+}
+
+impl SliceRun {
+    pub fn plan<P: Pel>(pic: &PicState<P>, jobs: &[SliceJob]) -> Option<SliceRun> {
+        let first = jobs.first()?;
+        let pps = &first.pps;
+        if jobs.len() < 2
+            || pps.tiles_enabled
+            || pps.entropy_coding_sync
+            || pps.dependent_slice_segments_enabled
+        {
+            return None;
+        }
+        let total = pic.wctb * pic.hctb;
+        let mut prev: Option<usize> = None;
+        for j in jobs {
+            let addr = j.sh.segment_address as usize;
+            if j.sh.dependent
+                || !Arc::ptr_eq(&j.pps, pps)
+                || !addr.is_multiple_of(pic.wctb)
+                || addr >= total
+                || prev.is_some_and(|p| p >= addr)
+            {
+                return None;
+            }
+            prev = Some(addr);
+        }
+        for (k, j) in jobs.iter().enumerate() {
+            let start = j.sh.segment_address as usize;
+            let end = jobs
+                .get(k + 1)
+                .map_or(total, |n| n.sh.segment_address as usize);
+            for rs in start..end {
+                pic.ctb_addr.set(rs, start as u32);
+            }
+        }
+        Some(SliceRun {
+            next: AtomicUsize::new(0),
+            finished: AtomicUsize::new(0),
+            count: jobs.len(),
+            error: Mutex::new(None),
+        })
+    }
+
+    pub fn slices(&self) -> usize {
+        self.count
+    }
+
+    pub fn done(&self) -> bool {
+        self.finished.load(Ordering::SeqCst) >= self.count
+    }
+
+    pub fn take_error(&self) -> Option<Error> {
+        self.error
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
+
+    pub fn work<P: Pel>(&self, pic: &PicState<P>, jobs: &[SliceJob]) {
+        loop {
+            let i = self.next.fetch_add(1, Ordering::SeqCst);
+            let Some(job) = jobs.get(i).filter(|_| i < self.count) else {
+                return;
+            };
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                SliceDecoder::decode(pic, job, i)
+            }));
+            let e = match r {
+                Ok(Ok(())) => None,
+                Ok(Err(e)) => Some(e),
+                Err(_) => Some(Error::Invalid(
+                    "internal error while decoding a slice".into(),
+                )),
+            };
+            if let Some(e) = e {
+                self.error
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get_or_insert(e);
+            }
+            self.finished.fetch_add(1, Ordering::SeqCst);
+            pic.signal.notify();
+        }
+    }
+}
+
 pub struct RowRun {
     next: AtomicUsize,
     finished: AtomicUsize,
@@ -211,6 +303,7 @@ impl RowRun {
 pub struct Progress {
     pub rows_complete: usize,
     pub rows_deblocked: usize,
+    pub rows_topped: usize,
     pub rows_published: usize,
 }
 
@@ -801,7 +894,9 @@ impl<'a, P: Pel> SliceDecoder<'a, P> {
             self.ctb_x = rx * ctb;
             self.ctb_y = ry * ctb;
             self.pic.ctb_slice.set(rs as usize, self.slice_idx);
-            self.pic.ctb_addr.set(rs as usize, self.slice_addr);
+            if self.pic.ctb_addr.get(rs as usize) != self.slice_addr {
+                self.pic.ctb_addr.set(rs as usize, self.slice_addr);
+            }
             let first_in_tile =
                 ts == 0 || layout.tile_id[ts as usize] != layout.tile_id[ts as usize - 1];
             let wpp_row_start = self.pps.entropy_coding_sync

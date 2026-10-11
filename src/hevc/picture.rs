@@ -9,11 +9,10 @@ pub struct ColMv {
     pub flags: u8,
 }
 
-pub struct FrameRow {
+pub struct Part {
     pub y: Samples,
     pub cb: Samples,
     pub cr: Samples,
-    pub col: Box<[ColMv]>,
 }
 
 pub struct Frame {
@@ -26,7 +25,9 @@ pub struct Frame {
     pub log2_ctb: u32,
     pub bit_depth: u32,
     pub bit_depth_c: u32,
-    rows: Box<[OnceLock<FrameRow>]>,
+    top: Box<[OnceLock<Part>]>,
+    bottom: Box<[OnceLock<Part>]>,
+    col: Box<[OnceLock<Box<[ColMv]>>]>,
     pub image: OnceLock<Mutex<Option<Image>>>,
     pool: Option<RowPool>,
 }
@@ -37,11 +38,11 @@ impl Drop for Frame {
     fn drop(&mut self) {
         let Some(pool) = self.pool.take() else { return };
         let Ok(mut pool) = pool.lock() else { return };
-        for row in self.rows.iter_mut() {
-            if let Some(r) = row.take()
-                && pool.len() + 3 <= 1024
+        for part in self.top.iter_mut().chain(self.bottom.iter_mut()) {
+            if let Some(p) = part.take()
+                && pool.len() + 3 <= 2048
             {
-                pool.extend([r.y, r.cb, r.cr]);
+                pool.extend([p.y, p.cb, p.cr]);
             }
         }
     }
@@ -68,7 +69,9 @@ impl Frame {
             log2_ctb,
             bit_depth,
             bit_depth_c,
-            rows: (0..n).map(|_| OnceLock::new()).collect(),
+            top: (0..n).map(|_| OnceLock::new()).collect(),
+            bottom: (0..n).map(|_| OnceLock::new()).collect(),
+            col: (0..n).map(|_| OnceLock::new()).collect(),
             image: OnceLock::new(),
             pool: None,
         }
@@ -88,7 +91,7 @@ impl Frame {
     }
 
     pub fn num_rows(&self) -> usize {
-        self.rows.len()
+        self.top.len()
     }
 
     pub fn row_lines(&self, r: usize) -> usize {
@@ -96,55 +99,118 @@ impl Frame {
         ctb.min(self.height - r * ctb)
     }
 
+    pub fn split(&self, plane: usize) -> usize {
+        let ctb = 1usize << self.log2_ctb;
+        if plane == 0 { ctb - 4 } else { ctb / 2 - 2 }
+    }
+
+    pub fn part_lines(&self, r: usize, plane: usize) -> (usize, usize) {
+        let lines = if plane == 0 {
+            self.row_lines(r)
+        } else {
+            self.row_lines(r).div_ceil(2)
+        };
+        let top = lines.min(self.split(plane));
+        (top, lines - top)
+    }
+
     pub fn width16(&self) -> usize {
         self.width.div_ceil(16)
     }
 
-    pub fn publish(&self, r: usize, row: FrameRow) {
-        let _ = self.rows[r].set(row);
+    pub fn publish_top(&self, r: usize, part: Part, col: Box<[ColMv]>) {
+        let _ = self.col[r].set(col);
+        let _ = self.top[r].set(part);
     }
 
-    pub fn is_published(&self, r: usize) -> bool {
-        self.rows[r].get().is_some()
+    pub fn publish_bottom(&self, r: usize, part: Part) {
+        let _ = self.bottom[r].set(part);
     }
 
     pub fn is_complete(&self) -> bool {
-        self.rows.last().is_none_or(|r| r.get().is_some())
-    }
-
-    #[inline]
-    pub fn row(&self, r: usize) -> &FrameRow {
-        self.rows[r].wait()
+        self.bottom.last().is_none_or(|r| r.get().is_some())
     }
 
     pub fn wait_complete(&self) {
-        for r in 0..self.rows.len() {
-            self.row(r);
+        for (t, b) in self.top.iter().zip(self.bottom.iter()) {
+            t.wait();
+            b.wait();
+        }
+    }
+
+    pub fn fill_unpublished_gray(&self) {
+        let gray = Frame::gray(0, self.poc, self);
+        for r in 0..self.num_rows() {
+            if self.top[r].get().is_none()
+                && let (Some(t), Some(c)) = (gray.top[r].get(), gray.col[r].get())
+            {
+                self.publish_top(
+                    r,
+                    Part {
+                        y: t.y.clone(),
+                        cb: t.cb.clone(),
+                        cr: t.cr.clone(),
+                    },
+                    c.clone(),
+                );
+            }
+            if self.bottom[r].get().is_none()
+                && let Some(b) = gray.bottom[r].get()
+            {
+                self.publish_bottom(
+                    r,
+                    Part {
+                        y: b.y.clone(),
+                        cb: b.cb.clone(),
+                        cr: b.cr.clone(),
+                    },
+                );
+            }
         }
     }
 
     #[inline]
     pub fn col_mv(&self, x: usize, y: usize) -> ColMv {
         let r = y >> self.log2_ctb;
-        let row = self.row(r);
+        let col = self.col[r].wait();
         let y16 = (y & ((1 << self.log2_ctb) - 1)) >> 4;
-        row.col[y16 * self.width16() + (x >> 4)]
+        col[y16 * self.width16() + (x >> 4)]
+    }
+
+    #[inline]
+    fn part_data<P: Pel>(&self, plane: usize, r: usize, bottom: bool) -> &[P] {
+        let part = if bottom {
+            self.bottom[r].wait()
+        } else {
+            self.top[r].wait()
+        };
+        P::view(match plane {
+            0 => &part.y,
+            1 => &part.cb,
+            _ => &part.cr,
+        })
+    }
+
+    #[inline]
+    fn locate(&self, plane: usize, y: usize) -> (usize, bool, usize) {
+        let sh = if plane == 0 {
+            self.log2_ctb
+        } else {
+            self.log2_ctb - 1
+        };
+        let l = y & ((1 << sh) - 1);
+        let t = self.split(plane);
+        if l < t {
+            (y >> sh, false, l)
+        } else {
+            (y >> sh, true, l - t)
+        }
     }
 
     fn line<P: Pel>(&self, plane: usize, y: usize) -> &[P] {
-        let (sh, w) = if plane == 0 {
-            (self.log2_ctb, self.width)
-        } else {
-            (self.log2_ctb - 1, self.cwidth)
-        };
-        let row = self.row(y >> sh);
-        let data = P::view(match plane {
-            0 => &row.y,
-            1 => &row.cb,
-            _ => &row.cr,
-        });
-        let off = (y & ((1 << sh) - 1)) * w;
-        &data[off..off + w]
+        let w = if plane == 0 { self.width } else { self.cwidth };
+        let (r, bottom, l) = self.locate(plane, y);
+        &self.part_data::<P>(plane, r, bottom)[l * w..(l + 1) * w]
     }
 
     fn plane_size(&self, plane: usize) -> (i32, i32) {
@@ -169,27 +235,15 @@ impl Frame {
             return false;
         }
         let x = x0 as usize;
-        let (sh, pw) = if plane == 0 {
-            (self.log2_ctb, self.width)
-        } else {
-            (self.log2_ctb - 1, self.cwidth)
-        };
-        let mut cached: (usize, &[P]) = (usize::MAX, &[]);
+        let pw = pw as usize;
+        let mut cached: ((usize, bool), &[P]) = ((usize::MAX, false), &[]);
         for (r, o) in out.iter_mut().enumerate().take(h) {
             let y = (y0 + r as i32).clamp(0, ph - 1) as usize;
-            let row = y >> sh;
-            if row != cached.0 {
-                let data = self.row(row);
-                cached = (
-                    row,
-                    P::view(match plane {
-                        0 => &data.y,
-                        1 => &data.cb,
-                        _ => &data.cr,
-                    }),
-                );
+            let (row, bottom, l) = self.locate(plane, y);
+            if (row, bottom) != cached.0 {
+                cached = ((row, bottom), self.part_data::<P>(plane, row, bottom));
             }
-            let off = (y & ((1 << sh) - 1)) * pw + x;
+            let off = l * pw + x;
             *o = &cached.1[off..off + w];
         }
         true
@@ -271,18 +325,21 @@ impl Frame {
         let w16 = f.width16();
         for r in 0..f.num_rows() {
             let lines = f.row_lines(r);
-            let (y0, y1) = (r * ctb * f.width, (r * ctb + lines) * f.width);
-            let clines = lines.div_ceil(2);
-            let (c0, c1) = (r * ctb / 2 * f.cwidth, (r * ctb / 2 + clines) * f.cwidth);
-            f.publish(
+            let (lt, lb) = f.part_lines(r, 0);
+            let (ct, cb_lines) = f.part_lines(r, 1);
+            let (w, cw) = (f.width, f.cwidth);
+            let (y0, c0) = (r * ctb * w, r * ctb / 2 * cw);
+            let part = |a: usize, n: usize, ca: usize, cn: usize| Part {
+                y: P::wrap(y[a..a + n * w].to_vec()),
+                cb: P::wrap(cb[ca..ca + cn * cw].to_vec()),
+                cr: P::wrap(cr[ca..ca + cn * cw].to_vec()),
+            };
+            f.publish_top(
                 r,
-                FrameRow {
-                    y: P::wrap(y[y0..y1].to_vec()),
-                    cb: P::wrap(cb[c0..c1].to_vec()),
-                    cr: P::wrap(cr[c0..c1].to_vec()),
-                    col: vec![ColMv::default(); w16 * lines.div_ceil(16)].into(),
-                },
+                part(y0, lt, c0, ct),
+                vec![ColMv::default(); w16 * lines.div_ceil(16)].into(),
             );
+            f.publish_bottom(r, part(y0 + lt * w, lb, c0 + ct * cw, cb_lines));
         }
         f
     }

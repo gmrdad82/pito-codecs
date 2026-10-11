@@ -5,7 +5,7 @@ use crate::hevc::params::{Layout, Pps, Sps, Vps};
 use crate::hevc::pel::Pel;
 use crate::hevc::picture::{Frame, FrameRef, RowPool};
 use crate::hevc::slice::{NalHeader, SliceHeader, nal_type};
-use crate::hevc::slicedec::{PicState, Pool, Scaling, SliceDecoder, SliceJob};
+use crate::hevc::slicedec::{PicState, Pool, Scaling, SliceDecoder, SliceJob, SliceRun};
 use crate::hevc::{ColorInfo, Hvcc};
 use crate::media::{Frame as Image, Packet, PixelFormat, Plane, TimeBase};
 use std::collections::VecDeque;
@@ -576,21 +576,7 @@ fn run_job(job: Job, shared: &Shared) {
     let err = match result {
         Ok(e) => e,
         Err(_) => {
-            let gray = Frame::gray(0, frame.poc, &frame);
-            for r in 0..frame.num_rows() {
-                if !frame.is_published(r) {
-                    let row = gray.row(r);
-                    frame.publish(
-                        r,
-                        crate::hevc::picture::FrameRow {
-                            y: row.y.clone(),
-                            cb: row.cb.clone(),
-                            cr: row.cr.clone(),
-                            col: row.col.clone(),
-                        },
-                    );
-                }
-            }
+            frame.fill_unpublished_gray();
             Some(Error::Invalid(
                 "internal error while decoding a picture".into(),
             ))
@@ -640,6 +626,19 @@ fn decode_picture<P: Pel>(input: Input, pool: Pool<P>) -> Option<Error> {
         draft,
         Some(pool),
     ));
+    if helpers > 0
+        && let Some(run) = SliceRun::plan(&pic, &slices)
+    {
+        let run = Arc::new(run);
+        for _ in 0..helpers.min(run.slices() - 1) {
+            let (pic, slices, run) = (pic.clone(), slices.clone(), run.clone());
+            rayon::spawn(move || run.work(&pic, &slices));
+        }
+        run.work(&pic, &slices);
+        pic.signal.wait_until(|| run.done());
+        crate::hevc::filter::finish(&pic);
+        return run.take_error();
+    }
     let mut first_err = None;
     for (i, s) in slices.iter().enumerate() {
         let plan = if helpers > 0 { s.row_plan(&pic) } else { None };
