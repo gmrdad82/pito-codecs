@@ -3,7 +3,6 @@ use super::quant::{Dither, Histogram, Lut, Mapper, Palette};
 use crate::filter::Rgba;
 use rayon::prelude::*;
 use std::cell::RefCell;
-use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaletteMode {
@@ -33,7 +32,6 @@ impl Default for EncodeOptions {
 }
 
 struct Mapped {
-    src: Rgba,
     idx: Vec<u8>,
     palette: Option<Palette>,
     alpha: bool,
@@ -58,7 +56,8 @@ pub struct Encoder {
     out: Vec<u8>,
     started: bool,
     batch: Vec<(Rgba, u16)>,
-    mapped: VecDeque<Mapped>,
+    pending: Option<Mapped>,
+    carry: Option<Rgba>,
     prev: Option<Rgba>,
     canvas: Vec<u32>,
     held: Option<Record>,
@@ -69,6 +68,18 @@ thread_local! {
     static LZW: RefCell<LzwEncoder> = RefCell::new(LzwEncoder::default());
     static ERR: RefCell<Vec<i16>> = const { RefCell::new(Vec::new()) };
     static HIST: RefCell<Option<Histogram>> = const { RefCell::new(None) };
+}
+
+fn keep(slot: &mut Option<Rgba>, from: &Rgba) {
+    match slot {
+        Some(r) => {
+            r.width = from.width;
+            r.height = from.height;
+            r.data.clear();
+            r.data.extend_from_slice(&from.data);
+        }
+        None => *slot = Some(from.clone()),
+    }
 }
 
 fn batch_size() -> usize {
@@ -109,7 +120,8 @@ impl Encoder {
             out: Vec::new(),
             started: false,
             batch: Vec::new(),
-            mapped: VecDeque::new(),
+            pending: None,
+            carry: None,
             prev: None,
             canvas: vec![0; width as usize * height as usize],
             held: None,
@@ -136,12 +148,25 @@ impl Encoder {
         );
         self.batch.push((frame, delay_cs));
         if self.batch.len() >= batch_size() {
-            self.process(false);
+            self.flush_batch(false);
         }
     }
 
+    fn flush_batch(&mut self, last: bool) {
+        let mut batch = std::mem::take(&mut self.batch);
+        let refs: Vec<(&Rgba, u16)> = batch.iter().map(|(f, d)| (f, *d)).collect();
+        self.process(&refs, last);
+        drop(refs);
+        batch.clear();
+        self.batch = batch;
+    }
+
     pub fn finish(mut self) -> Vec<u8> {
-        self.process(true);
+        self.flush_batch(true);
+        self.close()
+    }
+
+    fn close(mut self) -> Vec<u8> {
         if let Some(r) = self.held.take() {
             self.write(&r);
         }
@@ -152,10 +177,15 @@ impl Encoder {
         self.out
     }
 
-    fn process(&mut self, last: bool) {
-        let frames = std::mem::take(&mut self.batch);
+    fn process(&mut self, frames: &[(&Rgba, u16)], last: bool) {
+        assert!(
+            frames
+                .iter()
+                .all(|f| f.0.width as usize == self.width && f.0.height as usize == self.height),
+            "every frame has the canvas size"
+        );
         if self.opts.palette == PaletteMode::Global && self.global.is_none() && !frames.is_empty() {
-            let refs: Vec<&Rgba> = frames.iter().map(|f| &f.0).collect();
+            let refs: Vec<&Rgba> = frames.iter().map(|f| f.0).collect();
             let palette = Palette::from_frames(&refs, self.max_colors());
             let lut = Lut::new(&palette);
             self.global = Some((palette, lut));
@@ -171,9 +201,9 @@ impl Encoder {
         let dither = self.opts.dither;
         let global = self.global.as_ref();
         let mapped: Vec<Mapped> = frames
-            .into_par_iter()
+            .par_iter()
             .zip(bufs.into_par_iter())
-            .map(|((src, delay), mut idx)| {
+            .map(|(&(src, delay), mut idx)| {
                 let alpha = src.data.chunks_exact(4).any(|p| p[3] < 128);
                 let own;
                 let (palette, lut, local) = match global {
@@ -181,7 +211,7 @@ impl Encoder {
                     None => {
                         let mut h = HIST.take().unwrap_or_default();
                         h.clear();
-                        h.add(&src);
+                        h.add(src);
                         let p = h.palette(colors);
                         HIST.set(Some(h));
                         let l = Lut::new(&p);
@@ -196,10 +226,9 @@ impl Encoder {
                     transparent: palette.len() as u8,
                 };
                 let mut err = ERR.take();
-                mapper.map(&src, &mut idx, &mut err);
+                mapper.map(src, &mut idx, &mut err);
                 ERR.set(err);
                 Mapped {
-                    src,
                     idx,
                     palette: local,
                     alpha,
@@ -207,12 +236,46 @@ impl Encoder {
                 }
             })
             .collect();
-        self.mapped.extend(mapped);
-        let mut records = Vec::new();
-        while self.mapped.len() >= 2 || (last && !self.mapped.is_empty()) {
-            let f = self.mapped.pop_front().unwrap();
-            let next_alpha = self.mapped.front().is_some_and(|m| m.alpha);
-            records.push(self.diff(f, next_alpha));
+        let carry = self.carry.take();
+        let had_pending = self.pending.is_some();
+        let mut items: Vec<Mapped> = self.pending.take().into_iter().chain(mapped).collect();
+        let srcs: Vec<&Rgba> = carry
+            .iter()
+            .filter(|_| had_pending)
+            .chain(frames.iter().map(|f| f.0))
+            .collect();
+        let count = if last {
+            items.len()
+        } else {
+            items.len().saturating_sub(1)
+        };
+        let alphas: Vec<bool> = items.iter().map(|m| m.alpha).collect();
+        let rest = items.split_off(count);
+        let mut prev = self.prev.take();
+        let mut records = Vec::with_capacity(count);
+        for (i, f) in items.into_iter().enumerate() {
+            let before = if i == 0 {
+                prev.as_ref()
+            } else {
+                Some(srcs[i - 1])
+            };
+            let next_alpha = alphas.get(i + 1).copied().unwrap_or(false);
+            records.push(self.diff(f, srcs[i], before, next_alpha));
+        }
+        if count > 0 {
+            keep(&mut prev, srcs[count - 1]);
+        }
+        drop(srcs);
+        self.prev = prev;
+        if let Some(m) = rest.into_iter().next() {
+            if count == 0 && had_pending {
+                self.carry = carry;
+            } else {
+                let mut buf = carry;
+                keep(&mut buf, frames[count - had_pending as usize].0);
+                self.carry = buf;
+            }
+            self.pending = Some(m);
         }
         let w = self.width;
         records.par_iter_mut().for_each(|r| encode_body(r, w));
@@ -221,14 +284,14 @@ impl Encoder {
         }
     }
 
-    fn diff(&mut self, f: Mapped, next_alpha: bool) -> Record {
+    fn diff(&mut self, f: Mapped, src: &Rgba, prev: Option<&Rgba>, next_alpha: bool) -> Record {
         let palette = f
             .palette
             .as_ref()
             .unwrap_or_else(|| &self.global.as_ref().unwrap().0);
         let t = palette.len() as u8;
         let colors = packed_colors(palette);
-        let full = self.prev.is_none() || f.alpha || next_alpha || !self.opts.diff;
+        let full = prev.is_none() || f.alpha || next_alpha || !self.opts.diff;
         let mut idx = f.idx;
         let w = self.width;
         let rect = if full {
@@ -237,12 +300,11 @@ impl Encoder {
             }
             (0, 0, w, self.height)
         } else {
-            let prev = self.prev.as_ref().unwrap();
             diff_rows(
                 &mut idx,
                 &mut self.canvas,
-                &f.src.data,
-                &prev.data,
+                &src.data,
+                &prev.unwrap().data,
                 &colors,
                 t,
                 w,
@@ -250,9 +312,6 @@ impl Encoder {
         };
         if next_alpha {
             self.canvas.fill(0);
-        }
-        if let Some(old) = self.prev.replace(f.src) {
-            drop(old);
         }
         Record {
             rect,
@@ -467,8 +526,14 @@ pub fn encode(frames: &[Rgba], delays_cs: &[u16], opts: EncodeOptions) -> Vec<u8
         }
         PaletteMode::PerFrame => Encoder::new(first.width, first.height, opts),
     };
-    for (i, f) in frames.iter().enumerate() {
-        e.push(f.clone(), delays_cs.get(i).copied().unwrap_or(10));
+    let delays: Vec<u16> = (0..frames.len())
+        .map(|i| delays_cs.get(i).copied().unwrap_or(10))
+        .collect();
+    let size = batch_size();
+    let refs: Vec<(&Rgba, u16)> = frames.iter().zip(delays).collect();
+    let chunks = refs.chunks(size).count();
+    for (i, chunk) in refs.chunks(size).enumerate() {
+        e.process(chunk, i + 1 == chunks);
     }
-    e.finish()
+    e.close()
 }

@@ -442,7 +442,13 @@ fn colour_matches_ffmpeg() {
             data: std::fs::read(path(&out)).unwrap(),
         };
         let mut ours = Frame::new(PixelFormat::Yuv420p8, 0, 0, 0, frame.time_base);
-        rgba_to_yuv(&image, spec, PixelFormat::Yuv420p8, &mut ours).unwrap();
+        rgba_to_yuv(
+            &image,
+            spec.with_siting(Siting::Centre),
+            PixelFormat::Yuv420p8,
+            &mut ours,
+        )
+        .unwrap();
         let p = frame_psnr(&ours, &theirs);
         println!(
             "rgba to yuv {matrix} {range}: PSNR {:.1} {:.1} {:.1}",
@@ -488,6 +494,274 @@ fn colour_matches_ffmpeg() {
         p[0], p[1], p[2]
     );
     assert!(p.iter().all(|&v| v > 75.0), "convert: {p:?}");
+}
+
+fn pattern(format: PixelFormat, width: u32, height: u32, seed: u32) -> Frame {
+    let mut f = Frame::new(format, width, height, 0, TimeBase::new(1, 30));
+    let mut s = seed | 1;
+    let top = (1u32 << format.bit_depth()) - 1;
+    for p in f.planes.iter_mut() {
+        if format == PixelFormat::Yuv420p8 {
+            for v in p.data.iter_mut() {
+                s ^= s << 13;
+                s ^= s >> 17;
+                s ^= s << 5;
+                *v = s as u8;
+            }
+        } else {
+            for c in p.data.chunks_exact_mut(2) {
+                s ^= s << 13;
+                s ^= s >> 17;
+                s ^= s << 5;
+                c.copy_from_slice(&((s % (top + 1)) as u16).to_le_bytes());
+            }
+        }
+    }
+    f
+}
+
+#[test]
+fn simd_kernels_match_plain() {
+    use super::packed::{from_packed, to_packed};
+    use super::plane::{Simd, simd};
+    let fast = simd();
+    let (w, h) = (77u32, 13u32);
+    for format in [PixelFormat::Yuv420p8, PixelFormat::Yuv420p10] {
+        let frame = pattern(format, w, h, 7);
+        for siting in [Siting::Left, Siting::Centre] {
+            let spec = ColorSpec::BT709.with_siting(siting);
+            for order in [Order::Rgba, Order::Bgra, Order::Rgbx, Order::Bgrx] {
+                for chroma in [Chroma::Nearest, Chroma::Bilinear] {
+                    let mut a = vec![0u8; (w * h * 4) as usize];
+                    let mut b = a.clone();
+                    to_packed(
+                        &frame,
+                        spec,
+                        chroma,
+                        PackedMut::new(w, h, order, &mut a),
+                        Simd::Plain,
+                    )
+                    .unwrap();
+                    to_packed(
+                        &frame,
+                        spec,
+                        chroma,
+                        PackedMut::new(w, h, order, &mut b),
+                        fast,
+                    )
+                    .unwrap();
+                    assert_eq!(a, b, "{format:?} {siting:?} {order:?} {chroma:?} to packed");
+                }
+                let [luma, _, _] = pattern(PixelFormat::Yuv420p8, w * 2, h * 2, 9).planes;
+                let bytes = luma.data;
+                let image = Packed::new(w, h, order, &bytes[..(w * h * 4) as usize]);
+                let mut a = Frame::new(format, 0, 0, 0, frame.time_base);
+                let mut b = a.clone();
+                from_packed(image, spec, format, &mut a, Simd::Plain).unwrap();
+                from_packed(image, spec, format, &mut b, fast).unwrap();
+                assert_eq!(a, b, "{format:?} {siting:?} {order:?} from packed");
+            }
+        }
+        for (dw, dh) in [(40, 29), (160, 50)] {
+            for kernel in [Kernel::Bilinear, Kernel::Lanczos] {
+                let s = Scaler::new(w, h, dw, dh, format, kernel).unwrap();
+                let mut a = Frame::new(format, 0, 0, 0, frame.time_base);
+                let mut b = a.clone();
+                s.clone()
+                    .with_simd(Simd::Plain)
+                    .run(&frame, &mut a)
+                    .unwrap();
+                s.run(&frame, &mut b).unwrap();
+                assert_eq!(a, b, "{format:?} scale {kernel:?} to {dw}x{dh}");
+            }
+        }
+    }
+}
+
+fn zscale_rgba(src: &str, chroma: &str) -> String {
+    make(
+        &format!("zscale-rgba-{chroma}"),
+        &[
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
+            "-s",
+            "2560x1440",
+            "-i",
+            &path(src),
+            "-vf",
+            &format!(
+                "zscale=min=709:rin=limited:tin=709:pin=709:t=709:p=709:m=gbr:r=full:chromalin={chroma}:filter=bilinear,format=gbrp"
+            ),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+        ],
+    )
+}
+
+#[test]
+fn orders_and_siting_match_ffmpeg() {
+    if !ffmpeg_present() {
+        return;
+    }
+    let src = &source_1440p();
+    let frame = read_yuv(src, PixelFormat::Yuv420p8, 2560, 1440);
+    let (w, h) = (2560u32, 1440u32);
+    let size = (w * h * 4) as usize;
+    let mut ours = vec![0u8; size];
+
+    let bgra = make(
+        "bgra-bt709-tv",
+        &[
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
+            "-s",
+            "2560x1440",
+            "-i",
+            &path(src),
+            "-vf",
+            "scale=in_color_matrix=bt709:in_range=tv:flags=neighbor+accurate_rnd+full_chroma_int",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "bgra",
+        ],
+    );
+    let theirs = std::fs::read(path(&bgra)).unwrap();
+    yuv_to_packed(
+        &frame,
+        ColorSpec::BT709,
+        Chroma::Nearest,
+        PackedMut::new(w, h, Order::Bgra, &mut ours),
+    )
+    .unwrap();
+    let p = psnr(&ours, &theirs, false);
+    println!("yuv to bgra: PSNR {p:.1}");
+    assert!(p > 70.0, "yuv to bgra: {p}");
+
+    let back = make(
+        "bgr0-to-yuv-bt709-tv-area",
+        &[
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "bgr0",
+            "-s",
+            "2560x1440",
+            "-i",
+            &path(&bgra),
+            "-vf",
+            "scale=out_color_matrix=bt709:out_range=tv:flags=area+accurate_rnd",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+    );
+    let expect = read_yuv(&back, PixelFormat::Yuv420p8, w, h);
+    let mut got = Frame::new(PixelFormat::Yuv420p8, 0, 0, 0, frame.time_base);
+    let spec = ColorSpec::BT709.with_siting(Siting::Centre);
+    packed_to_yuv(
+        Packed::new(w, h, Order::Bgrx, &theirs),
+        spec,
+        PixelFormat::Yuv420p8,
+        &mut got,
+    )
+    .unwrap();
+    let p = frame_psnr(&got, &expect);
+    println!(
+        "bgrx to yuv, centre: PSNR {:.1} {:.1} {:.1}",
+        p[0], p[1], p[2]
+    );
+    assert!(p.iter().all(|&v| v > 75.0), "bgrx to yuv: {p:?}");
+
+    for (siting, name) in [(Siting::Left, "left"), (Siting::Centre, "center")] {
+        let theirs = std::fs::read(path(&zscale_rgba(src, name))).unwrap();
+        let spec = ColorSpec::BT709.with_siting(siting);
+        yuv_to_packed(
+            &frame,
+            spec,
+            Chroma::Bilinear,
+            PackedMut::new(w, h, Order::Rgba, &mut ours),
+        )
+        .unwrap();
+        let p = psnr(&ours, &theirs, false);
+        println!("yuv to rgba, bilinear chroma, {name}: PSNR {p:.1}");
+        assert!(p > 80.0, "bilinear chroma {name}: {p}");
+    }
+
+    let rgba = zscale_rgba(src, "left");
+    let left = make(
+        "rgba-to-yuv-bt709-tv-left",
+        &[
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+            "-s",
+            "2560x1440",
+            "-i",
+            &path(&rgba),
+            "-vf",
+            "format=gbrp,zscale=rin=full:tin=709:pin=709:m=709:r=limited:t=709:p=709:chromal=left:filter=bilinear,format=yuv420p",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+    );
+    let expect = read_yuv(&left, PixelFormat::Yuv420p8, w, h);
+    let bytes = std::fs::read(path(&rgba)).unwrap();
+    packed_to_yuv(
+        Packed::new(w, h, Order::Rgba, &bytes),
+        ColorSpec::BT709,
+        PixelFormat::Yuv420p8,
+        &mut got,
+    )
+    .unwrap();
+    let p = frame_psnr(&got, &expect);
+    println!(
+        "rgba to yuv, left: PSNR {:.1} {:.1} {:.1}",
+        p[0], p[1], p[2]
+    );
+    assert!(p.iter().all(|&v| v > 53.0), "rgba to yuv left: {p:?}");
+
+    let centre = make(
+        "zscale-lanczos-1920x1080-center",
+        &[
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
+            "-s",
+            "2560x1440",
+            "-i",
+            &path(src),
+            "-vf",
+            "zscale=w=1920:h=1080:filter=lanczos:chromal=center:chromalin=center",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+    );
+    let expect = read_yuv(&centre, PixelFormat::Yuv420p8, 1920, 1080);
+    let scaler = Scaler::new(w, h, 1920, 1080, PixelFormat::Yuv420p8, Kernel::Lanczos)
+        .unwrap()
+        .siting(Siting::Centre);
+    let mut scaled = Frame::new(PixelFormat::Yuv420p8, 0, 0, 0, frame.time_base);
+    scaler.run(&frame, &mut scaled).unwrap();
+    let p = frame_psnr(&scaled, &expect);
+    println!(
+        "scale lanczos, centre siting: PSNR {:.1} {:.1} {:.1}",
+        p[0], p[1], p[2]
+    );
+    assert!(p.iter().all(|&v| v > 60.0), "scale centre: {p:?}");
 }
 
 fn tone(freq: f64, rate: u32, seconds: f64, amp: f64) -> Vec<f32> {
@@ -740,6 +1014,59 @@ fn bench() {
         s.run(&small, &mut big).unwrap()
     });
 
+    let mut bgra = vec![0u8; 2560 * 1440 * 4];
+    rate("yuv to bgra 1440p 8-bit", 300, || {
+        yuv_to_packed(
+            &src,
+            ColorSpec::BT709,
+            Chroma::Nearest,
+            PackedMut::new(2560, 1440, Order::Bgra, &mut bgra),
+        )
+        .unwrap()
+    });
+    rate("yuv to bgra 1440p 8-bit, bilinear chroma", 300, || {
+        yuv_to_packed(
+            &src,
+            ColorSpec::BT709,
+            Chroma::Bilinear,
+            PackedMut::new(2560, 1440, Order::Bgra, &mut bgra),
+        )
+        .unwrap()
+    });
+    let mut out_yuv = Frame::new(PixelFormat::Yuv420p8, 0, 0, 0, src.time_base);
+    rate("bgrx to yuv 1440p 8-bit", 300, || {
+        packed_to_yuv(
+            Packed::new(2560, 1440, Order::Bgrx, &bgra),
+            ColorSpec::BT709,
+            PixelFormat::Yuv420p8,
+            &mut out_yuv,
+        )
+        .unwrap()
+    });
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    pool.install(|| {
+        rate("yuv to bgra 1440p 8-bit, 1 thread", 60, || {
+            yuv_to_packed(
+                &src,
+                ColorSpec::BT709,
+                Chroma::Nearest,
+                PackedMut::new(2560, 1440, Order::Bgra, &mut bgra),
+            )
+            .unwrap()
+        });
+        rate("bgrx to yuv 1440p 8-bit, 1 thread", 60, || {
+            packed_to_yuv(
+                Packed::new(2560, 1440, Order::Bgrx, &bgra),
+                ColorSpec::BT709,
+                PixelFormat::Yuv420p8,
+                &mut out_yuv,
+            )
+            .unwrap()
+        });
+    });
     let mut rgba = Rgba::new(0, 0);
     rate("yuv to rgba 1440p 8-bit", 300, || {
         yuv_to_rgba(&src, ColorSpec::BT709, &mut rgba).unwrap()
@@ -851,4 +1178,290 @@ fn bench() {
         "true-peak limiter 48 kHz stereo: {:.0}x real time",
         seconds / s
     );
+}
+
+fn wall(args: &[String]) -> f64 {
+    let mut best = f64::MAX;
+    for _ in 0..3 {
+        let t = Instant::now();
+        let out = Command::new("ffmpeg")
+            .args(["-hide_banner", "-nostats", "-v", "error", "-y"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "ffmpeg {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        best = best.min(t.elapsed().as_secs_f64());
+    }
+    best
+}
+
+fn ffmpeg_rate(input: &[&str], filter: (&str, &str), threads: usize, units: f64) -> f64 {
+    let run = |f: &str| -> f64 {
+        let mut a: Vec<String> = vec![
+            "-threads".into(),
+            threads.to_string(),
+            "-filter_threads".into(),
+            threads.to_string(),
+        ];
+        a.extend(input.iter().map(|s| s.to_string()));
+        a.extend([filter.0.to_string(), f.replace("{t}", &threads.to_string())]);
+        a.extend(["-f".to_string(), "null".into(), "-".into()]);
+        wall(&a)
+    };
+    let pass = if filter.0 == "-af" { "anull" } else { "null" };
+    let t = (run(filter.1) - run(pass)).max(1e-6);
+    units / t
+}
+
+fn ours_rate(units: f64, n: usize, mut f: impl FnMut()) -> f64 {
+    f();
+    let mut best = f64::MAX;
+    for _ in 0..3 {
+        let t = Instant::now();
+        for _ in 0..n {
+            f();
+        }
+        best = best.min(t.elapsed().as_secs_f64() / n as f64);
+    }
+    units / best
+}
+
+#[test]
+#[ignore]
+fn compare() {
+    if !ffmpeg_present() {
+        return;
+    }
+    let threads = rayon::current_num_threads();
+    let one = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let src_name = source_1440p();
+    let src_path = path(&src_name);
+    let src = read_yuv(&src_name, PixelFormat::Yuv420p8, 2560, 1440);
+    let frames = 120usize;
+    let frames_s = frames.to_string();
+    let yuv_in = [
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "yuv420p",
+        "-s",
+        "2560x1440",
+        "-stream_loop",
+        "-1",
+        "-i",
+        &src_path,
+        "-frames:v",
+        &frames_s,
+    ];
+    let mut bgra = vec![0u8; 2560 * 1440 * 4];
+    yuv_to_packed(
+        &src,
+        ColorSpec::BT709,
+        Chroma::Nearest,
+        PackedMut::new(2560, 1440, Order::Bgra, &mut bgra),
+    )
+    .unwrap();
+    let bgra_path = path("compare-bgra.raw");
+    std::fs::write(&bgra_path, &bgra).unwrap();
+    let bgr0_in = [
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "bgr0",
+        "-s",
+        "2560x1440",
+        "-stream_loop",
+        "-1",
+        "-i",
+        &bgra_path,
+        "-frames:v",
+        &frames_s,
+    ];
+    let mut rows: Vec<(String, [f64; 4], &str)> = Vec::new();
+    let mut video = |label: &str, input: &[&str], vf: &str, f: &mut (dyn FnMut() + Send)| {
+        let all = ours_rate(1.0, 40, &mut *f);
+        let single = one.install(|| ours_rate(1.0, 10, &mut *f));
+        let ff_all = ffmpeg_rate(input, ("-vf", vf), threads, frames as f64);
+        let ff_one = ffmpeg_rate(input, ("-vf", vf), 1, frames as f64);
+        println!("{label}: ours {all:.0}/{single:.0} fps, ffmpeg {ff_all:.0}/{ff_one:.0} fps");
+        rows.push((label.to_string(), [all, single, ff_all, ff_one], "fps"));
+    };
+    for (kernel, flag) in [
+        (Kernel::Bilinear, "bilinear"),
+        (Kernel::Bicubic, "bicubic"),
+        (Kernel::Lanczos, "lanczos"),
+    ] {
+        let s = Scaler::new(2560, 1440, 1920, 1080, PixelFormat::Yuv420p8, kernel).unwrap();
+        let mut out = Frame::new(PixelFormat::Yuv420p8, 0, 0, 0, src.time_base);
+        video(
+            &format!("Scale 1440p to 1080p, {flag}"),
+            &yuv_in,
+            &format!("scale=1920:1080:flags={flag}:threads={{t}}"),
+            &mut || s.run(&src, &mut out).unwrap(),
+        );
+    }
+    let mut packed = vec![0u8; 2560 * 1440 * 4];
+    for (order, name) in [(Order::Rgba, "rgba"), (Order::Bgra, "bgra")] {
+        video(
+            &format!("YUV 4:2:0 to {} 1440p", name.to_uppercase()),
+            &yuv_in,
+            &format!("scale=threads={{t}},format={name}"),
+            &mut || {
+                yuv_to_packed(
+                    &src,
+                    ColorSpec::BT709,
+                    Chroma::Nearest,
+                    PackedMut::new(2560, 1440, order, &mut packed),
+                )
+                .unwrap()
+            },
+        );
+    }
+    let mut yuv = Frame::new(PixelFormat::Yuv420p8, 0, 0, 0, src.time_base);
+    video(
+        "BGRX to YUV 4:2:0 1440p",
+        &bgr0_in,
+        "scale=threads={t},format=yuv420p",
+        &mut || {
+            packed_to_yuv(
+                Packed::new(2560, 1440, Order::Bgrx, &bgra),
+                ColorSpec::BT709,
+                PixelFormat::Yuv420p8,
+                &mut yuv,
+            )
+            .unwrap()
+        },
+    );
+    video(
+        "BT.601 to BT.709 1440p",
+        &yuv_in,
+        "colorspace=ispace=bt470bg:irange=tv:iprimaries=bt470bg:itrc=bt709:space=bt709:range=tv:primaries=bt470bg:trc=bt709:format=yuv420p",
+        &mut || {
+            convert_color(
+                &src,
+                ColorSpec::BT601,
+                ColorSpec::BT709,
+                PixelFormat::Yuv420p8,
+                &mut yuv,
+            )
+            .unwrap()
+        },
+    );
+    video("Rotate 90 1440p", &yuv_in, "transpose=1", &mut || {
+        rotate(&src, Rotation::R90, &mut yuv).unwrap()
+    });
+
+    let seconds = 60.0;
+    let noise = |rate: u32, channels: u16| -> (AudioBuffer, String) {
+        let name = make(
+            &format!("compare-noise-{rate}-{channels}"),
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("anoisesrc=color=pink:amplitude=0.5:seed=5:r={rate}:d={seconds}"),
+                "-ac",
+                &channels.to_string(),
+                "-f",
+                "f32le",
+            ],
+        );
+        (read_f32(&name, rate, channels), path(&name))
+    };
+    let mut audio = |label: &str, input: (&AudioBuffer, &str), af: &str, f: &mut dyn FnMut()| {
+        let (buf, file) = input;
+        let rate = buf.rate.to_string();
+        let ch = buf.channels.to_string();
+        let args = ["-f", "f32le", "-ar", &rate, "-ac", &ch, "-i", file];
+        let ours = ours_rate(seconds, 3, &mut *f);
+        let ff = ffmpeg_rate(&args, ("-af", af), 1, seconds);
+        println!("{label}: ours {ours:.0}x, ffmpeg {ff:.0}x real time");
+        rows.push((
+            label.to_string(),
+            [ours, f64::NAN, ff, f64::NAN],
+            "x real time",
+        ));
+    };
+    let (stereo48, f48) = noise(48000, 2);
+    audio(
+        "EBU R128 meter, 48 kHz stereo",
+        (&stereo48, &f48),
+        "ebur128=peak=true:framelog=quiet",
+        &mut || {
+            let mut m = LoudnessMeter::new(48000, 2).unwrap();
+            for c in stereo48.samples.chunks(2 * 1024) {
+                m.process(&AudioBuffer {
+                    samples: c.to_vec(),
+                    rate: 48000,
+                    channels: 2,
+                })
+                .unwrap();
+            }
+        },
+    );
+    let (stereo44, f44) = noise(44100, 2);
+    audio(
+        "Resample 44.1 to 48 kHz stereo",
+        (&stereo44, &f44),
+        "aresample=48000",
+        &mut || {
+            resample(&stereo44, 48000).unwrap();
+        },
+    );
+    let (mono48, fm) = noise(48000, 1);
+    audio(
+        "Resample 48 to 16 kHz mono",
+        (&mono48, &fm),
+        "aresample=16000",
+        &mut || {
+            resample(&mono48, 16000).unwrap();
+        },
+    );
+    audio(
+        "Normalise to -16 LUFS, 48 kHz stereo (ffmpeg: loudnorm)",
+        (&stereo48, &f48),
+        "loudnorm=I=-16:TP=-1.5",
+        &mut || {
+            let mut b = stereo48.clone();
+            normalize(&mut b, -16.0, -1.5).unwrap();
+        },
+    );
+
+    let load = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
+    let mut md = format!(
+        "| Operation | pito-codecs, {threads} threads | pito-codecs, 1 thread | ffmpeg, {threads} threads | ffmpeg, 1 thread | Unit |\n|---|---|---|---|---|---|\n"
+    );
+    let cell = |v: f64| {
+        if v.is_nan() {
+            "–".to_string()
+        } else {
+            format!("{v:.0}")
+        }
+    };
+    for (label, v, unit) in &rows {
+        md += &format!(
+            "| {label} | {} | {} | {} | {} | {unit} |\n",
+            cell(v[0]),
+            cell(v[1]),
+            cell(v[2]),
+            cell(v[3])
+        );
+    }
+    md += &format!(
+        "\n{} ; load average {}\n",
+        ffmpeg_version(),
+        load.split_whitespace()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    println!("{md}");
+    std::fs::write(dir().join("compare.md"), md).unwrap();
 }

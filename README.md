@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/images/decode.gif" width="800" alt="A terminal running pcodec on a 1080p H.264 clip: it probes the file, decodes it at about 590 fps on the CPU and about 1,700 fps on the GPU through VA-API, then encodes it to HEVC on the GPU at about 600 fps."></p>
+<p align="center"><img src="docs/images/decode.gif" width="800" alt="A terminal running pcod on a 1080p H.264 clip: it probes the file, decodes it at about 1,440 fps on the CPU and about 1,700 fps on the GPU through VA-API, then encodes it to HEVC on the GPU at about 620 fps."></p>
 
 # pito-codecs
 
@@ -28,7 +28,6 @@ The GPU route is tested on Linux with VA-API, on an AMD Radeon RX 9060 XT with M
 Known gaps in `v0.1.0`, being worked on now:
 
 - **CPU decode speed.** Our H.264 and H.265 decoders run at 0.3 to 0.7 times ffmpeg's speed on the CPU; the GPU route is faster than ffmpeg's.
-- **VA-API encode quality.** At the same size, our VA-API encodes score about 5 dB lower PSNR than ffmpeg's `h264_vaapi` and `hevc_vaapi`, because quality drifts across a GOP.
 - **CPU H.264 encode quality and speed.** Our CPU H.264 encoder trails libx264 on both.
 
 ## What it is
@@ -39,7 +38,7 @@ Known gaps in `v0.1.0`, being worked on now:
 - **Containers:** MP4, MOV, MKV and WebM read, write and remux; Ogg Opus.
 - **Images:** GIF and WebP, still and animated.
 - **Filters** between decode and encode (`filter`): scaling, colour, geometry, frame rate, overlays, resampling and loudness.
-- **A front for apps** (`media`), which picks the fastest working route for each call. It can probe a file, give the first frame or stills for a filmstrip, play a file, pull its audio as PCM, and export with smart cuts, which copy the middle of each piece and re-encode only the edges.
+- **A front for apps** (`media`), which picks the fastest working route for each call. It can probe a file, give the first frame or stills for a filmstrip, play a file, pull its audio as PCM over any time range or as a stereo mix of its tracks with a gain each, and export with smart cuts, which copy the middle of each piece and re-encode only the edges.
 
 ## Install
 
@@ -47,7 +46,7 @@ Add it as a git dependency at a tag, with the features you need (all are on by d
 
 ```toml
 [dependencies]
-pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v0.1.0", default-features = false, features = ["h264", "mp4"] }
+pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v0.1.2", default-features = false, features = ["h264", "mp4"] }
 ```
 
 | Feature | What it holds |
@@ -117,7 +116,7 @@ let info = probe("clip.mp4".as_ref(), &prefs)?;
 let still = first_frame("clip.mp4".as_ref(), 240, &prefs)?;
 ```
 
-`examples/pcodec.rs` is a small command line over the library, and it is what the GIF above shows: `cargo run --release --example pcodec -- decode clip.mp4 --route gpu`.
+`examples/pcod.rs` is a small command line over the library, and it is what the GIF above shows: `cargo run --release --example pcod -- decode clip.mp4 --route gpu`.
 
 ## Routes
 
@@ -168,7 +167,7 @@ The CPU decoders have improved since this run: H.264 1440p decode on 16 threads 
 Each minor release up to `1.0.0` lands as its group is finished and measured:
 
 - CPU decode at or past ffmpeg's speed for H.264, H.265 and VP9, with hand-written AVX2 kernels.
-- VA-API encode quality matched with ffmpeg's, and the CPU H.264 encoder at libx264's quality per bit.
+- The CPU H.264 encoder at libx264's quality per bit.
 - VP9 decode through VA-API, and a faster VP9 encoder.
 - Opus SILK and hybrid encode for speech.
 - WebP lossless and lossy encode.

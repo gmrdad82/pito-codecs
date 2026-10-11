@@ -13,8 +13,8 @@ use std::process::Command;
 use std::sync::{Arc, OnceLock};
 
 use pito_codecs::media::{
-    Codec, ExportOptions, Piece, Prefs, Rgba, audio_pcm, decode_video, export, first_frame,
-    frames_at, probe,
+    AudioBuffer, Codec, ExportOptions, Piece, Prefs, Rgba, audio_mix, audio_pcm, audio_pcm_range,
+    decode_video, export, first_frame, frames_at, probe,
 };
 
 fn have_ffmpeg() -> bool {
@@ -245,6 +245,60 @@ fn our_route_probes_shows_and_hears_without_ffmpeg() {
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(frames[0].pts, 180);
+}
+
+fn worst(a: &[f32], b: &[f32]) -> f32 {
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0, f32::max)
+}
+
+#[test]
+fn ranged_audio_lines_up_with_the_whole_track_and_mixes_on_every_route() {
+    if !have_ffmpeg() {
+        return;
+    }
+    for (name, prefs) in routes() {
+        for (track, channels, limit) in [(0usize, 2u16, 1e-3f32), (1, 1, 5e-3)] {
+            let whole =
+                audio_pcm_range(clip(), track, 0.0, f64::INFINITY, 48_000, channels, &prefs)
+                    .unwrap();
+            let ch = channels as usize;
+            let mut joined = Vec::new();
+            for (a, b, frames) in [(1.0, 1.5, 24_000), (1.5, 2.25, 36_000), (3.5, 4.5, 48_000)] {
+                let part = audio_pcm_range(clip(), track, a, b, 48_000, channels, &prefs).unwrap();
+                assert_eq!(
+                    (part.frames(), part.channels),
+                    (frames, channels),
+                    "{name} {track}"
+                );
+                joined.extend(part.samples);
+            }
+            let slice = [
+                &whole.samples[48_000 * ch..108_000 * ch],
+                &whole.samples[168_000 * ch..216_000 * ch],
+            ]
+            .concat();
+            let d = worst(&joined, &slice);
+            println!("{name} track {track}: worst sample difference {d}");
+            assert!(d < limit, "{name} track {track}: {d}");
+        }
+        let tail = audio_pcm_range(clip(), 0, 5.5, 9.0, 48_000, 2, &prefs).unwrap();
+        assert_eq!(tail.frames(), 168_000, "{name}");
+        assert!(tail.samples[48_000..].iter().all(|s| *s == 0.0), "{name}");
+
+        let game = audio_pcm_range(clip(), 0, 2.0, 3.0, 44_100, 2, &prefs).unwrap();
+        let alone = audio_mix(clip(), &[1.0, 0.0], 2.0, 3.0, 44_100, &prefs).unwrap();
+        assert_eq!(alone.samples, game.samples, "{name}");
+        let both: AudioBuffer = audio_mix(clip(), &[0.5, 2.0], 2.0, 3.0, 44_100, &prefs).unwrap();
+        assert_eq!(
+            (both.frames(), both.channels, both.rate),
+            (44_100, 2, 44_100)
+        );
+        let rms = |b: &[f32]| (b.iter().map(|s| s * s).sum::<f32>() / b.len() as f32).sqrt();
+        assert!(rms(&both.samples) > 2.0 * rms(&game.samples), "{name}");
+    }
 }
 
 #[test]

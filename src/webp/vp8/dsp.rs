@@ -15,11 +15,13 @@ pub const B_VR: u8 = 6;
 pub const B_VL: u8 = 7;
 pub const B_HD: u8 = 8;
 
+#[cfg(any(test, not(target_arch = "x86_64")))]
 #[inline(always)]
 fn mul1(a: i32) -> i32 {
     (a.wrapping_mul(20091) >> 16).wrapping_add(a)
 }
 
+#[cfg(any(test, not(target_arch = "x86_64")))]
 #[inline(always)]
 fn mul2(a: i32) -> i32 {
     a.wrapping_mul(35468) >> 16
@@ -30,8 +32,90 @@ fn clip8(v: i32) -> u8 {
     v.clamp(0, 255) as u8
 }
 
+#[cfg(target_arch = "x86_64")]
+pub use simd::{fdct, idct_add, nz_zigzag, sse4, sse8, sse16};
+
+#[cfg(not(target_arch = "x86_64"))]
+pub use self::{
+    fdct_scalar as fdct, idct_add_scalar as idct_add, nz_zigzag_scalar as nz_zigzag,
+    sse4_scalar as sse4, sse8_scalar as sse8, sse16_scalar as sse16,
+};
+
+const fn zigzag_lut(high: bool) -> [u16; 256] {
+    let zz = super::tables::ZIGZAG;
+    let mut inv = [0usize; 16];
+    let mut i = 0;
+    while i < 16 {
+        inv[zz[i]] = i;
+        i += 1;
+    }
+    let mut t = [0u16; 256];
+    let mut m = 0;
+    while m < 256 {
+        let mut v = 0u16;
+        let mut b = 0;
+        while b < 8 {
+            if m & (1 << b) != 0 {
+                v |= 1 << inv[b + if high { 8 } else { 0 }];
+            }
+            b += 1;
+        }
+        t[m] = v;
+        m += 1;
+    }
+    t
+}
+
+pub static ZZ_LO: [u16; 256] = zigzag_lut(false);
+pub static ZZ_HI: [u16; 256] = zigzag_lut(true);
+
 #[inline(always)]
-pub fn idct_add(c: &[i16], dst: &mut [u8], off: usize) {
+pub fn natural_to_zigzag(m: u16) -> u16 {
+    ZZ_LO[(m & 0xff) as usize] | ZZ_HI[(m >> 8) as usize]
+}
+
+#[cfg(any(test, not(target_arch = "x86_64")))]
+pub fn nz_zigzag_scalar(l: &[i16; 16]) -> u16 {
+    let mut m = 0u16;
+    for (i, v) in l.iter().enumerate() {
+        m |= ((*v != 0) as u16) << i;
+    }
+    natural_to_zigzag(m)
+}
+
+#[cfg(any(test, not(target_arch = "x86_64")))]
+fn sse_scalar(a: &[u8], ao: usize, b: &[u8], bo: usize, n: usize) -> u64 {
+    let mut s = 0u32;
+    for r in 0..n {
+        for (p, q) in a[ao + r * BPS..ao + r * BPS + n]
+            .iter()
+            .zip(&b[bo + r * BPS..bo + r * BPS + n])
+        {
+            let d = *p as i32 - *q as i32;
+            s += (d * d) as u32;
+        }
+    }
+    s as u64
+}
+
+#[cfg(any(test, not(target_arch = "x86_64")))]
+pub fn sse4_scalar(a: &[u8], ao: usize, b: &[u8], bo: usize) -> u64 {
+    sse_scalar(a, ao, b, bo, 4)
+}
+
+#[cfg(any(test, not(target_arch = "x86_64")))]
+pub fn sse8_scalar(a: &[u8], ao: usize, b: &[u8], bo: usize) -> u64 {
+    sse_scalar(a, ao, b, bo, 8)
+}
+
+#[cfg(any(test, not(target_arch = "x86_64")))]
+pub fn sse16_scalar(a: &[u8], ao: usize, b: &[u8], bo: usize) -> u64 {
+    sse_scalar(a, ao, b, bo, 16)
+}
+
+#[cfg(any(test, not(target_arch = "x86_64")))]
+#[inline(always)]
+pub fn idct_add_scalar(c: &[i16], dst: &mut [u8], off: usize) {
     let c = &c[..16];
     let mut t = [0i32; 16];
     for i in 0..4 {
@@ -91,6 +175,65 @@ pub fn iwht(input: &[i16; 16], out: &mut [i16]) {
         out[(r * 4 + 1) * 16] = ((c + d + 3) >> 3) as i16;
         out[(r * 4 + 2) * 16] = ((a - b + 3) >> 3) as i16;
         out[(r * 4 + 3) * 16] = ((d - c + 3) >> 3) as i16;
+    }
+}
+
+#[cfg(any(test, not(target_arch = "x86_64")))]
+pub fn fdct_scalar(src: &[u8], so: usize, pred: &[u8], po: usize, out: &mut [i16]) {
+    let mut t = [0i32; 16];
+    for i in 0..4 {
+        let s = &src[so + i * BPS..so + i * BPS + 4];
+        let p = &pred[po + i * BPS..po + i * BPS + 4];
+        let d0 = s[0] as i32 - p[0] as i32;
+        let d1 = s[1] as i32 - p[1] as i32;
+        let d2 = s[2] as i32 - p[2] as i32;
+        let d3 = s[3] as i32 - p[3] as i32;
+        let a0 = d0 + d3;
+        let a1 = d1 + d2;
+        let a2 = d1 - d2;
+        let a3 = d0 - d3;
+        t[i * 4] = (a0 + a1) * 8;
+        t[i * 4 + 1] = (a2 * 2217 + a3 * 5352 + 1812) >> 9;
+        t[i * 4 + 2] = (a0 - a1) * 8;
+        t[i * 4 + 3] = (a3 * 2217 - a2 * 5352 + 937) >> 9;
+    }
+    for i in 0..4 {
+        let a0 = t[i] + t[12 + i];
+        let a1 = t[4 + i] + t[8 + i];
+        let a2 = t[4 + i] - t[8 + i];
+        let a3 = t[i] - t[12 + i];
+        out[i] = ((a0 + a1 + 7) >> 4) as i16;
+        out[4 + i] = (((a2 * 2217 + a3 * 5352 + 12000) >> 16) + (a3 != 0) as i32) as i16;
+        out[8 + i] = ((a0 - a1 + 7) >> 4) as i16;
+        out[12 + i] = ((a3 * 2217 - a2 * 5352 + 51000) >> 16) as i16;
+    }
+}
+
+pub fn fwht(dc: &[i16], out: &mut [i16; 16]) {
+    let mut t = [0i32; 16];
+    for i in 0..4 {
+        let a0 = dc[i * 64] as i32 + dc[i * 64 + 32] as i32;
+        let a1 = dc[i * 64 + 16] as i32 + dc[i * 64 + 48] as i32;
+        let a2 = dc[i * 64 + 16] as i32 - dc[i * 64 + 48] as i32;
+        let a3 = dc[i * 64] as i32 - dc[i * 64 + 32] as i32;
+        t[i * 4] = a0 + a1;
+        t[i * 4 + 1] = a3 + a2;
+        t[i * 4 + 2] = a3 - a2;
+        t[i * 4 + 3] = a0 - a1;
+    }
+    for i in 0..4 {
+        let a0 = t[i] + t[8 + i];
+        let a1 = t[4 + i] + t[12 + i];
+        let a2 = t[4 + i] - t[12 + i];
+        let a3 = t[i] - t[8 + i];
+        let b0 = a0 + a1;
+        let b1 = a3 + a2;
+        let b2 = a3 - a2;
+        let b3 = a0 - a1;
+        out[i] = (b0 >> 1) as i16;
+        out[4 + i] = (b1 >> 1) as i16;
+        out[8 + i] = (b2 >> 1) as i16;
+        out[12 + i] = (b3 >> 1) as i16;
     }
 }
 
@@ -308,5 +451,213 @@ pub fn pred4(mode: u8, d: &mut [u8], off: usize) {
     }
     for (r, row) in o.iter().enumerate() {
         d[off + r * BPS..off + r * BPS + 4].copy_from_slice(row);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+mod simd {
+    use super::BPS;
+    use std::arch::x86_64::*;
+
+    #[inline(always)]
+    fn mul1(x: __m128i) -> __m128i {
+        unsafe { _mm_add_epi16(x, _mm_mulhi_epi16(x, _mm_set1_epi16(20091))) }
+    }
+
+    #[inline(always)]
+    fn mul2(x: __m128i) -> __m128i {
+        unsafe { _mm_add_epi16(x, _mm_mulhi_epi16(x, _mm_set1_epi16(-30068))) }
+    }
+
+    #[inline(always)]
+    fn ipass(i0: __m128i, i1: __m128i, i2: __m128i, i3: __m128i) -> [__m128i; 4] {
+        unsafe {
+            let a = _mm_add_epi16(i0, i2);
+            let b = _mm_sub_epi16(i0, i2);
+            let c = _mm_sub_epi16(mul2(i1), mul1(i3));
+            let d = _mm_add_epi16(mul1(i1), mul2(i3));
+            [
+                _mm_add_epi16(a, d),
+                _mm_add_epi16(b, c),
+                _mm_sub_epi16(b, c),
+                _mm_sub_epi16(a, d),
+            ]
+        }
+    }
+
+    #[inline(always)]
+    fn transpose(r: [__m128i; 4]) -> [__m128i; 4] {
+        unsafe {
+            let t0 = _mm_unpacklo_epi16(r[0], r[1]);
+            let t1 = _mm_unpacklo_epi16(r[2], r[3]);
+            let u0 = _mm_unpacklo_epi32(t0, t1);
+            let u1 = _mm_unpackhi_epi32(t0, t1);
+            [
+                u0,
+                _mm_unpackhi_epi64(u0, u0),
+                u1,
+                _mm_unpackhi_epi64(u1, u1),
+            ]
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn load4(p: *const u8) -> __m128i {
+        unsafe { _mm_cvtsi32_si128(std::ptr::read_unaligned(p as *const i32)) }
+    }
+
+    #[inline(always)]
+    pub fn idct_add(c: &[i16], dst: &mut [u8], off: usize) {
+        assert!(c.len() >= 16 && off + 3 * BPS + 4 <= dst.len());
+        unsafe {
+            let p = c.as_ptr();
+            let r = [
+                _mm_loadl_epi64(p.cast()),
+                _mm_loadl_epi64(p.add(4).cast()),
+                _mm_loadl_epi64(p.add(8).cast()),
+                _mm_loadl_epi64(p.add(12).cast()),
+            ];
+            let t = transpose(ipass(r[0], r[1], r[2], r[3]));
+            let o = ipass(_mm_add_epi16(t[0], _mm_set1_epi16(4)), t[1], t[2], t[3]);
+            let o = transpose([
+                _mm_srai_epi16(o[0], 3),
+                _mm_srai_epi16(o[1], 3),
+                _mm_srai_epi16(o[2], 3),
+                _mm_srai_epi16(o[3], 3),
+            ]);
+            let z = _mm_setzero_si128();
+            let d = dst.as_mut_ptr().add(off);
+            for (i, row) in o.iter().enumerate() {
+                let q = d.add(i * BPS);
+                let px = _mm_unpacklo_epi8(load4(q), z);
+                let v = _mm_packus_epi16(_mm_add_epi16(px, *row), z);
+                std::ptr::write_unaligned(q as *mut i32, _mm_cvtsi128_si32(v));
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub fn fdct(src: &[u8], so: usize, pred: &[u8], po: usize, out: &mut [i16]) {
+        assert!(so + 3 * BPS + 4 <= src.len() && po + 3 * BPS + 4 <= pred.len() && out.len() >= 16);
+        unsafe {
+            let z = _mm_setzero_si128();
+            let sp = src.as_ptr().add(so);
+            let pp = pred.as_ptr().add(po);
+            let d: [__m128i; 4] = std::array::from_fn(|r| {
+                _mm_sub_epi16(
+                    _mm_unpacklo_epi8(load4(sp.add(r * BPS)), z),
+                    _mm_unpacklo_epi8(load4(pp.add(r * BPS)), z),
+                )
+            });
+            let c = transpose(d);
+            let a0 = _mm_add_epi16(c[0], c[3]);
+            let a1 = _mm_add_epi16(c[1], c[2]);
+            let a2 = _mm_sub_epi16(c[1], c[2]);
+            let a3 = _mm_sub_epi16(c[0], c[3]);
+            let k1 = _mm_setr_epi16(2217, 5352, 2217, 5352, 2217, 5352, 2217, 5352);
+            let k3 = _mm_setr_epi16(-5352, 2217, -5352, 2217, -5352, 2217, -5352, 2217);
+            let m = _mm_unpacklo_epi16(a2, a3);
+            let t0 = _mm_slli_epi16(_mm_add_epi16(a0, a1), 3);
+            let t2 = _mm_slli_epi16(_mm_sub_epi16(a0, a1), 3);
+            let t1 = _mm_srai_epi32(
+                _mm_add_epi32(_mm_madd_epi16(m, k1), _mm_set1_epi32(1812)),
+                9,
+            );
+            let t3 = _mm_srai_epi32(_mm_add_epi32(_mm_madd_epi16(m, k3), _mm_set1_epi32(937)), 9);
+            let r = transpose([t0, _mm_packs_epi32(t1, t1), t2, _mm_packs_epi32(t3, t3)]);
+            let a0 = _mm_add_epi16(r[0], r[3]);
+            let a1 = _mm_add_epi16(r[1], r[2]);
+            let a2 = _mm_sub_epi16(r[1], r[2]);
+            let a3 = _mm_sub_epi16(r[0], r[3]);
+            let k7 = _mm_set1_epi16(7);
+            let o0 = _mm_srai_epi16(_mm_add_epi16(_mm_add_epi16(a0, a1), k7), 4);
+            let o2 = _mm_srai_epi16(_mm_add_epi16(_mm_sub_epi16(a0, a1), k7), 4);
+            let m = _mm_unpacklo_epi16(a2, a3);
+            let o1 = _mm_srai_epi32(
+                _mm_add_epi32(_mm_madd_epi16(m, k1), _mm_set1_epi32(12000)),
+                16,
+            );
+            let o3 = _mm_srai_epi32(
+                _mm_add_epi32(_mm_madd_epi16(m, k3), _mm_set1_epi32(51000)),
+                16,
+            );
+            let ne = _mm_andnot_si128(_mm_cmpeq_epi16(a3, z), _mm_set1_epi16(1));
+            let o1 = _mm_add_epi16(_mm_packs_epi32(o1, o1), ne);
+            let o3 = _mm_packs_epi32(o3, o3);
+            let p = out.as_mut_ptr();
+            _mm_storeu_si128(p.cast(), _mm_unpacklo_epi64(o0, o1));
+            _mm_storeu_si128(p.add(8).cast(), _mm_unpacklo_epi64(o2, o3));
+        }
+    }
+
+    #[inline(always)]
+    pub fn nz_zigzag(l: &[i16; 16]) -> u16 {
+        unsafe {
+            let p = l.as_ptr();
+            let v = _mm_packs_epi16(_mm_loadu_si128(p.cast()), _mm_loadu_si128(p.add(8).cast()));
+            let zero = _mm_movemask_epi8(_mm_cmpeq_epi8(v, _mm_setzero_si128())) as u16;
+            super::natural_to_zigzag(!zero)
+        }
+    }
+
+    #[inline(always)]
+    fn rows_sse(a: *const u8, b: *const u8, n: usize, wide: bool) -> u64 {
+        unsafe {
+            let z = _mm_setzero_si128();
+            let mut acc = _mm_setzero_si128();
+            for r in 0..n {
+                let (x, y) = if wide {
+                    (
+                        _mm_loadu_si128(a.add(r * BPS).cast()),
+                        _mm_loadu_si128(b.add(r * BPS).cast()),
+                    )
+                } else {
+                    (
+                        _mm_loadl_epi64(a.add(r * BPS).cast()),
+                        _mm_loadl_epi64(b.add(r * BPS).cast()),
+                    )
+                };
+                let dl = _mm_sub_epi16(_mm_unpacklo_epi8(x, z), _mm_unpacklo_epi8(y, z));
+                acc = _mm_add_epi32(acc, _mm_madd_epi16(dl, dl));
+                if wide {
+                    let dh = _mm_sub_epi16(_mm_unpackhi_epi8(x, z), _mm_unpackhi_epi8(y, z));
+                    acc = _mm_add_epi32(acc, _mm_madd_epi16(dh, dh));
+                }
+            }
+            let s = _mm_add_epi32(acc, _mm_shuffle_epi32(acc, 0b01_00_11_10));
+            let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b10_11_00_01));
+            _mm_cvtsi128_si32(s) as u32 as u64
+        }
+    }
+
+    #[inline(always)]
+    pub fn sse16(a: &[u8], ao: usize, b: &[u8], bo: usize) -> u64 {
+        assert!(ao + 15 * BPS + 16 <= a.len() && bo + 15 * BPS + 16 <= b.len());
+        unsafe { rows_sse(a.as_ptr().add(ao), b.as_ptr().add(bo), 16, true) }
+    }
+
+    #[inline(always)]
+    pub fn sse8(a: &[u8], ao: usize, b: &[u8], bo: usize) -> u64 {
+        assert!(ao + 7 * BPS + 8 <= a.len() && bo + 7 * BPS + 8 <= b.len());
+        unsafe { rows_sse(a.as_ptr().add(ao), b.as_ptr().add(bo), 8, false) }
+    }
+
+    #[inline(always)]
+    pub fn sse4(a: &[u8], ao: usize, b: &[u8], bo: usize) -> u64 {
+        assert!(ao + 3 * BPS + 4 <= a.len() && bo + 3 * BPS + 4 <= b.len());
+        unsafe {
+            let z = _mm_setzero_si128();
+            let (pa, pb) = (a.as_ptr().add(ao), b.as_ptr().add(bo));
+            let x = _mm_unpacklo_epi32(load4(pa), load4(pa.add(BPS)));
+            let x2 = _mm_unpacklo_epi32(load4(pa.add(2 * BPS)), load4(pa.add(3 * BPS)));
+            let y = _mm_unpacklo_epi32(load4(pb), load4(pb.add(BPS)));
+            let y2 = _mm_unpacklo_epi32(load4(pb.add(2 * BPS)), load4(pb.add(3 * BPS)));
+            let d0 = _mm_sub_epi16(_mm_unpacklo_epi8(x, z), _mm_unpacklo_epi8(y, z));
+            let d1 = _mm_sub_epi16(_mm_unpacklo_epi8(x2, z), _mm_unpacklo_epi8(y2, z));
+            let acc = _mm_add_epi32(_mm_madd_epi16(d0, d0), _mm_madd_epi16(d1, d1));
+            let s = _mm_add_epi32(acc, _mm_shuffle_epi32(acc, 0b01_00_11_10));
+            let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b10_11_00_01));
+            _mm_cvtsi128_si32(s) as u32 as u64
+        }
     }
 }
