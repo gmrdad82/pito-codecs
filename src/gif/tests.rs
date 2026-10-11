@@ -223,6 +223,38 @@ fn ffmpeg_decodes_ours_exactly() {
 }
 
 #[test]
+fn batches_do_not_change_the_output() {
+    if !ffmpeg_present() {
+        return;
+    }
+    let src = source("src", 160, 120, 30);
+    let delays = vec![4u16; src.len()];
+    let small = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .unwrap();
+    for dither in [Dither::FloydSteinberg, Dither::Ordered] {
+        let opts = EncodeOptions {
+            dither,
+            ..EncodeOptions::default()
+        };
+        let whole = encode(&src, &delays, opts);
+        let chunked = small.install(|| encode(&src, &delays, opts));
+        assert!(whole == chunked, "{dither:?}: encode in batches");
+        let refs: Vec<&Rgba> = src.iter().collect();
+        let palette = Palette::from_frames(&refs, 255);
+        let streamed = small.install(|| {
+            let mut e = Encoder::with_palette(160, 120, opts, palette);
+            for (f, &d) in src.iter().zip(&delays) {
+                e.push(f.clone(), d);
+            }
+            e.finish()
+        });
+        assert!(whole == streamed, "{dither:?}: streamed");
+    }
+}
+
+#[test]
 fn transparency_and_still_frames_survive() {
     if !ffmpeg_present() {
         return;
@@ -442,17 +474,64 @@ fn speed_against_ffmpeg() {
         let ours_name = format!("speed-ours-{w}.gif");
         let data = std::fs::read(path(&ours_name)).unwrap();
         let mut frames = 0;
+        let mut first = 0.0;
         let ours_s = timed(|| {
+            let t = std::time::Instant::now();
             let mut d = Decoder::new(&data).unwrap();
             while d.next_frame().unwrap().is_some() {
+                if frames == 0 {
+                    first = t.elapsed().as_secs_f64();
+                }
                 frames += 1;
             }
         });
         let ff_s = timed(|| ffmpeg(&["-i", &path(&ours_name), "-f", "null", "-"]));
         eprintln!(
-            "decode {w}x{h}: ours {:.0} fps, ffmpeg {:.0} fps",
+            "decode {w}x{h}: ours {:.0} fps (first frame {:.1} ms), ffmpeg {:.0} fps",
             frames as f64 / ours_s,
+            first * 1e3,
             frames as f64 / ff_s
         );
+    }
+}
+
+#[test]
+fn damaged_files_never_panic() {
+    let mut frames = Vec::new();
+    for k in 0..4u32 {
+        let mut f = Rgba::new(40, 30);
+        for (i, p) in f.data.chunks_exact_mut(4).enumerate() {
+            let v = (i as u32 * 7 + k * 50) as u8;
+            p.copy_from_slice(&[v, v ^ 0x5A, (i as u32 / 40 * 8) as u8, 255]);
+        }
+        frames.push(f);
+    }
+    let good = encode(&frames, &[5; 4], EncodeOptions::default());
+    assert_eq!(decode(&good).unwrap().frames.len(), 4);
+    let mut seed = 0x9E37_79B9u32;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed as usize
+    };
+    for round in 0..400 {
+        let mut bad = good.clone();
+        for _ in 0..1 + round % 8 {
+            let at = next() % bad.len();
+            bad[at] = next() as u8;
+        }
+        if round % 5 == 0 {
+            bad.truncate(next() % bad.len());
+        }
+        if let Ok(mut d) = Decoder::new(&bad) {
+            let mut n = 0;
+            while let Ok(Some(_)) = d.next_frame() {
+                n += 1;
+                if n > 1000 {
+                    break;
+                }
+            }
+        }
     }
 }

@@ -1,14 +1,16 @@
 mod bits;
 mod dec;
 mod dsp;
+mod enc;
 mod filter;
 mod tables;
 #[cfg(all(test, target_os = "linux"))]
 mod tests;
+mod tokens;
 mod yuv;
 
 use super::Options;
-use crate::media::{Error, Result};
+use crate::media::Result;
 
 pub(crate) fn info(data: &[u8]) -> Result<(u32, u32)> {
     let (w, h) = dec::size(data)?;
@@ -24,11 +26,15 @@ pub(crate) fn decode_into(data: &[u8], out: &mut [u8]) -> Result<()> {
     dec::decode_rgba(data, out)
 }
 
-pub(crate) fn encode(
-    _rgba: &[u8],
-    _width: u32,
-    _height: u32,
-    _options: &Options,
-) -> Result<Vec<u8>> {
-    Err(Error::Unsupported("webp: lossy encode".into()))
+pub(crate) fn encode(rgba: &[u8], width: u32, height: u32, options: &Options) -> Result<Vec<u8>> {
+    enc::encode(
+        rgba,
+        width as usize,
+        height as usize,
+        &enc::Params {
+            quality: options.quality,
+            effort: options.effort,
+            exact: options.exact,
+        },
+    )
 }
