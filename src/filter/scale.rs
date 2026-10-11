@@ -64,6 +64,8 @@ struct Taps {
     reach: usize,
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     packed: Vec<i16>,
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    quad: Vec<i16>,
 }
 
 impl Taps {
@@ -103,6 +105,15 @@ impl Taps {
             }
         }
         let reach = start.iter().max().copied().unwrap_or(0) + blocks * 8;
+        let mut quad = Vec::new();
+        if n <= 4 {
+            quad = vec![0i16; dst.div_ceil(4) * 16];
+            for j in 0..dst {
+                for t in 0..n {
+                    quad[j / 4 * 16 + j % 4 * 4 + t] = coef[j * n + t];
+                }
+            }
+        }
         Taps {
             n,
             start,
@@ -110,6 +121,7 @@ impl Taps {
             blocks,
             reach,
             packed,
+            quad,
         }
     }
 }
@@ -452,6 +464,38 @@ mod x86 {
         let order = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
         let t = tmp.as_ptr();
         let mut x = 0;
+        if taps.n <= 4 && taps.quad.len() >= width.div_ceil(4) * 16 {
+            let order = _mm256_setr_epi32(0, 1, 4, 5, 2, 3, 6, 7);
+            let q = taps.quad.as_ptr();
+            let at = |p: usize| unsafe { (t.add(taps.start[p]) as *const i64).read_unaligned() };
+            while x + 8 <= width {
+                let a = _mm256_setr_epi64x(at(x), at(x + 1), at(x + 2), at(x + 3));
+                let b = _mm256_setr_epi64x(at(x + 4), at(x + 5), at(x + 6), at(x + 7));
+                let (wa, wb) = unsafe {
+                    (
+                        _mm256_loadu_si256(q.add(x / 4 * 16) as *const __m256i),
+                        _mm256_loadu_si256(q.add(x / 4 * 16 + 16) as *const __m256i),
+                    )
+                };
+                let h = _mm256_hadd_epi32(_mm256_madd_epi16(a, wa), _mm256_madd_epi16(b, wb));
+                let h = _mm256_permutevar8x32_epi32(h, order);
+                let v = _mm256_sra_epi32(_mm256_add_epi32(h, round), count);
+                let v = _mm256_min_epi32(_mm256_max_epi32(v, zero), max);
+                let v = _mm256_castsi256_si128(_mm256_permute4x64_epi64::<8>(_mm256_packus_epi32(
+                    v, v,
+                )));
+                unsafe {
+                    let o = out.as_mut_ptr().add(x);
+                    if S::BYTES == 1 {
+                        _mm_storel_epi64(o as *mut __m128i, _mm_packus_epi16(v, v));
+                    } else {
+                        _mm_storeu_si128(o as *mut __m128i, v);
+                    }
+                }
+                x += 8;
+            }
+            return x;
+        }
         while x + 8 <= width {
             let mut r = [zero; 4];
             for (k, acc) in r.iter_mut().enumerate() {
