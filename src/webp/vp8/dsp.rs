@@ -15,13 +15,13 @@ pub const B_VR: u8 = 6;
 pub const B_VL: u8 = 7;
 pub const B_HD: u8 = 8;
 
-#[cfg(any(test, not(target_arch = "x86_64")))]
+#[cfg(any(all(test, target_os = "linux"), not(target_arch = "x86_64")))]
 #[inline(always)]
 fn mul1(a: i32) -> i32 {
     (a.wrapping_mul(20091) >> 16).wrapping_add(a)
 }
 
-#[cfg(any(test, not(target_arch = "x86_64")))]
+#[cfg(any(all(test, target_os = "linux"), not(target_arch = "x86_64")))]
 #[inline(always)]
 fn mul2(a: i32) -> i32 {
     a.wrapping_mul(35468) >> 16
@@ -74,7 +74,7 @@ pub fn natural_to_zigzag(m: u16) -> u16 {
     ZZ_LO[(m & 0xff) as usize] | ZZ_HI[(m >> 8) as usize]
 }
 
-#[cfg(any(test, not(target_arch = "x86_64")))]
+#[cfg(any(all(test, target_os = "linux"), not(target_arch = "x86_64")))]
 pub fn nz_zigzag_scalar(l: &[i16; 16]) -> u16 {
     let mut m = 0u16;
     for (i, v) in l.iter().enumerate() {
@@ -83,7 +83,7 @@ pub fn nz_zigzag_scalar(l: &[i16; 16]) -> u16 {
     natural_to_zigzag(m)
 }
 
-#[cfg(any(test, not(target_arch = "x86_64")))]
+#[cfg(any(all(test, target_os = "linux"), not(target_arch = "x86_64")))]
 fn sse_scalar(a: &[u8], ao: usize, b: &[u8], bo: usize, n: usize) -> u64 {
     let mut s = 0u32;
     for r in 0..n {
@@ -98,22 +98,22 @@ fn sse_scalar(a: &[u8], ao: usize, b: &[u8], bo: usize, n: usize) -> u64 {
     s as u64
 }
 
-#[cfg(any(test, not(target_arch = "x86_64")))]
+#[cfg(any(all(test, target_os = "linux"), not(target_arch = "x86_64")))]
 pub fn sse4_scalar(a: &[u8], ao: usize, b: &[u8], bo: usize) -> u64 {
     sse_scalar(a, ao, b, bo, 4)
 }
 
-#[cfg(any(test, not(target_arch = "x86_64")))]
+#[cfg(any(all(test, target_os = "linux"), not(target_arch = "x86_64")))]
 pub fn sse8_scalar(a: &[u8], ao: usize, b: &[u8], bo: usize) -> u64 {
     sse_scalar(a, ao, b, bo, 8)
 }
 
-#[cfg(any(test, not(target_arch = "x86_64")))]
+#[cfg(any(all(test, target_os = "linux"), not(target_arch = "x86_64")))]
 pub fn sse16_scalar(a: &[u8], ao: usize, b: &[u8], bo: usize) -> u64 {
     sse_scalar(a, ao, b, bo, 16)
 }
 
-#[cfg(any(test, not(target_arch = "x86_64")))]
+#[cfg(any(all(test, target_os = "linux"), not(target_arch = "x86_64")))]
 #[inline(always)]
 pub fn idct_add_scalar(c: &[i16], dst: &mut [u8], off: usize) {
     let c = &c[..16];
@@ -178,7 +178,7 @@ pub fn iwht(input: &[i16; 16], out: &mut [i16]) {
     }
 }
 
-#[cfg(any(test, not(target_arch = "x86_64")))]
+#[cfg(any(all(test, target_os = "linux"), not(target_arch = "x86_64")))]
 pub fn fdct_scalar(src: &[u8], so: usize, pred: &[u8], po: usize, out: &mut [i16]) {
     let mut t = [0i32; 16];
     for i in 0..4 {

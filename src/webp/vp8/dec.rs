@@ -922,7 +922,7 @@ pub fn decode_rgba(data: &[u8], out: &mut [u8]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub fn decode(data: &[u8]) -> Result<Frame> {
     let mut parser = Parser::new(data)?;
     let mut f = Frame::new(parser.hdr.width, parser.hdr.height);

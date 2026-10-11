@@ -183,7 +183,7 @@ impl Matrix {
     }
 }
 
-#[cfg(any(test, not(target_arch = "x86_64")))]
+#[cfg(any(all(test, target_os = "linux"), not(target_arch = "x86_64")))]
 pub fn quantize_scalar(m: &Matrix, c: &[i16; 16], first: usize, out: &mut [i16; 16]) -> bool {
     let mut nz = false;
     for i in 0..16 {
@@ -203,7 +203,7 @@ pub fn quantize_scalar(m: &Matrix, c: &[i16; 16], first: usize, out: &mut [i16; 
 }
 
 #[cfg(not(target_arch = "x86_64"))]
-use quantize_scalar as quantize;
+pub use quantize_scalar as quantize;
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
