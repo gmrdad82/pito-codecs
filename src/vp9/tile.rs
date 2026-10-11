@@ -24,6 +24,7 @@ pub struct FrameShared<'a> {
     pub seg_q: [[[i32; 2]; 2]; 8],
     pub counting: bool,
     pub pools: &'a crate::vp9::frame::Pools,
+    pub dst: &'a Frame,
 }
 
 pub struct Strip {
@@ -31,9 +32,6 @@ pub struct Strip {
     pub mi_col_end: usize,
     pub mi: Vec<MiInfo>,
     pub seg_ids: Vec<u8>,
-    pub planes: [Vec<u16>; 3],
-    pub strides: [usize; 3],
-    pub x_off: [usize; 3],
     pub counts: Box<Counts>,
     pub compound_blocks: u64,
     pub scaled_blocks: u64,
@@ -72,6 +70,8 @@ pub struct TileDecoder<'a> {
     h: &'a FrameHeader,
     fc: &'a FrameContext,
     pub strip: Strip,
+    planes: [&'a mut [u16]; 3],
+    strides: [usize; 3],
     mi_cols: usize,
     mi_rows: usize,
     ss_x: usize,
@@ -91,7 +91,6 @@ pub struct TileDecoder<'a> {
     best_mv: [Mv; 2],
     coefs: Vec<i32>,
     token_cache: Vec<u8>,
-    pred: Vec<u16>,
     pred2: Vec<u16>,
     mc_tmp: Vec<u16>,
     mc_win: Vec<u16>,
@@ -108,24 +107,12 @@ impl<'a> TileDecoder<'a> {
         );
         let sb_rows = h.sb64_rows as usize;
         let sb_cols = h.sb64_cols as usize;
-        let strip_w = (mi_col_end - mi_col_start).div_ceil(8) * 64;
-        let strip_h = sb_rows * 64;
-        let x0 = mi_col_start * 8;
-        let uv_len = (strip_w >> ss_x) * (strip_h >> ss_y);
-        let planes = [
-            s.pools.samples.take(strip_w * strip_h, 0),
-            s.pools.samples.take(uv_len, 0),
-            s.pools.samples.take(uv_len, 0),
-        ];
         let mi_w = mi_col_end - mi_col_start;
         let strip = Strip {
             mi_col_start,
             mi_col_end,
             mi: s.pools.mi.take(mi_w * mi_rows, MiInfo::default()),
             seg_ids: vec![0; mi_w * mi_rows],
-            planes,
-            strides: [strip_w, strip_w >> ss_x, strip_w >> ss_x],
-            x_off: [x0, x0 >> ss_x, x0 >> ss_x],
             counts: Box::default(),
             compound_blocks: 0,
             scaled_blocks: 0,
@@ -139,6 +126,8 @@ impl<'a> TileDecoder<'a> {
             h,
             fc: s.fc,
             strip,
+            planes: unsafe { s.dst.planes_mut() },
+            strides: s.dst.geo.map(|g| g.stride),
             mi_cols,
             mi_rows,
             ss_x,
@@ -158,7 +147,6 @@ impl<'a> TileDecoder<'a> {
             best_mv: [Mv::ZERO; 2],
             coefs: vec![0; 1024],
             token_cache: vec![0; 1024],
-            pred: vec![0; 64 * 64],
             pred2: vec![0; 64 * 64],
             mc_tmp: vec![
                 0;

@@ -1,4 +1,6 @@
 use crate::vp9::tables::{INTRA_FRAME, NONE};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Mv {
@@ -59,11 +61,7 @@ impl MiGrid {
     }
 }
 
-pub const BAND_PAD: usize = 8;
-
-pub struct Band {
-    pub planes: [Vec<u16>; 3],
-}
+pub const BORDER: usize = 80;
 
 #[derive(Clone, Copy, Debug)]
 pub struct FrameInfo {
@@ -80,137 +78,231 @@ pub struct FrameInfo {
     pub intra_only: bool,
 }
 
-pub struct Frame {
-    pub info: FrameInfo,
-    pub strides: [usize; 3],
-    pub band_h: [usize; 3],
-    pub vis: [(usize, usize); 3],
-    bands: Box<[std::sync::OnceLock<Band>]>,
-    pools: std::sync::Arc<Pools>,
+#[derive(Clone, Copy, Debug)]
+pub struct Geometry {
+    pub stride: usize,
+    pub origin: usize,
+    pub border_x: usize,
+    pub border_y: usize,
+    pub width: usize,
+    pub height: usize,
+    pub aligned_h: usize,
+    pub band_h: usize,
+    pub len: usize,
 }
 
+#[derive(Clone, Copy)]
+pub struct PlaneMut<'a> {
+    ptr: *mut u16,
+    pub stride: usize,
+    frame: std::marker::PhantomData<&'a Frame>,
+}
+
+impl<'a> PlaneMut<'a> {
+    #[inline(always)]
+    pub fn at(&self, x: usize, y: usize) -> *mut u16 {
+        self.ptr.wrapping_add(y * self.stride + x)
+    }
+
+    #[inline(always)]
+    pub fn row(&self, x: usize, y: usize, n: usize) -> &'a mut [u16] {
+        unsafe { std::slice::from_raw_parts_mut(self.at(x, y), n) }
+    }
+}
+
+pub struct Frame {
+    pub info: FrameInfo,
+    pub geo: [Geometry; 3],
+    data: [Vec<u16>; 3],
+    ptrs: [*mut u16; 3],
+    sb_rows: usize,
+    progress: AtomicUsize,
+    lock: Mutex<()>,
+    ready: Condvar,
+    pools: Arc<Pools>,
+}
+
+unsafe impl Send for Frame {}
+unsafe impl Sync for Frame {}
+
 impl Frame {
-    pub fn new(info: FrameInfo, pools: std::sync::Arc<Pools>) -> Frame {
+    pub fn new(info: FrameInfo, pools: Arc<Pools>) -> Frame {
         let geo = plane_geometry(info.width, info.height, info.ss_x, info.ss_y);
-        let sb_rows = (info.height as usize).div_ceil(64);
+        let mut data = geo.map(|g| pools.planes.take_any(g.len, 0));
+        let ptrs = std::array::from_fn(|p| data[p].as_mut_ptr());
         Frame {
             info,
-            strides: geo.map(|g| g.0),
-            band_h: [64, 64 >> info.ss_y as usize, 64 >> info.ss_y as usize],
-            vis: geo.map(|g| (g.2, g.3)),
-            bands: (0..sb_rows).map(|_| std::sync::OnceLock::new()).collect(),
+            geo,
+            data,
+            ptrs,
+            sb_rows: (info.height as usize).div_ceil(64),
+            progress: AtomicUsize::new(0),
+            lock: Mutex::new(()),
+            ready: Condvar::new(),
             pools,
         }
     }
 
     pub fn sb_rows(&self) -> usize {
-        self.bands.len()
+        self.sb_rows
     }
 
-    pub fn new_band(&self) -> Band {
-        Band {
-            planes: std::array::from_fn(|p| {
-                self.pools
-                    .bands
-                    .take_any((self.band_h[p] + BAND_PAD) * self.strides[p], 0)
-            }),
+    pub fn plane_mut(&self, p: usize) -> PlaneMut<'_> {
+        PlaneMut {
+            ptr: self.ptrs[p].wrapping_add(self.geo[p].origin),
+            stride: self.geo[p].stride,
+            frame: std::marker::PhantomData,
         }
     }
 
-    pub fn publish(&self, r: usize, band: Band) {
-        if let Err(b) = self.bands[r].set(band) {
-            for p in b.planes {
-                self.pools.bands.put(p);
-            }
-        }
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn planes_mut(&self) -> [&mut [u16]; 3] {
+        std::array::from_fn(|p| {
+            let g = &self.geo[p];
+            unsafe { std::slice::from_raw_parts_mut(self.ptrs[p].add(g.origin), g.len - g.origin) }
+        })
     }
 
-    pub fn is_published(&self, r: usize) -> bool {
-        self.bands[r].get().is_some()
+    pub fn publish(&self, rows: usize) {
+        let _g = self
+            .lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.progress.store(rows, Ordering::Release);
+        self.ready.notify_all();
     }
 
     pub fn is_complete(&self) -> bool {
-        self.bands.iter().all(|b| b.get().is_some())
+        self.progress.load(Ordering::Acquire) >= self.sb_rows
     }
 
     #[inline]
-    pub fn band(&self, r: usize) -> &Band {
-        self.bands[r].wait()
-    }
-
-    #[inline]
-    pub fn row(&self, p: usize, y: usize) -> &[u16] {
-        let bh = self.band_h[p];
-        let s = self.strides[p];
-        let o = (y % bh + BAND_PAD) * s;
-        &self.band(y / bh).planes[p][o..o + s]
-    }
-
-    #[inline]
-    pub fn span(&self, p: usize, y0: usize, y1: usize) -> Option<(&[u16], usize)> {
-        let bh = self.band_h[p];
-        let r = y0 / bh;
-        if (y1 - 1) / bh != r {
-            return None;
+    pub fn wait(&self, rows: usize) {
+        let rows = rows.min(self.sb_rows);
+        if self.progress.load(Ordering::Acquire) >= rows {
+            return;
         }
-        Some((
-            &self.band(r).planes[p],
-            (y0 % bh + BAND_PAD) * self.strides[p],
-        ))
+        let mut g = self
+            .lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while self.progress.load(Ordering::Acquire) < rows {
+            g = self
+                .ready
+                .wait(g)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    #[inline]
+    pub fn wait_plane_row(&self, p: usize, y: isize) {
+        let g = &self.geo[p];
+        let y = y.clamp(0, g.aligned_h as isize - 1) as usize;
+        self.wait(y / g.band_h + 1);
+    }
+
+    #[inline]
+    pub fn plane(&self, p: usize) -> &[u16] {
+        unsafe { std::slice::from_raw_parts(self.ptrs[p], self.geo[p].len) }
+    }
+
+    pub fn finish_rows(&self, r: usize) {
+        for p in 0..3 {
+            let g = self.geo[p];
+            let pm = self.plane_mut(p);
+            let y0 = r * g.band_h;
+            let y1 = ((r + 1) * g.band_h).min(g.height);
+            let bx = g.border_x;
+            let right = g.stride - bx - g.width;
+            for y in y0..y1 {
+                let row = unsafe {
+                    std::slice::from_raw_parts_mut(pm.at(0, y).wrapping_sub(bx), g.stride)
+                };
+                let l = row[bx];
+                row[..bx].fill(l);
+                let rv = row[bx + g.width - 1];
+                row[bx + g.width..bx + g.width + right].fill(rv);
+            }
+            let copy_row = |from: usize, to: isize| unsafe {
+                let src = pm.at(0, from).wrapping_sub(bx);
+                let dst = pm
+                    .ptr
+                    .wrapping_offset(to * g.stride as isize)
+                    .wrapping_sub(bx);
+                std::ptr::copy_nonoverlapping(src, dst, g.stride);
+            };
+            if r == 0 {
+                for y in 1..=g.border_y as isize {
+                    copy_row(0, -y);
+                }
+            }
+            if r + 1 == self.sb_rows {
+                for y in g.height..g.aligned_h + g.border_y {
+                    copy_row(g.height - 1, y as isize);
+                }
+            }
+        }
     }
 
     #[cfg(test)]
     pub fn from_planes(info: FrameInfo, planes: [&[u16]; 3]) -> Frame {
         let f = Frame::new(info, Default::default());
-        for r in 0..f.sb_rows() {
-            let mut b = f.new_band();
-            for p in 0..3 {
-                let (s, bh) = (f.strides[p], f.band_h[p]);
-                for k in 0..bh {
-                    let y = r * bh + k;
-                    if let Some(src) = planes[p].get(y * s..y * s + s) {
-                        b.planes[p][(k + BAND_PAD) * s..(k + BAND_PAD + 1) * s]
-                            .copy_from_slice(src);
-                    }
-                }
+        for p in 0..3 {
+            let g = f.geo[p];
+            let pm = f.plane_mut(p);
+            for y in 0..g.height {
+                pm.row(0, y, g.width)
+                    .copy_from_slice(&planes[p][y * g.width..y * g.width + g.width]);
             }
-            f.publish(r, b);
         }
+        for r in 0..f.sb_rows {
+            f.finish_rows(r);
+        }
+        f.publish(f.sb_rows);
         f
     }
 }
 
 impl Drop for Frame {
     fn drop(&mut self) {
-        for b in std::mem::take(&mut self.bands)
-            .into_vec()
-            .into_iter()
-            .filter_map(|b| b.into_inner())
-        {
-            for p in b.planes {
-                self.pools.bands.put(p);
-            }
+        for d in std::mem::take(&mut self.data) {
+            self.pools.planes.put(d);
         }
     }
 }
 
-pub fn plane_geometry(
-    width: u32,
-    height: u32,
-    ss_x: bool,
-    ss_y: bool,
-) -> [(usize, usize, usize, usize); 3] {
+pub fn plane_geometry(width: u32, height: u32, ss_x: bool, ss_y: bool) -> [Geometry; 3] {
     let sb_cols = (width as usize).div_ceil(64);
     let sb_rows = (height as usize).div_ceil(64);
     let (aw, ah) = (sb_cols * 64, sb_rows * 64);
     let (sx, sy) = (ss_x as usize, ss_y as usize);
+    let g = |w: usize, h: usize, aw: usize, ah: usize, bx: usize, by: usize, band_h: usize| {
+        let stride = (aw + 2 * bx).next_multiple_of(32);
+        Geometry {
+            stride,
+            origin: by * stride + bx,
+            border_x: bx,
+            border_y: by,
+            width: w,
+            height: h,
+            aligned_h: ah,
+            band_h,
+            len: (ah + 2 * by) * stride,
+        }
+    };
     let cw = (width as usize + sx) >> sx;
     let ch = (height as usize + sy) >> sy;
-    [
-        (aw, ah, width as usize, height as usize),
-        (aw >> sx, ah >> sy, cw, ch),
-        (aw >> sx, ah >> sy, cw, ch),
-    ]
+    let luma = g(width as usize, height as usize, aw, ah, BORDER, BORDER, 64);
+    let chroma = g(
+        cw,
+        ch,
+        aw >> sx,
+        ah >> sy,
+        BORDER >> sx,
+        BORDER >> sy,
+        64 >> sy,
+    );
+    [luma, chroma, chroma]
 }
 
 pub struct Pool<T> {
@@ -241,11 +333,14 @@ impl<T: Clone> Pool<T> {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             b.iter()
-                .position(|v| v.len() >= len)
+                .position(|v| v.capacity() >= len)
                 .map(|i| b.swap_remove(i))
         };
         match found {
             Some(mut v) => {
+                if v.len() < len {
+                    v.resize(len, fill);
+                }
                 v.truncate(len);
                 v
             }
@@ -288,16 +383,14 @@ impl<T: Clone> Pool<T> {
 }
 
 pub struct Pools {
-    pub samples: Pool<u16>,
-    pub bands: Pool<u16>,
+    pub planes: Pool<u16>,
     pub mi: Pool<MiInfo>,
 }
 
 impl Default for Pools {
     fn default() -> Self {
         Pools {
-            samples: Pool::default(),
-            bands: Pool::with_max(1024),
+            planes: Pool::with_max(64),
             mi: Pool::default(),
         }
     }
