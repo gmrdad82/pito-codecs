@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::panic::AssertUnwindSafe;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -45,14 +46,23 @@ pub fn frames_at(path: &Path, times: &[f64], height: u32, prefs: &Prefs) -> Resu
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(&t) = times.get(i) else { break };
-                    let got = match (times[..i].iter().position(|o| *o == t), &mut dec) {
-                        (Some(_), _) => None,
-                        (None, Some(d)) => Some(match &src.reader {
-                            Some(r) => native::still(r, d, t, height),
-                            None => Err(src.native()),
-                        }),
-                        (None, None) => Some(still(src, t, height)),
-                    };
+                    let repeat = times.get(..i).is_some_and(|b| b.contains(&t));
+                    let got = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                        match (repeat, &mut dec) {
+                            (true, _) => None,
+                            (false, Some(d)) => Some(match &src.reader {
+                                Some(r) => native::still(r, d, t, height),
+                                None => Err(src.native()),
+                            }),
+                            (false, None) => Some(still(src, t, height)),
+                        }
+                    }));
+                    let got = got.unwrap_or_else(|_| {
+                        dec = None;
+                        Some(Err(Error::Backend(format!(
+                            "decoding the still at {t:.3} s failed"
+                        ))))
+                    });
                     if let (Some(got), Ok(mut o)) = (got, out.lock()) {
                         o[i] = Some(got);
                     }
