@@ -113,18 +113,19 @@ impl Default for MbState {
 }
 
 #[derive(Clone, Copy)]
+#[repr(C, align(64))]
 pub struct ColMb {
-    pub mv: [[[i16; 2]; 16]; 2],
-    pub ref_id: [[u32; 4]; 2],
-    pub ref_idx: [[i8; 4]; 2],
     pub intra: bool,
+    pub ref_idx: [[i8; 4]; 2],
+    pub ref_id: [[u32; 4]; 2],
+    pub mv: [[[i16; 2]; 16]; 2],
 }
 
 const COL_INTRA: ColMb = ColMb {
-    mv: [[[0; 2]; 16]; 2],
-    ref_id: [[u32::MAX; 4]; 2],
-    ref_idx: [[-1; 4]; 2],
     intra: true,
+    ref_idx: [[-1; 4]; 2],
+    ref_id: [[u32::MAX; 4]; 2],
+    mv: [[[0; 2]; 16]; 2],
 };
 
 struct Motion {
@@ -382,21 +383,17 @@ impl SharedPlane {
     }
 
     #[inline(always)]
-    fn prefetch_rows(&self, at: usize, stride: usize, rows: usize, span: usize) {
+    fn prefetch_rows(&self, at: usize, stride: usize, rows: usize) {
         #[cfg(target_arch = "x86_64")]
-        if rows > 0 && at + (rows - 1) * stride + span <= self.len {
+        if rows > 0 && at + (rows - 1) * stride < self.len {
             use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
-            let mut p = unsafe { self.ptr.add(at) }.cast_const();
-            for _ in 0..rows {
-                unsafe { _mm_prefetch::<_MM_HINT_T0>(p.cast()) };
-                if (p as usize & 63) + span > 64 {
-                    unsafe { _mm_prefetch::<_MM_HINT_T0>(p.add(span - 1).cast()) };
-                }
-                p = p.wrapping_add(stride);
+            let p = unsafe { self.ptr.add(at) }.cast_const();
+            for r in 0..rows {
+                unsafe { _mm_prefetch::<_MM_HINT_T0>(p.wrapping_add(r * stride).cast()) };
             }
         }
         #[cfg(not(target_arch = "x86_64"))]
-        let _ = (at, stride, rows, span);
+        let _ = (at, stride, rows);
     }
 
     fn writer(&self) -> PlaneMut {
@@ -522,17 +519,13 @@ impl Frame {
 
     #[inline]
     pub fn luma(&self, y0: usize, y1: usize) -> &[u8] {
-        for r in y0 >> 4..=(y1 - 1) >> 4 {
-            self.rows[r].wait();
-        }
+        self.rows[(y1 - 1) >> 4].wait();
         unsafe { self.y.slice(y0 * self.width, (y1 - y0) * self.width) }
     }
 
     #[inline]
     pub fn chroma(&self, c: usize, y0: usize, y1: usize) -> &[u8] {
-        for r in y0 >> 3..=(y1 - 1) >> 3 {
-            self.rows[r].wait();
-        }
+        self.rows[(y1 - 1) >> 3].wait();
         let p = if c == 0 { &self.cb } else { &self.cr };
         unsafe { p.slice(y0 * self.cwidth, (y1 - y0) * self.cwidth) }
     }
@@ -580,49 +573,22 @@ impl Frame {
         f
     }
 
-    pub fn prefetch(&self, x0: i32, y0: i32) {
-        let (width, height) = (self.width as i32, self.height as i32);
-        if width < 21 || height < 21 {
-            return;
-        }
-        let x = (x0 - 2).clamp(0, width - 21) as usize;
-        let y = (y0 - 2).clamp(0, height - 21) as usize;
-        self.y.prefetch_rows(y * self.width + x, self.width, 21, 21);
-        let (cw, ch) = (self.cwidth as i32, self.cheight as i32);
-        let cx = (x0 >> 1).clamp(0, cw - 9) as usize;
-        let cy = (y0 >> 1).clamp(0, ch - 9) as usize;
-        let o = cy * self.cwidth + cx;
-        self.cb.prefetch_rows(o, self.cwidth, 9, 9);
-        self.cr.prefetch_rows(o, self.cwidth, 9, 9);
+    #[inline]
+    pub fn prefetch(&self, x: i32, y: i32) {
+        let x = (x + 64).clamp(0, self.width as i32 - 1) as usize;
+        let y = y.clamp(0, self.height as i32 - 4) as usize;
+        self.y.prefetch_rows(y * self.width + x, self.width, 4);
+        let o = (y / 2) * self.cwidth + x / 2;
+        self.cb.prefetch_rows(o, self.cwidth, 2);
+        self.cr.prefetch_rows(o, self.cwidth, 2);
     }
 
     #[inline]
-    pub fn luma_window(&self, x0: i32, y0: i32, w: usize, h: usize, out: &mut [u8], os: usize) {
-        let (width, height) = (self.width, self.height);
-        for r in 0..h {
-            let yy = (y0 + r as i32).clamp(0, height as i32 - 1) as usize;
-            let line = self.luma(yy, yy + 1);
-            copy_line::<24>(&line[..width], x0, &mut out[r * os..], w);
-        }
-    }
-
-    #[inline]
-    pub fn chroma_window(
-        &self,
-        c: usize,
-        x0: i32,
-        y0: i32,
-        w: usize,
-        h: usize,
-        out: &mut [u8],
-        os: usize,
-    ) {
-        let (cw, ch) = (self.cwidth, self.cheight);
-        for r in 0..h {
-            let yy = (y0 + r as i32).clamp(0, ch as i32 - 1) as usize;
-            let line = self.chroma(c, yy, yy + 1);
-            copy_line::<16>(&line[..cw], x0, &mut out[r * os..], w);
-        }
+    pub fn planes_upto(&self, r: usize) -> [&[u8]; 3] {
+        let r = r.min(self.rows.len().saturating_sub(1));
+        self.rows[r].wait();
+        let (n, c) = ((r + 1) * 16 * self.width, (r + 1) * 8 * self.cwidth);
+        unsafe { [self.y.slice(0, n), self.cb.slice(0, c), self.cr.slice(0, c)] }
     }
 
     pub fn copy_cropped(
@@ -694,6 +660,31 @@ fn prefetch_ptr<T>(p: Option<&T>) {
     }
     #[cfg(not(target_arch = "x86_64"))]
     let _ = p;
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+pub fn window<const N: usize>(
+    plane: &[u8],
+    stride: usize,
+    height: usize,
+    x0: i32,
+    y0: i32,
+    w: usize,
+    h: usize,
+    out: &mut [u8],
+    os: usize,
+) {
+    let last = (plane.len() / stride).min(height).max(1) - 1;
+    for r in 0..h {
+        let yy = (y0 + r as i32).clamp(0, last as i32) as usize;
+        copy_line::<N>(
+            &plane[yy * stride..yy * stride + stride],
+            x0,
+            &mut out[r * os..],
+            w,
+        );
+    }
 }
 
 #[inline(always)]

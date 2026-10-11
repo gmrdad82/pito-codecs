@@ -413,15 +413,92 @@ pub fn mc_chroma_win2_avg_scalar(
     }
 }
 
-#[cfg(target_arch = "x86_64")]
-pub use crate::h264::dec::simd::{
-    mc_chroma2 as mc_chroma_win2, mc_chroma2_avg as mc_chroma_win2_avg, mc_luma as mc_luma_win,
-    mc_luma_avg as mc_luma_win_avg, weighted_store,
-};
+#[allow(clippy::too_many_arguments)]
+pub trait Mc {
+    fn luma<const AVG: bool>(
+        src: &[u8],
+        ss: usize,
+        fx: u32,
+        fy: u32,
+        bw: usize,
+        bh: usize,
+        out: &mut [u8],
+        os: usize,
+    );
+    fn chroma2<const AVG: bool>(
+        src: [&[u8]; 2],
+        ss: usize,
+        fx: u32,
+        fy: u32,
+        bw: usize,
+        bh: usize,
+        out: [&mut [u8]; 2],
+        os: usize,
+    );
+    fn weighted(
+        dst: &mut [u8],
+        ds: usize,
+        p0: Option<&[u8]>,
+        p1: Option<&[u8]>,
+        ps: usize,
+        bw: usize,
+        bh: usize,
+        w: Weight,
+    );
+}
 
 #[cfg(not(target_arch = "x86_64"))]
-pub use self::{
-    mc_chroma_win2_avg_scalar as mc_chroma_win2_avg, mc_chroma_win2_scalar as mc_chroma_win2,
-    mc_luma_win_avg_scalar as mc_luma_win_avg, mc_luma_win_scalar as mc_luma_win,
-    weighted_store_scalar as weighted_store,
-};
+pub struct Scalar;
+
+#[cfg(not(target_arch = "x86_64"))]
+impl Mc for Scalar {
+    #[inline(always)]
+    fn luma<const AVG: bool>(
+        src: &[u8],
+        ss: usize,
+        fx: u32,
+        fy: u32,
+        bw: usize,
+        bh: usize,
+        out: &mut [u8],
+        os: usize,
+    ) {
+        if AVG {
+            mc_luma_win_avg_scalar(src, ss, fx, fy, bw, bh, out, os)
+        } else {
+            mc_luma_win_scalar(src, ss, fx, fy, bw, bh, out, os)
+        }
+    }
+
+    #[inline(always)]
+    fn chroma2<const AVG: bool>(
+        src: [&[u8]; 2],
+        ss: usize,
+        fx: u32,
+        fy: u32,
+        bw: usize,
+        bh: usize,
+        out: [&mut [u8]; 2],
+        os: usize,
+    ) {
+        if AVG {
+            mc_chroma_win2_avg_scalar(src, ss, fx, fy, bw, bh, out, os)
+        } else {
+            mc_chroma_win2_scalar(src, ss, fx, fy, bw, bh, out, os)
+        }
+    }
+
+    #[inline(always)]
+    fn weighted(
+        dst: &mut [u8],
+        ds: usize,
+        p0: Option<&[u8]>,
+        p1: Option<&[u8]>,
+        ps: usize,
+        bw: usize,
+        bh: usize,
+        w: Weight,
+    ) {
+        weighted_store_scalar(dst, ds, p0, p1, ps, bw, bh, w)
+    }
+}
