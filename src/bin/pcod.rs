@@ -1,11 +1,15 @@
 use std::error::Error;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use pito_codecs::gpu::{self, Backend, GpuFrame, HwDecoder, HwEncoder};
-use pito_codecs::media::{Codec, Frame, Packet, Prefs, TimeBase, probe};
+use pito_codecs::media::{
+    Caps, Choice, Codec, Fallback, Frame, Packet, Prefs, Route, TimeBase, pick_decode, pick_encode,
+    probe,
+};
 use pito_codecs::mp4::{
     AvcConfig, CodecConfig, HevcConfig, Reader, SampleEntry, Track, TrackConfig, Writer,
 };
@@ -57,6 +61,20 @@ enum Where {
     Gpu,
 }
 
+impl Where {
+    fn prefs(self) -> Prefs {
+        let choice = match self {
+            Where::Cpu => Choice::Cpu,
+            Where::Gpu => Choice::Gpu,
+        };
+        Prefs {
+            decode: choice.clone(),
+            encode: choice,
+            ..Prefs::default()
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Kind {
     H264,
@@ -74,20 +92,18 @@ impl Kind {
 
 fn main() -> ExitCode {
     let matches = Cli::command().arg_required_else_help(false).get_matches();
-    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
-    let (file, result) = match cli.command {
-        Command::Probe { file } => {
-            let r = show(&file);
-            (file, r)
-        }
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(e) => e.exit(),
+    };
+    let mut out = io::stdout().lock();
+    let result = match cli.command {
+        Command::Probe { file } => show(&mut out, &file),
         Command::Decode {
             file,
             route,
             threads,
-        } => {
-            let r = decode(&file, route, threads);
-            (file, r)
-        }
+        } => decode(&mut out, &file, route, threads),
         Command::Encode {
             input,
             output,
@@ -95,37 +111,46 @@ fn main() -> ExitCode {
             route,
             crf,
             threads,
-        } => {
-            let r = encode(&input, &output, codec, route, crf, threads);
-            (input, r)
-        }
+        } => encode(&mut out, &input, &output, codec, route, crf, threads),
     };
-    match result {
+    match result.and_then(|()| Ok(out.flush()?)) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) if !file.exists() => {
-            eprintln!("pcod: {}: {e}", file.display());
-            ExitCode::FAILURE
-        }
         Err(e) => {
-            eprintln!("pcod: {e}");
+            let text = e.to_string();
+            let line = text
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join("; ");
+            let _ = writeln!(io::stderr(), "pcod: {line}");
             ExitCode::FAILURE
         }
     }
 }
 
-fn show(file: &Path) -> Result<(), Fail> {
-    let p = probe(file, &Prefs::default())?;
+fn about(file: &Path, e: impl std::fmt::Display) -> Fail {
+    format!("{}: {e}", file.display()).into()
+}
+
+fn show(out: &mut impl Write, file: &Path) -> Result<(), Fail> {
+    let p = probe(file, &Prefs::default()).map_err(|e| about(file, e))?;
     let (w, h) = p.shown_size();
-    println!("container  MP4");
-    println!("duration   {:.1} s", p.duration);
-    println!(
+    writeln!(out, "container  MP4")?;
+    writeln!(out, "duration   {:.1} s", p.duration)?;
+    writeln!(
+        out,
         "video      {} {} {w}x{h} {:.2} fps",
         p.video_codec_name,
         p.profile,
         p.fps()
-    );
+    )?;
     for a in &p.audio {
-        println!("audio      {} {} ch {} Hz", a.codec, a.channels, a.rate);
+        writeln!(
+            out,
+            "audio      {} {} ch {} Hz",
+            a.codec, a.channels, a.rate
+        )?;
     }
     Ok(())
 }
@@ -201,12 +226,10 @@ impl Decoder {
         }
     }
 
-    fn gpu(track: &Track) -> Result<Self, Fail> {
-        let codec = track.codec().ok_or("unknown video codec")?;
+    fn gpu(track: &Track, codec: Codec) -> Result<HwDecoder, Fail> {
         let extradata = track.extradata().unwrap_or_default();
-        let dec = HwDecoder::new(codec, &extradata)?
-            .with_time_base(TimeBase::new(1, track.timescale.max(1)));
-        Ok(Decoder::Gpu(Box::new(dec)))
+        Ok(HwDecoder::new(codec, &extradata)?
+            .with_time_base(TimeBase::new(1, track.timescale.max(1))))
     }
 
     fn decode(&mut self, p: &Packet) -> Result<Vec<Picture>, Fail> {
@@ -250,6 +273,12 @@ impl Decoder {
         };
         Ok(frames.into_iter().map(Picture::Cpu).collect())
     }
+
+    fn recycle(&mut self, pic: Picture) {
+        if let (Decoder::H264 { dec, .. }, Picture::Cpu(f)) = (self, pic) {
+            dec.recycle(f);
+        }
+    }
 }
 
 fn driver_of(backend: Backend) -> String {
@@ -276,77 +305,96 @@ struct Opened {
     track: usize,
     decoder: Decoder,
     label: String,
-    note: Option<String>,
+    notes: Vec<String>,
 }
 
 fn open(file: &Path, want: Where, threads: usize) -> Result<Opened, Fail> {
-    let reader = Reader::open(file)?;
-    let track = reader.video().ok_or("no video track")?;
+    let prefs = want.prefs();
+    let reader = Reader::open(file).map_err(|e| about(file, e))?;
+    let track = reader
+        .video()
+        .ok_or_else(|| about(file, "no video track"))?;
     let t = &reader.tracks[track];
-    let mut note = None;
-    if want == Where::Gpu {
-        match Decoder::gpu(t) {
-            Ok(decoder) => {
-                let backend = match &decoder {
-                    Decoder::Gpu(d) => d.backend(),
-                    _ => unreachable!(),
-                };
-                let label = format!("GPU ({})", driver_of(backend));
+    let codec = t
+        .codec()
+        .ok_or_else(|| about(file, "an unknown video codec"))?;
+    let picked = pick_decode(codec, &prefs, &Caps::detect(&prefs)).map_err(|e| about(file, e))?;
+    let mut notes = picked.reasons;
+    if picked.route == Route::Gpu {
+        match Decoder::gpu(t, codec) {
+            Ok(dec) => {
+                let label = format!("GPU ({})", driver_of(dec.backend()));
                 return Ok(Opened {
                     reader,
                     track,
-                    decoder,
+                    decoder: Decoder::Gpu(Box::new(dec)),
                     label,
-                    note,
+                    notes,
                 });
             }
-            Err(e) => note = Some(format!("no GPU decoder ({e}), decoding on the CPU")),
+            Err(e) => notes.push(format!("the GPU decoder failed ({e}); decoding on the CPU")),
         }
     }
-    let decoder = Decoder::cpu(t, threads)?;
+    let decoder = Decoder::cpu(t, threads).map_err(|e| about(file, e))?;
     Ok(Opened {
         reader,
         track,
         decoder,
         label: format!("CPU ({threads} threads)"),
-        note,
+        notes,
     })
 }
 
 fn pump(
     opened: &mut Opened,
-    mut sink: impl FnMut(Picture) -> Result<(), Fail>,
+    mut sink: impl FnMut(Picture) -> Result<Option<Picture>, Fail>,
 ) -> Result<(), Fail> {
     let count = opened.reader.tracks[opened.track].samples.len();
+    let mut drain = |opened: &mut Opened, pics: Vec<Picture>| -> Result<(), Fail> {
+        for pic in pics {
+            if let Some(back) = sink(pic)? {
+                opened.decoder.recycle(back);
+            }
+        }
+        Ok(())
+    };
     for i in 0..count {
         let packet = opened.reader.packet(opened.track, i)?;
-        for pic in opened.decoder.decode(&packet)? {
-            sink(pic)?;
-        }
+        let pics = opened.decoder.decode(&packet)?;
+        drain(opened, pics)?;
     }
-    for pic in opened.decoder.flush()? {
-        sink(pic)?;
+    let pics = opened.decoder.flush()?;
+    drain(opened, pics)
+}
+
+fn notes(out: &mut impl Write, notes: &[String]) -> Result<(), Fail> {
+    if !notes.is_empty() {
+        writeln!(out, "note    {}", notes.join("; "))?;
     }
     Ok(())
 }
 
-fn decode(file: &Path, want: Where, threads: Option<usize>) -> Result<(), Fail> {
+fn decode(
+    out: &mut impl Write,
+    file: &Path,
+    want: Where,
+    threads: Option<usize>,
+) -> Result<(), Fail> {
     let mut opened = open(file, want, threads_of(threads))?;
-    if let Some(note) = &opened.note {
-        println!("{note}");
-    }
-    println!("route   {}", opened.label);
+    notes(out, &opened.notes)?;
+    writeln!(out, "route   {}", opened.label)?;
     let start = Instant::now();
     let mut frames = 0u64;
-    pump(&mut opened, |_| {
+    pump(&mut opened, |pic| {
         frames += 1;
-        Ok(())
+        Ok(Some(pic))
     })?;
-    let seconds = start.elapsed().as_secs_f64();
-    println!(
+    let seconds = start.elapsed().as_secs_f64().max(1e-9);
+    writeln!(
+        out,
         "decoded {frames} frames in {seconds:.2} s: {:.0} fps",
         frames as f64 / seconds
-    );
+    )?;
     Ok(())
 }
 
@@ -356,6 +404,46 @@ enum Encoder {
 }
 
 impl Encoder {
+    fn cpu(
+        width: u32,
+        height: u32,
+        fps: (u32, u32),
+        crf: u8,
+        threads: usize,
+    ) -> Result<Self, Fail> {
+        let e = h264::Encoder::new(h264::EncoderConfig {
+            width,
+            height,
+            fps,
+            profile: h264::Profile::High,
+            preset: h264::Preset::Balanced,
+            rate: h264::Rate::Crf(crf),
+            gop: gop_of(fps),
+            b_frames: 2,
+            threads,
+            bitstream: h264::Bitstream::LengthPrefixed,
+        })?;
+        Ok(Encoder::Cpu(Box::new(e)))
+    }
+
+    fn gpu(codec: Codec, width: u32, height: u32, fps: (u32, u32), crf: u8) -> Result<Self, Fail> {
+        let config = gpu::EncoderConfig {
+            width,
+            height,
+            fps,
+            profile: if codec == Codec::Hevc {
+                gpu::Profile::Main
+            } else {
+                gpu::Profile::High
+            },
+            rate: gpu::Rate::Crf(crf),
+            gop: gop_of(fps),
+            b_frames: 0,
+            bitstream: gpu::Bitstream::LengthPrefixed,
+        };
+        Ok(Encoder::Gpu(Box::new(HwEncoder::new(codec, &config)?)))
+    }
+
     fn extradata(&self) -> Option<Vec<u8>> {
         match self {
             Encoder::Cpu(e) => Some(e.avcc()),
@@ -371,13 +459,18 @@ impl Encoder {
     }
 }
 
+fn gop_of(fps: (u32, u32)) -> u32 {
+    (fps.0 / fps.1.max(1)).clamp(1, 120) * 2
+}
+
 fn frame_index(pts: i64, first: i64, time_base: TimeBase, fps: (u32, u32)) -> i64 {
     let ticks = (pts - first) as i128 * fps.0 as i128 * time_base.num as i128;
-    let per = fps.1 as i128 * time_base.den.max(1) as i128;
+    let per = (fps.1.max(1) as i128 * time_base.den.max(1) as i128).max(1);
     ((ticks + per / 2).div_euclid(per)) as i64
 }
 
 fn encode(
+    out: &mut impl Write,
     input: &Path,
     output: &Path,
     kind: Kind,
@@ -386,52 +479,49 @@ fn encode(
     threads: Option<usize>,
 ) -> Result<(), Fail> {
     let threads = threads_of(threads);
-    if kind == Kind::Hevc && want == Where::Cpu {
-        return Err("HEVC encodes on the GPU only".into());
-    }
-    let info = probe(input, &Prefs::default())?;
+    let prefs = want.prefs();
+    let info = probe(input, &prefs).map_err(|e| about(input, e))?;
     let fps = info.fps;
     let (width, height) = (info.width & !1, info.height & !1);
+    let mut picked = pick_encode(kind.codec(), &prefs, &Caps::detect(&prefs))?;
     let mut opened = open(input, want, threads)?;
-    if let Some(note) = &opened.note {
-        println!("{note}");
+    notes(out, &opened.notes)?;
+    writeln!(out, "decode  {}", opened.label)?;
+    let mut encoder = None;
+    if picked.route == Route::Gpu {
+        let mut tries = vec![picked.codec];
+        if picked.codec == Codec::Hevc && prefs.hevc_encode_fallback.contains(&Fallback::H264Gpu) {
+            tries.push(Codec::H264);
+        }
+        for codec in tries {
+            match Encoder::gpu(codec, width, height, fps, crf) {
+                Ok(e) => {
+                    picked.codec = codec;
+                    encoder = Some(e);
+                    break;
+                }
+                Err(e) => picked
+                    .reasons
+                    .push(format!("the GPU {codec} encoder failed ({e})")),
+            }
+        }
     }
-    println!("decode  {}", opened.label);
-    let codec = kind.codec();
-    let mut encoder = if want == Where::Gpu {
-        let config = gpu::EncoderConfig {
-            width,
-            height,
-            fps,
-            profile: if codec == Codec::Hevc {
-                gpu::Profile::Main
-            } else {
-                gpu::Profile::High
-            },
-            rate: gpu::Rate::Crf(crf),
-            gop: (fps.0 / fps.1.max(1)).clamp(1, 120) * 2,
-            b_frames: 0,
-            bitstream: gpu::Bitstream::LengthPrefixed,
-        };
-        let e = HwEncoder::new(codec, &config)?;
-        println!("encode  {codec} GPU ({})", driver_of(e.backend()));
-        Encoder::Gpu(Box::new(e))
-    } else {
-        let e = h264::Encoder::new(h264::EncoderConfig {
-            width,
-            height,
-            fps,
-            profile: h264::Profile::High,
-            preset: h264::Preset::Balanced,
-            rate: h264::Rate::Crf(crf),
-            gop: (fps.0 / fps.1.max(1)).clamp(1, 120) * 2,
-            b_frames: 2,
-            threads,
-            bitstream: h264::Bitstream::LengthPrefixed,
-        })?;
-        println!("encode  {codec} CPU ({threads} threads)");
-        Encoder::Cpu(Box::new(e))
+    let mut encoder = match encoder {
+        Some(e) => e,
+        None => {
+            if picked.route == Route::Gpu {
+                picked.reasons.push("encoding H.264 on the CPU".to_string());
+            }
+            picked.codec = Codec::H264;
+            Encoder::cpu(width, height, fps, crf, threads)?
+        }
     };
+    notes(out, &picked.reasons)?;
+    let codec = picked.codec;
+    match &encoder {
+        Encoder::Gpu(e) => writeln!(out, "encode  {codec} GPU ({})", driver_of(e.backend()))?,
+        Encoder::Cpu(_) => writeln!(out, "encode  {codec} CPU ({threads} threads)")?,
+    }
 
     let source_scale = opened.reader.tracks[opened.track].timescale.max(1);
     let source_base = TimeBase::new(1, source_scale);
@@ -445,40 +535,36 @@ fn encode(
     let mut frames = 0u64;
     let mut in_ticks = false;
     let mut packets: Vec<Packet> = Vec::new();
-    {
-        let encoder = &mut encoder;
-        let packets = &mut packets;
-        let in_ticks = &mut in_ticks;
-        pump(&mut opened, |pic| {
-            frames += 1;
-            let (pts, base) = match &pic {
-                Picture::Cpu(f) => (f.pts, f.time_base),
-                Picture::Gpu(g) => (g.pts(), g.time_base()),
-            };
-            let origin = *first.get_or_insert(pts);
-            let index = frame_index(pts, origin, base, fps);
-            let out = match (&mut *encoder, pic) {
-                (Encoder::Gpu(e), Picture::Gpu(g)) => {
-                    *in_ticks = true;
-                    e.encode_gpu(&g)?
-                }
-                (enc, pic) => {
-                    let mut frame = match pic {
-                        Picture::Cpu(f) => f,
-                        Picture::Gpu(g) => g.download()?,
-                    };
-                    frame.pts = index;
-                    frame.time_base = frame_base;
-                    match enc {
-                        Encoder::Cpu(e) => e.encode(&frame)?,
-                        Encoder::Gpu(e) => e.encode(&frame)?,
-                    }
-                }
-            };
-            packets.extend(out);
-            Ok(())
-        })?;
-    }
+    pump(&mut opened, |pic| {
+        frames += 1;
+        let (pts, base) = match &pic {
+            Picture::Cpu(f) => (f.pts, f.time_base),
+            Picture::Gpu(g) => (g.pts(), g.time_base()),
+        };
+        let origin = *first.get_or_insert(pts);
+        let index = frame_index(pts, origin, base, fps);
+        let back = match (&mut encoder, pic) {
+            (Encoder::Gpu(e), Picture::Gpu(g)) if g.on_gpu() => {
+                in_ticks = true;
+                packets.extend(e.encode_gpu(&g)?);
+                None
+            }
+            (enc, pic) => {
+                let mut frame = match pic {
+                    Picture::Cpu(f) => f,
+                    Picture::Gpu(g) => g.download()?,
+                };
+                frame.pts = index;
+                frame.time_base = frame_base;
+                packets.extend(match enc {
+                    Encoder::Cpu(e) => e.encode(&frame)?,
+                    Encoder::Gpu(e) => e.encode(&frame)?,
+                });
+                Some(Picture::Cpu(frame))
+            }
+        };
+        Ok(back)
+    })?;
     packets.extend(encoder.flush()?);
     if in_ticks {
         let origin = first.unwrap_or(0);
@@ -497,7 +583,7 @@ fn encode(
         _ => SampleEntry::h264(AvcConfig::parse(&extradata)?, width as u16, height as u16),
     };
 
-    let mut writer = Writer::create(output)?;
+    let mut writer = Writer::create(output).map_err(|e| about(output, e))?;
     let mut cfg = TrackConfig::new(entry, timescale);
     cfg.matrix = rotation;
     let video = writer.add_track(cfg)?;
@@ -511,7 +597,7 @@ fn encode(
         })
         .collect::<Result<_, _>>()?;
     let mut last: Option<i64> = None;
-    for p in &packets {
+    for p in packets {
         let mut dts = p.dts * step;
         if let Some(l) = last
             && dts <= l
@@ -522,10 +608,9 @@ fn encode(
         writer.push(
             video,
             &Packet {
-                data: p.data.clone(),
                 pts: p.pts * step,
                 dts,
-                keyframe: p.keyframe,
+                ..p
             },
         )?;
     }
@@ -535,15 +620,17 @@ fn encode(
         }
     }
     writer.finish_faststart()?;
-    let seconds = start.elapsed().as_secs_f64();
-    println!(
+    let seconds = start.elapsed().as_secs_f64().max(1e-9);
+    writeln!(
+        out,
         "encoded {frames} frames in {seconds:.2} s: {:.0} fps",
         frames as f64 / seconds
-    );
-    println!(
+    )?;
+    writeln!(
+        out,
         "wrote   {} ({:.1} MB)",
         output.display(),
         std::fs::metadata(output)?.len() as f64 / 1e6
-    );
+    )?;
     Ok(())
 }

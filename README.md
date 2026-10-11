@@ -116,7 +116,7 @@ let info = probe("clip.mp4".as_ref(), &prefs)?;
 let still = first_frame("clip.mp4".as_ref(), 240, &prefs)?;
 ```
 
-`examples/pcod.rs` is a small command line over the library, and it is what the GIF above shows: `cargo run --release --example pcod -- decode clip.mp4 --route gpu`.
+`pcod` (`src/bin/pcod.rs`) is a small command line over the library, and it is what the GIF above shows: `pcod decode clip.mp4 --route gpu`, or from a checkout `cargo run --release --bin pcod -- decode clip.mp4 --route gpu`. It is behind the `cli` feature, on by default, so a library user with `default-features = false` never builds clap.
 
 ## Routes
 
