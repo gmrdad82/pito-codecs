@@ -121,8 +121,8 @@ impl<S: ByteSource> Stream<'_, S> {
             .take_while(|c| c.time as i64 <= ticks)
             .last()
             .or_else(|| r.cues.iter().find(|c| c.track == t.number));
-        if let Some(c) = cue
-            && let Some(pts) = self.seek_in(track, ticks, &[r.segment_start + c.cluster])?
+        if let Some(at) = cue.and_then(|c| r.segment_start.checked_add(c.cluster))
+            && let Some(pts) = self.seek_in(track, ticks, &[at])?
         {
             return Ok(t.seconds(pts));
         }

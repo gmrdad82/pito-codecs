@@ -1,11 +1,14 @@
 #[path = "bench/charts.rs"]
 mod charts;
+#[macro_use]
+#[path = "support/fail.rs"]
+mod fail;
 
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitCode};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
@@ -164,7 +167,7 @@ fn prepare(dir: &Path, fixtures: &Path) -> Res<Assets> {
     let clip = fixtures.join("clips/resilience.mp4");
     let speech = fixtures.join("clips/solstice.mp4");
     if !clip.exists() || !speech.exists() {
-        eprintln!("bench: materialising the speech media set");
+        note!("bench: materialising the speech media set");
         let st = Command::new("prun")
             .args(["fixtures", "speech", "--into"])
             .arg(fixtures)
@@ -182,7 +185,7 @@ fn prepare(dir: &Path, fixtures: &Path) -> Res<Assets> {
             };
             let out = dir.join(&name);
             if !out.exists() {
-                eprintln!("bench: encoding {name}");
+                note!("bench: encoding {name}");
                 let vf = format!("scale={w}:{h}:flags=lanczos");
                 let secs = CLIP_SECONDS.to_string();
                 let mut a = vec![
@@ -226,7 +229,7 @@ fn prepare(dir: &Path, fixtures: &Path) -> Res<Assets> {
     for &(w, h) in sizes() {
         let out = dir.join(format!("raw-{h}.yuv"));
         if !out.exists() {
-            eprintln!("bench: raw {w}x{h} frames");
+            note!("bench: raw {w}x{h} frames");
             let src = &video[&(Codec::H264, h)];
             let part = dir.join(format!("part-raw-{h}.yuv"));
             ffmpeg_time(&[
@@ -246,7 +249,7 @@ fn prepare(dir: &Path, fixtures: &Path) -> Res<Assets> {
     }
     let pcm = dir.join("audio.f32");
     if !pcm.exists() {
-        eprintln!("bench: speech PCM");
+        note!("bench: speech PCM");
         let part = dir.join("part-audio.f32");
         ffmpeg_time(&[
             "-i",
@@ -295,8 +298,8 @@ enum Dec {
 }
 
 fn packet_of(r: &Reader, track: usize, index: usize, buf: &mut Vec<u8>) -> Res<Packet> {
-    let t = &r.tracks[track];
-    let s = t.samples[index];
+    let t = r.tracks.get(track).ok_or("no such track")?;
+    let s = *t.samples.get(index).ok_or("no such sample")?;
     r.read_into(track, index, buf)?;
     Ok(Packet {
         data: std::mem::take(buf),
@@ -390,18 +393,29 @@ fn load_raw(path: &Path, w: u32, h: u32) -> Res<Vec<Frame>> {
     let bytes = fs::read(path)?;
     let (y, c) = (w as usize * h as usize, (w as usize / 2) * (h as usize / 2));
     let each = y + 2 * c;
+    if each == 0 {
+        return Err(format!("{}: a {w}x{h} frame is empty", path.display()).into());
+    }
     let tb = TimeBase::new(1, 60);
-    Ok(bytes
+    bytes
         .chunks_exact(each)
         .enumerate()
         .map(|(i, b)| {
             let mut f = Frame::new(PixelFormat::Yuv420p8, w, h, i as i64, tb);
-            f.planes[0].data.copy_from_slice(&b[..y]);
-            f.planes[1].data.copy_from_slice(&b[y..y + c]);
-            f.planes[2].data.copy_from_slice(&b[y + c..]);
-            f
+            let parts = [&b[..y], &b[y..y + c], &b[y + c..]];
+            for (plane, part) in f.planes.iter_mut().zip(parts) {
+                if plane.data.len() != part.len() {
+                    return Err(format!(
+                        "{}: {w}x{h} planes don't match the frame size",
+                        path.display()
+                    )
+                    .into());
+                }
+                plane.data.copy_from_slice(part);
+            }
+            Ok(f)
         })
-        .collect())
+        .collect()
 }
 
 fn encode_cpu(frames: &[Frame], w: u32, h: u32) -> Res<(f64, Vec<u8>)> {
@@ -546,7 +560,7 @@ impl Bench {
             }
             Err(e) => row.skipped = Some(e.to_string()),
         }
-        println!(
+        let _ = say!(
             "{:<44} ours {:>10} ffmpeg {:>10} {}  {}",
             row.id,
             row.ours.map_or("-".into(), |v| format!("{v:.1}")),
@@ -644,11 +658,13 @@ impl Bench {
             if !self.want(&[&id_prefix]) {
                 continue;
             }
-            let raw = a.raw[&h].clone();
+            let Some(raw) = a.raw.get(&h).cloned() else {
+                continue;
+            };
             let frames = match load_raw(&raw, w, h) {
                 Ok(f) => f,
                 Err(e) => {
-                    eprintln!("bench: {e}");
+                    note!("bench: {e}");
                     continue;
                 }
             };
@@ -1125,7 +1141,9 @@ impl Bench {
                         first_frame(&copy, 240, &prefs)?;
                         m.ours.push(t0.elapsed().as_secs_f64() * 1e3);
                     }
-                    m.details.insert("ours_first_call_ms".into(), m.ours[0]);
+                    if let Some(&first) = m.ours.first() {
+                        m.details.insert("ours_first_call_ms".into(), first);
+                    }
                     let pstr = path_str(&path);
                     let mut args = vec![];
                     if key == "gpu" {
@@ -1219,14 +1237,16 @@ impl Bench {
                                             let i = next
                                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                             let Some(t) = strs.get(i) else { break };
-                                            if let Err(e) = one(t) {
-                                                *failed.lock().unwrap() = Some(e.to_string());
+                                            if let Err(e) = one(t)
+                                                && let Ok(mut slot) = failed.lock()
+                                            {
+                                                *slot = Some(e.to_string());
                                             }
                                         }
                                     });
                                 }
                             });
-                            if let Some(e) = failed.into_inner().unwrap() {
+                            if let Some(e) = failed.into_inner().ok().flatten() {
                                 return Err(e.into());
                             }
                             Ok(12.0 / t0.elapsed().as_secs_f64())
@@ -1394,7 +1414,9 @@ impl Bench {
                 .copied()
                 .unwrap_or((1920, 1080));
             let (dw, dh) = (to * 16 / 9, to);
-            let raw = a.raw[&from].clone();
+            let Some(raw) = a.raw.get(&from).cloned() else {
+                continue;
+            };
             let rawstr = path_str(&raw);
             let runs = self.runs;
             let m = (|| -> Res<Measured> {
@@ -1719,7 +1741,11 @@ fn charts(rows: &[Row], images: &Path, machine: &Machine, date: &str) -> Res<()>
     Ok(())
 }
 
-fn main() -> Res<()> {
+fn main() -> ExitCode {
+    fail::run("bench", run)
+}
+
+fn run() -> Res<()> {
     let mut args = std::env::args().skip(1);
     let mut runs = 3usize;
     let mut quick = false;
@@ -1806,10 +1832,10 @@ fn main() -> Res<()> {
         results
     };
     fs::write(&results_path, serde_json::to_vec_pretty(&merged)?)?;
-    println!("wrote {}", results_path.display());
+    say!("wrote {}", results_path.display())?;
     if !no_charts && !quick && b.only.is_empty() {
         charts(&merged.rows, &images, &merged.machine, &merged.date)?;
-        println!("wrote charts to {}", images.display());
+        say!("wrote charts to {}", images.display())?;
     }
     Ok(())
 }

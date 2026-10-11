@@ -1,3 +1,4 @@
+use super::{Error, Result};
 use crate::filter::Rgba;
 use rayon::prelude::*;
 use std::sync::LazyLock;
@@ -19,12 +20,11 @@ pub struct Palette {
 }
 
 impl Palette {
-    pub fn new(colors: Vec<[u8; 3]>) -> Self {
-        assert!(
-            !colors.is_empty() && colors.len() <= 256,
-            "a palette holds 1 to 256 colours"
-        );
-        Palette { colors }
+    pub fn new(colors: Vec<[u8; 3]>) -> Result<Self> {
+        if colors.is_empty() || colors.len() > 256 {
+            return Err(Error::Invalid("a palette holds 1 to 256 colours"));
+        }
+        Ok(Palette { colors })
     }
 
     pub fn colors(&self) -> &[[u8; 3]] {
@@ -196,19 +196,23 @@ impl Histogram {
             })
             .collect();
         if points.is_empty() {
-            return Palette::new(vec![[0, 0, 0]]);
+            return Palette {
+                colors: vec![[0, 0, 0]],
+            };
         }
         if points.len() <= colors {
-            return Palette::new(
-                points
+            return Palette {
+                colors: points
                     .iter()
                     .map(|p| p.rgb.map(|v| v.round() as u8))
                     .collect(),
-            );
+            };
         }
         let centers = median_cut(&mut points, colors);
         let centers = kmeans(&points, centers, 3);
-        Palette::new(centers.into_iter().map(oklab_to_srgb).collect())
+        Palette {
+            colors: centers.into_iter().map(oklab_to_srgb).collect(),
+        }
     }
 }
 

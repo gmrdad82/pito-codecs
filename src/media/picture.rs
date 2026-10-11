@@ -72,31 +72,31 @@ pub fn scale_to_height(img: &Rgba, height: u32) -> Rgba {
 
 pub fn scale(img: &Rgba, width: u32, height: u32) -> Rgba {
     let mut out = Rgba::new(width, height);
-    if img.width == 0 || img.height == 0 || width == 0 || height == 0 {
+    let (sw, sh) = (img.width as usize, img.height as usize);
+    if sw == 0 || sh == 0 || width == 0 || height == 0 || img.data.len() < sw * sh * 4 {
         return out;
     }
-    let (sw, sh) = (img.width as usize, img.height as usize);
     let fx = sw as f32 / width as f32;
     let fy = sh as f32 / height as f32;
     let span = |o: usize, f: f32, max: usize| {
-        let a = (o as f32 * f).floor() as usize;
+        let a = ((o as f32 * f).floor() as usize).min(max - 1);
         let b = (((o + 1) as f32 * f).ceil() as usize).clamp(a + 1, max);
-        (a.min(max - 1), b)
+        (a, b)
     };
     for oy in 0..height as usize {
         let (y0, y1) = span(oy, fy, sh);
         for ox in 0..width as usize {
             let (x0, x1) = span(ox, fx, sw);
-            let mut acc = [0u32; 4];
+            let mut acc = [0u64; 4];
             for y in y0..y1 {
                 let row = &img.data[(y * sw + x0) * 4..(y * sw + x1) * 4];
                 for px in row.chunks_exact(4) {
                     for (a, &v) in acc.iter_mut().zip(px) {
-                        *a += v as u32;
+                        *a += v as u64;
                     }
                 }
             }
-            let n = ((y1 - y0) * (x1 - x0)) as u32;
+            let n = ((y1 - y0) * (x1 - x0)) as u64;
             let o = (oy * width as usize + ox) * 4;
             for (d, a) in out.data[o..o + 4].iter_mut().zip(acc) {
                 *d = ((a + n / 2) / n) as u8;
@@ -109,7 +109,7 @@ pub fn scale(img: &Rgba, width: u32, height: u32) -> Rgba {
 pub fn rotate(img: &Rgba, clockwise: u16) -> Rgba {
     let (w, h) = (img.width as usize, img.height as usize);
     let turns = (clockwise / 90) % 4;
-    if turns == 0 {
+    if turns == 0 || img.data.len() < w * h * 4 {
         return img.clone();
     }
     let (ow, oh) = if turns % 2 == 1 { (h, w) } else { (w, h) };
