@@ -75,6 +75,28 @@ struct Tables {
     comp_end: i64,
 }
 
+impl Tables {
+    fn reach_end(&mut self) {
+        let end = u64::try_from(self.comp_end).unwrap_or(0);
+        let Some(extra) = end.checked_sub(self.media_duration).filter(|&e| e > 0) else {
+            return;
+        };
+        let Some(last) = self.stts.last_mut() else {
+            return;
+        };
+        let Ok(d) = u32::try_from(last.1 as u64 + extra) else {
+            return;
+        };
+        if last.0 > 1 {
+            last.0 -= 1;
+            self.stts.push((1, d));
+        } else {
+            last.1 = d;
+        }
+        self.media_duration = end;
+    }
+}
+
 fn push_run<T: PartialEq + Copy>(runs: &mut Vec<(u32, T)>, v: T) {
     if let Some(last) = runs.last_mut()
         && last.1 == v
@@ -676,6 +698,9 @@ impl<W: Write + Seek> Writer<W> {
     fn finish_mdat(&mut self) -> Result<()> {
         for i in 0..self.tracks.len() {
             self.flush_pending(i, None)?;
+        }
+        for t in &mut self.tracks {
+            t.t.reach_end();
         }
         self.w.write_all(&self.buf)?;
         self.buf = Vec::new();

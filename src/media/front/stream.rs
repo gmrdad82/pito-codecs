@@ -332,6 +332,27 @@ impl Native {
     }
 }
 
+pub(super) fn native_stream(
+    path: &Path,
+    track: usize,
+    from: f64,
+    rate: u32,
+    channels: u16,
+) -> Result<AudioStream> {
+    if rate == 0 || channels == 0 || !from.is_finite() {
+        return Err(Error::Invalid(format!(
+            "a stream from {from} at {rate} Hz with {channels} channels"
+        )));
+    }
+    let n = Native::open(path, track, from, rate, channels)?;
+    Ok(AudioStream {
+        route: Route::Cpu,
+        rate,
+        channels,
+        inner: Inner::Native(Box::new(n)),
+    })
+}
+
 impl AudioStream {
     fn read(&mut self) -> Result<Option<AudioBuffer>> {
         let block = self.rate as usize * self.channels as usize * 4;

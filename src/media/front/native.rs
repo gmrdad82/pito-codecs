@@ -825,10 +825,6 @@ pub fn cut(mut buf: AudioBuffer, skip: usize, want: Option<usize>) -> AudioBuffe
     buf
 }
 
-pub fn decode_audio(r: &Arc<Reader>, i: usize, from: f64, to: f64) -> Result<AudioBuffer> {
-    decode_track(&Demux::Mp4(r.clone()), i, from, to).map(|(b, _)| b)
-}
-
 pub fn on_grid(start: f64, origin: f64, step: f64) -> f64 {
     if step <= 0.0 {
         return start;

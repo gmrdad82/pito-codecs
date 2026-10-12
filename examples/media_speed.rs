@@ -258,6 +258,34 @@ fn scale(path: &std::path::Path, what: &str, arg: Option<&str>) -> Res<()> {
                 s.len()
             )?;
         }
+        "export" => {
+            let p = probe(path, &prefs)?;
+            let out = PathBuf::from(arg.unwrap_or("tmp/scale-copy.mp4"));
+            let done = export(
+                &out,
+                &[Piece {
+                    path: path.to_path_buf(),
+                    from: 0.0,
+                    to: p.duration,
+                }],
+                ExportOptions {
+                    prefs: prefs.clone(),
+                    ..ExportOptions::default()
+                },
+                |_| true,
+            )?;
+            let t2 = Instant::now();
+            let back = probe(&out, &prefs)?;
+            say!(
+                "export {:.1} ms: {} frames, {} copied; probe of it {:.1} ms: {:.3} s, {:?} frames",
+                ms(t),
+                done.frames,
+                done.copied,
+                ms(t2),
+                back.duration,
+                back.frames
+            )?;
+        }
         "index" => {
             let p = probe(path, &prefs)?;
             let t = Instant::now();
@@ -267,6 +295,10 @@ fn scale(path: &std::path::Path, what: &str, arg: Option<&str>) -> Res<()> {
         }
         _ => return Err(format!("no scale check {what}").into()),
     }
+    peak()
+}
+
+fn peak() -> Res<()> {
     if let Ok(status) = std::fs::read_to_string("/proc/self/status")
         && let Some(peak) = status.lines().find(|l| l.starts_with("VmHWM"))
     {
@@ -327,7 +359,7 @@ fn cuts(path: &std::path::Path, n: usize) -> Res<()> {
     for r in &done.reasons {
         say!("  {r}")?;
     }
-    Ok(())
+    peak()
 }
 
 fn gpu_playback(path: &std::path::Path) -> Res<()> {
