@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.0.4 — 2026-10-12
+
+Exports of MKV recordings smart-cut, every join is exact, and probing a large MKV reads only its head.
+
+### Added
+
+- `frame_count` gives a file's exact frame count on demand.
+- `Exported.reasons` says why a piece or a whole export was re-encoded instead of copied.
+
+### Changed
+
+- MKV sources smart-cut into MP4: the stream between cuts is copied, and only the frames around each cut are re-encoded.
+- `probe` of an MKV with Cues reads its head, Cues, first blocks and last cluster instead of every block: a few milliseconds whatever the file size. `Probe.frames` is `None` there; `frame_count` gives the exact count.
+- VA-API H.264 and HEVC refuse pictures below 352x240, which then run on the CPU: smaller ones faulted AMD's video engine.
+
+### Fixed
+
+- The ffmpeg route's join gives every part its exact duration, so a long edit can't drift; copied MKV parts start on the right frame, tiny parts open, and the audio mix trims to exact sample counts.
+- A track mix ends on the video's last sample instead of up to one AAC frame past it, and reads MKV audio without ffmpeg.
+
 ## v1.0.3 — 2026-10-12
 
 Long MKV recordings open, play audio and give stills without reading the whole file.
