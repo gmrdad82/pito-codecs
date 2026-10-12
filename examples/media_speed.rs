@@ -6,10 +6,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
+use std::sync::Arc;
+
 use pito_codecs::media::{
-    AudioBuffer, Choice, ExportOptions, Piece, Prefs, Rgba, VideoFrame, audio_mix_stream,
-    audio_pcm, audio_stream, decode_video, decode_video_gpu, export, export_with_audio,
-    first_frame, frame_count, frames_at, keyframes, probe, to_rgba, to_rgba_height,
+    AudioBuffer, Blender, Canvas, Choice, ExportOptions, Frame, Piece, PixelFormat, Prefs, Rgba,
+    TimeBase, VideoFrame, audio_mix_stream, audio_pcm, audio_stream, blend, decode_video,
+    decode_video_gpu, export, export_frames, export_with_audio, first_frame, frame_count,
+    frames_at, keyframes, probe, to_rgba, to_rgba_height,
 };
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
@@ -21,9 +24,17 @@ fn main() -> ExitCode {
 fn run() -> Res<()> {
     let mut args = std::env::args().skip(1);
     let path = PathBuf::from(args.next().ok_or(
-        "usage: media_speed <file> [ffmpeg|auto|cpu|gpu|probe|cuts [n]|scale <check> [arg]]",
+        "usage: media_speed <file> [ffmpeg|auto|cpu|gpu|probe|cuts [n]|scale <check> [arg]|frames [auto|cpu] [n]]",
     )?);
     let mode = args.next();
+    if mode.as_deref() == Some("frames") {
+        let cpu = args.next().as_deref() == Some("cpu");
+        let count = match args.next() {
+            Some(n) => n.parse()?,
+            None => 600,
+        };
+        return made_frames(&path, cpu, count);
+    }
     if mode.as_deref() == Some("gpu") {
         return gpu_playback(&path);
     }
@@ -410,4 +421,103 @@ fn gpu_playback(path: &std::path::Path) -> Res<()> {
         }
     }
     Ok(())
+}
+
+fn made_frames(out: &std::path::Path, cpu: bool, count: u64) -> Res<()> {
+    let (w, h) = (1080u32, 1920u32);
+    let looks: Vec<Frame> = (0..8)
+        .map(|k| {
+            let mut f = Frame::new(PixelFormat::Yuv420p8, w, h, 0, TimeBase::new(1, 60));
+            let stride = f.planes[0].stride;
+            for (y, row) in f.planes[0].data.chunks_mut(stride).enumerate() {
+                for (x, px) in row.iter_mut().take(w as usize).enumerate() {
+                    *px = (16 + (x / 4 + y / 4 + k * 9) % 200) as u8;
+                }
+            }
+            for (i, p) in f.planes[1..].iter_mut().enumerate() {
+                p.data.fill(100 + 40 * i as u8 + k as u8 * 4);
+            }
+            f
+        })
+        .collect();
+    let mut mark = Rgba::new(w, h);
+    for (i, px) in mark.data.chunks_exact_mut(4).enumerate() {
+        let (x, y) = (i as u32 % w, i as u32 / w);
+        if x > w - 300 && y > h - 120 {
+            px.copy_from_slice(&[255, 255, 255, 160]);
+        }
+    }
+    let mark = Arc::new(mark);
+    let mut frame = looks[0].clone();
+    let t = Instant::now();
+    for _ in 0..60 {
+        blend(&mut frame, &mark);
+    }
+    let fresh = t.elapsed().as_secs_f64() * 1e3 / 60.0;
+    let mut blender = Blender::new();
+    blender.draw(&mut frame, &mark);
+    let t = Instant::now();
+    for _ in 0..600 {
+        blender.draw(&mut frame, &mark);
+    }
+    let kept = t.elapsed().as_secs_f64() * 1e3 / 600.0;
+    say!(
+        "blend {w}x{h}: {fresh:.2} ms a frame cloning the overlay, {kept:.3} ms with a kept Blender"
+    )?;
+    let prefs = if cpu {
+        Prefs {
+            decode: Choice::Cpu,
+            encode: Choice::Cpu,
+            ..Prefs::default()
+        }
+    } else {
+        Prefs::default()
+    };
+    let canvas = Canvas {
+        width: w,
+        height: h,
+        fps: (60, 1),
+        frames: Some(count),
+    };
+    let mut at = 0usize;
+    let t = Instant::now();
+    let done = export_frames(
+        out,
+        canvas,
+        ExportOptions {
+            prefs,
+            ..ExportOptions::default()
+        },
+        |n, spent| {
+            if n >= count {
+                return Ok(None);
+            }
+            let look = &looks[n as usize % looks.len()];
+            let mut f = spent.unwrap_or_else(|| look.clone());
+            for (d, s) in f.planes.iter_mut().zip(&look.planes) {
+                d.data.copy_from_slice(&s.data);
+            }
+            Ok(Some(VideoFrame::Cpu(f)))
+        },
+        |_, frames| {
+            let mut buf = AudioBuffer::new(48_000, 2);
+            buf.samples = (at..at + frames)
+                .flat_map(|k| {
+                    let s = (k as f64 * 440.0 * std::f64::consts::TAU / 48_000.0).sin() as f32;
+                    [s * 0.25, s * 0.25]
+                })
+                .collect();
+            at += frames;
+            Ok(buf)
+        },
+        |_| true,
+    )?;
+    let s = t.elapsed().as_secs_f64();
+    say!(
+        "export_frames {w}x{h} at 60 fps: {} frames in {s:.2} s ({:.0} fps) on {}",
+        done.frames,
+        done.frames as f64 / s,
+        done.video.said()
+    )?;
+    peak()
 }
