@@ -163,7 +163,7 @@ pub(crate) fn container_ffmpeg(prefs: &Prefs) -> Result<Ffmpeg> {
     match prefs.user_ffmpeg() {
         Some(u) => Ffmpeg::find(u.path.as_deref()),
         None => Err(Error::Unsupported(
-            "reading containers needs the MP4 module, not in this build yet, or ffmpeg picked in the settings"
+            "reading containers needs the MP4 module, which is not in this build, or ffmpeg picked in the settings"
                 .to_string(),
         )),
     }

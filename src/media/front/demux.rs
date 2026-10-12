@@ -1,6 +1,6 @@
 use std::io::Read;
 use std::path::Path;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, PoisonError};
 
 use crate::mkv;
 use crate::mp4::{AvcConfig, CodecConfig, HevcConfig, Reader, Track};
@@ -24,9 +24,29 @@ pub struct Stream {
     pub color: Option<(u8, bool)>,
 }
 
+static MKV_READERS: Readers<mkv::Reader> = LazyLock::new(Default::default);
+static MKV_HEADS: Readers<mkv::Reader> = LazyLock::new(Default::default);
+
 fn mkv_reader(path: &Path) -> Result<Arc<mkv::Reader>> {
-    static READERS: Readers<mkv::Reader> = LazyLock::new(Default::default);
-    cached(&READERS, path, |p| mkv::Reader::open(p))
+    cached(&MKV_READERS, path, |p| mkv::Reader::open(p))
+}
+
+pub fn mkv_head(path: &Path) -> Result<Option<Arc<mkv::Reader>>> {
+    if !is_matroska(path) {
+        return Ok(None);
+    }
+    let key = native::key(path)?;
+    if let Some(r) = MKV_READERS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+    {
+        return Ok(Some(r.clone()));
+    }
+    cached(&MKV_HEADS, path, |p| {
+        mkv::Reader::open_with(p, mkv::ReadOptions { index: false })
+    })
+    .map(Some)
 }
 
 fn is_matroska(path: &Path) -> bool {

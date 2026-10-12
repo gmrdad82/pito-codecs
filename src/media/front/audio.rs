@@ -50,7 +50,7 @@ pub fn audio_pcm_range(
     if end.is_some_and(|e| e <= start) {
         return Ok(AudioBuffer::new(rate, channels));
     }
-    let buf = ffmpeg_pcm(
+    let mut buf = ffmpeg_pcm(
         &f,
         path,
         track,
@@ -59,11 +59,11 @@ pub fn audio_pcm_range(
         rate,
         channels,
     )?;
-    Ok(super::native::cut(
-        buf,
-        0,
-        end.map(|e| e.saturating_sub(start)),
-    ))
+    if let Some(e) = end {
+        buf.samples
+            .truncate(e.saturating_sub(start) * channels as usize);
+    }
+    Ok(buf)
 }
 
 pub(super) fn ffmpeg_pcm(
@@ -126,10 +126,12 @@ pub fn audio_mix(
         .par_iter()
         .map(|&(t, g)| audio_pcm_range(path, t, from, to, rate, 2, prefs).map(|b| (b, g)))
         .collect::<Result<_>>()?;
+    let longest = decoded.iter().map(|(b, _)| b.frames()).max().unwrap_or(0);
     let frames = if to.is_finite() {
-        ((to * rate as f64).round() - (from.max(0.0) * rate as f64).round()).max(0.0) as usize
+        (((to * rate as f64).round() - (from.max(0.0) * rate as f64).round()).max(0.0) as usize)
+            .min(longest)
     } else {
-        decoded.iter().map(|(b, _)| b.frames()).max().unwrap_or(0)
+        longest
     };
     let mut out = AudioBuffer::new(rate, 2);
     let samples = frames

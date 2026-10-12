@@ -75,7 +75,7 @@ Not covered: AC3 and E-AC3, DTS, MP3, FLAC, Vorbis, ALAC, AV1, ProRes, DNxHD, MP
 - **Containers:** MP4, MOV, MKV and WebM read, write and remux; Ogg Opus.
 - **Images:** GIF and WebP, still and animated.
 - **Filters** between decode and encode (`filter`): scaling, colour, geometry, frame rate, overlays, resampling and loudness.
-- **A front for apps** (`media`), which picks the fastest working route for each call. It can probe a file, give the first frame or stills for a filmstrip, play a file, pull its audio as PCM over any time range or as a stereo mix of its tracks with a gain each, and export with smart cuts, which copy the middle of each piece and re-encode only the edges.
+- **A front for apps** (`media`), which picks the fastest working route for each call. It can probe a file, give the first frame or stills for a filmstrip, play a file, pull its audio as PCM over any time range, as a stream of one-second blocks from any point, or as a stereo mix of its tracks with a gain each, and export with smart cuts, which copy the middle of each piece and re-encode only the edges.
 
 ## Install
 
@@ -186,12 +186,22 @@ let frames = decoder.decode(&packet)?;
 Or let the front pick the route:
 
 ```rust
-use pito_codecs::media::{Prefs, first_frame, probe};
+use pito_codecs::media::{
+    Prefs, Seek, audio_pcm_range, audio_stream, first_frame, frames_at, frames_at_seek, probe,
+};
 
 let prefs = Prefs::default();
 let info = probe("clip.mp4".as_ref(), &prefs)?;
 let still = first_frame("clip.mp4".as_ref(), 240, &prefs)?;
+let strip = frames_at("recording.mkv".as_ref(), &[60.0, 5400.0], 120, &prefs)?;
+let exact = frames_at_seek("recording.mkv".as_ref(), &[61.5], 240, Seek::Exact, &prefs)?;
+let slice = audio_pcm_range("recording.mkv".as_ref(), 0, 30.0, 60.0, 48_000, 2, &prefs)?;
+for block in audio_stream("recording.mkv".as_ref(), 0, 0.0, 16_000, 1, &prefs)? {
+    let block = block?;
+}
 ```
+
+`frames_at` shows the keyframe at or before each time, which is what a filmstrip wants; `frames_at_seek` with `Seek::Exact` decodes on to the frame shown at that time, and decodes a GOP once for all the times inside it. A range past the end of the track returns only the samples it has, so a buffer shorter than asked means the track ended. `audio_stream` hands the audio over in one-second blocks as it decodes and ends at the track's end. In MKV and WebM, stills and audio seek through the file's Cues, so a still or a slice late in a long recording reads only the clusters around it.
 
 Export an edit with audio you mixed yourself: the callback gets each piece's index and its exact sample count and returns that many 48 kHz stereo samples, which our AAC encoder turns into one track as long as the video to the sample:
 
