@@ -184,10 +184,7 @@ fn shape(
             };
             let mut out = Vec::with_capacity(bytes.len() + extra);
             let heads = if key { sets } else { &[] };
-            for n in heads.iter().map(Vec::as_slice).chain(keep) {
-                out.extend_from_slice(&[0, 0, 0, 1]);
-                out.extend_from_slice(n);
-            }
+            nal::put_start_codes(heads.iter().map(Vec::as_slice).chain(keep), &mut out);
             out
         }
     };
@@ -197,21 +194,14 @@ fn shape(
 fn parameter_sets(codec: Codec, bytes: &[u8]) -> Result<(Vec<u8>, Vec<Vec<u8>>)> {
     let mut found: [Vec<Vec<u8>>; 3] = Default::default();
     for n in nal::annexb(bytes) {
-        let i = match (codec, nal::nal_type(codec, n)) {
-            (Codec::Hevc, 32) => 0,
-            (Codec::Hevc, 33) | (Codec::H264, 7) => 1,
-            (Codec::Hevc, 34) | (Codec::H264, 8) => 2,
-            _ => continue,
-        };
-        found[i].push(n.to_vec());
+        if let Some(i) = nal::set_slot(codec, n) {
+            found[i].push(n.to_vec());
+        }
     }
     if found[1].is_empty() || found[2].is_empty() {
         return Err(Error::Backend("NVENC returned no parameter sets".into()));
     }
-    let record = match codec {
-        Codec::Hevc => nal::build_hvcc(&found[0], &found[1], &found[2])?,
-        _ => nal::build_avcc(&found[1], &found[2])?,
-    };
+    let record = nal::record(codec, &found)?;
     Ok((record, found.into_iter().flatten().collect()))
 }
 
@@ -307,14 +297,7 @@ impl NvEncoder {
             ready: 0,
             display_pts: VecDeque::with_capacity(slots),
             duration: 0,
-            name: format!(
-                "NVENC {} encoder",
-                if codec == Codec::Hevc {
-                    "HEVC"
-                } else {
-                    "H.264"
-                }
-            ),
+            name: format!("NVENC {codec} encoder"),
         })
     }
 

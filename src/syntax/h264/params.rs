@@ -1,3 +1,5 @@
+use std::borrow::Borrow;
+
 use super::tables::*;
 use crate::syntax::bits::BitReader;
 use crate::syntax::error::{Result, ensure, unsupported};
@@ -615,7 +617,7 @@ pub struct Pps {
 }
 
 impl Pps {
-    pub fn parse(rbsp: &[u8], spss: &[Option<Sps>]) -> Result<Pps> {
+    pub fn parse<S: Borrow<Sps>>(rbsp: &[u8], spss: &[Option<S>]) -> Result<Pps> {
         let mut r = BitReader::new(rbsp);
         let id = r.read_ue()?;
         ensure!(id < 256, "pic_parameter_set_id out of range");
@@ -624,6 +626,7 @@ impl Pps {
         let sps = spss
             .get(sps_id as usize)
             .and_then(|s| s.as_ref())
+            .map(Borrow::borrow)
             .ok_or_else(|| {
                 crate::syntax::error::Error::MissingParameterSet(format!(
                     "SPS {sps_id} for PPS {id}"

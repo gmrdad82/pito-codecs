@@ -118,14 +118,7 @@ pub fn merge_sets(codec: Codec, old: &[Vec<u8>], new: &[&[u8]]) -> Vec<Vec<u8>> 
 }
 
 pub fn annexb(nals: &[&[u8]], headers: Option<&[Vec<u8>]>, out: &mut Vec<u8>) {
-    const START: [u8; 4] = [0, 0, 0, 1];
     out.clear();
-    for n in headers.into_iter().flatten() {
-        out.extend_from_slice(&START);
-        out.extend_from_slice(n);
-    }
-    for n in nals {
-        out.extend_from_slice(&START);
-        out.extend_from_slice(n);
-    }
+    let heads = headers.into_iter().flatten().map(Vec::as_slice);
+    nal::put_start_codes(heads.chain(nals.iter().copied()), out);
 }

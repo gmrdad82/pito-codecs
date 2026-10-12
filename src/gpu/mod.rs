@@ -356,50 +356,6 @@ impl GpuFrame {
         }
     }
 
-    #[cfg_attr(
-        not(all(
-            feature = "h264",
-            feature = "hevc",
-            feature = "aac",
-            feature = "mp4",
-            feature = "filter",
-            feature = "mkv",
-            feature = "vp9"
-        )),
-        allow(dead_code)
-    )]
-    pub(crate) fn retime(&mut self, pts: i64, time_base: TimeBase) {
-        self.time_base = time_base;
-        match &mut self.inner {
-            GpuInner::Cpu(f) => {
-                f.pts = pts;
-                f.time_base = time_base;
-            }
-            #[cfg(target_os = "linux")]
-            GpuInner::VaApi(g) => g.pts = pts,
-        }
-    }
-
-    #[cfg_attr(
-        not(all(
-            feature = "h264",
-            feature = "hevc",
-            feature = "aac",
-            feature = "mp4",
-            feature = "filter",
-            feature = "mkv",
-            feature = "vp9"
-        )),
-        allow(dead_code)
-    )]
-    pub(crate) fn into_cpu(self) -> Option<Frame> {
-        match self.inner {
-            GpuInner::Cpu(f) => Some(f),
-            #[cfg(target_os = "linux")]
-            GpuInner::VaApi(_) => None,
-        }
-    }
-
     pub fn on_gpu(&self) -> bool {
         !matches!(self.inner, GpuInner::Cpu(_))
     }
@@ -440,6 +396,40 @@ impl GpuFrame {
             time_base: self.time_base,
             ..frame
         })
+    }
+}
+
+#[cfg_attr(
+    not(all(
+        feature = "h264",
+        feature = "hevc",
+        feature = "aac",
+        feature = "mp4",
+        feature = "filter",
+        feature = "mkv",
+        feature = "vp9"
+    )),
+    allow(dead_code)
+)]
+impl GpuFrame {
+    pub(crate) fn retime(&mut self, pts: i64, time_base: TimeBase) {
+        self.time_base = time_base;
+        match &mut self.inner {
+            GpuInner::Cpu(f) => {
+                f.pts = pts;
+                f.time_base = time_base;
+            }
+            #[cfg(target_os = "linux")]
+            GpuInner::VaApi(g) => g.pts = pts,
+        }
+    }
+
+    pub(crate) fn into_cpu(self) -> Option<Frame> {
+        match self.inner {
+            GpuInner::Cpu(f) => Some(f),
+            #[cfg(target_os = "linux")]
+            GpuInner::VaApi(_) => None,
+        }
     }
 }
 

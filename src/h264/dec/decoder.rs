@@ -238,13 +238,7 @@ impl Decoder {
                 self.spss[id] = Some(Arc::new(sps));
             }
             nal_type::PPS => {
-                let rbsp = unescape_rbsp(&nal[1..]);
-                let spss: Vec<Option<Sps>> = self
-                    .spss
-                    .iter()
-                    .map(|s| s.as_ref().map(|s| (**s).clone()))
-                    .collect();
-                let pps = Pps::parse(&rbsp, &spss)?;
+                let pps = Pps::parse(&unescape_rbsp(&nal[1..]), &self.spss)?;
                 let id = pps.id as usize;
                 self.ppss[id] = Some(Arc::new(pps));
             }

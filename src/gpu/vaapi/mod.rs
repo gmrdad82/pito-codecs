@@ -114,6 +114,10 @@ fn backend(e: impl std::fmt::Display) -> Error {
     Error::Backend(e.to_string())
 }
 
+fn unsupported(what: &str) -> Error {
+    Error::Unsupported(format!("the hardware decoder does not take {what}"))
+}
+
 fn open_front(codec: Codec, framing: Framing, sets: &[Vec<u8>]) -> Result<(Front, String)> {
     match codec {
         Codec::H264 => {
