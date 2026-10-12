@@ -186,19 +186,22 @@ let frames = decoder.decode(&packet)?;
 Or let the front pick the route:
 
 ```rust
-use pito_codecs::media::{Prefs, audio_pcm_range, audio_stream, first_frame, frames_at, probe};
+use pito_codecs::media::{
+    Prefs, Seek, audio_pcm_range, audio_stream, first_frame, frames_at, frames_at_seek, probe,
+};
 
 let prefs = Prefs::default();
 let info = probe("clip.mp4".as_ref(), &prefs)?;
 let still = first_frame("clip.mp4".as_ref(), 240, &prefs)?;
 let strip = frames_at("recording.mkv".as_ref(), &[60.0, 5400.0], 120, &prefs)?;
+let exact = frames_at_seek("recording.mkv".as_ref(), &[61.5], 240, Seek::Exact, &prefs)?;
 let slice = audio_pcm_range("recording.mkv".as_ref(), 0, 30.0, 60.0, 48_000, 2, &prefs)?;
 for block in audio_stream("recording.mkv".as_ref(), 0, 0.0, 16_000, 1, &prefs)? {
     let block = block?;
 }
 ```
 
-A range past the end of the track returns only the samples it has, so a buffer shorter than asked means the track ended. `audio_stream` hands the audio over in one-second blocks as it decodes and ends at the track's end. In MKV and WebM, stills and audio seek through the file's Cues, so a still or a slice late in a long recording reads only the clusters around it.
+`frames_at` shows the keyframe at or before each time, which is what a filmstrip wants; `frames_at_seek` with `Seek::Exact` decodes on to the frame shown at that time, and decodes a GOP once for all the times inside it. A range past the end of the track returns only the samples it has, so a buffer shorter than asked means the track ended. `audio_stream` hands the audio over in one-second blocks as it decodes and ends at the track's end. In MKV and WebM, stills and audio seek through the file's Cues, so a still or a slice late in a long recording reads only the clusters around it.
 
 `pcod` (`src/bin/pcod.rs`) is a small command line over the library, and it is what the GIF above shows: `pcod decode clip.mp4 --route gpu`, or from a checkout `cargo run --release --bin pcod -- decode clip.mp4 --route gpu`. It is behind the `cli` feature, on by default, so a library user with `default-features = false` never builds clap.
 
