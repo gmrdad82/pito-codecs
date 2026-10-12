@@ -9,6 +9,7 @@ use crate::gpu::GpuFrame;
 use crate::mp4::{CodecConfig, Reader, Track};
 
 use super::demux::{self, Demux, Stream};
+use super::feed::Feed;
 
 use super::picture::{Color, rotate, to_rgba_color};
 use super::probe::{AudioTrack, Probe};
@@ -469,7 +470,36 @@ pub fn still(reader: &Reader, dec: &mut Decoder, at: f64, height: u32) -> Result
     let (track, t) = video_track(reader)?;
     let i = t.keyframe_before(t.sample_at(t.ticks(at.max(0.0))).unwrap_or(0));
     let packet = reader.packet(track, i)?;
-    let mut frames = dec.decode(&packet)?;
+    picture(dec, &packet, t.rotation(), at, height)
+}
+
+pub fn still_mkv(
+    r: &crate::mkv::Reader,
+    cur: &mut crate::mkv::Cursor,
+    dec: &mut Decoder,
+    at: f64,
+    height: u32,
+) -> Result<Rgba> {
+    let v = r
+        .video()
+        .ok_or_else(|| Error::Invalid("no video track".to_string()))?;
+    let rotation = r.tracks.get(v).map_or(0, |t| t.rotation());
+    cur.seek(r, v, at.max(0.0))?;
+    let mut data = Vec::new();
+    let b = cur
+        .next_of(r, Some(v), &mut data)?
+        .ok_or_else(|| Error::Invalid(format!("no picture at {at:.3} s")))?;
+    let packet = Packet {
+        data,
+        pts: b.pts,
+        dts: b.pts,
+        keyframe: b.keyframe,
+    };
+    picture(dec, &packet, rotation, at, height)
+}
+
+fn picture(dec: &mut Decoder, packet: &Packet, rotation: u16, at: f64, height: u32) -> Result<Rgba> {
+    let mut frames = dec.decode(packet)?;
     frames.extend(dec.flush()?);
     let mut frames = frames.into_iter();
     let frame = frames
@@ -478,7 +508,6 @@ pub fn still(reader: &Reader, dec: &mut Decoder, at: f64, height: u32) -> Result
     for f in frames {
         dec.recycle(f);
     }
-    let rotation = t.rotation();
     let pre = if rotation % 180 == 90 && frame.height > 0 {
         let w = (height as u64 * frame.height as u64 / frame.width.max(1) as u64) as u32;
         w.max(2) & !1
@@ -491,12 +520,15 @@ pub fn still(reader: &Reader, dec: &mut Decoder, at: f64, height: u32) -> Result
 }
 
 pub fn still_decoder(reader: &Arc<Reader>, route: Route) -> Result<Decoder> {
-    let demux = Demux::Mp4(reader.clone());
+    video_decoder(&Demux::Mp4(reader.clone()), route)
+}
+
+pub fn video_decoder(demux: &Demux, route: Route) -> Result<Decoder> {
     let track = demux.video()?;
     Ok(Decoder::for_route(&demux.stream(track)?, 1, route)?.0)
 }
 
-const PAD: f64 = 0.02;
+pub const PAD: f64 = 0.02;
 const CHUNK: f64 = 4.0;
 
 fn audio_tracks(d: &Demux) -> Vec<usize> {
@@ -515,13 +547,26 @@ fn pcm_span(t: &crate::mkv::Track, sound: &Sound) -> Option<(f64, u64)> {
     Some((t.seconds(first.pts), frames))
 }
 
-fn audio_length(d: &Demux, i: usize, sound: &Sound) -> f64 {
-    match d {
+fn audio_length(d: &Demux, i: usize, sound: &Sound) -> Result<f64> {
+    Ok(match d {
         Demux::Mp4(r) => r.tracks.get(i).map_or(0.0, Track::duration_seconds),
-        Demux::Mkv(r) => r.tracks.get(i).map_or(0.0, |t| match pcm_span(t, sound) {
-            Some((start, frames)) => (start + frames as f64 / sound.rate().max(1) as f64).max(0.0),
-            None => t.seconds(t.end()).max(0.0),
-        }),
+        Demux::Mkv(r) => match r.tracks.get(i) {
+            Some(t) if t.samples.is_empty() => super::feed::mkv_end(r, i)?,
+            Some(t) => match pcm_span(t, sound) {
+                Some((start, frames)) => {
+                    (start + frames as f64 / sound.rate().max(1) as f64).max(0.0)
+                }
+                None => t.seconds(t.end()).max(0.0),
+            },
+            None => 0.0,
+        },
+    })
+}
+
+pub fn audio_demux(path: &Path) -> Result<Demux> {
+    match demux::mkv_head(path)? {
+        Some(r) => Ok(Demux::Mkv(r)),
+        None => Demux::open(path),
     }
 }
 
@@ -533,24 +578,21 @@ pub fn audio_range(
     rate: u32,
     channels: u16,
 ) -> Result<AudioBuffer> {
-    let d = Demux::open(path)?;
-    let ids = audio_tracks(&d);
-    let &i = ids
-        .get(track)
-        .ok_or_else(|| Error::Invalid(format!("no audio track {track}")))?;
+    let d = audio_demux(path)?;
+    let i = audio_track(&d, track)?;
     let sound = Sound::open(&d, i)?;
     let pad = sound.pre_roll().max(PAD);
     let at = |t: f64| (t * rate as f64).round() as usize;
     let start = at(from.max(0.0));
-    let length = audio_length(&d, i, &sound);
+    let whole = matches!(&d, Demux::Mkv(_)) && sound.pcm_frames(0).is_some();
     let end = if to.is_finite() {
         Some(at(to))
-    } else if length > 0.0 {
-        Some(at(length).max(start))
-    } else {
+    } else if whole {
         None
+    } else {
+        let length = audio_length(&d, i, &sound)?;
+        (length > 0.0).then(|| at(length).max(start))
     };
-    let whole = matches!(&d, Demux::Mkv(_)) && sound.pcm_frames(0).is_some();
     let Some(end) = end.filter(|_| !whole) else {
         return piece(&d, i, start, end, rate, channels, pad);
     };
@@ -586,13 +628,25 @@ fn piece(
     let pad = start.min((pad * rate as f64).round() as usize);
     let t0 = (start - pad) as f64 / rate as f64;
     let t1 = end.map_or(f64::INFINITY, |e| e as f64 / rate as f64 + PAD);
-    let raw = decode_track(d, i, t0, t1)?;
+    let (raw, length) = decode_track(d, i, t0, t1)?;
+    let last = (length > 0.0).then(|| ((length * rate as f64).round() as usize).max(start));
+    let end = match (end, last) {
+        (Some(e), Some(l)) => Some(e.min(l)),
+        (e, l) => e.or(l),
+    };
     let buf = if channels > raw.channels {
         shape(at_rate(raw, rate), channels)?
     } else {
         at_rate(shape(raw, channels)?, rate)
     };
     Ok(cut(buf, pad, end.map(|e| e - start)))
+}
+
+pub fn audio_track(d: &Demux, track: usize) -> Result<usize> {
+    audio_tracks(d)
+        .get(track)
+        .copied()
+        .ok_or_else(|| Error::Invalid(format!("no audio track {track}")))
 }
 
 fn at_rate(buf: AudioBuffer, rate: u32) -> AudioBuffer {
@@ -627,60 +681,10 @@ pub fn cut(mut buf: AudioBuffer, skip: usize, want: Option<usize>) -> AudioBuffe
 }
 
 pub fn decode_audio(r: &Arc<Reader>, i: usize, from: f64, to: f64) -> Result<AudioBuffer> {
-    decode_track(&Demux::Mp4(r.clone()), i, from, to)
+    decode_track(&Demux::Mp4(r.clone()), i, from, to).map(|(b, _)| b)
 }
 
-type First = (usize, usize, f64, Option<f64>);
-
-fn first_sample(d: &Demux, i: usize, from: f64, sound: &Sound) -> Result<First> {
-    let missing = || Error::Invalid(format!("no track {i}"));
-    Ok(match d {
-        Demux::Mp4(r) => {
-            let t = r.tracks.get(i).ok_or_else(missing)?;
-            let from_t = t.ticks(from);
-            let first = t
-                .samples
-                .partition_point(|s| {
-                    s.pts.saturating_add(t.edit_offset) + s.duration as i64 <= from_t
-                })
-                .saturating_sub(1);
-            let start = t.seconds(t.presentation(first).unwrap_or(0));
-            (first, t.samples.len(), start, None)
-        }
-        Demux::Mkv(r) => {
-            let t = r.tracks.get(i).ok_or_else(missing)?;
-            if let Some((start, _)) = pcm_span(t, sound) {
-                let rate = sound.rate().max(1) as f64;
-                let mut at = 0u64;
-                for (k, s) in t.samples.iter().enumerate() {
-                    let next = at.saturating_add(sound.pcm_frames(s.size).unwrap_or(0));
-                    if start + next as f64 / rate > from {
-                        return Ok((k, t.samples.len(), start + at as f64 / rate, None));
-                    }
-                    at = next;
-                }
-                return Ok((
-                    t.samples.len(),
-                    t.samples.len(),
-                    start + at as f64 / rate,
-                    None,
-                ));
-            }
-            let from_t = t.ticks(from);
-            let first = t
-                .samples
-                .partition_point(|s| s.pts.saturating_add(s.duration as i64) <= from_t)
-                .saturating_sub(1);
-            let delay = t.codec_delay as f64 / 1e9;
-            let fix = t.seconds(t.ticks(delay)) - delay;
-            let start = t.seconds(t.samples.get(first).map_or(0, |s| s.pts)) + fix;
-            let origin = t.samples.first().map(|s| t.seconds(s.pts) + fix);
-            (first, t.samples.len(), start, origin)
-        }
-    })
-}
-
-fn on_grid(start: f64, origin: f64, step: f64) -> f64 {
+pub fn on_grid(start: f64, origin: f64, step: f64) -> f64 {
     if step <= 0.0 {
         return start;
     }
@@ -692,50 +696,22 @@ fn on_grid(start: f64, origin: f64, step: f64) -> f64 {
     }
 }
 
-fn decode_track(d: &Demux, i: usize, from: f64, to: f64) -> Result<AudioBuffer> {
-    let mut dec = Sound::open(d, i)?;
-    let rate = dec.rate().max(1);
-    let channels = dec.channels().max(1);
-    let mut out = AudioBuffer::new(rate, channels);
-    let (first, count, start, origin) = first_sample(d, i, from.max(0.0), &dec)?;
-    let skip_from = |start: f64| {
-        if from > 0.0 || start < 0.0 {
-            ((from.max(0.0) - start) * rate as f64).round().max(0.0) as usize
-        } else {
-            0
-        }
-    };
-    let mut skip = origin.is_none().then(|| skip_from(start));
-    let end = audio_length(d, i, &dec);
-    let to = if end > 0.0 { to.min(end) } else { to };
-    let want = to
-        .is_finite()
-        .then(|| ((to - from.max(0.0)) * rate as f64).round().max(0.0) as usize);
-    let mut buf = Vec::new();
-    let mut pcm = Vec::new();
-    let mut skipped = 0usize;
-    for k in first..count {
-        if let Some(w) = want
+fn decode_track(d: &Demux, i: usize, from: f64, to: f64) -> Result<(AudioBuffer, f64)> {
+    let mut feed = Feed::open(d, i, from)?;
+    let mut out = AudioBuffer::new(feed.rate, feed.channels);
+    loop {
+        if let Some(w) = feed.want(to)
             && out.frames() >= w
         {
             break;
         }
-        d.read_into(i, k, &mut buf)?;
-        let got = dec.decode(&buf, &mut pcm)?;
-        let ch = got.max(1) as usize;
-        let frames = pcm.len() / ch;
-        let skip = *skip.get_or_insert_with(|| {
-            skip_from(origin.map_or(start, |o| on_grid(start, o, frames as f64 / rate as f64)))
-        });
-        let drop = (skip - skipped).min(frames);
-        skipped += drop;
-        if got == channels {
-            out.samples
-                .extend_from_slice(pcm.get(drop * ch..frames * ch).unwrap_or_default());
+        if !feed.next(&mut out.samples)? {
+            break;
         }
     }
-    if let Some(w) = want {
-        out.samples.resize(w * channels as usize, 0.0);
+    if let Some(w) = feed.want(to) {
+        out.samples.resize(w * feed.channels as usize, 0.0);
     }
-    Ok(out)
+    Ok((out, feed.end()))
 }
+

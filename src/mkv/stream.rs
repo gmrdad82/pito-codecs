@@ -23,8 +23,7 @@ struct InCluster {
     end: Option<u64>,
 }
 
-pub struct Stream<'r, S: ByteSource> {
-    reader: &'r Reader<S>,
+pub(crate) struct Cursor {
     cache: Cache,
     pos: u64,
     cluster: Option<InCluster>,
@@ -34,28 +33,23 @@ pub struct Stream<'r, S: ByteSource> {
     done: bool,
 }
 
+pub struct Stream<'r, S: ByteSource> {
+    reader: &'r Reader<S>,
+    cursor: Cursor,
+}
+
 impl<S: ByteSource> Reader<S> {
     pub fn stream(&self) -> Stream<'_, S> {
         Stream {
             reader: self,
-            cache: Cache::default(),
-            pos: self.first_cluster.unwrap_or(self.segment_end),
-            cluster: None,
-            pending: VecDeque::new(),
-            frames: Vec::new(),
-            skip: None,
-            done: false,
+            cursor: Cursor::new(self),
         }
     }
 }
 
 impl<S: ByteSource> Stream<'_, S> {
     pub fn rewind(&mut self) {
-        self.pos = self.reader.first_cluster.unwrap_or(self.reader.segment_end);
-        self.cluster = None;
-        self.pending.clear();
-        self.skip = None;
-        self.done = false;
+        self.cursor.rewind(self.reader);
     }
 
     pub fn next_packet(&mut self) -> Result<Option<(usize, Packet)>> {
@@ -74,17 +68,51 @@ impl<S: ByteSource> Stream<'_, S> {
     }
 
     pub fn next_into(&mut self, data: &mut Vec<u8>) -> Result<Option<Block>> {
+        self.cursor.next_of(self.reader, None, data)
+    }
+
+    pub fn seek(&mut self, track: usize, seconds: f64) -> Result<f64> {
+        self.cursor.seek(self.reader, track, seconds)
+    }
+}
+
+impl Cursor {
+    pub(crate) fn new<S: ByteSource>(r: &Reader<S>) -> Cursor {
+        Cursor {
+            cache: Cache::default(),
+            pos: r.first_cluster.unwrap_or(r.segment_end),
+            cluster: None,
+            pending: VecDeque::new(),
+            frames: Vec::new(),
+            skip: None,
+            done: false,
+        }
+    }
+
+    pub(crate) fn rewind<S: ByteSource>(&mut self, r: &Reader<S>) {
+        self.pos = r.first_cluster.unwrap_or(r.segment_end);
+        self.cluster = None;
+        self.pending.clear();
+        self.skip = None;
+        self.done = false;
+    }
+
+    pub(crate) fn next_of<S: ByteSource>(
+        &mut self,
+        r: &Reader<S>,
+        track: Option<usize>,
+        data: &mut Vec<u8>,
+    ) -> Result<Option<Block>> {
         loop {
             if let Some(f) = self.pending.pop_front() {
-                let r = self.reader;
-                read_frame(
-                    r.source(),
-                    r.len(),
-                    &r.tracks[f.track],
-                    f.offset,
-                    f.size,
-                    data,
-                )?;
+                if track.is_some_and(|t| t != f.track) {
+                    continue;
+                }
+                let t = r
+                    .tracks
+                    .get(f.track)
+                    .ok_or_else(|| Error::Invalid(format!("no track {}", f.track)))?;
+                read_frame(r.source(), r.len(), t, f.offset, f.size, data)?;
                 return Ok(Some(Block {
                     track: f.track,
                     pts: f.pts,
@@ -92,15 +120,19 @@ impl<S: ByteSource> Stream<'_, S> {
                     keyframe: f.keyframe,
                 }));
             }
-            if self.done || !self.fill()? {
+            if self.done || !self.fill(r)? {
                 self.done = true;
                 return Ok(None);
             }
         }
     }
 
-    pub fn seek(&mut self, track: usize, seconds: f64) -> Result<f64> {
-        let r = self.reader;
+    pub(crate) fn seek<S: ByteSource>(
+        &mut self,
+        r: &Reader<S>,
+        track: usize,
+        seconds: f64,
+    ) -> Result<f64> {
         let t = r
             .tracks
             .get(track)
@@ -111,7 +143,12 @@ impl<S: ByteSource> Stream<'_, S> {
                 .keyframe_at(ticks)
                 .ok_or_else(|| Error::Invalid(format!("track {track} has no keyframes")))?;
             let s = t.samples[k];
-            self.position_at(r.clusters[s.cluster as usize], s.block, s.lace);
+            let c = r
+                .clusters
+                .get(s.cluster as usize)
+                .copied()
+                .ok_or_else(|| Error::Invalid(format!("no cluster for track {track}")))?;
+            self.position_at(c, s.block, s.lace);
             return Ok(t.seconds(s.pts));
         }
         let cue = r
@@ -122,19 +159,62 @@ impl<S: ByteSource> Stream<'_, S> {
             .last()
             .or_else(|| r.cues.iter().find(|c| c.track == t.number));
         if let Some(at) = cue.and_then(|c| r.segment_start.checked_add(c.cluster))
-            && let Some(pts) = self.seek_in(track, ticks, &[at])?
+            && let Some(pts) = self.seek_in(r, track, ticks, &[at])?
         {
             return Ok(t.seconds(pts));
         }
-        let candidates = self.clusters_before(ticks)?;
-        match self.seek_in(track, ticks, &candidates)? {
+        self.seek_scan(r, track, ticks)
+    }
+
+    pub(crate) fn seek_near<S: ByteSource>(
+        &mut self,
+        r: &Reader<S>,
+        track: usize,
+        seconds: f64,
+    ) -> Result<f64> {
+        let t = r
+            .tracks
+            .get(track)
+            .ok_or_else(|| Error::Invalid(format!("no track {track}")))?;
+        if !t.samples.is_empty() {
+            return self.seek(r, track, seconds);
+        }
+        let ticks = t.ticks(seconds);
+        let mut near: Vec<u64> = Vec::with_capacity(3);
+        for c in r.cues.iter().take_while(|c| c.time as i64 <= ticks) {
+            let Some(at) = r.segment_start.checked_add(c.cluster) else {
+                continue;
+            };
+            if near.last() != Some(&at) {
+                near.retain(|&p| p != at);
+                near.push(at);
+                if near.len() > 2 {
+                    near.remove(0);
+                }
+            }
+        }
+        near.reverse();
+        if !near.is_empty()
+            && let Some(pts) = self.seek_in(r, track, ticks, &near)?
+        {
+            return Ok(t.seconds(pts));
+        }
+        self.seek_scan(r, track, ticks)
+    }
+
+    fn seek_scan<S: ByteSource>(&mut self, r: &Reader<S>, track: usize, ticks: i64) -> Result<f64> {
+        let t = r
+            .tracks
+            .get(track)
+            .ok_or_else(|| Error::Invalid(format!("no track {track}")))?;
+        let candidates = self.clusters_before(r, ticks)?;
+        match self.seek_in(r, track, ticks, &candidates)? {
             Some(pts) => Ok(t.seconds(pts)),
             None => Err(Error::Invalid(format!("track {track} has no keyframes"))),
         }
     }
 
-    fn clusters_before(&mut self, ticks: i64) -> Result<Vec<u64>> {
-        let r = self.reader;
+    fn clusters_before<S: ByteSource>(&mut self, r: &Reader<S>, ticks: i64) -> Result<Vec<u64>> {
         let mut io = Io::new(r.source(), &mut self.cache);
         let mut pos = r.first_cluster.unwrap_or(r.segment_end);
         let mut out = Vec::new();
@@ -167,10 +247,19 @@ impl<S: ByteSource> Stream<'_, S> {
         Ok(out)
     }
 
-    fn seek_in(&mut self, track: usize, ticks: i64, clusters: &[u64]) -> Result<Option<i64>> {
-        let r = self.reader;
+    fn seek_in<S: ByteSource>(
+        &mut self,
+        r: &Reader<S>,
+        track: usize,
+        ticks: i64,
+        clusters: &[u64],
+    ) -> Result<Option<i64>> {
         let scale = r.info.timestamp_scale;
-        let t = &r.tracks[track];
+        let t = r
+            .tracks
+            .get(track)
+            .ok_or_else(|| Error::Invalid(format!("no track {track}")))?;
+        let last = clusters.last().copied();
         for &at in clusters {
             let mut io = Io::new(r.source(), &mut self.cache);
             let Some(h) = io.header(at, r.segment_end)? else {
@@ -199,7 +288,7 @@ impl<S: ByteSource> Stream<'_, S> {
                 .filter(|f| f.pts <= ticks)
                 .max_by_key(|f| f.pts)
                 .or_else(|| {
-                    (at == clusters[clusters.len() - 1])
+                    (Some(at) == last)
                         .then(|| keys.iter().min_by_key(|f| f.pts))
                         .flatten()
                 })
@@ -223,8 +312,7 @@ impl<S: ByteSource> Stream<'_, S> {
         self.skip = (lace > 0).then_some((block, lace));
     }
 
-    fn fill(&mut self) -> Result<bool> {
-        let r = self.reader;
+    fn fill<S: ByteSource>(&mut self, r: &Reader<S>) -> Result<bool> {
         let seg_end = r.segment_end;
         let scale = r.info.timestamp_scale;
         let mut io = Io::new(r.source(), &mut self.cache);
@@ -269,9 +357,9 @@ impl<S: ByteSource> Stream<'_, S> {
                                 _ => 0,
                             };
                             let pending = &mut self.pending;
-                            expand(&b, &self.frames, &r.tracks[b.track], scale, skip, |f| {
-                                pending.push_back(f)
-                            });
+                            if let Some(t) = r.tracks.get(b.track) {
+                                expand(&b, &self.frames, t, scale, skip, |f| pending.push_back(f));
+                            }
                             if !self.pending.is_empty() {
                                 return Ok(true);
                             }

@@ -52,6 +52,38 @@ fn mkv_reader(path: &Path) -> Result<Arc<mkv::Reader>> {
     Ok(r)
 }
 
+fn mkv_heads() -> &'static Mutex<HashMap<Key, Arc<mkv::Reader>>> {
+    static HEADS: OnceLock<Mutex<HashMap<Key, Arc<mkv::Reader>>>> = OnceLock::new();
+    HEADS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn mkv_head(path: &Path) -> Result<Option<Arc<mkv::Reader>>> {
+    if !is_matroska(path) {
+        return Ok(None);
+    }
+    let meta = std::fs::metadata(path).map_err(|e| Error::at(path, e))?;
+    let key = (path.to_path_buf(), meta.len(), meta.modified().ok());
+    for cache in [mkv_readers(), mkv_heads()] {
+        if let Some(r) = cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+        {
+            return Ok(Some(r.clone()));
+        }
+    }
+    let r = Arc::new(mkv::Reader::open_with(
+        path,
+        mkv::ReadOptions { index: false },
+    )?);
+    let mut map = mkv_heads().lock().unwrap_or_else(PoisonError::into_inner);
+    if map.len() >= 64 {
+        map.clear();
+    }
+    map.insert(key, r.clone());
+    Ok(Some(r))
+}
+
 fn is_matroska(path: &Path) -> bool {
     let mut magic = [0u8; 4];
     std::fs::File::open(path)

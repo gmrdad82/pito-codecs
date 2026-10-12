@@ -16,8 +16,8 @@ use std::sync::{Arc, OnceLock};
 
 use pito_codecs::media::{
     AudioBuffer, Choice, Codec, ExportOptions, Frame, IN_FLIGHT, Piece, Prefs, Rgba, VideoFrame,
-    audio_mix, audio_pcm, audio_pcm_range, decode_video, decode_video_gpu, export, first_frame,
-    frames_at, probe,
+    audio_mix, audio_pcm, audio_pcm_range, audio_stream, decode_video, decode_video_gpu, export,
+    first_frame, frames_at, probe,
 };
 
 fn have_ffmpeg() -> bool {
@@ -288,8 +288,8 @@ fn ranged_audio_lines_up_with_the_whole_track_and_mixes_on_every_route() {
             assert!(d < limit, "{name} track {track}: {d}");
         }
         let tail = audio_pcm_range(clip(), 0, 5.5, 9.0, 48_000, 2, &prefs).unwrap();
-        assert_eq!(tail.frames(), 168_000, "{name}");
-        assert!(tail.samples[48_000..].iter().all(|s| *s == 0.0), "{name}");
+        let whole = audio_pcm(clip(), 0, 48_000, false, &prefs).unwrap();
+        assert_eq!(tail.frames(), whole.frames() - 264_000, "{name}");
 
         let game = audio_pcm_range(clip(), 0, 2.0, 3.0, 44_100, 2, &prefs).unwrap();
         let alone = audio_mix(clip(), &[1.0, 0.0], 2.0, 3.0, 44_100, &prefs).unwrap();
@@ -858,4 +858,200 @@ fn aac_and_opus_in_matroska_line_up_with_ffmpeg_to_the_sample() {
         let part = worst(&range.samples, &theirs[281_280..576_000]);
         assert!(part < 0.01, "{name}: {part}");
     }
+}
+
+fn recording() -> &'static Path {
+    static FILE: OnceLock<PathBuf> = OnceLock::new();
+    FILE.get_or_init(|| {
+        let out = dir().join("recording-h264-pcm.mkv");
+        if !out.exists() {
+            ffmpeg_make(
+                &out,
+                &[
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=s=320x240:r=30:d=180",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=f=440:r=48000:d=180",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "anoisesrc=r=48000:d=180:a=0.3",
+                    "-filter_complex",
+                    "[1][2]amerge=inputs=2[a]",
+                    "-map",
+                    "0:v",
+                    "-map",
+                    "[a]",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "ultrafast",
+                    "-g",
+                    "60",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "pcm_s16le",
+                ],
+            );
+        }
+        out
+    })
+}
+
+fn without_cues(src: &Path, name: &str) -> PathBuf {
+    let out = dir().join(name);
+    if out.exists() {
+        return out;
+    }
+    let part = dir().join(format!("{}.{name}", std::process::id()));
+    let file = std::fs::File::create(&part).unwrap();
+    let ok = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(src)
+        .args(["-map", "0", "-c", "copy", "-f", "matroska", "pipe:1"])
+        .stdout(file)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok);
+    if std::fs::rename(&part, &out).is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    out
+}
+
+fn mean_diff(a: &Rgba, b: &Rgba) -> f64 {
+    assert_eq!((a.width, a.height), (b.width, b.height));
+    a.data
+        .iter()
+        .zip(&b.data)
+        .map(|(x, y)| x.abs_diff(*y) as u64)
+        .sum::<u64>() as f64
+        / a.data.len() as f64
+}
+
+fn streamed(path: &Path, from: f64, rate: u32, channels: u16) -> Vec<f32> {
+    let mut all = Vec::new();
+    let stream = audio_stream(path, 0, from, rate, channels, &Prefs::default()).unwrap();
+    let blocks: Vec<AudioBuffer> = stream.collect::<Result<_, _>>().unwrap();
+    let (last, full) = blocks.split_last().unwrap();
+    assert!(full.iter().all(|b| b.frames() == rate as usize));
+    assert!(last.frames() <= rate as usize && last.frames() > 0);
+    for b in &blocks {
+        all.extend_from_slice(&b.samples);
+    }
+    all
+}
+
+#[test]
+fn an_mkv_still_late_in_a_recording_comes_from_the_cues_on_every_route() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let path = recording();
+    let cpu = Prefs {
+        decode: Choice::Cpu,
+        ..Prefs::default()
+    };
+    let theirs = frames_at(path, &[170.5], 120, &Prefs::ffmpeg()).unwrap();
+    let mut routes = Vec::new();
+    for prefs in [cpu.clone(), Prefs::default()] {
+        let mut ours = frames_at(path, &[170.5, 10.0, 171.9, 172.0, 999.0], 120, &prefs).unwrap();
+        assert_eq!(ours.len(), 5);
+        assert!(ours.iter().all(|s| s.height == 120 && lit(s)));
+        assert!(mean_diff(&ours[0], &theirs[0]) < 6.0);
+        assert!(ours[0].data == ours[2].data);
+        assert!(ours[0].data != ours[1].data && ours[0].data != ours[3].data);
+        routes.push(ours.swap_remove(0));
+    }
+    assert!(mean_diff(&routes[0], &routes[1]) < 1.0);
+    let first = first_frame(path, 240, &cpu).unwrap();
+    let theirs = first_frame(path, 240, &Prefs::ffmpeg()).unwrap();
+    assert!(mean_diff(&first, &theirs) < 6.0);
+}
+
+#[test]
+fn mkv_pcm_streams_bit_exact_against_the_whole_decode() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let path = recording();
+    let prefs = Prefs::default();
+    let theirs = ffmpeg_f32(path);
+    let whole = audio_pcm(path, 0, 48_000, false, &prefs).unwrap();
+    assert!(whole.samples == theirs, "the whole decode is not bit-exact");
+    let ours = streamed(path, 0.0, 48_000, 2);
+    assert!(ours == theirs, "the stream from 0 is not bit-exact");
+    let late = streamed(path, 150.25, 48_000, 2);
+    assert!(
+        late == theirs[150 * 96_000 + 24_000..],
+        "a late stream is off"
+    );
+    let part = audio_pcm_range(path, 0, 100.0, 130.0, 48_000, 2, &prefs).unwrap();
+    assert!(part.samples == theirs[9_600_000..12_480_000]);
+    let mono = audio_pcm(path, 0, 16_000, true, &prefs).unwrap();
+    assert!(streamed(path, 0.0, 16_000, 1) == mono.samples);
+}
+
+#[test]
+fn a_cueless_or_cut_mkv_still_streams_and_shows_or_fails_cleanly() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let prefs = Prefs {
+        decode: Choice::Cpu,
+        ..Prefs::default()
+    };
+    let path = recording();
+    let bare = without_cues(path, "recording-no-cues.mkv");
+    let want = frames_at(path, &[120.0], 120, &prefs).unwrap();
+    let got = frames_at(&bare, &[120.0], 120, &prefs).unwrap();
+    assert!(mean_diff(&want[0], &got[0]) < 1.0);
+    let theirs = ffmpeg_f32(path);
+    assert!(streamed(&bare, 120.0, 48_000, 2) == theirs[120 * 96_000..]);
+    let bytes = std::fs::read(path).unwrap();
+    let cut = dir().join("recording-cut.mkv");
+    std::fs::write(&cut, &bytes[..bytes.len() * 3 / 5]).unwrap();
+    let early = frames_at(&cut, &[20.0], 120, &prefs).unwrap();
+    assert!(lit(&early[0]));
+    let _ = frames_at(&cut, &[170.0], 120, &prefs);
+    let _ = first_frame(&cut, 120, &prefs);
+    if let Ok(stream) = audio_stream(&cut, 0, 170.0, 48_000, 2, &prefs) {
+        for b in stream {
+            if b.is_err() {
+                break;
+            }
+        }
+    }
+    let head: Vec<f32> = audio_stream(&cut, 0, 0.0, 48_000, 2, &prefs)
+        .unwrap()
+        .take(30)
+        .flat_map(|b| b.unwrap().samples)
+        .collect();
+    assert!(head == theirs[..30 * 96_000]);
+}
+
+#[test]
+fn a_range_past_the_end_returns_only_what_the_track_has() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let path = recording();
+    let theirs = ffmpeg_f32(path);
+    let prefs = Prefs::default();
+    let tail = audio_pcm_range(path, 0, 178.0, 190.0, 48_000, 2, &prefs).unwrap();
+    assert_eq!(tail.frames(), 96_000);
+    assert!(tail.samples == theirs[178 * 96_000..]);
+    let past = audio_pcm_range(path, 0, 200.0, 210.0, 48_000, 2, &prefs).unwrap();
+    assert_eq!(past.frames(), 0);
+    let tail = audio_pcm_range(path, 0, 178.0, 190.0, 48_000, 2, &Prefs::ffmpeg()).unwrap();
+    assert!(tail.frames() <= 96_000 && tail.frames() > 94_000);
+    let whole = audio_pcm(clip(), 0, 48_000, false, &prefs).unwrap();
+    let aac = audio_pcm_range(clip(), 0, 4.0, 16.0, 48_000, 2, &prefs).unwrap();
+    assert_eq!(aac.frames(), whole.frames() - 4 * 48_000);
 }

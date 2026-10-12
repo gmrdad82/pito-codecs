@@ -76,11 +76,11 @@ pub fn audio_pcm_range(
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
-    Ok(super::native::cut(
-        buf,
-        0,
-        end.map(|e| e.saturating_sub(start)),
-    ))
+    if let Some(e) = end {
+        let keep = e.saturating_sub(start) * channels as usize;
+        buf.samples.truncate(keep);
+    }
+    Ok(buf)
 }
 
 pub fn audio_mix(
@@ -104,10 +104,12 @@ pub fn audio_mix(
         .par_iter()
         .map(|&(t, g)| audio_pcm_range(path, t, from, to, rate, 2, prefs).map(|b| (b, g)))
         .collect::<Result<_>>()?;
+    let longest = decoded.iter().map(|(b, _)| b.frames()).max().unwrap_or(0);
     let frames = if to.is_finite() {
-        ((to * rate as f64).round() - (from.max(0.0) * rate as f64).round()).max(0.0) as usize
+        (((to * rate as f64).round() - (from.max(0.0) * rate as f64).round()).max(0.0) as usize)
+            .min(longest)
     } else {
-        decoded.iter().map(|(b, _)| b.frames()).max().unwrap_or(0)
+        longest
     };
     let mut out = AudioBuffer::new(rate, 2);
     let samples = frames
