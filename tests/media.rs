@@ -622,3 +622,240 @@ fn matroska_and_webm_play_through_the_media_front() {
         assert!(diff < 1.0, "{codec}: {diff}");
     }
 }
+
+fn ffmpeg_f32(path: &Path) -> Vec<f32> {
+    let out = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-map", "0:a:0", "-f", "f32le", "-"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out.stdout
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+fn ffmpeg_make(out: &Path, args: &[&str]) {
+    let part = dir().join(format!(
+        "{}.{}",
+        std::process::id(),
+        out.file_name().unwrap().to_str().unwrap()
+    ));
+    let ok = Command::new("ffmpeg")
+        .args(["-v", "error", "-y"])
+        .args(args)
+        .arg(&part)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "{}", out.display());
+    if std::fs::rename(&part, out).is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+}
+
+#[test]
+fn pcm_tracks_decode_bit_exact_without_ffmpeg() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let prefs = Prefs::default();
+    let known: Vec<i16> = (0..72_000i32)
+        .flat_map(|i| {
+            let l = ((i as f64 * 0.0577).sin() * 30_000.0) as i16;
+            let r = match i % 4800 {
+                0 => i16::MIN,
+                1 => i16::MAX,
+                _ => (i.wrapping_mul(7919) % 65_536 - 32_768) as i16,
+            };
+            [l, r]
+        })
+        .collect();
+    let raw = dir().join("known-s16le.raw");
+    let bytes: Vec<u8> = known.iter().flat_map(|s| s.to_le_bytes()).collect();
+    std::fs::write(&raw, bytes).unwrap();
+    let obs = dir().join("h264-pcm-s16le.mkv");
+    ffmpeg_make(
+        &obs,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=320x240:r=30:d=1.5",
+            "-f",
+            "s16le",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-i",
+            raw.to_str().unwrap(),
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-c:a",
+            "pcm_s16le",
+        ],
+    );
+    let p = probe(&obs, &prefs).unwrap();
+    assert_eq!(p.video_codec, Some(Codec::H264));
+    assert_eq!(
+        (p.audio[0].codec.as_str(), p.audio[0].native()),
+        ("pcm", true)
+    );
+    assert!(p.unsupported().is_empty(), "{:?}", p.unsupported());
+    let pcm = audio_pcm(&obs, 0, 48_000, false, &prefs).unwrap();
+    let want: Vec<f32> = known.iter().map(|&s| s as f32 / 32768.0).collect();
+    assert_eq!(pcm.samples.len(), want.len());
+    assert!(pcm.samples == want, "s16le in MKV is not bit-exact");
+    let mid = audio_pcm_range(&obs, 0, 0.5, 1.0, 48_000, 2, &prefs).unwrap();
+    assert!(
+        mid.samples == want[48_000..96_000],
+        "a PCM range is not bit-exact"
+    );
+    let cases = [
+        ("mkv", "pcm_s24le"),
+        ("mkv", "pcm_s32be"),
+        ("mkv", "pcm_f32le"),
+        ("mkv", "pcm_f64le"),
+        ("mkv", "pcm_u8"),
+        ("mov", "pcm_s16le"),
+        ("mov", "pcm_s16be"),
+        ("mov", "pcm_s24le"),
+        ("mov", "pcm_s32le"),
+        ("mov", "pcm_f32be"),
+        ("mov", "pcm_f64le"),
+        ("mp4", "pcm_s16le"),
+        ("mp4", "pcm_s24be"),
+        ("mp4", "pcm_f32le"),
+    ];
+    for (ext, codec) in cases {
+        let path = dir().join(format!("{codec}.{ext}"));
+        ffmpeg_make(
+            &path,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=f=440:r=44100:d=1.2",
+                "-f",
+                "lavfi",
+                "-i",
+                "anoisesrc=r=44100:d=1.2:a=0.5",
+                "-filter_complex",
+                "[0][1]amerge=inputs=2",
+                "-c:a",
+                codec,
+            ],
+        );
+        let theirs = ffmpeg_f32(&path);
+        let ours = audio_pcm(&path, 0, 44_100, false, &prefs).unwrap();
+        assert_eq!(ours.samples.len(), theirs.len(), "{codec} in {ext}");
+        assert!(ours.samples == theirs, "{codec} in {ext} is not bit-exact");
+    }
+}
+
+#[test]
+fn an_ac3_track_probes_by_name_and_is_refused_without_ffmpeg() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let prefs = Prefs::default();
+    let path = dir().join("h264-ac3-aac.mkv");
+    ffmpeg_make(
+        &path,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=320x240:r=30:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=f=440:r=48000:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=f=880:r=48000:d=1",
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-map",
+            "2:a",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-c:a:0",
+            "ac3",
+            "-c:a:1",
+            "aac",
+        ],
+    );
+    let p = probe(&path, &prefs).unwrap();
+    let names: Vec<_> = p
+        .audio
+        .iter()
+        .map(|a| (a.codec.as_str(), a.native()))
+        .collect();
+    assert_eq!(names, [("ac3", false), ("aac", true)]);
+    assert!(p.video_native());
+    assert_eq!(p.unsupported(), ["ac3"]);
+    let e = audio_pcm(&path, 0, 48_000, false, &prefs).unwrap_err();
+    assert!(e.to_string().contains("ac3"), "{e}");
+    let aac = audio_pcm(&path, 1, 48_000, false, &prefs).unwrap();
+    assert!(
+        (aac.frames() as i64 - 48_000).abs() < 1_200,
+        "{}",
+        aac.frames()
+    );
+}
+
+#[test]
+fn aac_and_opus_in_matroska_line_up_with_ffmpeg_to_the_sample() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let prefs = Prefs::default();
+    for (name, codec) in [("aac.mkv", "aac"), ("opus.webm", "libopus")] {
+        let path = dir().join(format!("tones-{name}"));
+        ffmpeg_make(
+            &path,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=f=440:r=48000:d=9",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=f=1250:r=48000:d=9",
+                "-filter_complex",
+                "[0][1]amerge=inputs=2",
+                "-c:a",
+                codec,
+                "-b:a",
+                "256k",
+            ],
+        );
+        let theirs = ffmpeg_f32(&path);
+        let ours = audio_pcm(&path, 0, 48_000, false, &prefs).unwrap().samples;
+        let whole = worst(&ours[20_000..800_000], &theirs[20_000..800_000]);
+        assert!(whole < 0.01, "{name}: {whole}");
+        let range = audio_pcm_range(&path, 0, 2.93, 6.0, 48_000, 2, &prefs).unwrap();
+        let part = worst(&range.samples, &theirs[281_280..576_000]);
+        assert!(part < 0.01, "{name}: {part}");
+    }
+}
