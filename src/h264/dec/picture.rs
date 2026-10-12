@@ -1,6 +1,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::syntax::error::{Error, Result};
+
 pub struct Output3 {
     pub y: Vec<u8>,
     pub u: Vec<u8>,
@@ -595,8 +597,22 @@ impl Frame {
         &self,
         crop: (usize, usize, usize, usize),
         bufs: [Vec<u8>; 3],
-    ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
         let (cx, cy, cw, ch) = crop;
+        let (ccx, ccy, ccw, cch) = (cx / 2, cy / 2, cw.div_ceil(2), ch.div_ceil(2));
+        let fits = |at: usize, n: usize, size: usize| {
+            n > 0 && at.checked_add(n).is_some_and(|e| e <= size)
+        };
+        if !(fits(cx, cw, self.width)
+            && fits(cy, ch, self.height)
+            && fits(ccx, ccw, self.cwidth)
+            && fits(ccy, cch, self.cheight))
+        {
+            return Err(Error::Invalid(format!(
+                "crop {cw}x{ch} at {cx},{cy} outside a {}x{} picture",
+                self.width, self.height
+            )));
+        }
         let [mut y, mut u, mut v] = bufs.map(|mut b| {
             b.clear();
             b
@@ -607,10 +623,9 @@ impl Frame {
             y.extend_from_slice(src);
         } else {
             for line in src.chunks_exact(self.width) {
-                y.extend_from_slice(&line[cx..cx + cw]);
+                y.extend_from_slice(line.get(cx..cx + cw).ok_or_else(outside)?);
             }
         }
-        let (ccx, ccy, ccw, cch) = (cx / 2, cy / 2, cw.div_ceil(2), ch.div_ceil(2));
         u.reserve(ccw * cch);
         v.reserve(ccw * cch);
         for (out, c) in [(&mut u, 0), (&mut v, 1)] {
@@ -619,12 +634,16 @@ impl Frame {
                 out.extend_from_slice(src);
             } else {
                 for line in src.chunks_exact(self.cwidth) {
-                    out.extend_from_slice(&line[ccx..ccx + ccw]);
+                    out.extend_from_slice(line.get(ccx..ccx + ccw).ok_or_else(outside)?);
                 }
             }
         }
-        (y, u, v)
+        Ok((y, u, v))
     }
+}
+
+fn outside() -> Error {
+    Error::Invalid("crop outside the picture".into())
 }
 
 #[inline(always)]

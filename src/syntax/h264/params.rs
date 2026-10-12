@@ -463,8 +463,10 @@ impl Sps {
         };
         if let Some((l, rr, t, b)) = sps.frame_crop {
             let (cx, cy) = sps.crop_unit();
+            let across = (l as u64 + rr as u64) * cx as u64;
+            let down = (t as u64 + b as u64) * cy as u64;
             ensure!(
-                (l + rr) * cx < sps.width() && (t + b) * cy < sps.height(),
+                across < sps.width() as u64 && down < sps.height() as u64,
                 "frame cropping exceeds picture size"
             );
         }
@@ -507,11 +509,16 @@ impl Sps {
             None => (0, 0, self.width(), self.height()),
             Some((l, r, t, b)) => {
                 let (cx, cy) = self.crop_unit();
+                let (w, h) = (self.width(), self.height());
+                let x = l.saturating_mul(cx).min(w.saturating_sub(1));
+                let y = t.saturating_mul(cy).min(h.saturating_sub(1));
                 (
-                    l * cx,
-                    t * cy,
-                    self.width() - (l + r) * cx,
-                    self.height() - (t + b) * cy,
+                    x,
+                    y,
+                    w.saturating_sub(x.saturating_add(r.saturating_mul(cx)))
+                        .max(1),
+                    h.saturating_sub(y.saturating_add(b.saturating_mul(cy)))
+                        .max(1),
                 )
             }
         }

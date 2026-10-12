@@ -712,3 +712,111 @@ fn tiny_and_odd_sizes_encode_without_crashing() {
         );
     }
 }
+
+fn crop_sps(sps: &[u8], crop: (u32, u32, u32, u32)) -> Vec<u8> {
+    use crate::syntax::bits::{BitReader, BitWriter, escape_rbsp, unescape_rbsp};
+    let rbsp = unescape_rbsp(&sps[1..]);
+    let end = rbsp
+        .iter()
+        .rposition(|&b| b != 0)
+        .map(|i| i * 8 + 7 - rbsp[i].trailing_zeros() as usize)
+        .unwrap();
+    let mut r = BitReader::new(&rbsp);
+    let mut w = BitWriter::new();
+    assert_eq!(rbsp[0], 66);
+    w.write_bits(r.read_bits(24).unwrap(), 24);
+    for _ in 0..5 {
+        w.write_ue(r.read_ue().unwrap());
+    }
+    w.write_bit(r.read_flag().unwrap());
+    w.write_ue(r.read_ue().unwrap());
+    w.write_ue(r.read_ue().unwrap());
+    assert!(r.read_flag().unwrap());
+    w.write_bit(true);
+    w.write_bit(r.read_flag().unwrap());
+    if r.read_flag().unwrap() {
+        for _ in 0..4 {
+            r.read_ue().unwrap();
+        }
+    }
+    w.write_bit(true);
+    for v in [crop.0, crop.1, crop.2, crop.3] {
+        w.write_ue(v);
+    }
+    while r.position() < end {
+        w.write_bit(r.read_bit().unwrap());
+    }
+    w.rbsp_trailing();
+    let mut out = vec![sps[0]];
+    out.extend(escape_rbsp(&w.finish()));
+    out
+}
+
+pub(crate) fn far_cropped_stream() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
+    let (w, h) = (64, 64);
+    let mut enc = Encoder::new(EncoderConfig {
+        width: w,
+        height: h,
+        profile: Profile::Baseline,
+        gop: 1,
+        b_frames: 0,
+        threads: 1,
+        bitstream: media::Bitstream::AnnexB,
+        ..EncoderConfig::default()
+    })
+    .unwrap();
+    let mut f = Frame::new(PixelFormat::Yuv420p8, w, h, 0, TimeBase::new(1, 30));
+    for p in f.planes.iter_mut() {
+        p.data.fill(128);
+    }
+    let mut packets = enc.encode(&f).unwrap();
+    packets.extend(enc.flush().unwrap());
+    let sps = crop_sps(&enc.sps(), (0, 0, 0, 0));
+    let crafted = crop_sps(&enc.sps(), (2_147_483_649, 2_147_483_647, 0, 0));
+    let pps = enc.pps();
+    let build = |sps: &[u8]| {
+        let mut out = Vec::new();
+        for nal in [sps, &pps[..]] {
+            out.extend_from_slice(&[0, 0, 0, 1]);
+            out.extend_from_slice(nal);
+        }
+        for p in &packets {
+            for nal in crate::syntax::bits::annexb_nals(&p.data) {
+                if !matches!(nal.first().map(|b| b & 0x1f), Some(7 | 8)) {
+                    out.extend_from_slice(&[0, 0, 0, 1]);
+                    out.extend_from_slice(nal);
+                }
+            }
+        }
+        out
+    };
+    (build(&sps), build(&crafted), crafted, pps)
+}
+
+#[test]
+fn crop_offsets_past_the_picture_are_refused() {
+    let (plain, crafted, _, _) = far_cropped_stream();
+    for threads in [1, 4] {
+        let mut dec = Decoder::with_threads(threads);
+        let mut n = dec
+            .decode(&Packet {
+                data: plain.clone(),
+                pts: 0,
+                dts: 0,
+                keyframe: true,
+            })
+            .unwrap()
+            .len();
+        n += dec.flush().unwrap().len();
+        assert_eq!(n, 1);
+        let mut dec = Decoder::with_threads(threads);
+        let got = dec.decode(&Packet {
+            data: crafted.clone(),
+            pts: 0,
+            dts: 0,
+            keyframe: true,
+        });
+        assert!(got.is_err(), "{threads} threads");
+        assert!(dec.flush().unwrap_or_default().is_empty());
+    }
+}

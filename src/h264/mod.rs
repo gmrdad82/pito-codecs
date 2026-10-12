@@ -4,7 +4,7 @@ mod dec;
 mod enc;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use crate::media::{self, Error, Frame, Packet, PixelFormat, Plane, Result, TimeBase};
 

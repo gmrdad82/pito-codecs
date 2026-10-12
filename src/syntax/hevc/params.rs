@@ -656,10 +656,16 @@ impl Sps {
     pub fn crop_rect(&self) -> (u32, u32, u32, u32) {
         let (l, r, t, b) = self.conf_win;
         let (sw, sh) = (self.sub_width_c(), self.sub_height_c());
-        let x = (l * sw).min(self.width - 1);
-        let y = (t * sh).min(self.height - 1);
-        let w = self.width.saturating_sub(x + r * sw).max(1);
-        let h = self.height.saturating_sub(y + b * sh).max(1);
+        let x = l.saturating_mul(sw).min(self.width.saturating_sub(1));
+        let y = t.saturating_mul(sh).min(self.height.saturating_sub(1));
+        let w = self
+            .width
+            .saturating_sub(x.saturating_add(r.saturating_mul(sw)))
+            .max(1);
+        let h = self
+            .height
+            .saturating_sub(y.saturating_add(b.saturating_mul(sh)))
+            .max(1);
         (x, y, w, h)
     }
 
