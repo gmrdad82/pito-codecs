@@ -162,6 +162,7 @@ pub(crate) trait DecoderBackend: Send {
     fn decode(&mut self, packet: &Packet) -> Result<Vec<Frame>>;
     fn flush(&mut self) -> Result<Vec<Frame>>;
     fn reset(&mut self);
+    fn stills(&mut self) {}
     fn decode_gpu(&mut self, packet: &Packet) -> Result<Vec<GpuFrame>> {
         Ok(self
             .decode(packet)?
@@ -283,6 +284,10 @@ impl HwDecoder {
 
     pub fn reset(&mut self) {
         self.inner.reset();
+    }
+
+    pub(crate) fn stills(&mut self) {
+        self.inner.stills();
     }
 
     fn stamp(&self, mut frames: Vec<Frame>) -> Vec<Frame> {

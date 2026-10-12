@@ -66,6 +66,7 @@ pub struct Vp9Decoder {
     queue: VecDeque<(usize, i64)>,
     name: String,
     gpu: bool,
+    stills: bool,
 }
 
 impl Vp9Decoder {
@@ -83,6 +84,7 @@ impl Vp9Decoder {
             queue: VecDeque::new(),
             name,
             gpu: false,
+            stills: false,
         })
     }
 
@@ -107,7 +109,10 @@ impl Vp9Decoder {
             crop: (0, 0, h.width, h.height),
             bits: c.bit_depth as u32,
         };
-        let session = Session::new(profiles, size, 8 + 2 + LAG, geometry).map_err(backend)?;
+        let mut session = Session::new(profiles, size, 8 + 2 + LAG, geometry).map_err(backend)?;
+        if self.stills {
+            session.direct();
+        }
         self.name = format!("VA-API VP9 ({})", session.vendor());
         self.session = Some(session);
         self.size = size;
@@ -336,6 +341,13 @@ impl DecoderBackend for Vp9Decoder {
 
     fn reset(&mut self) {
         Vp9Decoder::reset(self)
+    }
+
+    fn stills(&mut self) {
+        self.stills = true;
+        if let Some(s) = &mut self.session {
+            s.direct();
+        }
     }
 
     fn decode_gpu(&mut self, packet: &Packet) -> Result<Vec<GpuFrame>> {

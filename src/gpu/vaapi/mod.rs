@@ -102,6 +102,7 @@ pub struct VaDecoder {
     framing: Framing,
     front: Option<Front>,
     name: String,
+    stills: bool,
 }
 
 fn parameter_set(sets: &[Vec<u8>], header: usize, ty: impl Fn(u8) -> bool) -> Option<Vec<u8>> {
@@ -210,6 +211,7 @@ impl VaDecoder {
             framing: config.framing,
             front: None,
             name: "VA-API".into(),
+            stills: false,
         };
         if config.parameter_sets.is_empty() {
             va::probe().map_err(Error::Backend)?;
@@ -224,7 +226,23 @@ impl VaDecoder {
         let (front, name) = open_front(self.codec, self.framing, sets)?;
         self.front = Some(front);
         self.name = name;
+        if self.stills {
+            self.direct();
+        }
         Ok(())
+    }
+
+    pub fn stills(&mut self) {
+        self.stills = true;
+        self.direct();
+    }
+
+    fn direct(&mut self) {
+        match &mut self.front {
+            Some(Front::H264(f)) => f.accel_mut().direct(),
+            Some(Front::Hevc(f)) => f.accel_mut().direct(),
+            None => {}
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -381,6 +399,10 @@ impl DecoderBackend for VaDecoder {
 
     fn reset(&mut self) {
         VaDecoder::reset(self)
+    }
+
+    fn stills(&mut self) {
+        VaDecoder::stills(self)
     }
 
     fn decode_gpu(&mut self, packet: &Packet) -> Result<Vec<GpuFrame>> {
