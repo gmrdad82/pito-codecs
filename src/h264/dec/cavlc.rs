@@ -1,6 +1,6 @@
-use crate::h264::bits::BitReader;
 use crate::h264::dec::cavlc_tables::*;
-use crate::h264::dec::error::{Result, ensure};
+use crate::syntax::bits::BitReader;
+use crate::syntax::error::{Result, ensure};
 use std::sync::OnceLock;
 
 pub(crate) struct VlcTable {

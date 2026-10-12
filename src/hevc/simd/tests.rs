@@ -435,13 +435,13 @@ fn kernel_speed() {
     }
 }
 
-crate::hevc::isa::dispatch! {
+crate::media::isa::dispatch! {
 fn luma(src: &[u8], tmp: &mut [i16], taps: &Taps<8>, w: usize, h: usize, out: &mut [i16]) {
     inter::interpolate::<8, u8>(src, 128, tmp, taps, w, h, out);
 }
 }
 
-crate::hevc::isa::dispatch! {
+crate::media::isa::dispatch! {
 fn chroma(src: &[u8], tmp: &mut [i16], taps: &Taps<4>, w: usize, h: usize, out: &mut [i16]) {
     inter::interpolate::<4, u8>(src, 128, tmp, taps, w, h, out);
 }

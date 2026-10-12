@@ -1,13 +1,13 @@
-use crate::hevc::bits::{annexb_nals, length_prefixed_nals, unescape_rbsp, unescape_rbsp_marked};
-use crate::hevc::dpb::{Dpb, Output, OutputMeta, PocState, RefPicSet, build_ref_lists};
-use crate::hevc::error::{Error, Result, ensure, invalid};
-use crate::hevc::params::{Layout, Pps, Sps, Vps};
 use crate::hevc::pel::Pel;
 use crate::hevc::picture::{Frame, FrameRef, PlanePool};
-use crate::hevc::slice::{NalHeader, SliceHeader, nal_type};
 use crate::hevc::slicedec::{PicState, Pool, Scaling, SliceDecoder, SliceJob, SliceRun};
 use crate::hevc::{ColorInfo, Hvcc};
 use crate::media::{Frame as Image, Packet, PixelFormat, Plane, TimeBase};
+use crate::syntax::bits::{annexb_nals, length_prefixed_nals, unescape_rbsp, unescape_rbsp_marked};
+use crate::syntax::error::{Error, Result, ensure, invalid};
+use crate::syntax::hevc::dpb::{Dpb, Output, OutputMeta, PocState, RefPicSet, build_ref_lists};
+use crate::syntax::hevc::params::{Layout, Pps, Sps, Vps};
+use crate::syntax::hevc::slice::{NalHeader, SliceHeader, nal_type};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -79,16 +79,9 @@ impl Default for Decoder {
     }
 }
 
-fn default_threads() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .min(16)
-}
-
 impl Decoder {
     pub fn new() -> Self {
-        Self::with_threads(default_threads())
+        Self::with_threads(crate::media::default_threads())
     }
 
     pub fn with_threads(threads: usize) -> Self {
@@ -135,7 +128,7 @@ impl Decoder {
     pub fn configure_hvcc(&mut self, hvcc: &[u8]) -> crate::media::Result<()> {
         let config = Hvcc::parse(hvcc)?;
         for nal in config.vps.iter().chain(&config.sps).chain(&config.pps) {
-            self.handle_nal(nal, 0)?;
+            self.handle_nal(nal, 0).map_err(|e| e.media("hevc"))?;
         }
         self.nal_length_size = Some(config.nal_length_size);
         Ok(())
@@ -170,13 +163,14 @@ impl Decoder {
     }
 
     pub fn decode(&mut self, packet: &Packet) -> crate::media::Result<Vec<Image>> {
-        Ok(self.decode_au(&packet.data, packet.pts)?)
+        self.decode_au(&packet.data, packet.pts)
+            .map_err(|e| e.media("hevc"))
     }
 
     pub fn flush(&mut self) -> crate::media::Result<Vec<Image>> {
         let pics = self.flush_pictures();
         if let Some(e) = self.take_error() {
-            return Err(e.into());
+            return Err(e.media("hevc"));
         }
         Ok(pics)
     }
@@ -287,7 +281,7 @@ impl Decoder {
                 .as_ref()
                 .or(sps.scaling_list.as_ref())
                 .cloned()
-                .unwrap_or_else(crate::hevc::params::ScalingList::default_lists);
+                .unwrap_or_else(crate::syntax::hevc::params::ScalingList::default_lists);
             let mut v = Vec::with_capacity(24);
             for size in 0..4 {
                 for m in 0..6 {
@@ -691,7 +685,7 @@ fn make_picture(o: &Output<FrameRef>, time_base: TimeBase) -> Image {
     ready.unwrap_or_else(|| convert(&o.frame, &o.meta, time_base, Default::default()))
 }
 
-crate::hevc::isa::dispatch! {
+crate::media::isa::dispatch! {
 fn convert(frame: &Frame, meta: &OutputMeta, time_base: TimeBase, bufs: [Vec<u8>; 3]) -> Image {
     let (cx, cy, cw, ch) = meta.crop;
     let (cx, cy, cw, ch) = (cx as usize, cy as usize, cw as usize, ch as usize);

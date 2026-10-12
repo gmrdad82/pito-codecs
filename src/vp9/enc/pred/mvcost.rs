@@ -1,31 +1,10 @@
 use super::Mv;
-use std::sync::LazyLock;
 
-pub const MV_JOINT_TREE: [i8; 6] = [0, 2, -1, 4, -2, -3];
-pub const MV_CLASS_TREE: [i8; 20] = [
-    0, 2, -1, 4, 6, 8, -2, -3, 10, 12, -4, -5, -6, 14, 16, 18, -7, -8, -9, -10,
-];
-pub const MV_FR_TREE: [i8; 6] = [0, 2, -1, 4, -2, -3];
+pub use crate::vp9::tables::{MV_CLASS_TREE, MV_FR_TREE, MV_JOINT_TREE};
 
 const TABLE: i32 = 1024;
 
-static COST: LazyLock<[u16; 257]> = LazyLock::new(|| {
-    let mut t = [0u16; 257];
-    t[0] = 255 * 16;
-    for (i, c) in t.iter_mut().enumerate().skip(1) {
-        *c = (-(i as f64 / 256.0).log2() * 256.0).round().min(4095.0) as u16;
-    }
-    t
-});
-
-#[inline(always)]
-pub fn bit_cost(bit: bool, prob: u8) -> u32 {
-    COST[if bit {
-        256 - prob as usize
-    } else {
-        prob as usize
-    }] as u32
-}
+pub use super::super::bool::cost as bit_cost;
 
 pub fn tree_cost(tree: &[i8], probs: &[u8], value: u8) -> u32 {
     fn walk(tree: &[i8], probs: &[u8], node: usize, value: u8, acc: u32) -> Option<u32> {

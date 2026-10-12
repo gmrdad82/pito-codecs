@@ -99,7 +99,7 @@ fn psnr(a: &[u8], b: &[u8]) -> f64 {
 #[cfg(target_arch = "x86_64")]
 #[test]
 fn avx2_matches_scalar() {
-    if !avx2() {
+    if !crate::media::isa::avx2_fma() {
         return;
     }
     let mut rng = Rng(0x9e3779b97f4a7c15);

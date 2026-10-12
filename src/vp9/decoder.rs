@@ -73,13 +73,6 @@ impl Default for Decoder {
     }
 }
 
-fn default_threads() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .min(16)
-}
-
 fn tile_offset(i: usize, mis: usize, log2: u32) -> usize {
     let sbs = (mis + 7) >> 3;
     (((i * sbs) >> log2) << 3).min(mis)
@@ -87,7 +80,7 @@ fn tile_offset(i: usize, mis: usize, log2: u32) -> usize {
 
 impl Decoder {
     pub fn new() -> Self {
-        Self::with_threads(default_threads())
+        Self::with_threads(crate::media::default_threads())
     }
 
     pub fn with_threads(threads: usize) -> Self {

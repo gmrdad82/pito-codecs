@@ -1,7 +1,7 @@
 use super::Decoder;
-use crate::hevc::bits::{BitWriter, escape_rbsp};
 use crate::hevc::cabac::{Contexts, NEXT_STATE, RANGE_TAB_LPS, init_contexts};
 use crate::hevc::spec_tables::*;
+use crate::syntax::bits::{BitWriter, escape_rbsp};
 
 const W: usize = 96;
 const H: usize = 64;

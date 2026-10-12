@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+use super::backend;
 use super::ffi::{self, VAProfile, VASurfaceID};
 use super::va::Session;
 use super::{Accel, LAG, Picture};
@@ -65,10 +66,6 @@ pub struct Vp9Decoder {
     queue: VecDeque<(usize, i64)>,
     name: String,
     gpu: bool,
-}
-
-fn backend(e: impl std::fmt::Display) -> Error {
-    Error::Backend(e.to_string())
 }
 
 impl Vp9Decoder {

@@ -1,7 +1,7 @@
 mod boxes;
 mod entry;
 mod reader;
-mod remux;
+pub(crate) mod remux;
 mod source;
 mod writer;
 

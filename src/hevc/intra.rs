@@ -16,7 +16,7 @@ impl Default for Refs {
     }
 }
 
-crate::hevc::isa::dispatch! {
+crate::media::isa::dispatch! {
 pub fn substitute(
     r: &mut Refs,
     avail_left: &[bool; 129],
@@ -64,7 +64,7 @@ pub fn substitute(
 }
 }
 
-crate::hevc::isa::dispatch! {
+crate::media::isa::dispatch! {
 pub fn filter(
     r: &mut Refs,
     mode: u32,
@@ -110,7 +110,7 @@ pub fn filter(
 }
 }
 
-crate::hevc::isa::dispatch! {
+crate::media::isa::dispatch! {
 pub fn predict<P: Pel>(
     r: &Refs,
     mode: u32,

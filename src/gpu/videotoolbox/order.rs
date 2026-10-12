@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use crate::gpu::syntax::bits::unescape_rbsp;
-use crate::gpu::syntax::h264::params as h264p;
-use crate::gpu::syntax::h264::slice as h264s;
-use crate::gpu::syntax::hevc::dpb::PocState as HevcPoc;
-use crate::gpu::syntax::hevc::params as hevcp;
-use crate::gpu::syntax::hevc::slice as hevcs;
 use crate::media::{Codec, Error, Result};
+use crate::syntax::bits::unescape_rbsp;
+use crate::syntax::h264::params as h264p;
+use crate::syntax::h264::slice as h264s;
+use crate::syntax::hevc::dpb::PocState as HevcPoc;
+use crate::syntax::hevc::params as hevcp;
+use crate::syntax::hevc::slice as hevcs;
 
 const HEADER_BYTES: usize = 512;
 
@@ -112,9 +112,8 @@ impl Order {
                 let mut parsed = None;
                 for rbsp in prefixes(rest) {
                     parsed = Some(h264s::SliceHeader::parse(&rbsp, hdr, |id| {
-                        let missing = |what: String| {
-                            crate::gpu::syntax::error::Error::MissingParameterSet(what)
-                        };
+                        let missing =
+                            |what: String| crate::syntax::error::Error::MissingParameterSet(what);
                         let pps = ppss
                             .get(id as usize)
                             .and_then(Option::as_ref)
@@ -183,7 +182,7 @@ impl Order {
                         hdr,
                         |id| {
                             let missing = |what: String| {
-                                crate::gpu::syntax::error::Error::MissingParameterSet(what)
+                                crate::syntax::error::Error::MissingParameterSet(what)
                             };
                             let pps = ppss
                                 .get(id as usize)

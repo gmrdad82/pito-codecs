@@ -472,7 +472,7 @@ fn diff_rows(
     }
 }
 
-crate::gif::isa::dispatch! {
+crate::media::isa::dispatch! {
     fn diff_band(
         idx: &mut [u8],
         canvas: &mut [u32],

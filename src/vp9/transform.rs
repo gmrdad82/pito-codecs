@@ -43,7 +43,7 @@ macro_rules! adst4 {
 adst4!(iadst4_narrow, i32);
 adst4!(iadst4_wide, i64);
 
-fn iwht4(x: [i32; 4], shift: u32) -> [i32; 4] {
+pub(crate) fn iwht4(x: [i32; 4], shift: u32) -> [i32; 4] {
     let mut a = x[0] >> shift;
     let mut c = x[1] >> shift;
     let mut d = x[2] >> shift;
@@ -145,7 +145,7 @@ fn sat(v: i32, lim: i32) -> i32 {
     v.clamp(-lim, lim)
 }
 
-crate::vp9::isa::dispatch! {
+crate::media::isa::dispatch! {
 #[allow(clippy::too_many_arguments)]
 pub fn inverse_transform_add<P: Pixel>(
     coefs: &[i32],
@@ -188,7 +188,7 @@ pub fn inverse_transform_add<P: Pixel>(
         let b = (a * 11585 + (1 << 13)) >> 14;
         let v = ((b + round as i64) >> shift).clamp(-(1 << 20), 1 << 20) as i32;
         #[cfg(target_arch = "x86_64")]
-        if crate::vp9::isa::avx2() && dst.len() >= (n - 1) * stride + n {
+        if crate::media::isa::avx2() && dst.len() >= (n - 1) * stride + n {
             unsafe { simd::dc_add(n, v, max, dst, stride) };
             return;
         }
@@ -211,7 +211,7 @@ pub fn inverse_transform_add<P: Pixel>(
     };
     #[cfg(target_arch = "x86_64")]
     if bit_depth == 8
-        && crate::vp9::isa::avx2()
+        && crate::media::isa::avx2()
         && coefs.len() >= n * n
         && dst.len() >= (n - 1) * stride + n
     {
@@ -220,7 +220,7 @@ pub fn inverse_transform_add<P: Pixel>(
     }
     #[cfg(target_arch = "x86_64")]
     if bit_depth > 8
-        && crate::vp9::isa::avx2()
+        && crate::media::isa::avx2()
         && coefs.len() >= n * n
         && dst.len() >= (n - 1) * stride + n
         && unsafe { simd::l1(&coefs[..rows.clamp(1, n) * n]) } <= WIDE_L1
@@ -1172,7 +1172,7 @@ pub(crate) mod tests {
             itx_narrow_ref::<N>(&coefs, &p, &mut b, stride);
             assert_eq!(a, b, "N {N} case {case}");
             #[cfg(target_arch = "x86_64")]
-            if crate::vp9::isa::avx2() {
+            if crate::media::isa::avx2() {
                 let mut c = base_c.clone();
                 unsafe { simd::itx::<u16, true>(&coefs, tx_size as u8, &p, &mut c, stride) };
                 assert_eq!(a, c, "simd N {N} case {case}");

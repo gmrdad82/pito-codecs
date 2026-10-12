@@ -1,6 +1,5 @@
 #![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 
-mod bits;
 mod dec;
 mod enc;
 
@@ -106,10 +105,7 @@ impl Decoder {
 }
 
 fn dec_error(e: dec::Error) -> Error {
-    match e {
-        dec::Error::Unsupported(s) => Error::Unsupported(format!("h264: {s}")),
-        e => Error::Invalid(format!("h264: {e}")),
-    }
+    e.media("h264")
 }
 
 fn enc_error(e: enc::Error) -> Error {

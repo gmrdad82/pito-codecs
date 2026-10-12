@@ -21,7 +21,7 @@ pub(crate) fn on() -> bool {
     if OFF.get() {
         return false;
     }
-    crate::hevc::isa::avx2()
+    crate::media::isa::avx2()
 }
 
 #[cfg(target_arch = "x86_64")]

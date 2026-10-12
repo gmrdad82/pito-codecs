@@ -230,21 +230,6 @@ fn fwht1(x: [i32; 4]) -> [i32; 4] {
     [a1 - c0, c0, d1 + b0, b0]
 }
 
-fn iwht1(x: [i32; 4], shift: u32) -> [i32; 4] {
-    let mut a = x[0] >> shift;
-    let mut c = x[1] >> shift;
-    let mut d = x[2] >> shift;
-    let mut b = x[3] >> shift;
-    a += c;
-    d -= b;
-    let e = (a - d) >> 1;
-    b = e - b;
-    c = e - c;
-    a -= b;
-    d += c;
-    [a, b, c, d]
-}
-
 pub fn forward_wht(buf: &mut [i16]) {
     let mut t = [[0i32; 4]; 4];
     for j in 0..4 {
@@ -269,10 +254,10 @@ pub fn forward_wht(buf: &mut [i16]) {
 pub fn inverse_wht_add(buf: &[i16], dst: &mut [u8], stride: usize) {
     let mut t = [[0i32; 4]; 4];
     for (u, row) in t.iter_mut().enumerate() {
-        *row = iwht1(std::array::from_fn(|v| buf[v * 4 + u] as i32), 2);
+        *row = crate::vp9::transform::iwht4(std::array::from_fn(|v| buf[v * 4 + u] as i32), 2);
     }
     for j in 0..4 {
-        let r = iwht1([t[0][j], t[1][j], t[2][j], t[3][j]], 0);
+        let r = crate::vp9::transform::iwht4([t[0][j], t[1][j], t[2][j], t[3][j]], 0);
         for i in 0..4 {
             let p = &mut dst[i * stride + j];
             *p = (*p as i32 + r[i]).clamp(0, 255) as u8;

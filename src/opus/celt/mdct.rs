@@ -6,7 +6,7 @@ pub struct Cpx {
 
 impl Cpx {
     #[inline]
-    fn mul(self, o: Cpx) -> Cpx {
+    pub(crate) fn mul(self, o: Cpx) -> Cpx {
         Cpx {
             re: self.re * o.re - self.im * o.im,
             im: self.re * o.im + self.im * o.re,

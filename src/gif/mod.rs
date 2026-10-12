@@ -1,6 +1,5 @@
 mod decode;
 mod encode;
-mod isa;
 mod lzw;
 mod quant;
 

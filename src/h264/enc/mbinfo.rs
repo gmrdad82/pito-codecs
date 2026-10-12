@@ -74,7 +74,6 @@ impl Part {
 #[derive(Clone, Copy, Debug)]
 pub struct MbInfo {
     pub kind: MbKind,
-    pub slice: u16,
     pub qp: u8,
     pub cbp: u8,
     pub t8x8: bool,
@@ -92,7 +91,6 @@ impl Default for MbInfo {
     fn default() -> Self {
         MbInfo {
             kind: MbKind::None,
-            slice: 0,
             qp: 0,
             cbp: 0,
             t8x8: false,

@@ -54,35 +54,10 @@ pub fn complexity(cur: &LowRes, prev: Option<&LowRes>) -> Complexity {
     let (intra, inter) = block_rows(bh, |by| {
         let mut ci = 0u64;
         let mut cp = 0u64;
-        let mut blk = [0u8; 64];
         for bx in 0..bw {
             let (x0, y0) = (bx * 8, by * 8);
             let base = y0 * cur.w + x0;
-            let mut best = u32::MAX;
-            for mode in 0..3 {
-                if (mode == 1 && x0 == 0) || (mode == 2 && y0 == 0) {
-                    continue;
-                }
-                for y in 0..8 {
-                    for x in 0..8 {
-                        blk[y * 8 + x] = match mode {
-                            0 => {
-                                if x0 > 0 && y0 > 0 {
-                                    ((cur.data[(y0 - 1) * cur.w + x0 + x] as u32
-                                        + cur.data[(y0 + y) * cur.w + x0 - 1] as u32)
-                                        / 2) as u8
-                                } else {
-                                    128
-                                }
-                            }
-                            1 => cur.data[(y0 + y) * cur.w + x0 - 1],
-                            _ => cur.data[(y0 - 1) * cur.w + x0 + x],
-                        };
-                    }
-                }
-                best = best.min(satd(&cur.data[base..], cur.w, &blk, 8, 8, 8));
-            }
-            let intra_c = best as u64 + 16;
+            let intra_c = crate::h264::enc::mbtree::intra_cost(cur, x0, y0) as u64;
             ci += intra_c;
             if let Some(p) = prev {
                 let mut bmv = (0i32, 0i32);

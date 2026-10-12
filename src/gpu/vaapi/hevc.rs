@@ -1,14 +1,15 @@
+use super::{backend, unsupported};
 use std::collections::VecDeque;
 use std::sync::Arc;
 
 use super::Picture;
-use crate::gpu::syntax::bits::unescape_rbsp;
-use crate::gpu::syntax::hevc::dpb::{
+use crate::media::Result;
+use crate::syntax::bits::unescape_rbsp;
+use crate::syntax::hevc::dpb::{
     Dpb, Marking, Output, OutputMeta, PocState, Ref, RefPicSet, build_ref_lists,
 };
-use crate::gpu::syntax::hevc::params::{Layout, Pps, ScalingList, Sps};
-use crate::gpu::syntax::hevc::slice::{NalHeader, SliceHeader, SliceType, nal_type};
-use crate::media::{Error, Result};
+use crate::syntax::hevc::params::{Layout, Pps, ScalingList, Sps};
+use crate::syntax::hevc::slice::{NalHeader, SliceHeader, SliceType, nal_type};
 
 use super::Accel;
 use super::ffi::{
@@ -58,14 +59,6 @@ pub struct Front<A: Accel> {
     after_eos: bool,
 }
 
-fn decode_err(e: impl std::fmt::Display) -> Error {
-    Error::Backend(e.to_string())
-}
-
-fn unsupported(what: &str) -> Error {
-    Error::Unsupported(format!("the hardware decoder does not take {what}"))
-}
-
 impl<A: Accel> Front<A> {
     pub fn new(
         accel: A,
@@ -102,7 +95,7 @@ impl<A: Accel> Front<A> {
     }
 
     pub fn decode(&mut self, sample: &[u8], pts: i64) -> Result<Vec<Picture>> {
-        let nals = self.framing.split(sample).map_err(decode_err)?;
+        let nals = self.framing.split(sample).map_err(backend)?;
         let mut frames = Vec::new();
         for nal in nals {
             self.handle_nal(nal, pts, &mut frames)?;
@@ -146,7 +139,7 @@ impl<A: Accel> Front<A> {
             let Some((index, pts)) = self.ready.pop_front() else {
                 break;
             };
-            let picture = self.accel.read(index).map_err(decode_err)?;
+            let picture = self.accel.read(index).map_err(backend)?;
             frames.push(picture.at(pts));
         }
         Ok(())
@@ -162,26 +155,26 @@ impl<A: Accel> Front<A> {
         if nal.len() < 2 {
             return Ok(());
         }
-        let hdr = NalHeader::parse(nal).map_err(decode_err)?;
+        let hdr = NalHeader::parse(nal).map_err(backend)?;
         if hdr.layer_id != 0 {
             return Ok(());
         }
         let rbsp = || unescape_rbsp(nal.get(2..).unwrap_or_default());
         match hdr.nal_type {
             nal_type::SPS => {
-                let sps = Sps::parse(&rbsp()).map_err(decode_err)?;
+                let sps = Sps::parse(&rbsp()).map_err(backend)?;
                 let slot = self
                     .spss
                     .get_mut(sps.id as usize)
-                    .ok_or_else(|| decode_err("SPS id out of range"))?;
+                    .ok_or_else(|| backend("SPS id out of range"))?;
                 *slot = Some(Arc::new(sps));
             }
             nal_type::PPS => {
-                let pps = Pps::parse(&rbsp()).map_err(decode_err)?;
+                let pps = Pps::parse(&rbsp()).map_err(backend)?;
                 let slot = self
                     .ppss
                     .get_mut(pps.id as usize)
-                    .ok_or_else(|| decode_err("PPS id out of range"))?;
+                    .ok_or_else(|| backend("PPS id out of range"))?;
                 *slot = Some(Arc::new(pps));
             }
             nal_type::EOS | nal_type::EOB => {
@@ -221,7 +214,7 @@ impl<A: Accel> Front<A> {
                 hdr,
                 |id| {
                     let missing =
-                        |what: String| crate::gpu::syntax::error::Error::MissingParameterSet(what);
+                        |what: String| crate::syntax::error::Error::MissingParameterSet(what);
                     let pps = ppss
                         .get(id as usize)
                         .and_then(Option::as_ref)
@@ -242,22 +235,22 @@ impl<A: Accel> Front<A> {
             }
         }
         let (sh, pps, sps) = result
-            .ok_or_else(|| decode_err("empty slice"))?
-            .map_err(decode_err)?;
-        sps.check_supported().map_err(decode_err)?;
-        pps.check_supported().map_err(decode_err)?;
+            .ok_or_else(|| backend("empty slice"))?
+            .map_err(backend)?;
+        sps.check_gpu().map_err(backend)?;
+        pps.check_supported().map_err(backend)?;
         if first {
             self.start_picture(&sh, &sps, &pps, pts, frames)?;
         }
         let Some(p) = self.pending.as_mut() else {
-            return Err(decode_err(
+            return Err(backend(
                 "slice segment without the first slice of its picture",
             ));
         };
         if !Arc::ptr_eq(&p.pps, &pps) {
-            return Err(decode_err("PPS changed within a picture"));
+            return Err(backend("PPS changed within a picture"));
         }
-        let refs = build_ref_lists(&sh, &p.rps).map_err(decode_err)?;
+        let refs = build_ref_lists(&sh, &p.rps).map_err(backend)?;
         let params = slice_params(&sh, nal, &refs, &p.ref_frames)?;
         if !sh.dependent {
             p.last = sh.clone();
@@ -277,7 +270,7 @@ impl<A: Accel> Front<A> {
         frames: &mut Vec<Picture>,
     ) -> Result<()> {
         if !sh.first_slice_segment_in_pic || sh.dependent {
-            return Err(decode_err("invalid first slice segment"));
+            return Err(backend("invalid first slice segment"));
         }
         if (sps.width, sps.height) != self.size
             || sps.bit_depth_luma != self.bits
@@ -317,7 +310,7 @@ impl<A: Accel> Front<A> {
         let rps = self
             .dpb
             .apply_rps(sh, poc, max_lsb, irap_no_rasl, &mut make_missing)
-            .map_err(decode_err)?;
+            .map_err(backend)?;
         if [&rps.st_curr_before, &rps.st_curr_after, &rps.lt_curr]
             .iter()
             .any(|l| l.iter().any(|r| r.frame.index == MISSING))
@@ -337,11 +330,11 @@ impl<A: Accel> Front<A> {
         let surfaces = self.accel.surfaces();
         let target = (0..surfaces.len())
             .find(|&i| !self.busy(i))
-            .ok_or_else(|| decode_err("no free surface"))?;
+            .ok_or_else(|| backend("no free surface"))?;
         let target_id = surfaces
             .get(target)
             .copied()
-            .ok_or_else(|| decode_err("surface out of range"))?;
+            .ok_or_else(|| backend("surface out of range"))?;
         let mut pic = picture_params(sps, pps, sh)?;
         pic.CurrPic = VAPictureHEVC {
             picture_id: target_id,
@@ -380,7 +373,7 @@ impl<A: Accel> Front<A> {
             let picture_id = surfaces
                 .get(e.frame.index)
                 .copied()
-                .ok_or_else(|| decode_err("surface out of range"))?;
+                .ok_or_else(|| backend("surface out of range"))?;
             *slot = VAPictureHEVC {
                 picture_id,
                 pic_order_cnt: e.poc,
@@ -417,7 +410,7 @@ impl<A: Accel> Front<A> {
             return Ok(());
         };
         let Some(last) = p.slices.last_mut() else {
-            return Err(decode_err("a picture without slices"));
+            return Err(backend("a picture without slices"));
         };
         last.0.LongSliceFlags |= 1 << hevc_slice_bits::LAST_SLICE_OF_PIC;
         p.pic.slice_parsing_fields |= u32::from(p.all_intra) << hevc_slice_parsing_bits::INTRA_PIC;
@@ -431,7 +424,7 @@ impl<A: Accel> Front<A> {
         };
         self.accel
             .decode_hevc(p.target, &p.pic, iq.as_ref(), &p.slices)
-            .map_err(decode_err)?;
+            .map_err(backend)?;
         self.poc_state.update(&p.first, p.poc);
         let mut outs = Vec::new();
         self.dpb.insert(
@@ -446,7 +439,10 @@ impl<A: Accel> Front<A> {
 }
 
 fn output_meta(pts: i64) -> OutputMeta {
-    OutputMeta { pts }
+    OutputMeta {
+        pts,
+        ..Default::default()
+    }
 }
 
 fn flag(on: bool, bit: u32) -> u32 {
@@ -523,7 +519,7 @@ pub fn picture_params(
         )
         | flag(sh.nal.is_irap(), s::RAP_PIC)
         | flag(sh.nal.is_idr(), s::IDR_PIC);
-    let layout = Layout::new(sps, pps).map_err(decode_err)?;
+    let layout = Layout::new(sps, pps).map_err(backend)?;
     let mut column_width_minus1 = [0u16; 19];
     let mut row_height_minus1 = [0u16; 21];
     if pps.tiles_enabled {
@@ -540,7 +536,7 @@ pub fn picture_params(
         sizes(&layout.col_bd, &mut column_width_minus1)?;
         sizes(&layout.row_bd, &mut row_height_minus1)?;
     }
-    let narrow = |v: u32| u16::try_from(v).map_err(|_| decode_err("picture too large"));
+    let narrow = |v: u32| u16::try_from(v).map_err(|_| backend("picture too large"));
     Ok(VAPictureParameterBufferHEVC {
         CurrPic: VAPictureHEVC::INVALID,
         ReferenceFrames: [VAPictureHEVC::INVALID; 15],
@@ -676,14 +672,14 @@ pub fn slice_params(
     let header_bytes = sh
         .data_offset
         .checked_add(2)
-        .ok_or_else(|| decode_err("slice header too long"))?;
+        .ok_or_else(|| backend("slice header too long"))?;
     let ep = emulation_bytes_before(nal.get(2..).unwrap_or_default(), sh.data_offset);
     let mut s = VASliceParameterBufferHEVC {
-        slice_data_size: u32::try_from(nal.len()).map_err(|_| decode_err("slice too large"))?,
+        slice_data_size: u32::try_from(nal.len()).map_err(|_| backend("slice too large"))?,
         slice_data_offset: 0,
         slice_data_flag: ffi::VA_SLICE_DATA_FLAG_ALL,
         slice_data_byte_offset: u32::try_from(header_bytes)
-            .map_err(|_| decode_err("slice header too long"))?,
+            .map_err(|_| backend("slice header too long"))?,
         slice_segment_address: sh.segment_address,
         RefPicList: [[0xFF; 15]; 2],
         LongSliceFlags: flags,
@@ -707,20 +703,20 @@ pub fn slice_params(
         ChromaOffsetL1: [[0; 2]; 15],
         five_minus_max_num_merge_cand: u8_of(5u32.saturating_sub(sh.max_num_merge_cand)),
         num_entry_point_offsets: u16::try_from(sh.entry_points.len())
-            .map_err(|_| decode_err("too many entry points"))?,
+            .map_err(|_| backend("too many entry points"))?,
         entry_offset_to_subset_array: 0,
         slice_data_num_emu_prevn_bytes: u16::try_from(ep).unwrap_or(u16::MAX),
         va_reserved: [0; ffi::VA_PADDING_LOW - 2],
     };
     for (l, list) in refs.iter().enumerate() {
         if list.len() > 15 {
-            return Err(decode_err("reference list longer than 15"));
+            return Err(backend("reference list longer than 15"));
         }
         for (i, r) in list.iter().enumerate() {
             let idx = ref_frames
                 .iter()
                 .position(|&f| f == r.frame.index)
-                .ok_or_else(|| decode_err("a reference is not among the reference frames"))?;
+                .ok_or_else(|| backend("a reference is not among the reference frames"))?;
             s.RefPicList[l][i] = u8::try_from(idx).unwrap_or(0xFF);
         }
     }

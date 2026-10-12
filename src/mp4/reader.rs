@@ -309,6 +309,13 @@ impl<S: ByteSource> Reader<S> {
     }
 }
 
+fn times(c: &mut Cur, v: u8) -> Result<(u32, u64)> {
+    c.skip(if v == 1 { 16 } else { 8 })?;
+    let timescale = c.u32()?;
+    let duration = if v == 1 { c.u64()? } else { c.u32()? as u64 };
+    Ok((timescale, duration))
+}
+
 fn read_range<S: ByteSource + ?Sized>(
     src: &S,
     len: u64,
@@ -325,12 +332,6 @@ fn read_range<S: ByteSource + ?Sized>(
     data.resize(size as usize, 0);
     src.read_at(offset, data)?;
     Ok(())
-}
-
-fn read_body<S: ByteSource + ?Sized>(src: &S, len: u64, offset: u64, size: u64) -> Result<Vec<u8>> {
-    let mut data = Vec::new();
-    read_range(src, len, offset, size, &mut data)?;
-    Ok(data)
 }
 
 fn parse_name(udta: &[u8]) -> Option<String> {
@@ -369,7 +370,9 @@ fn open<S: ByteSource>(src: S) -> Result<Reader<S>> {
             if body_len > max {
                 return Err(too_large("header box"));
             }
-            read_body(&src, len, offset + h.header_len, body_len)
+            let mut data = Vec::new();
+            read_range(&src, len, offset + h.header_len, body_len, &mut data)?;
+            Ok(data)
         };
         match &h.kind.0 {
             b"ftyp" if ftyp.is_none() => ftyp = Some(body(1 << 16)?),
@@ -407,15 +410,7 @@ fn open<S: ByteSource>(src: S) -> Result<Reader<S>> {
             b"mvhd" => {
                 let mut c = Cur::new(b.payload, "mvhd");
                 let (v, _) = c.full_header()?;
-                if v == 1 {
-                    c.skip(16)?;
-                    file.timescale = c.u32()?;
-                    file.duration = c.u64()?;
-                } else {
-                    c.skip(8)?;
-                    file.timescale = c.u32()?;
-                    file.duration = c.u32()? as u64;
-                }
+                (file.timescale, file.duration) = times(&mut c, v)?;
             }
             b"trak" => trak_payloads.push(b.payload),
             b"mvex" => {
@@ -532,21 +527,9 @@ fn parse_trak(p: &[u8], movie_timescale: u32, quicktime: bool, file_len: u64) ->
                 let mut c = Cur::new(b.payload, "tkhd");
                 let (v, flags) = c.full_header()?;
                 t.enabled = flags & 1 != 0;
-                if v == 1 {
-                    c.skip(16)?;
-                    t.id = c.u32()?;
-                    c.skip(4)?;
-                    c.skip(8)?;
-                } else {
-                    c.skip(8)?;
-                    t.id = c.u32()?;
-                    c.skip(4)?;
-                    c.skip(4)?;
-                }
-                c.skip(8)?;
-                let _layer = c.i16()?;
-                c.skip(4)?;
-                c.skip(2)?;
+                c.skip(if v == 1 { 16 } else { 8 })?;
+                t.id = c.u32()?;
+                c.skip(if v == 1 { 28 } else { 24 })?;
                 for m in t.matrix.iter_mut() {
                     *m = c.i32()?;
                 }
@@ -589,15 +572,7 @@ fn parse_trak(p: &[u8], movie_timescale: u32, quicktime: bool, file_len: u64) ->
             b"mdhd" => {
                 let mut c = Cur::new(b.payload, "mdhd");
                 let (v, _) = c.full_header()?;
-                if v == 1 {
-                    c.skip(16)?;
-                    t.timescale = c.u32()?;
-                    t.duration = c.u64()?;
-                } else {
-                    c.skip(8)?;
-                    t.timescale = c.u32()?;
-                    t.duration = c.u32()? as u64;
-                }
+                (t.timescale, t.duration) = times(&mut c, v)?;
                 t.language = parse_language(c.u16()?);
             }
             b"hdlr" => {

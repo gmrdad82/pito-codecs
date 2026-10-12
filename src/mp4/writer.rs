@@ -233,20 +233,24 @@ fn presentation_duration(t: &WTrack, movie_ts: u32) -> u64 {
     }
 }
 
+fn write_times(b: &mut BoxBuf, v1: bool, timescale: u32, duration: u64) {
+    b.zeros(if v1 { 16 } else { 8 });
+    b.u32(timescale);
+    write_duration(b, v1, duration);
+}
+
+fn write_duration(b: &mut BoxBuf, v1: bool, duration: u64) {
+    if v1 {
+        b.u64(duration);
+    } else {
+        b.u32(duration as u32);
+    }
+}
+
 fn write_mvhd(b: &mut BoxBuf, timescale: u32, duration: u64, next_id: u32) {
     let v1 = duration > u32::MAX as u64;
     let m = b.start_full(b"mvhd", v1 as u8, 0);
-    if v1 {
-        b.u64(0);
-        b.u64(0);
-        b.u32(timescale);
-        b.u64(duration);
-    } else {
-        b.u32(0);
-        b.u32(0);
-        b.u32(timescale);
-        b.u32(duration as u32);
-    }
+    write_times(b, v1, timescale, duration);
     b.u32(0x10000);
     b.u16(0x100);
     b.zeros(10);
@@ -275,19 +279,10 @@ fn write_trak(
     };
     let v1 = dur > u32::MAX as u64;
     let m = b.start_full(b"tkhd", v1 as u8, 3);
-    if v1 {
-        b.u64(0);
-        b.u64(0);
-        b.u32(t.id);
-        b.u32(0);
-        b.u64(dur);
-    } else {
-        b.u32(0);
-        b.u32(0);
-        b.u32(t.id);
-        b.u32(0);
-        b.u32(dur as u32);
-    }
+    b.zeros(if v1 { 16 } else { 8 });
+    b.u32(t.id);
+    b.u32(0);
+    write_duration(b, v1, dur);
     b.zeros(8);
     b.i16(0);
     b.u16(0);
@@ -345,17 +340,7 @@ fn write_trak(
     let mdia = b.start(b"mdia");
     let mv1 = t.t.media_duration > u32::MAX as u64;
     let m = b.start_full(b"mdhd", mv1 as u8, 0);
-    if mv1 {
-        b.u64(0);
-        b.u64(0);
-        b.u32(t.cfg.timescale);
-        b.u64(t.t.media_duration);
-    } else {
-        b.u32(0);
-        b.u32(0);
-        b.u32(t.cfg.timescale);
-        b.u32(t.t.media_duration as u32);
-    }
+    write_times(b, mv1, t.cfg.timescale, t.t.media_duration);
     b.u16(pack_language(&t.cfg.language));
     b.u16(0);
     b.end(m);
@@ -503,14 +488,7 @@ pub struct Writer<W: Write + Seek = File> {
 
 impl Writer<File> {
     pub fn create(path: impl AsRef<Path>) -> Result<Self> {
-        let f = File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(path.as_ref())
-            .map_err(|e| Error::at(path.as_ref(), e))?;
-        Self::new(f, Options::default())
+        Self::create_with(path, Options::default())
     }
 
     pub fn create_with(path: impl AsRef<Path>, options: Options) -> Result<Self> {

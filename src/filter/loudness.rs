@@ -1,4 +1,4 @@
-use super::resample::bessel_i0;
+use super::resample::{bessel_i0, kaiser, sinc};
 use crate::media::{AudioBuffer, Error, Result};
 use rayon::prelude::*;
 use std::f64::consts::PI;
@@ -93,19 +93,7 @@ pub(crate) fn polyphase(factor: usize) -> Vec<[f32; TAPS]> {
             let mut w = [0.0f64; TAPS];
             for (j, v) in w.iter_mut().enumerate() {
                 let t = j as f64 - (half - 1.0) - p as f64 / factor as f64;
-                let r = t / half;
-                let window = if r.abs() >= 1.0 {
-                    0.0
-                } else {
-                    bessel_i0(BETA * (1.0 - r * r).sqrt()) / i0
-                };
-                let x = CUTOFF * t;
-                let sinc = if x.abs() < 1e-12 {
-                    1.0
-                } else {
-                    (PI * x).sin() / (PI * x)
-                };
-                *v = sinc * window;
+                *v = sinc(CUTOFF * t) * kaiser(t / half, BETA, i0);
             }
             let sum: f64 = w.iter().sum();
             w.map(|v| (v / sum) as f32)

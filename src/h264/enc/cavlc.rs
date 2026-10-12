@@ -1,4 +1,4 @@
-use crate::h264::bits::BitWriter;
+use crate::syntax::bits::BitWriter;
 
 use crate::h264::enc::mbinfo::{MbKind, Part};
 use crate::h264::enc::nal::SliceType;

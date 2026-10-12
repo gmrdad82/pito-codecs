@@ -83,11 +83,7 @@ pub fn downmix(input: &AudioBuffer, channels: u16) -> Result<AudioBuffer> {
             }
         }
         1 => {
-            let m: Vec<f32> = if from == 1 {
-                vec![1.0]
-            } else {
-                w.iter().map(|c| 0.5 * (c[0] + c[1])).collect()
-            };
+            let m: Vec<f32> = w.iter().map(|c| 0.5 * (c[0] + c[1])).collect();
             out.samples.resize(frames, 0.0);
             for (o, f) in out.samples.iter_mut().zip(input.samples.chunks_exact(from)) {
                 *o = f.iter().zip(&m).map(|(s, c)| s * c).sum();

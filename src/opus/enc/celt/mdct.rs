@@ -83,22 +83,14 @@ impl Mdct {
                 re: u[2 * n],
                 im: u[n2 - 1 - 2 * n],
             };
-            zc.push(mul(v, self.pre[n]));
+            zc.push(v.mul(self.pre[n]));
         }
         self.fft.process(zc, &mut work.fft);
         for k in 0..n4 {
-            let d = mul(zc[k], self.post[k]);
+            let d = zc[k].mul(self.post[k]);
             out[2 * k * stride] = d.re;
             out[(n2 - 1 - 2 * k) * stride] = -d.im;
         }
-    }
-}
-
-#[inline]
-fn mul(a: Cpx, b: Cpx) -> Cpx {
-    Cpx {
-        re: a.re * b.re - a.im * b.im,
-        im: a.re * b.im + a.im * b.re,
     }
 }
 

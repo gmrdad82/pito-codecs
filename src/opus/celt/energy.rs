@@ -2,10 +2,10 @@ use super::rate::MAX_FINE_BITS;
 use super::tables::*;
 use crate::opus::range::RangeDecoder;
 
-const LAPLACE_MINP: u32 = 1;
+pub(crate) const LAPLACE_MINP: u32 = 1;
 const LAPLACE_NMIN: u32 = 16;
 
-fn laplace_get_freq1(fs0: u32, decay: u32) -> u32 {
+pub(crate) fn laplace_get_freq1(fs0: u32, decay: u32) -> u32 {
     let ft = 32768 - LAPLACE_MINP * (2 * LAPLACE_NMIN) - fs0;
     (ft * (16384 - decay)) >> 15
 }

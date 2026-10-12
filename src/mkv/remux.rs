@@ -1,117 +1,48 @@
 use std::io::{Seek, Write};
-use std::ops::Range;
 use std::path::Path;
 
 use super::reader::Reader;
 use super::track::Track;
 use super::writer::{Options, TrackConfig, Writer};
 use crate::media::{Error, Result};
+use crate::mp4::remux::{Timeline, plan_tracks};
 use crate::mp4::{ByteSource, Cut, Snap, Span, TrackKind};
 
 const WINDOW: u64 = 8 << 20;
 
-fn track_end(t: &Track) -> i64 {
-    t.end()
-}
-
-fn video_range(t: &Track, from: f64, to: f64, snap: Snap) -> Result<(Range<usize>, i64, i64)> {
-    let keys: Vec<usize> = t.keyframes().iter().map(|&k| k as usize).collect();
-    if keys.is_empty() {
-        return Err(Error::Invalid("video track has no keyframes".into()));
+impl Timeline for Track {
+    fn len(&self) -> usize {
+        self.samples.len()
     }
-    let n = t.samples.len();
-    let pts = |i: usize| t.samples[i].pts;
-    let gop_min: Vec<i64> = keys
-        .iter()
-        .enumerate()
-        .map(|(j, &k)| {
-            let end = keys.get(j + 1).copied().unwrap_or(n);
-            (k..end).map(pts).min().unwrap_or(i64::MAX)
-        })
-        .collect();
-    let (from_t, to_t) = (t.ticks(from), t.ticks(to));
-    let end_t = track_end(t);
-    match snap {
-        Snap::Outward => {
-            let ja = keys.iter().rposition(|&k| pts(k) <= from_t).unwrap_or(0);
-            let b = (ja + 1..keys.len())
-                .find(|&j| gop_min[j] >= to_t)
-                .map_or(n, |j| keys[j]);
-            let a = keys[ja];
-            let copied_end = (a..b)
-                .map(|i| pts(i).saturating_add(t.samples[i].duration as i64))
-                .max()
-                .unwrap_or(0);
-            Ok((a..b, from_t.max(pts(a)), to_t.min(copied_end)))
-        }
-        Snap::Inward => {
-            let ja = keys
-                .iter()
-                .position(|&k| pts(k) >= from_t)
-                .ok_or_else(|| Error::Invalid(format!("no keyframe after {from:.3} s")))?;
-            let start = pts(keys[ja]);
-            if to_t >= end_t {
-                return Ok((keys[ja]..n, start, end_t));
-            }
-            let jb = (ja + 1..keys.len())
-                .rev()
-                .find(|&j| pts(keys[j]) <= to_t)
-                .ok_or_else(|| {
-                    Error::Invalid(format!(
-                        "no keyframe-to-keyframe stretch inside {from:.3}..{to:.3} s"
-                    ))
-                })?;
-            Ok((keys[ja]..keys[jb], start, pts(keys[jb])))
-        }
+    fn keyframes(&self) -> &[u32] {
+        Track::keyframes(self)
     }
-}
-
-fn audio_range(t: &Track, start: f64, end: f64) -> Range<usize> {
-    let (s, e) = (t.ticks(start), t.ticks(end));
-    let n = t.samples.len();
-    let first = (0..n)
-        .position(|i| {
-            t.samples[i]
-                .pts
-                .saturating_add(t.samples[i].duration as i64)
-                > s
-        })
-        .unwrap_or(n);
-    let first = if first < n && t.samples[first].pts < s {
-        first.saturating_sub(1)
-    } else {
-        first
-    };
-    let last = (first..n).find(|&i| t.samples[i].pts >= e).unwrap_or(n);
-    first..last
+    fn pts(&self, i: usize) -> i64 {
+        self.samples[i].pts
+    }
+    fn duration(&self, i: usize) -> i64 {
+        self.samples[i].duration as i64
+    }
+    fn ticks(&self, seconds: f64) -> i64 {
+        Track::ticks(self, seconds)
+    }
+    fn seconds(&self, ticks: i64) -> f64 {
+        Track::seconds(self, ticks)
+    }
+    fn end(&self) -> i64 {
+        Track::end(self)
+    }
 }
 
 pub fn plan<S: ByteSource>(reader: &Reader<S>, from: f64, to: f64, snap: Snap) -> Result<Cut> {
-    let total = reader.duration_seconds();
-    let (from, to) = (from.max(0.0), to.min(total.max(from)));
-    if to.is_nan() || from.is_nan() || to <= from {
-        return Err(Error::Invalid(format!("empty range {from:.3}..{to:.3} s")));
-    }
-    let mut tracks = Vec::new();
-    let span = match reader.video() {
-        Some(v) => {
-            let t = &reader.tracks[v];
-            let (range, start, end) = video_range(t, from, to, snap)?;
-            tracks.push((v, range));
-            Span {
-                start: t.seconds(start),
-                end: t.seconds(end),
-            }
-        }
-        None => Span {
-            start: from,
-            end: to,
-        },
-    };
-    for a in reader.audio() {
-        tracks.push((a, audio_range(&reader.tracks[a], span.start, span.end)));
-    }
-    Ok(Cut { span, tracks })
+    plan_tracks(
+        reader.duration_seconds(),
+        &reader.tracks,
+        reader.video(),
+        reader.audio(),
+        (from, to),
+        snap,
+    )
 }
 
 pub fn copy<S: ByteSource, W: Write + Seek>(

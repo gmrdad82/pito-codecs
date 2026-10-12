@@ -1,4 +1,7 @@
-use std::io::Write;
+#[macro_use]
+#[path = "support/fail.rs"]
+mod fail;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
@@ -10,20 +13,8 @@ use pito_codecs::media::{
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
-macro_rules! say {
-    ($($t:tt)*) => {
-        writeln!(std::io::stdout(), $($t)*)?
-    };
-}
-
 fn main() -> ExitCode {
-    match run() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            let _ = writeln!(std::io::stderr(), "media_speed: {e}");
-            ExitCode::FAILURE
-        }
-    }
+    fail::run("media_speed", run)
 }
 
 fn run() -> Res<()> {
@@ -47,7 +38,7 @@ fn run() -> Res<()> {
     };
     let t = Instant::now();
     let p = probe(&path, &prefs)?;
-    say!("probe {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+    say!("probe {:.1} ms", t.elapsed().as_secs_f64() * 1e3)?;
     let t = Instant::now();
     let f = first_frame(&path, 240, &prefs)?;
     say!(
@@ -55,7 +46,7 @@ fn run() -> Res<()> {
         f.width,
         f.height,
         t.elapsed().as_secs_f64() * 1e3
-    );
+    )?;
     let times: Vec<f64> = (0..12)
         .map(|k| p.duration * (k as f64 + 0.5) / 12.0)
         .collect();
@@ -65,7 +56,7 @@ fn run() -> Res<()> {
         "filmstrip {} stills {:.1} ms",
         strip.len(),
         t.elapsed().as_secs_f64() * 1e3
-    );
+    )?;
     for height in [None, Some(1080)] {
         let t = Instant::now();
         let mut n = 0;
@@ -83,7 +74,7 @@ fn run() -> Res<()> {
             "decode {n} frames at {:?}: {:.1} fps",
             height.unwrap_or(p.height),
             n as f64 / s
-        );
+        )?;
         if let Some(fr) = last {
             let t = Instant::now();
             let mut img = Rgba::new(0, 0);
@@ -95,7 +86,7 @@ fn run() -> Res<()> {
                 img.width,
                 img.height,
                 t.elapsed().as_secs_f64() * 1e3 / 20.0
-            );
+            )?;
             let t = Instant::now();
             for _ in 0..20 {
                 img = to_rgba_height(&fr, 240);
@@ -105,7 +96,7 @@ fn run() -> Res<()> {
                 img.width,
                 img.height,
                 t.elapsed().as_secs_f64() * 1e3 / 20.0
-            );
+            )?;
         }
     }
     let out = PathBuf::from("tmp/speed-smart.mp4");
@@ -135,7 +126,7 @@ fn run() -> Res<()> {
         done.frames,
         done.copied,
         done.encoded
-    );
+    )?;
     let layer = std::sync::Arc::new(Rgba::new(p.width, p.height));
     let t = Instant::now();
     let out = PathBuf::from("tmp/speed-overlay.mp4");
@@ -154,7 +145,7 @@ fn run() -> Res<()> {
         "overlay export {} frames in {s:.2} s: {:.1} fps",
         done.frames,
         done.frames as f64 / s
-    );
+    )?;
     Ok(())
 }
 
@@ -202,7 +193,7 @@ fn gpu_playback(path: &std::path::Path) -> Res<()> {
                 } else {
                     "in memory"
                 }
-            );
+            )?;
         }
     }
     Ok(())

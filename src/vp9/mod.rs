@@ -9,7 +9,6 @@ pub(crate) mod frame;
 pub(crate) mod header;
 pub(crate) mod inter;
 pub(crate) mod intra;
-pub(crate) mod isa;
 pub(crate) mod loopfilter;
 pub(crate) mod probs;
 #[rustfmt::skip]

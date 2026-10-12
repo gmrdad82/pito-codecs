@@ -1,4 +1,6 @@
-use crate::h264::enc::tables::{DEQUANT4, DEQUANT8, QUANT4, pos_class4, pos_class8};
+use crate::h264::dec::tables::{norm_adjust4, norm_adjust8};
+use crate::h264::dec::transform::idct8_1d;
+use crate::h264::enc::tables::{QUANT4, pos_class4};
 
 #[inline]
 pub fn fdct4(d: &[i32; 16]) -> [i32; 16] {
@@ -59,7 +61,7 @@ pub fn idct4(d: &[i32; 16]) -> [i32; 16] {
 }
 
 #[inline(always)]
-fn fdct8_1d(s: [i32; 8]) -> [i32; 8] {
+pub(super) fn fdct8_1d(s: [i32; 8]) -> [i32; 8] {
     let a0 = s[0] + s[7];
     let a1 = s[1] + s[6];
     let a2 = s[2] + s[5];
@@ -111,37 +113,9 @@ pub fn fdct8(d: &[i32; 64]) -> [i32; 64] {
 }
 
 pub fn idct8(d: &[i32; 64]) -> [i32; 64] {
-    fn one(s: [i32; 8]) -> [i32; 8] {
-        let a0 = s[0] + s[4];
-        let a4 = s[0] - s[4];
-        let a2 = (s[2] >> 1) - s[6];
-        let a6 = s[2] + (s[6] >> 1);
-        let b0 = a0 + a6;
-        let b2 = a4 + a2;
-        let b4 = a4 - a2;
-        let b6 = a0 - a6;
-        let a1 = -s[3] + s[5] - s[7] - (s[7] >> 1);
-        let a3 = s[1] + s[7] - s[3] - (s[3] >> 1);
-        let a5 = -s[1] + s[7] + s[5] + (s[5] >> 1);
-        let a7 = s[3] + s[5] + s[1] + (s[1] >> 1);
-        let b1 = a1 + (a7 >> 2);
-        let b7 = a7 - (a1 >> 2);
-        let b3 = a3 + (a5 >> 2);
-        let b5 = (a3 >> 2) - a5;
-        [
-            b0 + b7,
-            b2 + b5,
-            b4 + b3,
-            b6 + b1,
-            b6 - b1,
-            b4 - b3,
-            b2 - b5,
-            b0 - b7,
-        ]
-    }
     let mut g = [0i32; 64];
     for (i, row) in d.as_chunks::<8>().0.iter().enumerate() {
-        let o = one(*row);
+        let o = idct8_1d(*row);
         g[i * 8..i * 8 + 8].copy_from_slice(&o);
     }
     let mut r = [0i32; 64];
@@ -156,7 +130,7 @@ pub fn idct8(d: &[i32; 64]) -> [i32; 64] {
             g[48 + j],
             g[56 + j],
         ];
-        let o = one(col);
+        let o = idct8_1d(col);
         for i in 0..8 {
             r[i * 8 + j] = (o[i] + 32) >> 6;
         }
@@ -181,10 +155,10 @@ impl QuantTables {
         for q in 0..6 {
             for i in 0..16 {
                 mf4[q][i] = QUANT4[q][pos_class4(i)];
-                v4[q][i] = DEQUANT4[q][pos_class4(i)];
+                v4[q][i] = norm_adjust4(q, i) as i32;
             }
             for i in 0..64 {
-                let v = DEQUANT8[q][pos_class8(i)];
+                let v = norm_adjust8(q, i) as i32;
                 v8[q][i] = v;
                 let (x, y) = (i & 7, i >> 3);
                 mf8[q][i] = ((1u64 << 36) as f64 / (norm8[x] * norm8[y] * v as f64)).round() as i32;
@@ -250,16 +224,21 @@ pub fn quant8(c: &mut [i32; 64], qt: &QuantTables, qp: u8, dz: Deadzone) -> u32 
     nz
 }
 
+#[inline(always)]
+pub(super) fn dequant8_one(level: i32, v: i32, q6: i32) -> i32 {
+    let ls = 16 * v;
+    if q6 >= 6 {
+        (level * ls) << (q6 - 6)
+    } else {
+        (level * ls + (1 << (5 - q6))) >> (6 - q6)
+    }
+}
+
 pub fn dequant8(c: &mut [i32; 64], qt: &QuantTables, qp: u8) {
     let v = &qt.v8[(qp % 6) as usize];
     let q6 = (qp / 6) as i32;
     for i in 0..64 {
-        let ls = 16 * v[i];
-        c[i] = if q6 >= 6 {
-            (c[i] * ls) << (q6 - 6)
-        } else {
-            (c[i] * ls + (1 << (5 - q6))) >> (6 - q6)
-        };
+        c[i] = dequant8_one(c[i], v[i], q6);
     }
 }
 

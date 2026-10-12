@@ -49,17 +49,6 @@ pub struct Out {
 #[repr(C, align(32))]
 struct Buf<const N2: usize>([i16; N2]);
 
-#[cfg(target_arch = "x86_64")]
-fn avx2() -> bool {
-    use std::sync::LazyLock;
-    static AVX2: LazyLock<bool> = LazyLock::new(|| {
-        std::env::var_os("PITO_CODECS_NO_SIMD").is_none()
-            && is_x86_feature_detected!("avx2")
-            && is_x86_feature_detected!("fma")
-    });
-    *AVX2
-}
-
 fn scan_for(tx_size: u8, tx_type: u8) -> Scan<'static> {
     let set = tables::scan_set(tx_size, tx_type);
     Scan {
@@ -87,7 +76,7 @@ pub fn encode(
     levels: &mut [i16; 1024],
 ) -> Out {
     #[cfg(target_arch = "x86_64")]
-    if avx2() {
+    if crate::media::isa::avx2_fma() {
         return unsafe { encode_avx2(b, q, costs, lambda, levels) };
     }
     encode_with::<Scalar>(b, q, costs, lambda, levels)
@@ -117,7 +106,7 @@ pub fn reconstruct(
     dst_stride: usize,
 ) {
     #[cfg(target_arch = "x86_64")]
-    if avx2() {
+    if crate::media::isa::avx2_fma() {
         return unsafe {
             reconstruct_avx2(levels, eob, tx_size, tx_type, lossless, q, dst, dst_stride)
         };
