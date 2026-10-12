@@ -1,14 +1,14 @@
-use crate::h264::bits::{BitReader, annexb_nals, length_prefixed_nals, unescape_rbsp};
-use crate::h264::dec::dpb::{Dpb, Output, OutputMeta, RefMark};
-use crate::h264::dec::error::{Error, Result, ensure, invalid, unsupported};
-use crate::h264::dec::params::{Pps, Sps};
 use crate::h264::dec::picture::{Frame, FramePool, FrameRef, Output3, Planes, RefPic};
-use crate::h264::dec::slice::{
-    NalHeader, Poc, PocState, SliceHeader, SliceType, is_new_picture, nal_type,
-};
 use crate::h264::dec::slicedec::{PicState, SliceDecoder};
 use crate::h264::dec::transform::LevelScale;
 use crate::h264::dec::{ColorInfo, Picture};
+use crate::syntax::bits::{BitReader, annexb_nals, length_prefixed_nals, unescape_rbsp};
+use crate::syntax::error::{Error, Result, ensure, invalid, unsupported};
+use crate::syntax::h264::dpb::{Dpb, Output, OutputMeta, RefMark};
+use crate::syntax::h264::params::{Pps, Sps};
+use crate::syntax::h264::slice::{
+    NalHeader, Poc, PocState, SliceHeader, SliceType, is_new_picture, nal_type,
+};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
@@ -230,17 +230,15 @@ impl Decoder {
         match hdr.nal_unit_type {
             nal_type::SPS => {
                 let sps = Sps::parse(&unescape_rbsp(&nal[1..]))?;
+                ensure!(
+                    sps.pic_width_in_mbs * sps.pic_height_in_map_units <= 139_264,
+                    "picture too large"
+                );
                 let id = sps.id as usize;
                 self.spss[id] = Some(Arc::new(sps));
             }
             nal_type::PPS => {
-                let rbsp = unescape_rbsp(&nal[1..]);
-                let spss: Vec<Option<Sps>> = self
-                    .spss
-                    .iter()
-                    .map(|s| s.as_ref().map(|s| (**s).clone()))
-                    .collect();
-                let pps = Pps::parse(&rbsp, &spss)?;
+                let pps = Pps::parse(&unescape_rbsp(&nal[1..]), &self.spss)?;
                 let id = pps.id as usize;
                 self.ppss[id] = Some(Arc::new(pps));
             }

@@ -149,7 +149,7 @@ fn predict<const T: usize, P: Pel>(
     interpolate::<T, P>(src, stride, &mut sc.tmp, taps, w, h, out);
 }
 
-crate::hevc::isa::dispatch! {
+crate::media::isa::dispatch! {
 pub fn mc_luma<P: Pel>(
     f: &Frame,
     x: i32,
@@ -176,7 +176,7 @@ pub fn mc_luma<P: Pel>(
 }
 }
 
-crate::hevc::isa::dispatch! {
+crate::media::isa::dispatch! {
 pub fn mc_chroma<P: Pel>(
     f: &Frame,
     c: usize,
@@ -204,7 +204,7 @@ pub fn mc_chroma<P: Pel>(
 }
 }
 
-crate::hevc::isa::dispatch! {
+crate::media::isa::dispatch! {
 pub fn put_uni<P: Pel>(p: &[i16], w: usize, h: usize, bd: u32, dst: &mut [P], ds: usize) {
     if simd::mc::put_uni(p, w, h, bd, dst, ds) {
         return;
@@ -220,7 +220,7 @@ pub fn put_uni<P: Pel>(p: &[i16], w: usize, h: usize, bd: u32, dst: &mut [P], ds
 }
 }
 
-crate::hevc::isa::dispatch! {
+crate::media::isa::dispatch! {
 pub fn put_bi<P: Pel>(p0: &[i16], p1: &[i16], w: usize, h: usize, bd: u32, dst: &mut [P], ds: usize) {
     if simd::mc::put_bi(p0, p1, w, h, bd, dst, ds) {
         return;
@@ -240,7 +240,7 @@ pub fn put_bi<P: Pel>(p0: &[i16], p1: &[i16], w: usize, h: usize, bd: u32, dst: 
 }
 }
 
-crate::hevc::isa::dispatch! {
+crate::media::isa::dispatch! {
 pub fn put_weighted_uni<P: Pel>(
     p: &[i16],
     w: usize,
@@ -270,7 +270,7 @@ pub fn put_weighted_uni<P: Pel>(
 }
 }
 
-crate::hevc::isa::dispatch! {
+crate::media::isa::dispatch! {
 pub fn put_weighted_bi<P: Pel>(
     p0: &[i16],
     p1: &[i16],

@@ -12,6 +12,22 @@ fn gcd(a: u64, b: u64) -> u64 {
     if b == 0 { a } else { gcd(b, a % b) }
 }
 
+pub(crate) fn kaiser(r: f64, beta: f64, i0: f64) -> f64 {
+    if r.abs() >= 1.0 {
+        0.0
+    } else {
+        bessel_i0(beta * (1.0 - r * r).sqrt()) / i0
+    }
+}
+
+pub(crate) fn sinc(x: f64) -> f64 {
+    if x.abs() < 1e-12 {
+        1.0
+    } else {
+        (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
+    }
+}
+
 pub(crate) fn bessel_i0(x: f64) -> f64 {
     let mut sum = 1.0;
     let mut term = 1.0;
@@ -70,19 +86,7 @@ impl Resampler {
             let mut w = vec![0.0f64; taps];
             for (m, v) in w.iter_mut().enumerate() {
                 let t = frac + (half as f64 - 1.0) - m as f64;
-                let r = t / half as f64;
-                let window = if r.abs() >= 1.0 {
-                    0.0
-                } else {
-                    bessel_i0(BETA * (1.0 - r * r).sqrt()) / i0
-                };
-                let x = f * t;
-                let sinc = if x.abs() < 1e-12 {
-                    1.0
-                } else {
-                    (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
-                };
-                *v = f * sinc * window;
+                *v = f * sinc(f * t) * kaiser(t / half as f64, BETA, i0);
             }
             let sum: f64 = w.iter().sum();
             for (o, v) in row.iter_mut().zip(&w) {

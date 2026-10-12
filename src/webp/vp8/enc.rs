@@ -1,9 +1,9 @@
 use super::bits::{BoolEncoder, Code, codes};
 use super::dec::{Quant, UV_OFF, Work, Y_OFF, quant};
 use super::dsp::{self, B_PRED, BPS};
-use super::isa::dispatch;
 use super::tables::*;
 use super::tokens::{self, Counter, Counts, Writer, block_cost};
+use crate::media::isa::dispatch;
 use crate::media::{Error, Result};
 use std::sync::atomic::{AtomicUsize, Ordering};
 

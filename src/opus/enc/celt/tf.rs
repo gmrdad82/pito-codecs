@@ -1,6 +1,6 @@
 use crate::opus::celt::tables::*;
 
-use super::bands::haar1;
+use crate::opus::celt::bands::haar1;
 
 const SPREAD_NONE: usize = 0;
 const SPREAD_LIGHT: usize = 1;

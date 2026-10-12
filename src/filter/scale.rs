@@ -62,7 +62,6 @@ struct Taps {
     coef: Vec<i16>,
     blocks: usize,
     reach: usize,
-    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     packed: Vec<i16>,
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     quad: Vec<i16>,

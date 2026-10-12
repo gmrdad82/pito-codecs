@@ -1,14 +1,7 @@
+use crate::opus::celt::energy::{LAPLACE_MINP, laplace_get_freq1};
 use crate::opus::celt::rate::MAX_FINE_BITS;
 use crate::opus::celt::tables::*;
 use crate::opus::range::RangeEncoder;
-
-const LAPLACE_MINP: u32 = 1;
-const LAPLACE_NMIN: u32 = 16;
-
-fn laplace_freq1(fs0: u32, decay: u32) -> u32 {
-    let ft = 32768 - LAPLACE_MINP * (2 * LAPLACE_NMIN) - fs0;
-    (ft * (16384 - decay)) >> 15
-}
 
 pub fn laplace_encode(enc: &mut RangeEncoder, value: &mut i32, fs0: u32, decay: u32) {
     let mut fl = 0u32;
@@ -18,7 +11,7 @@ pub fn laplace_encode(enc: &mut RangeEncoder, value: &mut i32, fs0: u32, decay: 
         let s: i32 = if val < 0 { -1 } else { 0 };
         val = val.abs();
         fl = fs;
-        fs = laplace_freq1(fs, decay);
+        fs = laplace_get_freq1(fs, decay);
         let mut i = 1;
         while fs > 0 && i < val {
             fs *= 2;

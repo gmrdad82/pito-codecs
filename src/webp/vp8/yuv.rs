@@ -1,4 +1,4 @@
-use super::isa::dispatch;
+use crate::media::isa::dispatch;
 use std::cell::RefCell;
 
 #[inline(always)]

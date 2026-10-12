@@ -1,15 +1,15 @@
 use crate::hevc::cabac::{Cabac, Contexts, init_contexts};
-use crate::hevc::error::{Error, Result, ensure, invalid};
 use crate::hevc::grid::Grid;
 use crate::hevc::inter;
 use crate::hevc::intra::{self, Refs};
-use crate::hevc::params::{Layout, Pps, Sps};
 use crate::hevc::pel::Pel;
 use crate::hevc::picture::{FrameRef, RefPic};
-use crate::hevc::slice::{SliceHeader, SliceType};
 use crate::hevc::spec_tables::*;
 use crate::hevc::tables::{CTX_IDX_MAP, LEVEL_SCALE, SCAN_4, qpc_420, scan_order};
 use crate::hevc::transform;
+use crate::syntax::error::{Error, Result, ensure, invalid};
+use crate::syntax::hevc::params::{Layout, Pps, Sps};
+use crate::syntax::hevc::slice::{SliceHeader, SliceType};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Duration;
@@ -1423,7 +1423,7 @@ impl<'a, P: Pel> SliceDecoder<'a, P> {
             start + total_bits.div_ceil(8) <= data.len(),
             "PCM samples truncated"
         );
-        let mut r = crate::hevc::bits::BitReader::new(&data[start..]);
+        let mut r = crate::syntax::bits::BitReader::new(&data[start..]);
         let (sy, sc) = (self.pic.bd_y - bl, self.pic.bd_c - bc);
         for y in 0..n {
             for x in 0..n {
@@ -1739,7 +1739,7 @@ impl<'a, P: Pel> SliceDecoder<'a, P> {
 
     fn residual(&mut self, x0: i32, y0: i32, log2: u32, c: usize, qp: i32) -> Result<()> {
         #[cfg(target_arch = "x86_64")]
-        if crate::hevc::isa::avx2() {
+        if crate::media::isa::avx2() {
             return unsafe { self.residual_fast(x0, y0, log2, c, qp) };
         }
         self.residual_body(x0, y0, log2, c, qp)

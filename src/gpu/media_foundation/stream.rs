@@ -1,8 +1,8 @@
 use super::device::SurfaceFormat;
 use crate::gpu::nal;
-use crate::gpu::syntax::bits::unescape_rbsp;
-use crate::gpu::syntax::{h264, hevc};
 use crate::media::{Codec, Error, Result};
+use crate::syntax::bits::unescape_rbsp;
+use crate::syntax::{h264, hevc};
 
 pub const MAX_SIDE: u32 = 8192;
 
@@ -69,7 +69,7 @@ pub fn plan(codec: Codec, sets: &[Vec<u8>]) -> Result<Plan> {
                     sps.chroma_format_idc
                 )));
             }
-            let format = match (sps.ptl.profile_idc, bits) {
+            let format = match (sps.profile_idc, bits) {
                 (1..=3, 8) => SurfaceFormat::Nv12,
                 (2, 10) => SurfaceFormat::P010,
                 (p, b) => {
@@ -118,14 +118,7 @@ pub fn merge_sets(codec: Codec, old: &[Vec<u8>], new: &[&[u8]]) -> Vec<Vec<u8>> 
 }
 
 pub fn annexb(nals: &[&[u8]], headers: Option<&[Vec<u8>]>, out: &mut Vec<u8>) {
-    const START: [u8; 4] = [0, 0, 0, 1];
     out.clear();
-    for n in headers.into_iter().flatten() {
-        out.extend_from_slice(&START);
-        out.extend_from_slice(n);
-    }
-    for n in nals {
-        out.extend_from_slice(&START);
-        out.extend_from_slice(n);
-    }
+    let heads = headers.into_iter().flatten().map(Vec::as_slice);
+    nal::put_start_codes(heads.chain(nals.iter().copied()), out);
 }

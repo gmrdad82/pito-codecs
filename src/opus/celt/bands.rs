@@ -88,7 +88,7 @@ fn decode_pulses(
     ryy
 }
 
-fn exp_rotation1(x: &mut [f32], len: usize, stride: usize, c: f32, s: f32) {
+pub(crate) fn exp_rotation1(x: &mut [f32], len: usize, stride: usize, c: f32, s: f32) {
     let ms = -s;
     if len <= stride {
         return;
@@ -158,7 +158,7 @@ pub fn renormalise_vector(x: &mut [f32], gain: f32) {
     }
 }
 
-fn haar1(x: &mut [f32], n0: usize, stride: usize) {
+pub(crate) fn haar1(x: &mut [f32], n0: usize, stride: usize) {
     let n0 = n0 >> 1;
     const S: f32 = std::f32::consts::FRAC_1_SQRT_2;
     for i in 0..stride {
@@ -175,7 +175,7 @@ fn ordery(stride: usize) -> &'static [usize] {
     &ORDERY[stride - 2..2 * stride - 2]
 }
 
-fn deinterleave_hadamard(
+pub(crate) fn deinterleave_hadamard(
     x: &mut [f32],
     n0: usize,
     stride: usize,
@@ -230,18 +230,18 @@ fn interleave_hadamard(
 }
 
 #[inline]
-fn frac_mul16(a: i32, b: i32) -> i32 {
+pub(crate) fn frac_mul16(a: i32, b: i32) -> i32 {
     (16384 + (a as i16 as i32) * (b as i16 as i32)) >> 15
 }
 
-fn bitexact_cos(x: i32) -> i32 {
+pub(crate) fn bitexact_cos(x: i32) -> i32 {
     let tmp = (4096 + x * x) >> 13;
     let x2 = tmp;
     let x2 = (32767 - x2) + frac_mul16(x2, -7651 + frac_mul16(x2, 8277 + frac_mul16(-626, x2)));
     1 + x2
 }
 
-fn bitexact_log2tan(isin: i32, icos: i32) -> i32 {
+pub(crate) fn bitexact_log2tan(isin: i32, icos: i32) -> i32 {
     let lc = ilog(icos as u32);
     let ls = ilog(isin as u32);
     let icos = icos << (15 - lc);
@@ -261,7 +261,7 @@ fn isqrt32(v: u32) -> u32 {
     r
 }
 
-fn compute_qn(n: i32, b: i32, offset: i32, pulse_cap: i32, stereo: bool) -> i32 {
+pub(crate) fn compute_qn(n: i32, b: i32, offset: i32, pulse_cap: i32, stereo: bool) -> i32 {
     const EXP2_TABLE8: [i32; 8] = [16384, 17866, 19483, 21247, 23170, 25267, 27554, 30048];
     let mut n2 = 2 * n - 1;
     if stereo && n == 2 {

@@ -334,15 +334,7 @@ impl VaEncoder {
             Codec::Hevc => hevc_level(size.0, size.1, fps),
             _ => h264_level(size.0, size.1, fps),
         };
-        let name = format!(
-            "VA-API {} encoder ({})",
-            if codec == Codec::Hevc {
-                "HEVC"
-            } else {
-                "H.264"
-            },
-            session.vendor()
-        );
+        let name = format!("VA-API {codec} encoder ({})", session.vendor());
         Ok(Self {
             codec,
             config,
@@ -556,24 +548,12 @@ impl VaEncoder {
         let mut keep: Vec<&[u8]> = Vec::with_capacity(nals.len());
         let mut found = [Vec::new(), Vec::new(), Vec::new()];
         let mut keyframe = f.key;
+        let aud = if codec == Codec::Hevc { 35 } else { 9 };
         for n in nals {
-            let t = nal::nal_type(codec, n);
-            let set = match codec {
-                Codec::Hevc => match t {
-                    32 => Some(0),
-                    33 => Some(1),
-                    34 => Some(2),
-                    35 => continue,
-                    _ => None,
-                },
-                _ => match t {
-                    7 => Some(1),
-                    8 => Some(2),
-                    9 => continue,
-                    _ => None,
-                },
-            };
-            match set {
+            if nal::nal_type(codec, n) == aud {
+                continue;
+            }
+            match nal::set_slot(codec, n) {
                 Some(i) => found[i].push(n.to_vec()),
                 None => {
                     keyframe |= nal::is_keyframe(codec, n);
@@ -582,11 +562,7 @@ impl VaEncoder {
             }
         }
         if !found[1].is_empty() && self.extradata.is_none() {
-            let record = match codec {
-                Codec::Hevc => nal::build_hvcc(&found[0], &found[1], &found[2])?,
-                _ => nal::build_avcc(&found[1], &found[2])?,
-            };
-            self.extradata = Some(record);
+            self.extradata = Some(nal::record(codec, &found)?);
             self.sets = found;
         }
         if self.extradata.is_none() {
@@ -610,14 +586,8 @@ impl VaEncoder {
             Bitstream::AnnexB => {
                 let mut out = Vec::with_capacity(bytes.len() + 64);
                 let sets = self.sets.iter().flatten().map(Vec::as_slice);
-                let mut put = |n: &[u8]| {
-                    out.extend_from_slice(&[0, 0, 0, 1]);
-                    out.extend_from_slice(n);
-                };
-                if keyframe {
-                    sets.for_each(&mut put);
-                }
-                keep.iter().for_each(|n| put(n));
+                let heads = sets.filter(|_| keyframe);
+                nal::put_start_codes(heads.chain(keep.iter().copied()), &mut out);
                 out
             }
         };

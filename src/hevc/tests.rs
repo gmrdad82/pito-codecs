@@ -1,6 +1,6 @@
-use super::bits::annexb_nals;
 use super::{Decoder, Hvcc};
 use crate::media::{Frame, Packet, PixelFormat};
+use crate::syntax::bits::annexb_nals;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};

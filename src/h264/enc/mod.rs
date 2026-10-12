@@ -82,25 +82,6 @@ pub enum RateControl {
     Qp(u8),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ColorConfig {
-    pub primaries: u8,
-    pub transfer: u8,
-    pub matrix: u8,
-    pub full_range: bool,
-}
-
-impl Default for ColorConfig {
-    fn default() -> Self {
-        ColorConfig {
-            primaries: 1,
-            transfer: 1,
-            matrix: 1,
-            full_range: false,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum PacketFormat {
     #[default]
@@ -119,17 +100,11 @@ pub struct EncoderConfig {
     pub rate: RateControl,
     pub keyint: u32,
     pub bframes: u8,
-    pub color: ColorConfig,
     pub threads: usize,
     pub format: PacketFormat,
-    pub aq_strength: f32,
-    pub sar: (u16, u16),
-    pub scenecut: bool,
-    pub aud: bool,
-    pub mastering_display: Option<[u8; 24]>,
-    pub content_light: Option<(u16, u16)>,
-    pub level: Option<u8>,
 }
+
+const AQ_STRENGTH: f32 = 0.6;
 
 impl EncoderConfig {
     pub fn new(width: u32, height: u32, fps_num: u32, fps_den: u32) -> Self {
@@ -143,16 +118,8 @@ impl EncoderConfig {
             rate: RateControl::Crf(23.0),
             keyint: 250,
             bframes: 2,
-            color: ColorConfig::default(),
             threads: 0,
             format: PacketFormat::AnnexB,
-            aq_strength: 0.6,
-            sar: (1, 1),
-            scenecut: true,
-            mastering_display: None,
-            content_light: None,
-            aud: true,
-            level: None,
         }
     }
 }
@@ -313,7 +280,6 @@ pub struct Encoder {
     dpb: Vec<Arc<Pic>>,
     retired: Vec<Arc<Pic>>,
     pic_pool: Vec<Pic>,
-    coded_count: u64,
     display_pts: VecDeque<i64>,
     dts_offset: Option<i64>,
     all_pts: Vec<i64>,
@@ -371,7 +337,7 @@ impl Encoder {
         };
         let level = self.sps.level_idc;
         format!(
-            "{rate} profile={profile} level={}.{} preset={preset} keyint={} bframes={} refs={} cabac={} 8x8dct={} slices={} aq={:.2} scenecut={}",
+            "{rate} profile={profile} level={}.{} preset={preset} keyint={} bframes={} refs={} cabac={} 8x8dct={} slices=1 aq={AQ_STRENGTH:.2} scenecut=1",
             level / 10,
             level % 10,
             c.keyint,
@@ -379,9 +345,6 @@ impl Encoder {
             self.max_refs,
             u8::from(c.profile != Profile::Baseline),
             u8::from(c.profile == Profile::High),
-            1,
-            c.aq_strength,
-            u8::from(c.scenecut),
         )
     }
 
@@ -416,54 +379,42 @@ impl Encoder {
                 mbh,
                 cabac,
                 t8x8: high,
-                i4x4: true,
                 i8x8: false,
                 partitions: false,
                 me_range: 8,
-                subpel: 2,
                 subpel_rounds: 0,
                 rd: false,
                 chroma_qp_offset: 0,
-                decimate: true,
                 adaptive_t8: false,
                 always_intra: false,
-                cavlc_clamp: !cabac,
             },
             Preset::Balanced => EncParams {
                 mbw,
                 mbh,
                 cabac,
                 t8x8: high,
-                i4x4: true,
                 i8x8: high,
                 partitions: true,
                 me_range: 16,
-                subpel: 2,
                 subpel_rounds: 1,
                 rd: true,
                 chroma_qp_offset: 0,
-                decimate: true,
                 adaptive_t8: high,
                 always_intra: false,
-                cavlc_clamp: !cabac,
             },
             Preset::Quality => EncParams {
                 mbw,
                 mbh,
                 cabac,
                 t8x8: high,
-                i4x4: true,
                 i8x8: high,
                 partitions: true,
                 me_range: 24,
-                subpel: 2,
                 subpel_rounds: 2,
                 rd: true,
                 chroma_qp_offset: 0,
-                decimate: true,
                 adaptive_t8: high,
                 always_intra: true,
-                cavlc_clamp: !cabac,
             },
         };
         let max_refs = if cfg.bframes > 0 { 2 } else { 1 };
@@ -509,7 +460,6 @@ impl Encoder {
             kbps_for_level,
             high,
         );
-        let level = cfg.level.map_or(auto, |l| nal::level_at_least(l, auto));
         let (profile_idc, constraint) = match cfg.profile {
             Profile::Baseline => (66u8, 0xC0u8),
             Profile::Main => (77, 0x40),
@@ -519,7 +469,7 @@ impl Encoder {
         let sps = Sps {
             profile_idc,
             constraint_flags: constraint,
-            level_idc: level,
+            level_idc: auto,
             width_mbs: mbw as u32,
             height_mbs: mbh as u32,
             crop_right: mbw as u32 * 16 - cfg.width,
@@ -528,11 +478,6 @@ impl Encoder {
             log2_max_poc_lsb: LOG2_MAX_POC_LSB,
             max_num_ref_frames: max_refs as u32,
             vui: Vui {
-                sar: cfg.sar,
-                video_full_range: cfg.color.full_range,
-                colour_primaries: cfg.color.primaries,
-                transfer: cfg.color.transfer,
-                matrix: cfg.color.matrix,
                 num_units_in_tick: cfg.fps_den,
                 time_scale: cfg.fps_num.saturating_mul(2),
                 max_num_reorder_frames: reorder,
@@ -569,8 +514,6 @@ impl Encoder {
             qt: QuantTables::new(),
             cost_tab: CostTable::new(),
             lam: Lambdas::new(),
-            cabac_i: Box::new(tables::cabac_init_i()),
-            cabac_pb: Box::new(tables::cabac_init_pb0()),
         });
         let frame_threads = threads.clamp(1, 64);
         let frame_bytes = (mbw * 16 + 128) * (mbh * 16 + 128) * 2;
@@ -602,7 +545,6 @@ impl Encoder {
             dpb: Vec::new(),
             retired: Vec::new(),
             pic_pool: Vec::new(),
-            coded_count: 0,
             display_pts: VecDeque::new(),
             dts_offset: None,
             all_pts: Vec::new(),
@@ -662,14 +604,14 @@ impl Encoder {
 
     fn encode_inner(&mut self, frame: &YuvFrame, pts: i64) -> Result<Vec<Packet>, Error> {
         let src = self.import(frame)?;
-        let use_aq = self.cfg.aq_strength > 0.0 && !matches!(self.cfg.rate, RateControl::Qp(_));
-        let (mbw, mbh, strength) = (self.mbw, self.mbh, self.cfg.aq_strength);
+        let use_aq = !matches!(self.cfg.rate, RateControl::Qp(_));
+        let (mbw, mbh) = (self.mbw, self.mbh);
         let prev = self.prev_lowres.take();
         let (lowres, cplx, aq) = self.pool.install(|| {
             let lowres = Arc::new(LowRes::new(&src));
             let cplx = lookahead::complexity(&lowres, prev.as_deref());
             let aq = if use_aq {
-                lookahead::aq_offsets(&src, mbw, mbh, strength)
+                lookahead::aq_offsets(&src, mbw, mbh, AQ_STRENGTH)
             } else {
                 Vec::new()
             };
@@ -695,8 +637,7 @@ impl Encoder {
         let min_gap = (keyint / 10).clamp(1, 25);
         let span = keyint.saturating_sub(min_gap).max(1) as f64;
         let bias = 0.01 + 0.39 * (since.saturating_sub(min_gap) as f64 / span).min(1.0);
-        let scenecut = self.cfg.scenecut
-            && display > 0
+        let scenecut = display > 0
             && since >= min_gap
             && cplx.inter as f64 >= (1.0 - bias) * cplx.intra as f64;
         let idr = display == 0 || since >= self.cfg.keyint as u64 || scenecut;
@@ -969,7 +910,6 @@ impl Encoder {
             0
         };
         let hdr = SliceHeader {
-            first_mb: 0,
             slice_type: st,
             nal_ref_idc,
             idr,
@@ -1110,7 +1050,7 @@ impl Encoder {
         let st = job.st;
         let annexb = self.cfg.format == PacketFormat::AnnexB;
         let mut nals: Vec<Vec<u8>> = Vec::new();
-        if annexb && self.cfg.aud {
+        if annexb {
             let t = match st {
                 SliceType::I => 0,
                 SliceType::P => 1,
@@ -1130,13 +1070,6 @@ impl Encoder {
                 self.options()
             );
             nals.push(nal::nal(0, NAL_SEI, &nal::sei_user_data_rbsp(&text)));
-            if self.cfg.mastering_display.is_some() || self.cfg.content_light.is_some() {
-                nals.push(nal::nal(
-                    0,
-                    NAL_SEI,
-                    &nal::sei_hdr_rbsp(self.cfg.mastering_display.as_ref(), self.cfg.content_light),
-                ));
-            }
         }
         nals.push(res.nal);
         let mut data = Vec::with_capacity(nals.iter().map(|n| n.len() + 4).sum());
@@ -1158,7 +1091,6 @@ impl Encoder {
         let dts_base = pos
             .and_then(|p| self.display_pts.remove(p))
             .unwrap_or(job.pts);
-        self.coded_count += 1;
         let Job {
             src,
             pic,

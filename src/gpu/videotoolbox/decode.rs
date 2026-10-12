@@ -23,9 +23,9 @@ use objc2_video_toolbox::{
 use super::order::{Key, Order};
 use super::{Locked, NV12_FULL, NV12_VIDEO, P010_FULL, P010_VIDEO, codec_type, label, planes};
 use crate::gpu::nal::{self, Framing};
-use crate::gpu::syntax::bits::unescape_rbsp;
-use crate::gpu::syntax::{h264 as h264_syntax, hevc as hevc_syntax};
 use crate::media::{Codec, Error, Frame, Packet, PixelFormat, Result};
+use crate::syntax::bits::unescape_rbsp;
+use crate::syntax::{h264 as h264_syntax, hevc as hevc_syntax};
 
 const IN_FLIGHT: usize = 4;
 
@@ -392,14 +392,6 @@ pub fn hardware(codec: Codec) -> bool {
     codec_type(codec).is_ok_and(|t| unsafe { VTIsHardwareDecodeSupported(t) })
 }
 
-fn has_picture(codec: Codec, nal: &[u8]) -> bool {
-    let t = nal::nal_type(codec, nal);
-    match codec {
-        Codec::Hevc => t < 32,
-        _ => (1..=5).contains(&t),
-    }
-}
-
 pub struct VtDecoder {
     codec: Codec,
     framing: Framing,
@@ -531,7 +523,7 @@ impl VtDecoder {
         let key = self.order.key(self.codec, &nals)?;
         let skip = self.skip(&nals);
         self.first = false;
-        if skip || !nals.iter().any(|n| has_picture(self.codec, n)) {
+        if skip || !nals.iter().any(|n| nal::is_vcl(self.codec, n)) {
             return Ok(Vec::new());
         }
         let sample = match self.framing {

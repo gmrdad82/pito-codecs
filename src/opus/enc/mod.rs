@@ -1,5 +1,4 @@
 pub(crate) mod celt;
-mod isa;
 pub(crate) mod silk;
 
 use std::io::Write;

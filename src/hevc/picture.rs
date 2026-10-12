@@ -464,4 +464,4 @@ impl Frame {
 
 pub type FrameRef = Arc<Frame>;
 
-pub type RefPic = crate::hevc::dpb::Ref<FrameRef>;
+pub type RefPic = crate::syntax::hevc::dpb::Ref<FrameRef>;

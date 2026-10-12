@@ -1,4 +1,5 @@
-use crate::h264::enc::tables::{NUM_CTX, RANGE_LPS, TRANS_LPS};
+use crate::h264::enc::tables::NUM_CTX;
+use crate::syntax::cabac::{RANGE_TAB_LPS as RANGE_LPS, TRANS_IDX_LPS as TRANS_LPS, ctx_state};
 
 pub trait BinSink {
     fn decision(&mut self, ctx: usize, bin: u32);
@@ -10,17 +11,11 @@ pub trait BinSink {
 pub struct Contexts(pub [u8; NUM_CTX]);
 
 impl Contexts {
-    pub fn init(table: &[(i8, i8); NUM_CTX], slice_qp: i32) -> Self {
+    pub fn init(table: &[(i8, i8)], slice_qp: i32) -> Self {
         let qp = slice_qp.clamp(0, 51);
         let mut s = [0u8; NUM_CTX];
-        for (i, &(m, n)) in table.iter().enumerate() {
-            let pre = (((m as i32) * qp) >> 4) + n as i32;
-            let pre = pre.clamp(1, 126);
-            s[i] = if pre <= 63 {
-                ((63 - pre) as u8) << 1
-            } else {
-                (((pre - 64) as u8) << 1) | 1
-            };
+        for (c, &(m, n)) in s.iter_mut().zip(table) {
+            *c = ctx_state(m as i32, n as i32, qp);
         }
         Contexts(s)
     }
@@ -36,7 +31,6 @@ pub struct CabacEncoder {
     buf: Vec<u8>,
     acc: u64,
     nbits: u32,
-    bins: u64,
 }
 
 impl CabacEncoder {
@@ -50,7 +44,6 @@ impl CabacEncoder {
             buf: header,
             acc: 0,
             nbits: 0,
-            bins: 0,
         }
     }
 
@@ -111,7 +104,6 @@ impl CabacEncoder {
 impl BinSink for CabacEncoder {
     #[inline]
     fn decision(&mut self, ctx: usize, bin: u32) {
-        self.bins += 1;
         let s = self.ctx.0[ctx];
         let state = (s >> 1) as usize;
         let mps = (s & 1) as u32;
@@ -130,7 +122,6 @@ impl BinSink for CabacEncoder {
 
     #[inline]
     fn bypass(&mut self, bin: u32) {
-        self.bins += 1;
         self.low <<= 1;
         if bin != 0 {
             self.low += self.range;
@@ -147,7 +138,6 @@ impl BinSink for CabacEncoder {
     }
 
     fn terminate(&mut self, bin: u32) {
-        self.bins += 1;
         self.range -= 2;
         if bin != 0 {
             self.low += self.range;

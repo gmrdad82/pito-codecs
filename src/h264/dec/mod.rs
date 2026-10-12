@@ -1,29 +1,25 @@
 mod cabac;
 mod cabac_mb;
 #[rustfmt::skip]
-mod cabac_tables;
+pub(super) mod cabac_tables;
 mod cavlc;
 #[rustfmt::skip]
-mod cavlc_tables;
+pub(super) mod cavlc_tables;
 mod deblock;
 mod decoder;
-pub mod dpb;
-mod error;
 mod inter;
 mod intra;
-mod mbtypes;
-pub mod params;
+pub(super) mod mbtypes;
 mod picture;
 #[cfg(target_arch = "x86_64")]
-mod simd;
-pub mod slice;
+pub(super) mod simd;
 mod slicedec;
 
-mod tables;
-mod transform;
+pub(super) mod tables;
+pub(super) mod transform;
 
+pub use crate::syntax::error::Error;
 pub use decoder::Decoder;
-pub use error::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ColorInfo {

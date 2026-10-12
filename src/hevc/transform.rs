@@ -2,7 +2,7 @@ use crate::hevc::pel::Pel;
 use crate::hevc::simd;
 use crate::hevc::tables::{DST_MATRIX, TRANS_MATRIX};
 
-crate::hevc::isa::dispatch! {
+crate::media::isa::dispatch! {
 pub fn inverse_transform(
     c: &mut [i16],
     n: usize,
@@ -70,7 +70,7 @@ pub fn inverse_dc(dc: i32, bd_shift: u32) -> i32 {
     (64 * e + (1 << (bd_shift - 1))) >> bd_shift
 }
 
-crate::hevc::isa::dispatch! {
+crate::media::isa::dispatch! {
 pub fn transform_skip(c: &mut [i16], n: usize, bd_shift: u32) {
     let ts_shift = 5 + n.trailing_zeros();
     let round = 1 << (bd_shift - 1);
@@ -80,7 +80,7 @@ pub fn transform_skip(c: &mut [i16], n: usize, bd_shift: u32) {
 }
 }
 
-crate::hevc::isa::dispatch! {
+crate::media::isa::dispatch! {
 pub fn dequant(
     coeffs: &mut [i16],
     n: usize,
@@ -107,7 +107,7 @@ pub fn dequant(
 }
 }
 
-crate::hevc::isa::dispatch! {
+crate::media::isa::dispatch! {
 pub fn add_residual<P: Pel>(plane: &mut [P], stride: usize, n: usize, coeffs: &[i16], max: i32) {
     if simd::itx::add_residual(plane, stride, n, coeffs, max) {
         return;

@@ -76,12 +76,8 @@ pub(crate) fn span(stride: usize, rows: usize, row: usize) -> Option<usize> {
 pub(crate) fn check(frame: &Frame) -> Result<()> {
     sized(frame.width, frame.height)?;
     let bytes = frame.format.bytes_per_sample();
-    let w = frame.width as usize;
-    let h = frame.height as usize;
-    let cw = w.div_ceil(2);
-    let ch = h.div_ceil(2);
     for (i, p) in frame.planes.iter().enumerate() {
-        let (pw, ph) = if i == 0 { (w, h) } else { (cw, ch) };
+        let (pw, ph) = plane_dims(frame.width, frame.height, i);
         if p.width < pw || p.height < ph || p.stride < pw * bytes {
             return Err(Error::Invalid(format!(
                 "plane {i} is smaller than the frame"
@@ -103,10 +99,8 @@ pub(crate) fn reshape(
     time_base: TimeBase,
 ) {
     let bytes = format.bytes_per_sample();
-    let cw = width.div_ceil(2) as usize;
-    let ch = height.div_ceil(2) as usize;
-    let dims = [(width as usize, height as usize), (cw, ch), (cw, ch)];
-    for (p, (w, h)) in frame.planes.iter_mut().zip(dims) {
+    for (i, p) in frame.planes.iter_mut().enumerate() {
+        let (w, h) = plane_dims(width, height, i);
         p.width = w;
         p.height = h;
         p.stride = w * bytes;

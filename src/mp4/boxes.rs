@@ -99,9 +99,6 @@ impl<'a> Cur<'a> {
     pub fn u16(&mut self) -> Result<u16> {
         Ok(u16::from_be_bytes(self.array()?))
     }
-    pub fn i16(&mut self) -> Result<i16> {
-        Ok(i16::from_be_bytes(self.array()?))
-    }
     pub fn u24(&mut self) -> Result<u32> {
         let a = self.array::<3>()?;
         Ok(((a[0] as u32) << 16) | ((a[1] as u32) << 8) | a[2] as u32)
@@ -146,7 +143,6 @@ pub(crate) struct BoxHeader {
     pub kind: FourCc,
     pub header_len: u64,
     pub size: Option<u64>,
-    pub uuid: Option<[u8; 16]>,
 }
 
 pub(crate) fn parse_box_header(buf: &[u8]) -> Result<BoxHeader> {
@@ -163,12 +159,10 @@ pub(crate) fn parse_box_header(buf: &[u8]) -> Result<BoxHeader> {
         }
         s => Some(s as u64),
     };
-    let uuid = if kind == b"uuid" {
+    if kind == b"uuid" {
         header_len += 16;
-        Some(c.array::<16>()?)
-    } else {
-        None
-    };
+        c.array::<16>()?;
+    }
     if let Some(s) = size
         && s < header_len
     {
@@ -180,7 +174,6 @@ pub(crate) fn parse_box_header(buf: &[u8]) -> Result<BoxHeader> {
         kind,
         header_len,
         size,
-        uuid,
     })
 }
 
@@ -188,8 +181,6 @@ pub(crate) fn parse_box_header(buf: &[u8]) -> Result<BoxHeader> {
 pub(crate) struct RawBox<'a> {
     pub kind: FourCc,
     pub payload: &'a [u8],
-    #[allow(dead_code)]
-    pub uuid: Option<[u8; 16]>,
 }
 
 pub(crate) struct Boxes<'a> {
@@ -247,7 +238,6 @@ impl<'a> Iterator for Boxes<'a> {
         Some(Ok(RawBox {
             kind: h.kind,
             payload,
-            uuid: h.uuid,
         }))
     }
 }

@@ -1,3 +1,6 @@
+use crate::h264::dec::transform::idct8_1d;
+use crate::h264::enc::transform::{dequant8_one, fdct8_1d};
+
 pub type Soa4 = [[i16; 16]; 16];
 
 #[inline(always)]
@@ -75,44 +78,6 @@ fn luma4_rec_body(levels: &Soa4, v: &[i32; 16], sh: u32, pred: &[u8; 256], out: 
     }
 }
 
-fn fdct8_1d(s: [i32; 8]) -> [i32; 8] {
-    let a: [i32; 4] = std::array::from_fn(|k| s[k] + s[7 - k]);
-    let b: [i32; 4] = std::array::from_fn(|k| s[k] - s[7 - k]);
-    let (e0, e1, e2, e3) = (a[0] + a[3], a[1] + a[2], a[0] - a[3], a[1] - a[2]);
-    [
-        8 * (e0 + e1),
-        12 * b[0] + 10 * b[1] + 6 * b[2] + 3 * b[3],
-        8 * e2 + 4 * e3,
-        10 * b[0] - 3 * b[1] - 12 * b[2] - 6 * b[3],
-        8 * (e0 - e1),
-        6 * b[0] - 12 * b[1] + 3 * b[2] + 10 * b[3],
-        4 * e2 - 8 * e3,
-        3 * b[0] - 6 * b[1] + 10 * b[2] - 12 * b[3],
-    ]
-}
-
-fn idct8_1d(s: [i32; 8]) -> [i32; 8] {
-    let (a0, a4) = (s[0] + s[4], s[0] - s[4]);
-    let (a2, a6) = ((s[2] >> 1) - s[6], s[2] + (s[6] >> 1));
-    let (b0, b2, b4, b6) = (a0 + a6, a4 + a2, a4 - a2, a0 - a6);
-    let a1 = -s[3] + s[5] - s[7] - (s[7] >> 1);
-    let a3 = s[1] + s[7] - s[3] - (s[3] >> 1);
-    let a5 = -s[1] + s[7] + s[5] + (s[5] >> 1);
-    let a7 = s[3] + s[5] + s[1] + (s[1] >> 1);
-    let (b1, b7) = (a1 + (a7 >> 2), a7 - (a1 >> 2));
-    let (b3, b5) = (a3 + (a5 >> 2), (a3 >> 2) - a5);
-    [
-        b0 + b7,
-        b2 + b5,
-        b4 + b3,
-        b6 + b1,
-        b6 - b1,
-        b4 - b3,
-        b2 - b5,
-        b0 - b7,
-    ]
-}
-
 fn luma8_fwd_body(
     src: &[u8; 256],
     pred: &[u8; 256],
@@ -141,15 +106,6 @@ fn luma8_fwd_body(
     out
 }
 
-fn dequant8(level: i32, v: i32, q6: i32) -> i32 {
-    let ls = 16 * v;
-    if q6 >= 6 {
-        (level * ls) << (q6 - 6)
-    } else {
-        (level * ls + (1 << (5 - q6))) >> (6 - q6)
-    }
-}
-
 fn luma8_rec_body(
     levels: &[i32; 64],
     v: &[i32; 64],
@@ -162,7 +118,7 @@ fn luma8_rec_body(
     let mut g = [[0i32; 8]; 8];
     for (i, row) in g.iter_mut().enumerate() {
         *row = idct8_1d(std::array::from_fn(|k| {
-            dequant8(levels[i * 8 + k], v[i * 8 + k], q6)
+            dequant8_one(levels[i * 8 + k], v[i * 8 + k], q6)
         }));
     }
     let (ox, oy) = ((b8 & 1) * 8, (b8 >> 1) * 8);
@@ -530,11 +486,6 @@ mod avx2 {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
-fn has_avx2() -> bool {
-    std::arch::is_x86_feature_detected!("avx2")
-}
-
 pub fn luma4_fwd(
     src: &[u8; 256],
     pred: &[u8; 256],
@@ -544,7 +495,7 @@ pub fn luma4_fwd(
     lim: i32,
 ) -> Soa4 {
     #[cfg(target_arch = "x86_64")]
-    if has_avx2() {
+    if crate::h264::dec::simd::avx2() {
         return unsafe { avx2::luma4_fwd(src, pred, mf, f, qbits, lim) };
     }
     luma4_fwd_body(src, pred, mf, f, qbits, lim)
@@ -552,7 +503,7 @@ pub fn luma4_fwd(
 
 pub fn luma4_rec(levels: &Soa4, v: &[i32; 16], sh: u32, pred: &[u8; 256], out: &mut [u8; 256]) {
     #[cfg(target_arch = "x86_64")]
-    if has_avx2() {
+    if crate::h264::dec::simd::avx2() {
         return unsafe { avx2::luma4_rec(levels, v, sh, pred, out) };
     }
     luma4_rec_body(levels, v, sh, pred, out)
@@ -567,7 +518,7 @@ pub fn luma8_fwd(
     qbits: u32,
 ) -> [i32; 64] {
     #[cfg(target_arch = "x86_64")]
-    if has_avx2() {
+    if crate::h264::dec::simd::avx2() {
         return unsafe { avx2::luma8_fwd(src, pred, b8, mf, f, qbits) };
     }
     luma8_fwd_body(src, pred, b8, mf, f, qbits)
@@ -582,7 +533,7 @@ pub fn luma8_rec(
     out: &mut [u8; 256],
 ) {
     #[cfg(target_arch = "x86_64")]
-    if has_avx2() {
+    if crate::h264::dec::simd::avx2() {
         return unsafe { avx2::luma8_rec(levels, v, qp, pred, b8, out) };
     }
     luma8_rec_body(levels, v, qp, pred, b8, out)
@@ -595,7 +546,7 @@ mod tests {
 
     #[test]
     fn avx2_kernels_match_portable() {
-        if !has_avx2() {
+        if !crate::h264::dec::simd::avx2() {
             return;
         }
         let qt = QuantTables::new();

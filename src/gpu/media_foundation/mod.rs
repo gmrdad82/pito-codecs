@@ -68,10 +68,6 @@ pub fn decoder(codec: Codec, extradata: &[u8]) -> Result<Box<dyn DecoderBackend>
     Ok(Box::new(MfDecoder::new(codec, extradata)?))
 }
 
-fn backend(e: String) -> Error {
-    Error::Backend(e)
-}
-
 struct Session {
     plan: Plan,
     geometry: Geometry,
@@ -99,10 +95,10 @@ impl MfDecoder {
         if !matches!(codec, Codec::H264 | Codec::Hevc) {
             return Err(Error::Unsupported(format!("{codec:?} on Media Foundation")));
         }
-        ensure_com().map_err(backend)?;
+        ensure_com().map_err(Error::Backend)?;
         let config = nal::parse_extradata(codec, extradata)?;
-        let api = mft::api().map_err(backend)?;
-        let gpu = Gpu::shared(api).map_err(backend)?;
+        let api = mft::api().map_err(Error::Backend)?;
+        let gpu = Gpu::shared(api).map_err(Error::Backend)?;
         let mut d = Self {
             codec,
             framing: config.framing,
@@ -279,7 +275,7 @@ impl DecoderBackend for MfDecoder {
     }
 
     fn decode(&mut self, packet: &Packet) -> Result<Vec<Frame>> {
-        ensure_com().map_err(backend)?;
+        ensure_com().map_err(Error::Backend)?;
         let codec = self.codec;
         let nals = self.framing.split(&packet.data)?;
         let in_band: Vec<&[u8]> = nals
@@ -326,10 +322,10 @@ impl DecoderBackend for MfDecoder {
     }
 
     fn flush(&mut self) -> Result<Vec<Frame>> {
-        ensure_com().map_err(backend)?;
+        ensure_com().map_err(Error::Backend)?;
         let mut out = Vec::new();
         if let Some(mft) = self.session.as_ref().and_then(|s| s.mft.as_ref()) {
-            mft.drain().map_err(backend)?;
+            mft.drain().map_err(Error::Backend)?;
             self.collect(&mut out).map_err(|e| {
                 self.gpu.note_failure();
                 Error::Backend(e)

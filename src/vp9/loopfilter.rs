@@ -289,7 +289,7 @@ fn filter_sb_planes<P: Pixel>(
     }
 }
 
-crate::vp9::isa::dispatch! {
+crate::media::isa::dispatch! {
 fn filter_edge<P: Pixel>(
     d: &mut [P],
     pos: usize,
@@ -300,7 +300,7 @@ fn filter_edge<P: Pixel>(
     rows: bool,
 ) {
     #[cfg(target_arch = "x86_64")]
-    if f.bit_depth <= 10 && crate::vp9::isa::avx2() {
+    if f.bit_depth <= 10 && crate::media::isa::avx2() {
         for (k, pair) in groups.chunks(2).enumerate() {
             let g1 = pair.get(1).copied().unwrap_or_default();
             if pair[0].apply | g1.apply == 0 {

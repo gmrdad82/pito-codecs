@@ -1,0 +1,72 @@
+#[cfg(all(
+    target_arch = "x86_64",
+    any(feature = "hevc", feature = "vp9", feature = "gif", feature = "webp")
+))]
+pub fn avx2() -> bool {
+    use std::sync::LazyLock;
+    static AVX2: LazyLock<bool> = LazyLock::new(|| {
+        std::env::var_os("PITO_CODECS_NO_SIMD").is_none()
+            && is_x86_feature_detected!("avx2")
+            && is_x86_feature_detected!("bmi1")
+            && is_x86_feature_detected!("bmi2")
+            && is_x86_feature_detected!("lzcnt")
+            && is_x86_feature_detected!("popcnt")
+            && is_x86_feature_detected!("fma")
+    });
+    *AVX2
+}
+
+#[cfg(all(target_arch = "x86_64", any(feature = "opus", feature = "vp9")))]
+pub fn avx2_fma() -> bool {
+    use std::sync::LazyLock;
+    static AVX2: LazyLock<bool> = LazyLock::new(|| {
+        std::env::var_os("PITO_CODECS_NO_SIMD").is_none()
+            && is_x86_feature_detected!("avx2")
+            && is_x86_feature_detected!("fma")
+    });
+    *AVX2
+}
+
+macro_rules! dispatch {
+    (@ $check:path, $features:literal, $(#[$m:meta])* $vis:vis fn $name:ident <$($g:ident: $gb:path),+> ($($a:ident: $t:ty),* $(,)?) $(-> $r:ty)? $body:block) => {
+        $(#[$m])*
+        $vis fn $name<$($g: $gb),+>($($a: $t),*) $(-> $r)? {
+            #[inline(always)]
+            fn body<$($g: $gb),+>($($a: $t),*) $(-> $r)? $body
+            #[cfg(target_arch = "x86_64")]
+            #[target_feature(enable = $features)]
+            fn fast<$($g: $gb),+>($($a: $t),*) $(-> $r)? {
+                body::<$($g),+>($($a),*)
+            }
+            #[cfg(target_arch = "x86_64")]
+            if $check() {
+                return unsafe { fast::<$($g),+>($($a),*) };
+            }
+            body::<$($g),+>($($a),*)
+        }
+    };
+    (@ $check:path, $features:literal, $(#[$m:meta])* $vis:vis fn $name:ident ($($a:ident: $t:ty),* $(,)?) $(-> $r:ty)? $body:block) => {
+        $(#[$m])*
+        $vis fn $name($($a: $t),*) $(-> $r)? {
+            #[inline(always)]
+            fn body($($a: $t),*) $(-> $r)? $body
+            #[cfg(target_arch = "x86_64")]
+            #[target_feature(enable = $features)]
+            fn fast($($a: $t),*) $(-> $r)? {
+                body($($a),*)
+            }
+            #[cfg(target_arch = "x86_64")]
+            if $check() {
+                return unsafe { fast($($a),*) };
+            }
+            body($($a),*)
+        }
+    };
+    (fma: $($item:tt)*) => {
+        $crate::media::isa::dispatch!(@ $crate::media::isa::avx2_fma, "avx2,fma", $($item)*);
+    };
+    ($($item:tt)*) => {
+        $crate::media::isa::dispatch!(@ $crate::media::isa::avx2, "avx2,bmi1,bmi2,lzcnt,popcnt,fma", $($item)*);
+    };
+}
+pub(crate) use dispatch;

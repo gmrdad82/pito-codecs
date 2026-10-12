@@ -1,5 +1,5 @@
-use crate::gpu::syntax::bits::unescape_rbsp;
 use crate::media::{Codec, Error, Result};
+use crate::syntax::bits::unescape_rbsp;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Framing {
@@ -20,29 +20,7 @@ pub fn is_annexb(data: &[u8]) -> bool {
     data.starts_with(&[0, 0, 1]) || data.starts_with(&[0, 0, 0, 1])
 }
 
-pub fn annexb(data: &[u8]) -> Vec<&[u8]> {
-    let mut starts = Vec::new();
-    let mut i = 0;
-    while i + 2 < data.len() {
-        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
-            starts.push((i, i + 3));
-            i += 3;
-        } else {
-            i += 1;
-        }
-    }
-    let mut out = Vec::with_capacity(starts.len());
-    for (k, &(_, body)) in starts.iter().enumerate() {
-        let mut end = starts.get(k + 1).map_or(data.len(), |&(code, _)| code);
-        while end > body && data[end - 1] == 0 {
-            end -= 1;
-        }
-        if end > body {
-            out.push(&data[body..end]);
-        }
-    }
-    out
-}
+pub use crate::syntax::bits::annexb_nals as annexb;
 
 pub fn length_prefixed(data: &[u8], size: usize) -> Result<Vec<&[u8]>> {
     if !(1..=4).contains(&size) {
@@ -67,7 +45,6 @@ pub fn length_prefixed(data: &[u8], size: usize) -> Result<Vec<&[u8]>> {
     Ok(out)
 }
 
-#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub fn length_prefix(nals: &[&[u8]]) -> Vec<u8> {
     let mut out = Vec::with_capacity(nals.iter().map(|n| n.len() + 4).sum());
     for n in nals {
@@ -75,6 +52,29 @@ pub fn length_prefix(nals: &[&[u8]]) -> Vec<u8> {
         out.extend_from_slice(n);
     }
     out
+}
+
+pub fn put_start_codes<'a>(nals: impl IntoIterator<Item = &'a [u8]>, out: &mut Vec<u8>) {
+    for n in nals {
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(n);
+    }
+}
+
+pub fn set_slot(codec: Codec, nal: &[u8]) -> Option<usize> {
+    match (codec, nal_type(codec, nal)) {
+        (Codec::Hevc, 32) => Some(0),
+        (Codec::Hevc, 33) | (Codec::H264, 7) => Some(1),
+        (Codec::Hevc, 34) | (Codec::H264, 8) => Some(2),
+        _ => None,
+    }
+}
+
+pub fn record(codec: Codec, [vps, sps, pps]: &[Vec<Vec<u8>>; 3]) -> Result<Vec<u8>> {
+    match codec {
+        Codec::Hevc => build_hvcc(vps, sps, pps),
+        _ => build_avcc(sps, pps),
+    }
 }
 
 pub fn nal_type(codec: Codec, nal: &[u8]) -> u8 {
@@ -101,7 +101,7 @@ pub fn is_keyframe(codec: Codec, nal: &[u8]) -> bool {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, target_os = "macos"))]
 pub fn is_vcl(codec: Codec, nal: &[u8]) -> bool {
     let t = nal_type(codec, nal);
     match codec {
@@ -190,7 +190,6 @@ fn parse_hvcc(data: &[u8]) -> Result<Config> {
     })
 }
 
-#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub fn build_avcc(sps: &[Vec<u8>], pps: &[Vec<u8>]) -> Result<Vec<u8>> {
     let first = sps
         .first()
@@ -215,7 +214,7 @@ pub fn build_avcc(sps: &[Vec<u8>], pps: &[Vec<u8>]) -> Result<Vec<u8>> {
     }
     if matches!(first[1], 100 | 110 | 122 | 144) {
         let rbsp = unescape_rbsp(&first[1..]);
-        let parsed = crate::gpu::syntax::h264::params::Sps::parse(&rbsp)
+        let parsed = crate::syntax::h264::params::Sps::parse(&rbsp)
             .map_err(|e| Error::Invalid(e.to_string()))?;
         out.push(0xfc | (parsed.chroma_format_idc as u8 & 3));
         out.push(0xf8 | (parsed.bit_depth_luma.saturating_sub(8) as u8 & 7));
@@ -225,7 +224,6 @@ pub fn build_avcc(sps: &[Vec<u8>], pps: &[Vec<u8>]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub fn build_hvcc(vps: &[Vec<u8>], sps: &[Vec<u8>], pps: &[Vec<u8>]) -> Result<Vec<u8>> {
     let first = sps
         .first()
@@ -234,7 +232,7 @@ pub fn build_hvcc(vps: &[Vec<u8>], sps: &[Vec<u8>], pps: &[Vec<u8>]) -> Result<V
     let ptl = rbsp
         .get(1..13)
         .ok_or_else(|| Error::Invalid("SPS too short for hvcC".into()))?;
-    let parsed = crate::gpu::syntax::hevc::params::Sps::parse(&rbsp)
+    let parsed = crate::syntax::hevc::params::Sps::parse(&rbsp)
         .map_err(|e| Error::Invalid(e.to_string()))?;
     let sub_layers = (rbsp[0] >> 1) & 7;
     let nesting = rbsp[0] & 1;

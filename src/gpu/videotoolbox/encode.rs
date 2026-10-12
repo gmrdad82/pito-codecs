@@ -149,13 +149,7 @@ fn read_sets(sample: &CMSampleBuffer, codec: Codec) -> Result<Sets> {
         }
         count = total;
         let bytes = unsafe { std::slice::from_raw_parts(ptr, size) }.to_vec();
-        let slot = match (codec, nal::nal_type(codec, &bytes)) {
-            (Codec::Hevc, 32) => Some(0),
-            (Codec::Hevc, 33) | (Codec::H264, 7) => Some(1),
-            (Codec::Hevc, 34) | (Codec::H264, 8) => Some(2),
-            _ => None,
-        };
-        if let Some(i) = slot {
+        if let Some(i) = nal::set_slot(codec, &bytes) {
             sets[i].push(bytes);
         }
         index += 1;
@@ -220,10 +214,7 @@ fn read_packet(sample: &CMSampleBuffer, shared: &Shared, pts: i64) -> Result<Out
         if annexb {
             let mut out = Vec::with_capacity(len + 256);
             let head = sets.iter().flatten().map(Vec::as_slice);
-            for n in head.chain(kept) {
-                out.extend_from_slice(&[0, 0, 0, 1]);
-                out.extend_from_slice(n);
-            }
+            nal::put_start_codes(head.chain(kept), &mut out);
             out
         } else {
             nal::length_prefix(&kept)
@@ -745,11 +736,8 @@ impl VtEncoder {
         }
         if self.extradata.is_none() {
             let sets = shared.sets.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some([vps, sps, pps]) = sets.as_ref() {
-                self.extradata = Some(match self.codec {
-                    Codec::Hevc => nal::build_hvcc(vps, sps, pps)?,
-                    _ => nal::build_avcc(sps, pps)?,
-                });
+            if let Some(sets) = sets.as_ref() {
+                self.extradata = Some(nal::record(self.codec, sets)?);
             }
         }
         let tb = self.time_base.unwrap_or(TimeBase::new(1, 90000));
