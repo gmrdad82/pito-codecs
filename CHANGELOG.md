@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.2.0 — 2026-10-12
+
+Exports from the app's own frames at any size, a public blend without copies, export progress that follows real work, GPU stills about 3x faster, and the audit's second hardening wave.
+
+### Added
+
+- `export_frames` writes caller-made frames at their own size and frame rate to MP4, with the same GPU-first H.264 routing as `export` and premixed AAC sample-exact against the video.
+- `Blender` is public: kept across frames with the same `Arc<Rgba>` overlay, it blends without copying it.
+
+### Changed
+
+- Export progress counts copied frames as they're written and encoded frames as they're encoded, then the final file pass, so it rises steadily to 1.0.
+- GPU keyframe stills read the decoded VA-API picture directly instead of through the streaming staging path: time to first frame on the GPU about 3x faster (10.5 to 3.6 ms at 1440p in a same-run comparison).
+- HEVC pictures above level 6.2's luma size (8192x4352) are refused, and VA-API builds only the tile boundaries it sends.
+
+### Fixed
+
+- MKV resync never rescans bytes it has scanned, so a damaged file can't make a seek take quadratic time; warnings are capped.
+- MP4 sample tables are bounded by their chunk table and the file's bytes across tracks.
+- `packet` on the MP4 and MKV readers looks samples up without indexing; H.264 slice-group maps are capped by the picture size; EBML floats of an odd size are ignored.
+
 ## v1.1.1 — 2026-10-12
 
 Hardening for files from anywhere: malformed headers are refused instead of crashing or allocating without bound, and every parser is fuzzed on CI.
