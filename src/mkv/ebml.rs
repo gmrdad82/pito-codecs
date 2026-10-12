@@ -103,11 +103,12 @@ pub fn uint(data: &[u8]) -> u64 {
     data.iter().take(8).fold(0u64, |a, &b| (a << 8) | b as u64)
 }
 
-pub fn float(data: &[u8]) -> f64 {
+pub fn float(data: &[u8]) -> Option<f64> {
     match data.len() {
-        4 => f32::from_be_bytes(data.try_into().unwrap_or([0; 4])) as f64,
-        8 => f64::from_be_bytes(data.try_into().unwrap_or([0; 8])),
-        _ => 0.0,
+        0 => Some(0.0),
+        4 => data.try_into().ok().map(|b| f32::from_be_bytes(b) as f64),
+        8 => data.try_into().ok().map(f64::from_be_bytes),
+        _ => None,
     }
 }
 

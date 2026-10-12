@@ -13,6 +13,15 @@ const WIN: usize = 64 * 1024;
 const MAX_WIN: usize = 4 << 20;
 const MAX_META: u64 = 256 << 20;
 const MAX_SAMPLES: usize = 1 << 26;
+const MAX_WARNINGS: usize = 256;
+
+fn warn(warnings: &mut Vec<String>, line: impl FnOnce() -> String) {
+    match warnings.len().cmp(&MAX_WARNINGS) {
+        std::cmp::Ordering::Less => warnings.push(line()),
+        std::cmp::Ordering::Equal => warnings.push("further damage not listed".into()),
+        std::cmp::Ordering::Greater => {}
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Options {
@@ -30,6 +39,15 @@ pub(crate) struct Cache {
     buf: Vec<u8>,
     start: u64,
     win: usize,
+    scanned: Option<Scanned>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Scanned {
+    from: u64,
+    to: u64,
+    limit: u64,
+    found: bool,
 }
 
 pub(crate) struct Io<'a, S: ByteSource + ?Sized> {
@@ -178,28 +196,64 @@ impl<'a, S: ByteSource + ?Sized> Io<'a, S> {
     }
 
     pub(crate) fn resync(&mut self, from: u64, limit: u64) -> Result<Option<u64>> {
+        let memo = self
+            .cache
+            .scanned
+            .filter(|m| m.limit == limit && m.to >= from);
+        let last = limit.saturating_sub(3);
         let mut pos = from;
-        while pos + 4 <= limit {
-            let chunk = self.peek(pos, WIN)?.to_vec();
-            if chunk.len() < 4 {
-                return Ok(None);
+        loop {
+            if let Some(m) = memo
+                && m.from <= pos
+            {
+                return Ok(self.remember(from.min(m.from), m.to, limit, m.found));
             }
-            for i in 0..chunk.len() - 3 {
-                if chunk[i] & 0xF0 != 0x10 {
-                    continue;
-                }
-                let id = u32::from_be_bytes([chunk[i], chunk[i + 1], chunk[i + 2], chunk[i + 3]]);
-                if !is_top_level(id) || id == EBML || id == SEGMENT {
-                    continue;
-                }
-                let p = pos + i as u64;
-                if self.plausible(p, id, limit)? {
-                    return Ok(Some(p));
-                }
+            let stop = memo.map_or(last, |m| m.from.min(last));
+            if pos >= stop {
+                return Ok(self.remember(from, limit, limit, false));
             }
-            pos += (chunk.len() - 3) as u64;
+            let hit = {
+                let chunk = self.peek(pos, WIN)?;
+                let n = chunk.len().saturating_sub(3);
+                if n == 0 {
+                    return Ok(None);
+                }
+                let n = n.min(usize::try_from(stop - pos).unwrap_or(usize::MAX));
+                let found = chunk.windows(4).take(n).enumerate().find_map(|(i, w)| {
+                    let &[a, b, c, d] = w else {
+                        return None;
+                    };
+                    if a & 0xF0 != 0x10 {
+                        return None;
+                    }
+                    let id = u32::from_be_bytes([a, b, c, d]);
+                    (is_top_level(id) && id != EBML && id != SEGMENT).then_some((i, id))
+                });
+                match found {
+                    Some((i, id)) => Ok((pos + i as u64, id)),
+                    None => Err(pos + n as u64),
+                }
+            };
+            match hit {
+                Ok((p, id)) => {
+                    if self.plausible(p, id, limit)? {
+                        return Ok(self.remember(from, p, limit, true));
+                    }
+                    pos = p + 1;
+                }
+                Err(next) => pos = next,
+            }
         }
-        Ok(None)
+    }
+
+    fn remember(&mut self, from: u64, to: u64, limit: u64, found: bool) -> Option<u64> {
+        self.cache.scanned = Some(Scanned {
+            from,
+            to,
+            limit,
+            found,
+        });
+        found.then_some(to)
     }
 
     fn plausible(&mut self, p: u64, id: u32, limit: u64) -> Result<bool> {
@@ -440,20 +494,21 @@ pub(crate) fn scan_cluster<S: ByteSource + ?Sized>(
             break lim;
         }
         let Some(c) = io.header(pos, lim)? else {
-            warnings.push(format!(
-                "damaged cluster at {}: undecodable element at {pos}",
-                h.pos
-            ));
+            warn(warnings, || {
+                format!("damaged cluster at {}: undecodable element at {pos}", h.pos)
+            });
             break io.resync(pos + 1, limit)?.unwrap_or(limit);
         };
         if known_end.is_none() && is_top_level(c.id) {
             break pos;
         }
         if c.size == Size::Unknown || c.overruns(lim) {
-            warnings.push(format!(
-                "damaged cluster at {}: element 0x{:X} at {pos} overruns",
-                h.pos, c.id
-            ));
+            warn(warnings, || {
+                format!(
+                    "damaged cluster at {}: element 0x{:X} at {pos} overruns",
+                    h.pos, c.id
+                )
+            });
             if c.overruns(lim)
                 && matches!(c.id, SIMPLE_BLOCK | BLOCK_GROUP)
                 && io.len <= c.data_start() + c.size.known().unwrap_or(0)
@@ -706,7 +761,12 @@ impl<S: ByteSource> Reader<S> {
 
     pub fn packet(&self, track: usize, index: usize) -> Result<Packet> {
         let data = self.read(track, index)?;
-        let s = self.tracks[track].samples[index];
+        let s = self
+            .tracks
+            .get(track)
+            .and_then(|t| t.samples.get(index))
+            .copied()
+            .ok_or_else(|| Error::Invalid(format!("no sample {index} in track {track}")))?;
         Ok(Packet {
             data,
             pts: s.pts,
@@ -807,8 +867,9 @@ impl Walker {
             let Some(h) = io.header(pos, seg_end)? else {
                 match io.resync(pos + 1, seg_end)? {
                     Some(p) => {
-                        r.warnings
-                            .push(format!("undecodable element at {pos}; resynced at {p}"));
+                        warn(&mut r.warnings, || {
+                            format!("undecodable element at {pos}; resynced at {p}")
+                        });
                         pos = p;
                         continue;
                     }
@@ -889,10 +950,12 @@ impl Walker {
                     } else if h.overruns(seg_end) && h.id != VOID {
                         match io.resync(pos + 1, seg_end)? {
                             Some(p) => {
-                                r.warnings.push(format!(
-                                    "oversized element 0x{:X} at {pos}; resynced at {p}",
-                                    h.id
-                                ));
+                                warn(&mut r.warnings, || {
+                                    format!(
+                                        "oversized element 0x{:X} at {pos}; resynced at {p}",
+                                        h.id
+                                    )
+                                });
                                 pos = p;
                             }
                             None => break,
@@ -930,10 +993,12 @@ impl Walker {
                 Some(h) if h.id == e.id => {
                     self.level1(io, r, &h, r.segment_end)?;
                 }
-                _ => r.warnings.push(format!(
-                    "SeekHead entry 0x{:X} -> {abs} does not point at that element",
-                    e.id
-                )),
+                _ => warn(&mut r.warnings, || {
+                    format!(
+                        "SeekHead entry 0x{:X} -> {abs} does not point at that element",
+                        e.id
+                    )
+                }),
             }
         }
         Ok(())
@@ -952,18 +1017,21 @@ impl Walker {
             h.end(limit)
         };
         if h.overruns(limit) {
-            r.warnings
-                .push(format!("element 0x{:X} at {} truncated", h.id, h.pos));
+            warn(&mut r.warnings, || {
+                format!("element 0x{:X} at {} truncated", h.id, h.pos)
+            });
         }
         if !self.parsed.insert(h.pos) || !matches!(h.id, SEEK_HEAD | INFO | TRACKS | CUES) {
             return Ok(end);
         }
         let n = end - h.data_start();
         if n > MAX_META {
-            r.warnings.push(format!(
-                "element 0x{:X} at {} too large ({n} bytes); skipped",
-                h.id, h.pos
-            ));
+            warn(&mut r.warnings, || {
+                format!(
+                    "element 0x{:X} at {} too large ({n} bytes); skipped",
+                    h.id, h.pos
+                )
+            });
             return Ok(end);
         }
         let data = io.read_vec(h.data_start(), n)?;

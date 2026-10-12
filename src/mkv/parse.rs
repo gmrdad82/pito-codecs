@@ -68,7 +68,11 @@ pub(crate) fn info(d: &[u8]) -> Info {
                     info.timestamp_scale = v;
                 }
             }
-            DURATION => info.duration = Some(float(e.data)).filter(|v| v.is_finite() && *v >= 0.0),
+            DURATION => {
+                if let Some(v) = float(e.data) {
+                    info.duration = Some(v).filter(|v| v.is_finite() && *v >= 0.0);
+                }
+            }
             TITLE => info.title = Some(string(e.data)),
             MUXING_APP => info.muxing_app = string(e.data),
             WRITING_APP => info.writing_app = string(e.data),
@@ -147,7 +151,9 @@ fn colour(d: &[u8]) -> Colour {
             MASTERING_METADATA => {
                 let mut m = Mastering::default();
                 for x in Children::new(e.data) {
-                    let f = float(x.data);
+                    let Some(f) = float(x.data) else {
+                        continue;
+                    };
                     match x.id {
                         PRIMARY_R_X => m.primaries[0].0 = f,
                         PRIMARY_R_Y => m.primaries[0].1 = f,
@@ -191,9 +197,9 @@ fn video(d: &[u8]) -> VideoInfo {
                 for x in Children::new(e.data) {
                     match x.id {
                         PROJECTION_TYPE => p.kind = uint(x.data),
-                        PROJECTION_POSE_YAW => p.yaw = float(x.data),
-                        PROJECTION_POSE_PITCH => p.pitch = float(x.data),
-                        PROJECTION_POSE_ROLL => p.roll = float(x.data),
+                        PROJECTION_POSE_YAW => p.yaw = float(x.data).unwrap_or(p.yaw),
+                        PROJECTION_POSE_PITCH => p.pitch = float(x.data).unwrap_or(p.pitch),
+                        PROJECTION_POSE_ROLL => p.roll = float(x.data).unwrap_or(p.roll),
                         _ => {}
                     }
                 }
@@ -209,8 +215,12 @@ fn audio(d: &[u8]) -> AudioInfo {
     let mut a = AudioInfo::default();
     for e in Children::new(d) {
         match e.id {
-            SAMPLING_FREQUENCY => a.sampling_frequency = float(e.data),
-            OUTPUT_SAMPLING_FREQUENCY => a.output_sampling_frequency = Some(float(e.data)),
+            SAMPLING_FREQUENCY => {
+                a.sampling_frequency = float(e.data).unwrap_or(a.sampling_frequency)
+            }
+            OUTPUT_SAMPLING_FREQUENCY => {
+                a.output_sampling_frequency = float(e.data).or(a.output_sampling_frequency)
+            }
             CHANNELS => a.channels = uint(e.data),
             BIT_DEPTH => a.bit_depth = Some(uint(e.data)),
             _ => {}
