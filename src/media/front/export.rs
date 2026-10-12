@@ -2,13 +2,15 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use super::ffmpeg::{Child, Ffmpeg, pix_fmt};
+use super::mux::{Premix, Sound, premixed_m4a};
 use super::picture::Blender;
 use super::probe::keyframes;
 use super::route::{Caps, Picked, Prefs, pick_encode};
 use super::video::{Source, frame_at, open, source};
-use crate::media::{Codec, Error, Frame, PixelFormat, Result, Rgba, Route};
+use crate::media::{AudioBuffer, Codec, Error, Frame, PixelFormat, Result, Rgba, Route};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Piece {
@@ -235,7 +237,27 @@ impl Job<'_> {
 pub fn export(
     out: &Path,
     pieces: &[Piece],
+    opts: ExportOptions,
+    progress: impl FnMut(&Progress) -> bool,
+) -> Result<Exported> {
+    export_to(out, pieces, opts, None, progress)
+}
+
+pub fn export_with_audio(
+    out: &Path,
+    pieces: &[Piece],
+    opts: ExportOptions,
+    mut audio: impl FnMut(usize, usize) -> Result<AudioBuffer> + Send,
+    progress: impl FnMut(&Progress) -> bool,
+) -> Result<Exported> {
+    export_to(out, pieces, opts, Some(&mut audio), progress)
+}
+
+fn export_to(
+    out: &Path,
+    pieces: &[Piece],
     mut opts: ExportOptions,
+    premix: Option<Premix>,
     mut progress: impl FnMut(&Progress) -> bool,
 ) -> Result<Exported> {
     if pieces.is_empty() {
@@ -349,7 +371,16 @@ pub fn export(
         .map(|p| (job.frame_of(p.to) - job.frame_of(p.from)).max(0) as u64)
         .sum();
     let result = match &ffmpeg {
-        Some(f) => run(&mut job, f, &video, &mut opts, smart, out, &mut progress),
+        Some(f) => run(
+            &mut job,
+            f,
+            &video,
+            &mut opts,
+            smart,
+            out,
+            &mut progress,
+            premix,
+        ),
         None => super::mux::run(
             &mut job,
             &video,
@@ -357,7 +388,10 @@ pub fn export(
             smart,
             out,
             &mut progress,
-            caps.ffmpeg.as_ref(),
+            match premix {
+                Some(p) => Sound::Premixed(p),
+                None => Sound::Tracks(caps.ffmpeg.as_ref()),
+            },
         ),
     };
     let _ = std::fs::remove_dir_all(&work);
@@ -373,6 +407,7 @@ pub fn export(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     job: &mut Job,
     f: &Ffmpeg,
@@ -381,9 +416,12 @@ fn run(
     smart: bool,
     out: &Path,
     progress: Tell,
+    mut premix: Option<Premix>,
 ) -> Result<(u64, u64)> {
     let (mut copied, mut encoded) = (0u64, 0u64);
     let mut list = String::new();
+    let exact = premix.is_some();
+    let kbps = opts.audio_kbps;
     if smart {
         let (plan, order) = job.plan(&opts.prefs, |_, p, _| Ok(vec![p]))?;
         for &i in &order {
@@ -396,7 +434,11 @@ fn run(
         }
         let tail = tail(f, job, video, opts.crf, true)?;
         let mix = job.work.join("mix.m4a");
-        let mix_args = mix_args(job, opts, &mix);
+        let mix_args = if exact {
+            Vec::new()
+        } else {
+            mix_args(job, opts, &mix)
+        };
         let total: i64 = plan.iter().map(|(_, p)| p.frames()).sum::<i64>().max(1);
         let next = std::sync::atomic::AtomicUsize::new(0);
         let stop = std::sync::atomic::AtomicBool::new(false);
@@ -406,9 +448,13 @@ fn run(
         let outcome = std::thread::scope(|s| {
             {
                 let tx = tx.clone();
-                let mix_args = &mix_args;
+                let (mix_args, mix, stop) = (&mix_args, &mix, &stop);
                 s.spawn(move || {
-                    let _ = tx.send(f.run_args(mix_args).map(|_| 0));
+                    let r = match premix.take() {
+                        Some(p) => premixed_m4a(jobref, p, kbps, stop, mix),
+                        None => f.run_args(mix_args).map(|_| ()),
+                    };
+                    let _ = tx.send(r.map(|_| 0));
                 });
             }
             for _ in 0..workers {
@@ -467,7 +513,7 @@ fn run(
             }
         });
         outcome?;
-        return join(job, f, video, &list, &mix, out, progress).map(|_| (copied, encoded));
+        return join(job, f, video, &list, (&mix, exact), out, progress).map(|_| (copied, encoded));
     } else {
         job.tell(progress, Stage::Encoding)?;
         let file = job.work.join("whole.ts");
@@ -492,8 +538,13 @@ fn run(
     }
     job.tell(progress, Stage::Mixing)?;
     let mix = job.work.join("mix.m4a");
-    f.run_args(&mix_args(job, opts, &mix))?;
-    join(job, f, video, &list, &mix, out, progress)?;
+    match premix {
+        Some(p) => premixed_m4a(job, p, kbps, &AtomicBool::new(false), &mix)?,
+        None => {
+            f.run_args(&mix_args(job, opts, &mix))?;
+        }
+    }
+    join(job, f, video, &list, (&mix, exact), out, progress)?;
     Ok((copied, encoded))
 }
 
@@ -502,7 +553,7 @@ fn join(
     f: &Ffmpeg,
     video: &Picked,
     list: &str,
-    mix: &Path,
+    (mix, exact): (&Path, bool),
     out: &Path,
     progress: Tell,
 ) -> Result<()> {
@@ -535,6 +586,9 @@ fn join(
             "-display_rotation:v:0".into(),
             format!("{}", -(rotation as i32)),
         ]);
+    }
+    if exact {
+        join.extend(["-movie_timescale".into(), "48000".into()]);
     }
     join.extend([
         "-movflags".into(),
