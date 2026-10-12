@@ -141,3 +141,61 @@ fn malformed_files_never_panic() {
         }
     }
 }
+
+fn head_of(webm: bool) -> Vec<u8> {
+    let mut d = good(webm);
+    let find = |d: &[u8], id: [u8; 4]| d.windows(4).position(|w| w == id).unwrap();
+    let seg = find(&d, [0x18, 0x53, 0x80, 0x67]);
+    d[seg + 4..seg + 12].copy_from_slice(&[0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+    let cluster = find(&d, [0x1F, 0x43, 0xB6, 0x75]);
+    d.truncate(cluster);
+    d
+}
+
+fn with_cluster(webm: bool, blocks: &[Vec<u8>]) -> Vec<u8> {
+    let mut body = vec![0xE7, 0x81, 0x00];
+    for b in blocks {
+        body.push(0xA3);
+        ebml::write_size(&mut body, b.len() as u64, 8);
+        body.extend_from_slice(b);
+    }
+    let mut d = head_of(webm);
+    d.extend_from_slice(&[0x1F, 0x43, 0xB6, 0x75]);
+    ebml::write_size(&mut d, body.len() as u64, 8);
+    d.extend_from_slice(&body);
+    d
+}
+
+#[test]
+fn laced_frames_out_of_proportion_to_the_file_are_refused() {
+    let mut empty = vec![0x81, 0, 0, 0x80 | 0x02, 255];
+    empty.extend(std::iter::repeat_n(0u8, 255));
+    let data = with_cluster(true, &vec![empty; 4096]);
+    let started = std::time::Instant::now();
+    assert!(Reader::new(data.as_slice()).is_err());
+    assert!(started.elapsed().as_secs() < 5);
+    let head = Reader::with_options(data.as_slice(), ReadOptions { index: false }).unwrap();
+    assert_eq!(head.tracks.len(), 2);
+    let plain = with_cluster(
+        true,
+        &[vec![0x81, 0, 0, 0x80, 1, 2, 3], vec![0x82, 0, 0, 0x80, 4]],
+    );
+    let r = Reader::new(plain.as_slice()).unwrap();
+    assert_eq!(
+        (r.tracks[0].samples.len(), r.tracks[1].samples.len()),
+        (1, 1)
+    );
+}
+
+#[test]
+fn fixed_lacing_needs_a_byte_per_frame() {
+    let data = with_cluster(
+        true,
+        &[
+            vec![0x81, 0, 0, 0x80 | 0x04, 254, 7],
+            vec![0x81, 0, 1, 0x80, 9],
+        ],
+    );
+    let r = Reader::new(data.as_slice()).unwrap();
+    assert_eq!(r.tracks[0].samples.len(), 1);
+}
