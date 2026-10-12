@@ -8,6 +8,7 @@ use std::fs::File;
 use std::path::Path;
 
 const MAX_SAMPLES: usize = 1 << 26;
+const MAX_EMPTY_SAMPLES: u64 = 1 << 16;
 const MAX_HEADER_BOX: u64 = 1 << 30;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -936,11 +937,14 @@ fn parse_moof(
                 .count()
                 * 4;
             let n = c.u32()? as usize;
+            let total = (tracks[ti].samples.len() as u64).saturating_add(n as u64);
             if per > 0 {
                 c.check_count(n, per)?;
-            } else if ((tracks[ti].samples.len() + n) as u64).saturating_mul(def_size.max(1) as u64)
-                > file_len
-            {
+            } else if def_size == 0 {
+                if total > (file_len / 64).max(MAX_EMPTY_SAMPLES) {
+                    return Err(too_large("trun sample count"));
+                }
+            } else if total.saturating_mul(def_size as u64) > file_len {
                 return Err(too_large("trun sample count"));
             }
             if tracks[ti].samples.len() + n > MAX_SAMPLES {

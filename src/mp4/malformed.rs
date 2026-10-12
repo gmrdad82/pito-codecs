@@ -182,3 +182,68 @@ fn malformed_files_never_panic() {
         }
     }
 }
+
+struct Sparse(Vec<u8>, u64);
+
+impl ByteSource for Sparse {
+    fn len(&self) -> u64 {
+        self.1
+    }
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        buf.fill(0);
+        let start = (offset as usize).min(self.0.len());
+        let n = (self.0.len() - start).min(buf.len());
+        buf[..n].copy_from_slice(&self.0[start..start + n]);
+        Ok(())
+    }
+}
+
+fn bx(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+    let mut out = (8 + body.len() as u32).to_be_bytes().to_vec();
+    out.extend_from_slice(kind);
+    out.extend_from_slice(body);
+    out
+}
+
+fn empty_run(count: u32) -> Vec<u8> {
+    let mut w = FragmentedWriter::new(Vec::new(), 0.2);
+    let v = w
+        .add_track(TrackConfig::new(SampleEntry::h264(avc(), 64, 48), 90_000))
+        .unwrap();
+    w.push(
+        v,
+        &Packet {
+            data: vec![0, 0, 0, 3, 0x65, 1, 7],
+            pts: 0,
+            dts: 0,
+            keyframe: true,
+        },
+    )
+    .unwrap();
+    let full = w.finish().unwrap();
+    let id = Reader::new(full.as_slice()).unwrap().tracks[0].id;
+    let moof = full.windows(4).position(|w| w == b"moof").unwrap() - 4;
+    let mut d = full[..moof].to_vec();
+    let mut tfhd = vec![0, 0x02, 0x00, 0x10];
+    tfhd.extend(id.to_be_bytes());
+    tfhd.extend(0u32.to_be_bytes());
+    let mut trun = vec![0, 0, 0, 0];
+    trun.extend(count.to_be_bytes());
+    let mut mfhd = vec![0; 4];
+    mfhd.extend(1u32.to_be_bytes());
+    let traf = [bx(b"tfhd", &tfhd), bx(b"trun", &trun)].concat();
+    d.extend(bx(
+        b"moof",
+        &[bx(b"mfhd", &mfhd), bx(b"traf", &traf)].concat(),
+    ));
+    d
+}
+
+#[test]
+fn runs_of_empty_samples_are_bounded() {
+    let started = std::time::Instant::now();
+    assert!(Reader::new(Sparse(empty_run((1 << 26) - 1), 1 << 31)).is_err());
+    assert!(started.elapsed().as_secs() < 5);
+    let r = Reader::new(Sparse(empty_run(3), 1 << 31)).unwrap();
+    assert_eq!(r.tracks[0].samples.len(), 3);
+}
