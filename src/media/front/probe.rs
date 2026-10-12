@@ -136,6 +136,30 @@ pub fn keyframes(path: &Path, prefs: &Prefs) -> Result<Vec<f64>> {
     )
 }
 
+pub fn frame_count(path: &Path, prefs: &Prefs) -> Result<u64> {
+    match super::demux::frame_count(path) {
+        Ok(n) => Ok(n),
+        Err(native) => {
+            let Ok(f) = container_ffmpeg(prefs) else {
+                return Err(native);
+            };
+            f.probe_csv(
+                &[
+                    "-count_packets",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=nb_read_packets",
+                ],
+                path,
+            )?
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| native)
+        }
+    }
+}
+
 fn keyframes_of(path: &Path, prefs: &Prefs) -> Result<Vec<f64>> {
     let f = container_ffmpeg(prefs)?;
     let listing = f.probe_csv(

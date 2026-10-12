@@ -135,6 +135,11 @@ const GENERIC: [&str; 6] = [
 ];
 
 pub fn probe(path: &Path) -> Result<Probe> {
+    if let Ok(Some(head)) = demux::mkv_head(path)
+        && let Ok(Some(p)) = demux::probe_head(&head)
+    {
+        return Ok(p);
+    }
     let r = match Demux::open(path)? {
         Demux::Mp4(r) => r,
         Demux::Mkv(r) => return demux::probe(&r),

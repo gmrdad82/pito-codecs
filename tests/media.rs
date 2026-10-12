@@ -17,7 +17,8 @@ use std::sync::{Arc, OnceLock};
 use pito_codecs::media::{
     AudioBuffer, Choice, Codec, ExportOptions, Frame, IN_FLIGHT, Piece, Prefs, Rgba, Seek,
     VideoFrame, audio_mix, audio_pcm, audio_pcm_range, audio_stream, decode_video,
-    decode_video_gpu, export, export_with_audio, first_frame, frames_at, frames_at_seek, probe,
+    decode_video_gpu, export, export_with_audio, first_frame, frame_count, frames_at,
+    frames_at_seek, probe,
 };
 
 fn have_ffmpeg() -> bool {
@@ -1193,7 +1194,7 @@ fn an_exact_still_inside_the_first_gop_of_a_fade_is_not_the_keyframe() {
 fn counted() -> &'static Path {
     static FILE: OnceLock<PathBuf> = OnceLock::new();
     FILE.get_or_init(|| {
-        let out = dir().join("counted-h264-pcm.mkv");
+        let out = dir().join("counted-426x240-h264-pcm.mkv");
         if !out.exists() {
             ffmpeg_make(
                 &out,
@@ -1201,7 +1202,7 @@ fn counted() -> &'static Path {
                     "-f",
                     "lavfi",
                     "-i",
-                    "color=c=black:s=192x96:r=30:d=60,format=yuv420p,geq=lum='22+13*if(lt(X,64),mod(N,16),if(lt(X,128),mod(floor(N/16),16),mod(floor(N/256),16)))':cb=128:cr=128",
+                    "color=c=black:s=426x240:r=30:d=60,format=yuv420p,geq=lum='22+13*if(lt(X,142),mod(N,16),if(lt(X,284),mod(floor(N/16),16),mod(floor(N/256),16)))':cb=128:cr=128",
                     "-f",
                     "lavfi",
                     "-i",
@@ -1336,4 +1337,85 @@ fn three_hundred_short_cuts_join_without_drift_on_every_route() {
         let rms = (pcm.iter().map(|&s| s as f64 * s as f64).sum::<f64>() / pcm.len() as f64).sqrt();
         assert!((rms - 0.0625).abs() < 0.004, "{name}: {rms}");
     }
+}
+
+#[test]
+fn an_mkv_probe_reads_the_head_and_cues_and_matches_the_full_index() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let vfr = dir().join("dropped-frames-h264.mkv");
+    if !vfr.exists() {
+        ffmpeg_make(
+            &vfr,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=s=160x96:r=30:d=8,select='not(eq(mod(n,5),2))'",
+                "-fps_mode",
+                "vfr",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-g",
+                "30",
+            ],
+        );
+    }
+    let prefs = Prefs::default();
+    for (name, src) in [
+        ("counted", counted()),
+        ("recording", recording()),
+        ("vfr", vfr.as_path()),
+    ] {
+        let head = probe(src, &prefs).unwrap();
+        let full = probe(
+            &without_cues(
+                src,
+                &format!("cueless-{}", src.file_name().unwrap().to_str().unwrap()),
+            ),
+            &prefs,
+        )
+        .unwrap();
+        let count = frame_count(src, &prefs).unwrap();
+        assert_eq!(full.frames, Some(count), "{name}");
+        assert!(
+            head.frames.is_none() || head.frames == Some(count),
+            "{name}"
+        );
+        assert!(
+            (head.duration - full.duration).abs() < 1e-6,
+            "{name}: {} against {}",
+            head.duration,
+            full.duration
+        );
+        assert_eq!(
+            (
+                head.fps,
+                head.width,
+                head.height,
+                &head.profile,
+                head.audio.len()
+            ),
+            (
+                full.fps,
+                full.width,
+                full.height,
+                &full.profile,
+                full.audio.len()
+            ),
+            "{name}"
+        );
+    }
+    assert_eq!(frame_count(counted(), &prefs).unwrap(), 1800);
+    let hollow = dir().join("counted-hollow.mkv");
+    let mut bytes = std::fs::read(counted()).unwrap();
+    let n = bytes.len();
+    bytes[n / 4..n * 3 / 4].fill(0);
+    std::fs::write(&hollow, &bytes).unwrap();
+    let got = probe(&hollow, &prefs).unwrap();
+    assert!(got.frames.is_none(), "the probe read the clusters");
+    assert_eq!((got.duration, got.fps), (60.0, (30, 1)));
 }

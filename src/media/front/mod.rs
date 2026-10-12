@@ -24,7 +24,7 @@ pub use ffmpeg::{Ffmpeg, Listed};
 pub use picture::{
     Color, blend, rotate, scale, scale_to_height, to_rgba, to_rgba_color, to_rgba_height,
 };
-pub use probe::{AudioTrack, Probe, keyframes, probe};
+pub use probe::{AudioTrack, Probe, frame_count, keyframes, probe};
 pub use route::{Caps, Choice, Fallback, Picked, Prefs, UserFfmpeg, pick_decode, pick_encode};
 pub use still::{Seek, first_frame, frames_at, frames_at_seek};
 pub use stream::{AudioStream, audio_stream};
