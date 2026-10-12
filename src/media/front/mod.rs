@@ -16,7 +16,10 @@ mod stream;
 mod video;
 
 pub use audio::{audio_mix, audio_pcm, audio_pcm_range};
-pub use export::{ExportOptions, Exported, Overlay, Part, Piece, Progress, Stage, export, parts};
+pub use export::{
+    ExportOptions, Exported, Overlay, Part, Piece, Progress, Stage, export, export_with_audio,
+    parts,
+};
 pub use ffmpeg::{Ffmpeg, Listed};
 pub use picture::{
     Color, blend, rotate, scale, scale_to_height, to_rgba, to_rgba_color, to_rgba_height,

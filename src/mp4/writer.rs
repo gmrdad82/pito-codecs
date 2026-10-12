@@ -550,6 +550,12 @@ impl<W: Write + Seek> Writer<W> {
         })
     }
 
+    pub fn set_movie_timescale(&mut self, timescale: u32) {
+        if timescale > 0 {
+            self.movie_timescale = timescale;
+        }
+    }
+
     pub fn add_track(&mut self, cfg: TrackConfig) -> Result<usize> {
         let t = WTrack::new(cfg, self.tracks.len() as u32 + 1)?;
         self.tracks.push(t);

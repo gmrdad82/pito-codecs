@@ -10,7 +10,7 @@ Works on Linux x86-64 and arm64, Windows x86-64 and macOS on Apple Silicon; CI t
 
 ## Status
 
-`v1.0.1`: every format below decodes and encodes, on Linux, Windows and macOS, and the API is settled. Opus speech encoding (SILK and hybrid) is marked experimental below: it decodes clean but doesn't sound as good as libopus.
+`v1.0.2`: every format below decodes and encodes, on Linux, Windows and macOS, and the API is settled. Opus speech encoding (SILK and hybrid) is marked experimental below: it decodes clean but doesn't sound as good as libopus.
 
 | Part | Decode | Encode |
 | --- | --- | --- |
@@ -122,7 +122,7 @@ Add it as a git dependency at a tag, with the features you need (all are on by d
 
 ```toml
 [dependencies]
-pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v1.0.1", default-features = false, features = ["h264", "mp4"] }
+pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v1.0.2", default-features = false, features = ["h264", "mp4"] }
 ```
 
 | Feature | What it holds |
@@ -202,6 +202,12 @@ for block in audio_stream("recording.mkv".as_ref(), 0, 0.0, 16_000, 1, &prefs)? 
 ```
 
 `frames_at` shows the keyframe at or before each time, which is what a filmstrip wants; `frames_at_seek` with `Seek::Exact` decodes on to the frame shown at that time, and decodes a GOP once for all the times inside it. A range past the end of the track returns only the samples it has, so a buffer shorter than asked means the track ended. `audio_stream` hands the audio over in one-second blocks as it decodes and ends at the track's end. In MKV and WebM, stills and audio seek through the file's Cues, so a still or a slice late in a long recording reads only the clusters around it.
+
+Export an edit with audio you mixed yourself: the callback gets each piece's index and its exact sample count and returns that many 48 kHz stereo samples, which our AAC encoder turns into one track as long as the video to the sample:
+
+```rust
+let done = export_with_audio("edit.mp4".as_ref(), &pieces, ExportOptions::default(), |piece, samples| mixer.render(piece, samples), |_| true)?;
+```
 
 `pcod` (`src/bin/pcod.rs`) is a small command line over the library, and it is what the GIF above shows: `pcod decode clip.mp4 --route gpu`, or from a checkout `cargo run --release --bin pcod -- decode clip.mp4 --route gpu`. It is behind the `cli` feature, on by default, so a library user with `default-features = false` never builds clap.
 
