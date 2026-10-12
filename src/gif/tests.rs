@@ -1,5 +1,5 @@
 use super::*;
-use crate::filter::Rgba;
+use crate::media::Rgba;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

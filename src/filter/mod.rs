@@ -10,7 +10,10 @@ mod plane;
 mod resample;
 mod scale;
 
-pub use color::{ColorSpec, Matrix, Range, Rgba, Siting, convert_color};
+pub use color::{ColorSpec, Matrix, Range, Siting, convert_color};
+
+#[deprecated(note = "use pito_codecs::media::Rgba")]
+pub type Rgba = crate::media::Rgba;
 pub use fps::FpsConverter;
 pub use geometry::{Fill, Rotation, crop, flip_horizontal, flip_vertical, pad, rotate};
 pub use limiter::{Limiter, normalize, normalize_gain_db};

@@ -4,11 +4,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 
-use crate::gpu::{
-    Bitstream as GpuBitstream, EncoderConfig as GpuConfig, HwEncoder, Profile as GpuProfile,
-    Rate as GpuRate,
-};
-use crate::h264::{Bitstream, Encoder, EncoderConfig, Preset, Profile, Rate};
+use crate::gpu::{EncoderConfig as GpuConfig, HwEncoder, Profile as GpuProfile};
+use crate::h264::{Encoder, EncoderConfig, Preset, Profile};
+use crate::media::{Bitstream, Rate};
 use crate::mp4::{AvcConfig, HevcConfig, SampleEntry, TrackConfig, Writer, rotation_matrix};
 
 use super::audio::ffmpeg_pcm;
@@ -163,10 +161,10 @@ fn gpu_config(
             (Codec::Hevc, _) => GpuProfile::Main,
             _ => GpuProfile::High,
         },
-        rate: GpuRate::Crf(crf),
+        rate: Rate::Crf(crf),
         gop,
         b_frames: 0,
-        bitstream: GpuBitstream::LengthPrefixed,
+        bitstream: Bitstream::LengthPrefixed,
     }
 }
 

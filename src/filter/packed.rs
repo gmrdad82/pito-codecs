@@ -1,5 +1,6 @@
-use super::color::{ColorSpec, FRAC, Rgba, Siting, fixed, rows_job};
+use super::color::{ColorSpec, FRAC, Siting, fixed, rows_job};
 use super::plane::{Sample, Simd, check, reshape, samples, samples_mut, simd, sized, span};
+use crate::media::Rgba;
 use crate::media::{Error, Frame, PixelFormat, Result};
 use rayon::prelude::*;
 

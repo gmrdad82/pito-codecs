@@ -180,6 +180,24 @@ impl Rgba {
             data: vec![0; width as usize * height as usize * 4],
         }
     }
+
+    pub fn stride(&self) -> usize {
+        self.width as usize * 4
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Rate {
+    Crf(u8),
+    Bitrate(u32),
+    Vbr { kbps: u32, max_kbps: u32 },
+    Qp(u8),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Bitstream {
+    LengthPrefixed,
+    AnnexB,
 }
 
 #[derive(Debug)]

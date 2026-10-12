@@ -1,6 +1,7 @@
 use super::riff::invalid;
-use super::{Options, Rgba, lossless};
+use super::{Options, lossless};
 use crate::media::Result;
+use crate::media::Rgba;
 
 pub(super) fn decode(data: &[u8], width: u32, height: u32, out: &mut [u8]) -> Result<()> {
     let (w, h) = (width as usize, height as usize);

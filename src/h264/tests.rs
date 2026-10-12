@@ -355,7 +355,7 @@ fn crf_18_encode_plays_in_ffmpeg_and_decodes_back() {
         width: w,
         height: h,
         fps: (30, 1),
-        rate: Rate::Crf(18),
+        rate: crate::media::Rate::Crf(18),
         gop: 15,
         b_frames: 2,
         ..EncoderConfig::default()
@@ -544,7 +544,7 @@ fn bench_encoder() {
             height: 1080,
             fps: (60, 1),
             preset,
-            rate: Rate::Crf(18),
+            rate: crate::media::Rate::Crf(18),
             b_frames: b,
             ..EncoderConfig::default()
         };

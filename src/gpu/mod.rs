@@ -21,7 +21,7 @@ mod videotoolbox;
 #[cfg(target_os = "windows")]
 mod media_foundation;
 
-use crate::media::{Codec, Error, Frame, Packet, Result, TimeBase};
+use crate::media::{self, Codec, Error, Frame, Packet, Result, TimeBase};
 
 #[cfg(target_os = "linux")]
 pub use vaapi::{DmaBuf, DmaLayer, DmaObject, DmaPlane};
@@ -48,19 +48,11 @@ pub enum Profile {
     Main10,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Rate {
-    Crf(u8),
-    Bitrate(u32),
-    Vbr { kbps: u32, max_kbps: u32 },
-    Qp(u8),
-}
+#[deprecated(note = "use pito_codecs::media::Rate")]
+pub type Rate = crate::media::Rate;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Bitstream {
-    LengthPrefixed,
-    AnnexB,
-}
+#[deprecated(note = "use pito_codecs::media::Bitstream")]
+pub type Bitstream = crate::media::Bitstream;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncoderConfig {
@@ -68,10 +60,10 @@ pub struct EncoderConfig {
     pub height: u32,
     pub fps: (u32, u32),
     pub profile: Profile,
-    pub rate: Rate,
+    pub rate: media::Rate,
     pub gop: u32,
     pub b_frames: u8,
-    pub bitstream: Bitstream,
+    pub bitstream: media::Bitstream,
 }
 
 impl Default for EncoderConfig {
@@ -81,10 +73,10 @@ impl Default for EncoderConfig {
             height: 1080,
             fps: (30, 1),
             profile: Profile::High,
-            rate: Rate::Crf(20),
+            rate: media::Rate::Crf(20),
             gop: 0,
             b_frames: 0,
-            bitstream: Bitstream::LengthPrefixed,
+            bitstream: media::Bitstream::LengthPrefixed,
         }
     }
 }
