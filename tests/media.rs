@@ -1189,3 +1189,151 @@ fn an_exact_still_inside_the_first_gop_of_a_fade_is_not_the_keyframe() {
         }
     }
 }
+
+fn counted() -> &'static Path {
+    static FILE: OnceLock<PathBuf> = OnceLock::new();
+    FILE.get_or_init(|| {
+        let out = dir().join("counted-h264-pcm.mkv");
+        if !out.exists() {
+            ffmpeg_make(
+                &out,
+                &[
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=black:s=192x96:r=30:d=60,format=yuv420p,geq=lum='22+13*if(lt(X,64),mod(N,16),if(lt(X,128),mod(floor(N/16),16),mod(floor(N/256),16)))':cb=128:cr=128",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=f=440:r=48000:d=60",
+                    "-map",
+                    "0:v",
+                    "-map",
+                    "1:a",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "ultrafast",
+                    "-crf",
+                    "8",
+                    "-bf",
+                    "2",
+                    "-g",
+                    "60",
+                    "-keyint_min",
+                    "60",
+                    "-sc_threshold",
+                    "0",
+                    "-c:a",
+                    "pcm_s16le",
+                    "-ac",
+                    "2",
+                ],
+            );
+        }
+        out
+    })
+}
+
+fn frame_numbers(path: &Path) -> Vec<i64> {
+    let out = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-map", "0:v:0", "-fps_mode", "passthrough"])
+        .args(["-vf", "scale=3:1:flags=area", "-pix_fmt", "gray"])
+        .args(["-f", "rawvideo", "-"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let digit = |v: u8| {
+        ((v as f64 * 219.0 / 255.0 - 6.0) / 13.0)
+            .round()
+            .clamp(0.0, 15.0) as i64
+    };
+    out.stdout
+        .chunks_exact(3)
+        .map(|p| digit(p[0]) + 16 * digit(p[1]) + 256 * digit(p[2]))
+        .collect()
+}
+
+#[test]
+fn three_hundred_short_cuts_join_without_drift_on_every_route() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let mut seed = 0x2545_f491_u64;
+    let mut next = |n: u64| {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (seed >> 33) % n
+    };
+    let mut want: Vec<i64> = Vec::new();
+    let pieces: Vec<Piece> = (0..300)
+        .map(|k| {
+            let len = if k % 9 == 4 {
+                61 + next(80) as i64
+            } else {
+                2 + next(19) as i64
+            };
+            let a = next((1800 - len) as u64) as i64;
+            want.extend(a..a + len);
+            Piece {
+                path: counted().to_path_buf(),
+                from: a as f64 / 30.0,
+                to: (a + len) as f64 / 30.0,
+            }
+        })
+        .collect();
+    let total = want.len() as u64;
+    for (name, prefs) in routes() {
+        let out = dir().join(format!("drift-{name}.mp4"));
+        let done = export(
+            &out,
+            &pieces,
+            ExportOptions {
+                prefs,
+                ..ExportOptions::default()
+            },
+            |_| true,
+        )
+        .unwrap();
+        assert!(done.smart, "{name}: {:?}", done.reasons);
+        assert_eq!(done.frames, total, "{name}");
+        assert!(done.copied > 0 && done.encoded > 0, "{name}: {done:?}");
+        let got = frame_numbers(&out);
+        assert_eq!(got.len(), want.len(), "{name}");
+        let wrong = got.iter().zip(&want).filter(|(g, w)| g != w).count();
+        let at = got.iter().zip(&want).position(|(g, w)| g != w).unwrap_or(0);
+        let near = at.saturating_sub(3)..(at + 4).min(want.len());
+        assert_eq!(
+            wrong,
+            0,
+            "{name}: {wrong} frames are not the source frame they should be, first at {at}: {:?} for {:?}",
+            &got[near.clone()],
+            &want[near]
+        );
+        assert_eq!(got.last(), want.last(), "{name}");
+        let video: f64 = ffprobe(
+            &out,
+            &[
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=duration",
+                "-of",
+                "csv=p=0",
+            ],
+        )
+        .parse()
+        .unwrap();
+        assert!(
+            (video - total as f64 / 30.0).abs() < 1e-3,
+            "{name}: {video} s of video for {total} frames"
+        );
+        let pcm = ffmpeg_f32(&out);
+        assert_eq!(pcm.len() as u64, total * 1600 * 2, "{name}");
+        let rms = (pcm.iter().map(|&s| s as f64 * s as f64).sum::<f64>() / pcm.len() as f64).sqrt();
+        assert!((rms - 0.0625).abs() < 0.004, "{name}: {rms}");
+    }
+}

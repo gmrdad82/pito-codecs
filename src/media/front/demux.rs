@@ -118,6 +118,13 @@ impl Demux {
         }
     }
 
+    pub fn samples(&self, track: usize) -> usize {
+        match self {
+            Demux::Mp4(r) => r.tracks.get(track).map_or(0, |t| t.samples.len()),
+            Demux::Mkv(r) => r.tracks.get(track).map_or(0, |t| t.samples.len()),
+        }
+    }
+
     pub fn read_into(&self, track: usize, i: usize, buf: &mut Vec<u8>) -> Result<()> {
         match self {
             Demux::Mp4(r) => r.read_into(track, i, buf),

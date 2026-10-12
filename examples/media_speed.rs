@@ -21,11 +21,18 @@ fn run() -> Res<()> {
     let mut args = std::env::args().skip(1);
     let path = PathBuf::from(
         args.next()
-            .ok_or("usage: media_speed <file> [ffmpeg|auto|cpu|gpu]")?,
+            .ok_or("usage: media_speed <file> [ffmpeg|auto|cpu|gpu|cuts [n]]")?,
     );
     let mode = args.next();
     if mode.as_deref() == Some("gpu") {
         return gpu_playback(&path);
+    }
+    if mode.as_deref() == Some("cuts") {
+        let n = match args.next() {
+            Some(n) => n.parse()?,
+            None => 300,
+        };
+        return cuts(&path, n);
     }
     let prefs = match mode.as_deref() {
         Some("auto") => Prefs::default(),
@@ -146,6 +153,49 @@ fn run() -> Res<()> {
         done.frames,
         done.frames as f64 / s
     )?;
+    Ok(())
+}
+
+fn cuts(path: &std::path::Path, n: usize) -> Res<()> {
+    let prefs = Prefs::default();
+    let p = probe(path, &prefs)?;
+    let slot = p.duration / n.max(1) as f64;
+    let pieces: Vec<Piece> = (0..n)
+        .map(|k| {
+            let from = k as f64 * slot + slot * ((k * 13 % 7) as f64 / 20.0);
+            let len = slot * (0.05 + (k * 37 % 57) as f64 / 100.0);
+            Piece {
+                path: path.to_path_buf(),
+                from,
+                to: (from + len).min(p.duration),
+            }
+        })
+        .collect();
+    let seconds: f64 = pieces.iter().map(|x| x.to - x.from).sum();
+    let out = PathBuf::from("tmp/speed-cuts.mp4");
+    let t = Instant::now();
+    let done = export(
+        &out,
+        &pieces,
+        ExportOptions {
+            prefs,
+            ..ExportOptions::default()
+        },
+        |_| true,
+    )?;
+    let s = t.elapsed().as_secs_f64();
+    say!(
+        "{n} cuts, {seconds:.1} s of video in {s:.2} s ({:.0}x realtime) on {}: {} frames, {} copied, {} encoded, smart {}",
+        seconds / s,
+        done.video.route,
+        done.frames,
+        done.copied,
+        done.encoded,
+        done.smart
+    )?;
+    for r in &done.reasons {
+        say!("  {r}")?;
+    }
     Ok(())
 }
 

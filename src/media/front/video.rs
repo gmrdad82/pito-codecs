@@ -98,11 +98,6 @@ impl Source {
     pub fn mp4(&self) -> Option<&Arc<Reader>> {
         self.demux.as_ref().and_then(Demux::mp4)
     }
-
-    pub fn reader(&self) -> Result<&Arc<Reader>> {
-        self.mp4()
-            .ok_or_else(|| Error::Unsupported("our MP4 reader can't open this file".to_string()))
-    }
 }
 
 enum Inner {
