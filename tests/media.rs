@@ -16,9 +16,9 @@ use std::sync::{Arc, OnceLock};
 
 use pito_codecs::media::{
     AudioBuffer, Choice, Codec, ExportOptions, Frame, IN_FLIGHT, Piece, Prefs, Rgba, Seek,
-    VideoFrame, audio_mix, audio_pcm, audio_pcm_range, audio_stream, decode_video,
-    decode_video_gpu, export, export_with_audio, first_frame, frame_count, frames_at,
-    frames_at_seek, probe,
+    VideoFrame, audio_mix, audio_mix_stream, audio_pcm, audio_pcm_range, audio_stream,
+    decode_video, decode_video_gpu, export, export_with_audio, first_frame, frame_count, frames_at,
+    frames_at_seek, keyframes, probe,
 };
 
 fn have_ffmpeg() -> bool {
@@ -352,6 +352,136 @@ fn a_three_piece_export_with_a_repeat_smart_cuts_to_the_frame_on_every_route() {
         .parse()
         .unwrap();
         assert!((audio - 5.6).abs() < 0.05, "{name}: {audio}");
+        header_durations_match_the_samples(&out, name);
+    }
+}
+
+fn children(data: &[u8]) -> Vec<([u8; 4], &[u8])> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at + 8 <= data.len() {
+        let size = u32::from_be_bytes(data[at..at + 4].try_into().unwrap()) as usize;
+        let (head, size) = if size == 1 {
+            (
+                16,
+                u64::from_be_bytes(data[at + 8..at + 16].try_into().unwrap()) as usize,
+            )
+        } else {
+            (8, size)
+        };
+        let kind: [u8; 4] = data[at + 4..at + 8].try_into().unwrap();
+        out.push((kind, &data[at + head..at + size]));
+        at += size;
+    }
+    out
+}
+
+fn child<'a>(data: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
+    children(data)
+        .into_iter()
+        .find(|(k, _)| k == kind)
+        .map(|(_, d)| d)
+}
+
+fn be(d: &[u8], at: usize, wide: bool) -> u64 {
+    if wide {
+        u64::from_be_bytes(d[at..at + 8].try_into().unwrap())
+    } else {
+        u32::from_be_bytes(d[at..at + 4].try_into().unwrap()) as u64
+    }
+}
+
+fn times(d: &[u8]) -> (u64, u64) {
+    let v1 = d[0] == 1;
+    let at = if v1 { 20 } else { 12 };
+    (be(d, at, false), be(d, at + 4, v1))
+}
+
+fn header_durations_match_the_samples(path: &Path, name: &str) {
+    let file = std::fs::read(path).unwrap();
+    let moov = child(&file, b"moov").unwrap();
+    let (movie_ts, movie) = times(child(moov, b"mvhd").unwrap());
+    let mut longest = 0.0f64;
+    for (kind, trak) in children(moov) {
+        if &kind != b"trak" {
+            continue;
+        }
+        let tkhd = child(trak, b"tkhd").unwrap();
+        let track =
+            be(tkhd, if tkhd[0] == 1 { 28 } else { 20 }, tkhd[0] == 1) as f64 / movie_ts as f64;
+        let mdia = child(trak, b"mdia").unwrap();
+        let (ts, media) = times(child(mdia, b"mdhd").unwrap());
+        let video = &child(mdia, b"hdlr").unwrap()[8..12] == b"vide";
+        let stbl = child(child(mdia, b"minf").unwrap(), b"stbl").unwrap();
+        let stts = child(stbl, b"stts").unwrap();
+        let runs: Vec<(u64, u64)> = (0..be(stts, 4, false) as usize)
+            .map(|i| (be(stts, 8 + i * 8, false), be(stts, 12 + i * 8, false)))
+            .collect();
+        let frames: u64 = runs.iter().map(|r| r.0).sum();
+        let ticks: u64 = runs.iter().map(|r| r.0 * r.1).sum();
+        let step = runs.iter().max_by_key(|r| r.0).unwrap().1;
+        let start = child(trak, b"edts")
+            .and_then(|e| child(e, b"elst"))
+            .map(|l| {
+                let v1 = l[0] == 1;
+                (be(l, 8, v1), be(l, if v1 { 16 } else { 12 }, v1))
+            });
+        let media_time = start.map_or(0, |s| s.1);
+        let shown = if video {
+            frames * step
+        } else {
+            ticks - media_time
+        };
+        let kind = if video { "video" } else { "audio" };
+        if name != "ffmpeg" {
+            assert_eq!(media, shown + media_time, "{name}: mdhd of a {kind} track");
+            assert_eq!(ticks, media, "{name}: stts of a {kind} track");
+        }
+        let shown = shown as f64 / ts as f64;
+        if let Some((segment, _)) = start {
+            let segment = segment as f64 / movie_ts as f64;
+            assert!(
+                (segment - shown).abs() < 1e-3,
+                "{name}: elst of a {kind} track {segment} against {shown}"
+            );
+        }
+        assert!(
+            (track - shown).abs() < 1e-3,
+            "{name}: tkhd of a {kind} track {track} against {shown}"
+        );
+        longest = longest.max(track);
+    }
+    let movie = movie as f64 / movie_ts as f64;
+    assert!(
+        (movie - longest).abs() < 1e-3,
+        "{name}: mvhd {movie} against {longest}"
+    );
+}
+
+#[test]
+fn an_export_ending_on_a_copied_gop_lasts_to_its_last_frame_in_the_headers() {
+    if !have_ffmpeg() {
+        return;
+    }
+    for (name, prefs) in routes() {
+        let out = dir().join(format!("headers-{name}.mp4"));
+        let pieces = [(1.1, 2.0), (2.5, 4.0)].map(|(from, to)| Piece {
+            path: clip().to_path_buf(),
+            from,
+            to,
+        });
+        let done = export(
+            &out,
+            &pieces,
+            ExportOptions {
+                prefs,
+                ..ExportOptions::default()
+            },
+            |_| true,
+        )
+        .unwrap();
+        assert_eq!(done.frames, 144, "{name}");
+        header_durations_match_the_samples(&out, name);
     }
 }
 
@@ -1371,16 +1501,22 @@ fn an_mkv_probe_reads_the_head_and_cues_and_matches_the_full_index() {
         ("vfr", vfr.as_path()),
     ] {
         let head = probe(src, &prefs).unwrap();
-        let full = probe(
-            &without_cues(
-                src,
-                &format!("cueless-{}", src.file_name().unwrap().to_str().unwrap()),
-            ),
-            &prefs,
-        )
-        .unwrap();
+        let bare = without_cues(
+            src,
+            &format!("cueless-{}", src.file_name().unwrap().to_str().unwrap()),
+        );
+        let full = probe(&bare, &prefs).unwrap();
         let count = frame_count(src, &prefs).unwrap();
-        assert_eq!(full.frames, Some(count), "{name}");
+        assert_eq!(frame_count(&bare, &prefs).unwrap(), count, "{name}");
+        assert!(
+            full.frames.is_none() || full.frames == Some(count),
+            "{name}"
+        );
+        assert_eq!(
+            keyframes(src, &prefs).unwrap(),
+            keyframes(&bare, &prefs).unwrap(),
+            "{name}"
+        );
         assert!(
             head.frames.is_none() || head.frames == Some(count),
             "{name}"
@@ -1418,4 +1554,83 @@ fn an_mkv_probe_reads_the_head_and_cues_and_matches_the_full_index() {
     let got = probe(&hollow, &prefs).unwrap();
     assert!(got.frames.is_none(), "the probe read the clusters");
     assert_eq!((got.duration, got.fps), (60.0, (30, 1)));
+    let bare = without_cues(counted(), "cueless-counted-hollow-src.mkv");
+    let hollow = dir().join("cueless-counted-hollow.mkv");
+    let mut bytes = std::fs::read(&bare).unwrap();
+    let n = bytes.len();
+    bytes[n / 4..n * 3 / 4].fill(0);
+    std::fs::write(&hollow, &bytes).unwrap();
+    let got = probe(&hollow, &prefs).unwrap();
+    assert!(got.frames.is_none(), "the Cue-less probe read the clusters");
+    assert_eq!((got.duration, got.fps), (60.0, (30, 1)));
+}
+
+fn two_tracks() -> &'static Path {
+    static FILE: OnceLock<PathBuf> = OnceLock::new();
+    FILE.get_or_init(|| {
+        let out = dir().join("two-pcm-tracks.mkv");
+        if !out.exists() {
+            ffmpeg_make(
+                &out,
+                &[
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=s=352x240:r=30:d=40",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=f=440:r=48000:d=40",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "anoisesrc=r=48000:d=37.5:a=0.3:seed=3",
+                    "-map",
+                    "0:v",
+                    "-map",
+                    "1:a",
+                    "-map",
+                    "2:a",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "ultrafast",
+                    "-g",
+                    "60",
+                    "-c:a",
+                    "pcm_s16le",
+                    "-ac",
+                    "2",
+                ],
+            );
+        }
+        out
+    })
+}
+
+#[test]
+fn a_mix_stream_equals_the_whole_mix_with_and_without_cues() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let prefs = Prefs::default();
+    let path = two_tracks();
+    let bare = without_cues(path, "cueless-two-pcm-tracks.mkv");
+    let gains = [0.5, 1.25];
+    for file in [path, bare.as_path()] {
+        for from in [0.0, 12.3] {
+            let want = audio_mix(file, &gains, from, f64::INFINITY, 48_000, &prefs).unwrap();
+            let got: Vec<f32> = audio_mix_stream(file, &gains, from, 48_000, &prefs)
+                .unwrap()
+                .flat_map(|b| b.unwrap().samples)
+                .collect();
+            assert_eq!(
+                got.len(),
+                want.samples.len(),
+                "{} from {from}",
+                file.display()
+            );
+            assert!(got == want.samples, "{} from {from}", file.display());
+        }
+    }
 }

@@ -4,7 +4,7 @@ use super::ebml::Size;
 use super::ids::*;
 use super::parse::Cluster;
 use super::reader::{
-    Cache, FrameRef, Io, Reader, expand, parse_block_elem, read_frame, scan_cluster,
+    Cache, FrameRef, Hdr, Io, Reader, expand, parse_block_elem, read_frame_io, scan_cluster,
 };
 use crate::media::{Error, Packet, Result};
 use crate::mp4::ByteSource;
@@ -15,6 +15,54 @@ pub struct Block {
     pub pts: i64,
     pub duration: u32,
     pub keyframe: bool,
+}
+
+const BISECT: u64 = 8 << 20;
+
+fn cluster_ts<S: ByteSource + ?Sized>(io: &mut Io<'_, S>, h: &Hdr, end: u64) -> Result<i64> {
+    let mut pos = h.data_start();
+    for _ in 0..3 {
+        match io.header(pos, end)? {
+            Some(c) if c.id == TIMESTAMP => return Ok(io.uint(&c, c.end(end))? as i64),
+            Some(c) if matches!(c.id, CRC32 | VOID) && c.end(end) > pos => pos = c.end(end),
+            _ => break,
+        }
+    }
+    Ok(0)
+}
+
+fn cluster_from<S: ByteSource + ?Sized>(
+    io: &mut Io<'_, S>,
+    from: u64,
+    limit: u64,
+) -> Result<Option<(u64, i64)>> {
+    let mut pos = from;
+    for _ in 0..16 {
+        let Some(at) = io.resync(pos, limit)? else {
+            return Ok(None);
+        };
+        let Some(h) = io.header(at, limit)? else {
+            return Ok(None);
+        };
+        if h.id == CLUSTER {
+            let end = h.end(limit);
+            return Ok(Some((at, cluster_ts(io, &h, end)?)));
+        }
+        if h.size == Size::Unknown {
+            return Ok(None);
+        }
+        pos = h.end(limit).max(at + 1);
+    }
+    Ok(None)
+}
+
+fn block(f: &FrameRef) -> Block {
+    Block {
+        track: f.track,
+        pts: f.pts,
+        duration: f.duration,
+        keyframe: f.keyframe,
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -74,6 +122,36 @@ impl<S: ByteSource> Stream<'_, S> {
     pub fn seek(&mut self, track: usize, seconds: f64) -> Result<f64> {
         self.cursor.seek(self.reader, track, seconds)
     }
+
+    #[cfg_attr(
+        not(all(
+            feature = "h264",
+            feature = "hevc",
+            feature = "aac",
+            feature = "gpu",
+            feature = "filter",
+            feature = "vp9"
+        )),
+        allow(dead_code)
+    )]
+    pub(crate) fn next_block(&mut self, track: Option<usize>) -> Result<Option<Block>> {
+        self.cursor.next_block(self.reader, track)
+    }
+
+    #[cfg_attr(
+        not(all(
+            feature = "h264",
+            feature = "hevc",
+            feature = "aac",
+            feature = "gpu",
+            feature = "filter",
+            feature = "vp9"
+        )),
+        allow(dead_code)
+    )]
+    pub(crate) fn tail(&mut self, span: u64) -> Result<bool> {
+        self.cursor.tail(self.reader, span)
+    }
 }
 
 impl Cursor {
@@ -97,28 +175,87 @@ impl Cursor {
         self.done = false;
     }
 
+    #[cfg_attr(
+        not(all(
+            feature = "h264",
+            feature = "hevc",
+            feature = "aac",
+            feature = "gpu",
+            feature = "filter",
+            feature = "vp9"
+        )),
+        allow(dead_code)
+    )]
+    pub(crate) fn tail<S: ByteSource>(&mut self, r: &Reader<S>, span: u64) -> Result<bool> {
+        let first = r.first_cluster.unwrap_or(r.segment_end);
+        let from = r.segment_end.saturating_sub(span);
+        let at = if from <= first {
+            Some(first)
+        } else {
+            let mut io = Io::with_len(r.source(), r.len(), &mut self.cache);
+            cluster_from(&mut io, from, r.segment_end)?.map(|(at, _)| at)
+        };
+        self.rewind(r);
+        match at {
+            Some(at) => {
+                self.pos = at;
+                Ok(true)
+            }
+            None => {
+                self.done = true;
+                Ok(false)
+            }
+        }
+    }
+
     pub(crate) fn next_of<S: ByteSource>(
         &mut self,
         r: &Reader<S>,
         track: Option<usize>,
         data: &mut Vec<u8>,
     ) -> Result<Option<Block>> {
+        let Some(f) = self.next_ref(r, track)? else {
+            return Ok(None);
+        };
+        let t = r
+            .tracks
+            .get(f.track)
+            .ok_or_else(|| Error::Invalid(format!("no track {}", f.track)))?;
+        let mut io = Io::with_len(r.source(), r.len(), &mut self.cache);
+        read_frame_io(&mut io, t, f.offset, f.size, data)?;
+        Ok(Some(block(&f)))
+    }
+
+    #[cfg_attr(
+        not(all(
+            feature = "h264",
+            feature = "hevc",
+            feature = "aac",
+            feature = "gpu",
+            feature = "filter",
+            feature = "vp9"
+        )),
+        allow(dead_code)
+    )]
+    pub(crate) fn next_block<S: ByteSource>(
+        &mut self,
+        r: &Reader<S>,
+        track: Option<usize>,
+    ) -> Result<Option<Block>> {
+        Ok(self.next_ref(r, track)?.as_ref().map(block))
+    }
+
+    fn next_ref<S: ByteSource>(
+        &mut self,
+        r: &Reader<S>,
+        track: Option<usize>,
+    ) -> Result<Option<FrameRef>> {
         loop {
             if let Some(f) = self.pending.pop_front() {
                 if track.is_some_and(|t| t != f.track) {
                     continue;
                 }
-                let t = r
-                    .tracks
-                    .get(f.track)
-                    .ok_or_else(|| Error::Invalid(format!("no track {}", f.track)))?;
-                read_frame(r.source(), r.len(), t, f.offset, f.size, data)?;
-                return Ok(Some(Block {
-                    track: f.track,
-                    pts: f.pts,
-                    duration: f.duration,
-                    keyframe: f.keyframe,
-                }));
+                return Ok(Some(f));
             }
             if self.done || !self.fill(r)? {
                 self.done = true;
@@ -159,13 +296,24 @@ impl Cursor {
             .last()
             .or_else(|| r.cues.iter().find(|c| c.track == t.number));
         if let Some(at) = cue.and_then(|c| r.segment_start.checked_add(c.cluster))
-            && let Some(pts) = self.seek_in(r, track, ticks, &[at])?
+            && let Some(pts) = self.seek_in(r, track, ticks, &[at], true)?
         {
             return Ok(t.seconds(pts));
         }
         self.seek_scan(r, track, ticks)
     }
 
+    #[cfg_attr(
+        not(all(
+            feature = "h264",
+            feature = "hevc",
+            feature = "aac",
+            feature = "gpu",
+            feature = "filter",
+            feature = "vp9"
+        )),
+        allow(dead_code)
+    )]
     pub(crate) fn seek_near<S: ByteSource>(
         &mut self,
         r: &Reader<S>,
@@ -195,7 +343,7 @@ impl Cursor {
         }
         near.reverse();
         if !near.is_empty()
-            && let Some(pts) = self.seek_in(r, track, ticks, &near)?
+            && let Some(pts) = self.seek_in(r, track, ticks, &near, true)?
         {
             return Ok(t.seconds(pts));
         }
@@ -207,16 +355,43 @@ impl Cursor {
             .tracks
             .get(track)
             .ok_or_else(|| Error::Invalid(format!("no track {track}")))?;
-        let candidates = self.clusters_before(r, ticks)?;
-        match self.seek_in(r, track, ticks, &candidates)? {
+        let first = r.first_cluster.unwrap_or(r.segment_end);
+        let near = self.bisect(r, ticks)?;
+        if near > first {
+            let candidates = self.clusters_before(r, ticks, near)?;
+            if let Some(pts) = self.seek_in(r, track, ticks, &candidates, false)? {
+                return Ok(t.seconds(pts));
+            }
+        }
+        let candidates = self.clusters_before(r, ticks, first)?;
+        match self.seek_in(r, track, ticks, &candidates, true)? {
             Some(pts) => Ok(t.seconds(pts)),
             None => Err(Error::Invalid(format!("track {track} has no keyframes"))),
         }
     }
 
-    fn clusters_before<S: ByteSource>(&mut self, r: &Reader<S>, ticks: i64) -> Result<Vec<u64>> {
-        let mut io = Io::new(r.source(), &mut self.cache);
-        let mut pos = r.first_cluster.unwrap_or(r.segment_end);
+    fn bisect<S: ByteSource>(&mut self, r: &Reader<S>, ticks: i64) -> Result<u64> {
+        let mut io = Io::with_len(r.source(), r.len(), &mut self.cache);
+        let mut lo = r.first_cluster.unwrap_or(r.segment_end);
+        let mut hi = r.segment_end;
+        while hi.saturating_sub(lo) > BISECT {
+            let mid = lo + (hi - lo) / 2;
+            match cluster_from(&mut io, mid, hi)? {
+                Some((at, ts)) if ts <= ticks => lo = at,
+                _ => hi = mid,
+            }
+        }
+        Ok(lo)
+    }
+
+    fn clusters_before<S: ByteSource>(
+        &mut self,
+        r: &Reader<S>,
+        ticks: i64,
+        from: u64,
+    ) -> Result<Vec<u64>> {
+        let mut io = Io::with_len(r.source(), r.len(), &mut self.cache);
+        let mut pos = from;
         let mut out = Vec::new();
         while let Some(h) = io.header(pos, r.segment_end)? {
             if h.id != CLUSTER {
@@ -230,10 +405,7 @@ impl Cursor {
                 Size::Known(_) => h.end(r.segment_end),
                 Size::Unknown => io.unknown_end(h.data_start(), r.segment_end)?,
             };
-            let ts = match io.header(h.data_start(), end)? {
-                Some(c) if c.id == TIMESTAMP => io.uint(&c, c.end(end))? as i64,
-                _ => 0,
-            };
+            let ts = cluster_ts(&mut io, &h, end)?;
             if ts > ticks && !out.is_empty() {
                 break;
             }
@@ -253,15 +425,16 @@ impl Cursor {
         track: usize,
         ticks: i64,
         clusters: &[u64],
+        loose: bool,
     ) -> Result<Option<i64>> {
         let scale = r.info.timestamp_scale;
         let t = r
             .tracks
             .get(track)
             .ok_or_else(|| Error::Invalid(format!("no track {track}")))?;
-        let last = clusters.last().copied();
+        let last = clusters.last().copied().filter(|_| loose);
         for &at in clusters {
-            let mut io = Io::new(r.source(), &mut self.cache);
+            let mut io = Io::with_len(r.source(), r.len(), &mut self.cache);
             let Some(h) = io.header(at, r.segment_end)? else {
                 continue;
             };
@@ -315,7 +488,7 @@ impl Cursor {
     fn fill<S: ByteSource>(&mut self, r: &Reader<S>) -> Result<bool> {
         let seg_end = r.segment_end;
         let scale = r.info.timestamp_scale;
-        let mut io = Io::new(r.source(), &mut self.cache);
+        let mut io = Io::with_len(r.source(), r.len(), &mut self.cache);
         loop {
             if let Some(c) = self.cluster {
                 let lim = c.end.unwrap_or(seg_end);

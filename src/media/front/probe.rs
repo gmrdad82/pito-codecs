@@ -75,9 +75,12 @@ pub struct AudioTrack {
 
 impl AudioTrack {
     pub fn native(&self) -> bool {
-        ["aac", "opus", "pcm"]
-            .iter()
-            .any(|c| self.codec.eq_ignore_ascii_case(c))
+        let native: &[&str] = if cfg!(feature = "opus") {
+            &["aac", "opus", "pcm"]
+        } else {
+            &["aac", "pcm"]
+        };
+        native.iter().any(|c| self.codec.eq_ignore_ascii_case(c))
     }
 }
 

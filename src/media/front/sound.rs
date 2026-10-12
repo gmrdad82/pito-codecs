@@ -1,4 +1,4 @@
-use crate::mp4::{CodecConfig, PcmConfig, SampleEntry};
+use crate::mp4::{CodecConfig, PcmConfig};
 
 use super::demux::Demux;
 use crate::media::{Error, Result};
@@ -147,6 +147,7 @@ impl Pcm {
 
 pub enum Sound {
     Aac(Box<crate::aac::Decoder>),
+    #[cfg(feature = "opus")]
     Opus(Box<crate::opus::Decoder>),
     Pcm(Pcm),
 }
@@ -182,7 +183,8 @@ fn mkv_pcm(t: &crate::mkv::Track) -> Result<Pcm> {
     )
 }
 
-fn dops(e: &SampleEntry) -> Option<&[u8]> {
+#[cfg(feature = "opus")]
+fn dops(e: &crate::mp4::SampleEntry) -> Option<&[u8]> {
     let extra = match e.audio.as_ref().map_or(0, |a| a.qt_version) {
         1 => 16,
         2 => 36,
@@ -221,6 +223,7 @@ impl Sound {
                         Ok(Sound::Aac(Box::new(crate::aac::Decoder::new(&asc)?)))
                     }
                     CodecConfig::Pcm(p) => Ok(Sound::Pcm(Pcm::from_mp4(p)?)),
+                    #[cfg(feature = "opus")]
                     CodecConfig::Other(f) if &f.0 == b"Opus" => {
                         let head = dops(e).ok_or_else(|| {
                             Error::Invalid("Opus track without a dOps box".to_string())
@@ -245,6 +248,7 @@ impl Sound {
                         })?;
                         Ok(Sound::Aac(Box::new(crate::aac::Decoder::new(&asc)?)))
                     }
+                    #[cfg(feature = "opus")]
                     "opus" => Ok(Sound::Opus(Box::new(crate::opus::Decoder::new(
                         &t.codec_private,
                     )?))),
@@ -258,6 +262,7 @@ impl Sound {
     pub fn rate(&self) -> u32 {
         match self {
             Sound::Aac(d) => d.rate(),
+            #[cfg(feature = "opus")]
             Sound::Opus(d) => d.sample_rate(),
             Sound::Pcm(p) => p.rate,
         }
@@ -266,6 +271,7 @@ impl Sound {
     pub fn channels(&self) -> u16 {
         match self {
             Sound::Aac(d) => d.channels(),
+            #[cfg(feature = "opus")]
             Sound::Opus(d) => d.channels() as u16,
             Sound::Pcm(p) => p.channels,
         }
@@ -274,12 +280,15 @@ impl Sound {
     pub fn pcm_frames(&self, bytes: u32) -> Option<u64> {
         match self {
             Sound::Pcm(p) => Some(bytes as u64 / (p.width() * p.channels as usize).max(1) as u64),
-            Sound::Aac(_) | Sound::Opus(_) => None,
+            Sound::Aac(_) => None,
+            #[cfg(feature = "opus")]
+            Sound::Opus(_) => None,
         }
     }
 
     pub fn pre_roll(&self) -> f64 {
         match self {
+            #[cfg(feature = "opus")]
             Sound::Opus(_) => 0.08,
             Sound::Aac(_) | Sound::Pcm(_) => 0.0,
         }
@@ -292,6 +301,7 @@ impl Sound {
                 *out = b.samples;
                 Ok(b.channels)
             }
+            #[cfg(feature = "opus")]
             Sound::Opus(d) => {
                 out.clear();
                 d.decode_into(Some(data), out)?;

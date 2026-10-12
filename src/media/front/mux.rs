@@ -15,7 +15,7 @@ use super::audio::ffmpeg_pcm;
 use super::demux::Demux;
 use super::export::{ExportOptions, Job, Part, Progress, Stage, Tell, reencode};
 use super::ffmpeg::Ffmpeg;
-use super::native::{at_rate, audio_range, decode_audio, shape, threads, video_track};
+use super::native::{threads, video_track};
 use super::route::{Picked, Prefs};
 use super::video::frame_at;
 use crate::media::{AudioBuffer, Codec, Error, Frame, Packet, PixelFormat, Result, Route};
@@ -251,16 +251,52 @@ fn encode_edge(
     })
 }
 
+enum Lane {
+    Stream(super::stream::AudioStream, Vec<f32>),
+    Whole(Vec<f32>, usize),
+}
+
+impl Lane {
+    fn add(&mut self, out: &mut [f32], gain: f32) -> Result<()> {
+        let want = out.len();
+        let got: &[f32] = match self {
+            Lane::Stream(s, pending) => {
+                while pending.len() < want {
+                    match s.next() {
+                        Some(b) => pending.extend_from_slice(&b?.samples),
+                        None => break,
+                    }
+                }
+                pending.get(..want.min(pending.len())).unwrap_or_default()
+            }
+            Lane::Whole(all, at) => all
+                .get(*at..(*at + want).min(all.len()))
+                .unwrap_or_default(),
+        };
+        for (o, s) in out.iter_mut().zip(got) {
+            *o += s * gain;
+        }
+        match self {
+            Lane::Stream(_, pending) => {
+                pending.drain(..want.min(pending.len()));
+            }
+            Lane::Whole(_, at) => *at += want,
+        }
+        Ok(())
+    }
+}
+
 fn mix(
     job: &Job,
     gains: &[f32],
     ffmpeg: Option<&Ffmpeg>,
     enc: &mut crate::aac::Encoder,
     stop: &AtomicBool,
-) -> Result<(Vec<Packet>, u64)> {
-    let mut packets = Vec::new();
+) -> Result<(Spill, u64)> {
+    let mut packets = Spill::new(job, "mixed.aac")?;
     let mut at = 0i64;
     let mut total = 0u64;
+    let mut out = AudioBuffer::new(RATE, 2);
     for (i, piece) in job.pieces.iter().enumerate() {
         if stop.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
@@ -273,44 +309,44 @@ fn mix(
         at += b - a;
         let n = ((job.seconds(at) * RATE as f64).round() as usize).saturating_sub(first);
         total = total.saturating_add(n as u64);
-        let mut out = AudioBuffer::new(RATE, 2);
-        out.samples = vec![0.0; n * 2];
+        let mut lanes: Vec<(Lane, f32)> = Vec::new();
         for t in &src.probe.audio {
             let g = gains.get(t.index).copied().unwrap_or(1.0);
             if g <= 0.0 {
                 continue;
             }
-            let buf = match (src.mp4(), ffmpeg) {
-                (Some(r), _) => {
-                    let ids = r.audio();
-                    let id = *ids
-                        .get(t.index)
-                        .ok_or_else(|| Error::Invalid(format!("no audio track {}", t.index)))?;
-                    at_rate(shape(decode_audio(r, id, start, start + dur)?, 2)?, RATE)
-                }
-                (None, f) => {
-                    let ours = match &src.demux {
-                        Some(_) => audio_range(&src.path, t.index, start, start + dur, RATE, 2),
-                        None => Err(Error::Unsupported(
-                            "this file's audio needs ffmpeg picked in the settings".to_string(),
-                        )),
-                    };
-                    match (ours, f) {
-                        (Ok(b), _) => b,
-                        (Err(_), Some(f)) => {
-                            ffmpeg_pcm(f, &src.path, t.index, Some(start), Some(dur), RATE, 2)?
-                        }
-                        (Err(e), None) => return Err(e),
-                    }
-                }
+            let ours = match &src.demux {
+                Some(_) => super::stream::native_stream(&src.path, t.index, start, RATE, 2),
+                None => Err(Error::Unsupported(
+                    "this file's audio needs ffmpeg picked in the settings".to_string(),
+                )),
             };
-            for (o, s) in out.samples.iter_mut().zip(&buf.samples) {
-                *o += s * g;
-            }
+            let lane = match (ours, ffmpeg) {
+                (Ok(s), _) => Lane::Stream(s, Vec::new()),
+                (Err(_), Some(f)) => Lane::Whole(
+                    ffmpeg_pcm(f, &src.path, t.index, Some(start), Some(dur), RATE, 2)?.samples,
+                    0,
+                ),
+                (Err(e), None) => return Err(e),
+            };
+            lanes.push((lane, g));
         }
-        packets.extend(enc.encode(&out)?);
+        let mut left = n;
+        while left > 0 {
+            if stop.load(Ordering::Relaxed) {
+                return Err(Error::Cancelled);
+            }
+            let step = left.min(RATE as usize);
+            out.samples.clear();
+            out.samples.resize(step * 2, 0.0);
+            for (lane, g) in &mut lanes {
+                lane.add(&mut out.samples, *g)?;
+            }
+            packets.extend(enc.encode(&out)?)?;
+            left -= step;
+        }
     }
-    packets.extend(enc.flush());
+    packets.extend(enc.flush())?;
     Ok((packets, total))
 }
 
@@ -356,8 +392,8 @@ fn premixed(
     audio: Premix,
     enc: &mut crate::aac::Encoder,
     stop: &AtomicBool,
-) -> Result<(Vec<Packet>, u64)> {
-    let mut packets = Vec::new();
+) -> Result<(Spill, u64)> {
+    let mut packets = Spill::new(job, "premixed.aac")?;
     let (mut at, mut first) = (0i64, 0usize);
     for (i, piece) in job.pieces.iter().enumerate() {
         if stop.load(Ordering::Relaxed) {
@@ -370,17 +406,74 @@ fn premixed(
         first = end;
         let buf = audio(i, n)?;
         check(i, n, &buf)?;
-        packets.extend(enc.encode(&buf)?);
+        packets.extend(enc.encode(&buf)?)?;
     }
-    packets.extend(enc.flush());
+    packets.extend(enc.flush())?;
     Ok((packets, first as u64))
+}
+
+struct Spill {
+    file: std::io::BufWriter<File>,
+    path: std::path::PathBuf,
+    meta: Vec<(i64, u32)>,
+}
+
+impl Spill {
+    fn new(job: &Job, name: &str) -> Result<Spill> {
+        let path = job.work.join(name);
+        let file = File::create(&path).map_err(|e| Error::at(&path, e))?;
+        Ok(Spill {
+            file: std::io::BufWriter::with_capacity(1 << 20, file),
+            path,
+            meta: Vec::new(),
+        })
+    }
+
+    fn extend(&mut self, packets: Vec<Packet>) -> Result<()> {
+        use std::io::Write as _;
+        for p in packets {
+            let size = u32::try_from(p.data.len())
+                .map_err(|_| Error::Invalid("an audio packet over 4 GiB".into()))?;
+            self.file.write_all(&p.data)?;
+            self.meta.push((p.pts, size));
+        }
+        Ok(())
+    }
+
+    fn replay(self, mut each: impl FnMut(&Packet, bool) -> Result<()>) -> Result<()> {
+        use std::io::Read as _;
+        let file = self
+            .file
+            .into_inner()
+            .map_err(|e| Error::Io(e.into_error()))?;
+        drop(file);
+        let file = File::open(&self.path).map_err(|e| Error::at(&self.path, e))?;
+        let mut r = std::io::BufReader::with_capacity(1 << 20, file);
+        let mut p = Packet {
+            data: Vec::new(),
+            pts: 0,
+            dts: 0,
+            keyframe: true,
+        };
+        let n = self.meta.len();
+        for (k, &(pts, size)) in self.meta.iter().enumerate() {
+            p.data.resize(size as usize, 0);
+            r.read_exact(&mut p.data)?;
+            p.pts = pts;
+            p.dts = pts;
+            each(&p, k + 1 == n)?;
+        }
+        drop(r);
+        let _ = std::fs::remove_file(&self.path);
+        Ok(())
+    }
 }
 
 fn audio_track(
     w: &mut Writer<File>,
     enc: &crate::aac::Encoder,
     kbps: u32,
-    packets: &[Packet],
+    packets: Spill,
     total: Option<u64>,
 ) -> Result<()> {
     let priming = enc.priming() as i64;
@@ -390,19 +483,21 @@ fn audio_track(
     );
     cfg.media_start = Some(priming);
     let a = w.add_track(cfg)?;
-    let (Some(total), Some((last, rest))) = (total, packets.split_last()) else {
-        for p in packets {
-            w.push(a, p)?;
-        }
-        return Ok(());
+    let Some(total) = total else {
+        return packets.replay(|p, _| w.push(a, p));
     };
-    w.set_movie_timescale(RATE);
-    for p in rest {
-        w.push(a, p)?;
+    if !packets.meta.is_empty() {
+        w.set_movie_timescale(RATE);
     }
     let end = priming.saturating_add(i64::try_from(total).unwrap_or(i64::MAX));
-    let duration = u32::try_from(end.saturating_sub(last.pts).max(1)).unwrap_or(u32::MAX);
-    w.push_timed(a, last, duration)
+    packets.replay(|p, last| {
+        if last {
+            let duration = u32::try_from(end.saturating_sub(p.pts).max(1)).unwrap_or(u32::MAX);
+            w.push_timed(a, p, duration)
+        } else {
+            w.push(a, p)
+        }
+    })
 }
 
 pub(super) fn premixed_m4a(
@@ -415,7 +510,7 @@ pub(super) fn premixed_m4a(
     let mut enc = aac_encoder(kbps)?;
     let (packets, total) = premixed(job, audio, &mut enc, stop)?;
     let mut w = Writer::create(path)?;
-    audio_track(&mut w, &enc, kbps, &packets, Some(total))?;
+    audio_track(&mut w, &enc, kbps, packets, Some(total))?;
     w.finish().map(|_| ())
 }
 
@@ -469,7 +564,7 @@ pub(super) fn run(
     job.tell(progress, Stage::Joining)?;
     mux.close()?;
     let (packets, total) = audio;
-    audio_track(&mut mux.w, &aac, opts.audio_kbps, &packets, total)?;
+    audio_track(&mut mux.w, &aac, opts.audio_kbps, packets, total)?;
     mux.w.finish_faststart()?;
     std::fs::rename(&part, out).map_err(|e| Error::at(out, e))?;
     job.finish(progress)?;
@@ -764,6 +859,47 @@ impl Planner {
     }
 }
 
+const AHEAD: usize = 4;
+
+struct Writing {
+    mux: Option<Mux>,
+    ids: HashMap<Vec<u8>, u32>,
+    rotation: u16,
+    timescale: u32,
+    fd: i64,
+}
+
+impl Writing {
+    fn entry(&mut self, key: Vec<u8>, entry: SampleEntry, part: &Path) -> Result<u32> {
+        if let Some(&id) = self.ids.get(&key) {
+            return Ok(id);
+        }
+        let id = match self.mux.as_mut() {
+            Some(m) => m.w.add_entry(m.track, entry)?,
+            None => {
+                let mut entries = Entries::default();
+                entries.id(key.clone(), entry);
+                self.mux = Some(open_mux(
+                    self.rotation,
+                    entries,
+                    self.timescale,
+                    self.fd,
+                    part,
+                )?);
+                0
+            }
+        };
+        self.ids.insert(key, id);
+        Ok(id)
+    }
+
+    fn mux(&mut self) -> Result<&mut Mux> {
+        self.mux
+            .as_mut()
+            .ok_or_else(|| Error::Invalid("no video to write".to_string()))
+    }
+}
+
 fn smart_video(
     job: &Job,
     video: &Picked,
@@ -780,17 +916,29 @@ fn smart_video(
     let edges: Vec<usize> = (0..plan.len())
         .filter(|&i| matches!(plan[i].1, Part::Encode { .. }))
         .collect();
+    let rank: HashMap<usize, usize> = edges.iter().enumerate().map(|(r, &i)| (i, r)).collect();
+    let mut source_entry: HashMap<usize, u32> = HashMap::new();
+    let mut last_use: HashMap<usize, usize> = HashMap::new();
+    for (n, &i) in order.iter().enumerate() {
+        last_use.insert(i, n);
+    }
     let workers = edges.len().clamp(1, 4);
     let per = (threads() * 2 / workers).max(2);
     let next = AtomicUsize::new(0);
+    let wanted = AtomicUsize::new(0);
     let (tx, rx) = mpsc::channel::<(usize, Result<Edge>)>();
     let total: i64 = plan.iter().map(|(_, p)| p.frames()).sum::<i64>().max(1);
-    let mut done_frames = 0i64;
-    let mut encoded_edges: HashMap<usize, Edge> = HashMap::new();
-    std::thread::scope(|s| -> Result<()> {
+    let mut out = Writing {
+        mux: None,
+        ids: HashMap::new(),
+        rotation: job.sources[job.index[0]].probe.rotation,
+        timescale,
+        fd,
+    };
+    let written = std::thread::scope(|s| -> Result<(u64, u64)> {
         for _ in 0..workers {
             let tx = tx.clone();
-            let (plan, next, edges) = (&plan, &next, &edges);
+            let (plan, next, edges, wanted) = (&plan, &next, &edges, &wanted);
             s.spawn(move || {
                 loop {
                     if stop.load(Ordering::Relaxed) {
@@ -798,120 +946,123 @@ fn smart_video(
                     }
                     let k = next.fetch_add(1, Ordering::Relaxed);
                     let Some(&i) = edges.get(k) else { break };
+                    while k >= wanted.load(Ordering::Relaxed) + AHEAD + workers {
+                        if stop.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
                     let (si, p) = plan[i];
                     let Part::Encode { from, frames } = p else {
                         continue;
                     };
-                    let _ = tx.send((i, encode_edge(job, video, (si, from, frames), crf, per)));
+                    if tx
+                        .send((i, encode_edge(job, video, (si, from, frames), crf, per)))
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
             });
         }
         drop(tx);
-        for (i, r) in rx.iter() {
-            match r {
-                Ok(e) => {
-                    if let Part::Encode { frames, .. } = plan[i].1 {
-                        done_frames += frames;
+        let mut ready: HashMap<usize, Edge> = HashMap::new();
+        let mut received = 0usize;
+        let mut done_frames = 0i64;
+        let got = (|| -> Result<(u64, u64)> {
+            let (mut copied, mut encoded) = (0u64, 0u64);
+            let mut at = 0i64;
+            let mut buf = Vec::new();
+            let mut times: Vec<(i64, i64, bool)> = Vec::new();
+            let mut order_pts: Vec<i64> = Vec::new();
+            for (n, &i) in order.iter().enumerate() {
+                let (si, p) = plan[i];
+                match p {
+                    Part::Copy { from, frames } => {
+                        let entry = match source_entry.get(&si) {
+                            Some(&id) => id,
+                            None => {
+                                let (key, entry) = copy_entry(job, si)?;
+                                let id = out.entry(key, entry, part)?;
+                                source_entry.insert(si, id);
+                                id
+                            }
+                        };
+                        let mux = out.mux()?;
+                        let g = Gop::at(job, si, from)?;
+                        copy_times(&g, frames, &mut times, &mut order_pts)?;
+                        for (k, &(pts, dts, key)) in (g.start..).zip(&times) {
+                            g.demux.read_into(g.track, k, &mut buf)?;
+                            mux.push(
+                                &buf,
+                                at.saturating_add(pts).saturating_mul(fd),
+                                at.saturating_add(dts).saturating_mul(fd),
+                                key,
+                                entry,
+                            )?;
+                        }
+                        copied += frames as u64;
                     }
-                    encoded_edges.insert(i, e);
-                    let keep = progress(&Progress {
-                        stage: Stage::Cutting {
-                            piece: encoded_edges.len(),
-                            pieces: edges.len(),
-                        },
-                        done: done_frames as f32 / total as f32 * 0.8,
-                        encoder: job.route,
-                    });
-                    if !keep {
-                        stop.store(true, Ordering::Relaxed);
-                        return Err(Error::Cancelled);
+                    Part::Encode { frames, .. } => {
+                        if let Some(&r) = rank.get(&i) {
+                            wanted.fetch_max(r, Ordering::Relaxed);
+                        }
+                        while !ready.contains_key(&i) {
+                            let Ok((j, r)) = rx.recv() else {
+                                return Err(Error::Backend("an edge was not encoded".into()));
+                            };
+                            let e = r?;
+                            received += 1;
+                            if let Part::Encode { frames, .. } = plan[j].1 {
+                                done_frames += frames;
+                            }
+                            ready.insert(j, e);
+                            let keep = progress(&Progress {
+                                stage: Stage::Cutting {
+                                    piece: received,
+                                    pieces: edges.len(),
+                                },
+                                done: done_frames as f32 / total as f32 * 0.8,
+                                encoder: job.route,
+                            });
+                            if !keep {
+                                return Err(Error::Cancelled);
+                            }
+                        }
+                        let e = ready
+                            .remove(&i)
+                            .ok_or_else(|| Error::Backend("an edge was not encoded".into()))?;
+                        let entry = out.entry(e.avcc.clone(), e.entry.clone(), part)?;
+                        let mux = out.mux()?;
+                        for p in &e.packets {
+                            mux.push(
+                                &p.data,
+                                (at + p.pts) * fd,
+                                (at + p.dts) * fd,
+                                p.keyframe,
+                                entry,
+                            )?;
+                        }
+                        if last_use.get(&i).is_some_and(|&l| l > n) {
+                            ready.insert(i, e);
+                        }
+                        encoded += frames as u64;
                     }
                 }
-                Err(e) => {
-                    stop.store(true, Ordering::Relaxed);
-                    return Err(e);
-                }
+                at += p.frames();
             }
+            Ok((copied, encoded))
+        })();
+        if got.is_err() {
+            stop.store(true, Ordering::Relaxed);
         }
-        Ok(())
+        drop(rx);
+        got
     })?;
-    let mut entries = Entries::default();
-    let mut entry_of: HashMap<usize, u32> = HashMap::new();
-    let mut source_entry: HashMap<usize, u32> = HashMap::new();
-    for &i in &order {
-        if entry_of.contains_key(&i) {
-            continue;
-        }
-        let (si, p) = plan[i];
-        let id = match p {
-            Part::Copy { .. } => match source_entry.get(&si) {
-                Some(&id) => id,
-                None => {
-                    let (key, entry) = copy_entry(job, si)?;
-                    let id = entries.id(key, entry);
-                    source_entry.insert(si, id);
-                    id
-                }
-            },
-            Part::Encode { .. } => {
-                let e = encoded_edges
-                    .get(&i)
-                    .ok_or_else(|| Error::Backend("an edge was not encoded".into()))?;
-                entries.id(e.avcc.clone(), e.entry.clone())
-            }
-        };
-        entry_of.insert(i, id);
-    }
-    let mut mux = open_mux(
-        job.sources[job.index[0]].probe.rotation,
-        entries,
-        timescale,
-        fd,
-        part,
-    )?;
-    let (mut copied, mut encoded) = (0u64, 0u64);
-    let mut at = 0i64;
-    let mut buf = Vec::new();
-    let mut times: Vec<(i64, i64, bool)> = Vec::new();
-    let mut order_pts: Vec<i64> = Vec::new();
-    for &i in &order {
-        let (si, p) = plan[i];
-        let entry = entry_of.get(&i).copied().unwrap_or(0);
-        match p {
-            Part::Copy { from, frames } => {
-                let g = Gop::at(job, si, from)?;
-                copy_times(&g, frames, &mut times, &mut order_pts)?;
-                for (k, &(pts, dts, key)) in (g.start..).zip(&times) {
-                    g.demux.read_into(g.track, k, &mut buf)?;
-                    mux.push(
-                        &buf,
-                        at.saturating_add(pts).saturating_mul(fd),
-                        at.saturating_add(dts).saturating_mul(fd),
-                        key,
-                        entry,
-                    )?;
-                }
-                copied += frames as u64;
-            }
-            Part::Encode { frames, .. } => {
-                let e = encoded_edges
-                    .get(&i)
-                    .ok_or_else(|| Error::Backend("an edge was not encoded".into()))?;
-                for p in &e.packets {
-                    mux.push(
-                        &p.data,
-                        (at + p.pts) * fd,
-                        (at + p.dts) * fd,
-                        p.keyframe,
-                        entry,
-                    )?;
-                }
-                encoded += frames as u64;
-            }
-        }
-        at += p.frames();
-    }
-    Ok((copied, encoded, mux, planner.reasons))
+    let mux = out
+        .mux
+        .ok_or_else(|| Error::Invalid("no video to write".to_string()))?;
+    Ok((written.0, written.1, mux, planner.reasons))
 }
 
 fn copy_entry(job: &Job, si: usize) -> Result<(Vec<u8>, SampleEntry)> {

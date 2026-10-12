@@ -194,6 +194,9 @@ pub fn probe(path: &Path) -> Result<Probe> {
 }
 
 pub fn keyframes(path: &Path) -> Result<Vec<f64>> {
+    if let Some(head) = demux::mkv_head(path)? {
+        return demux::keyframes(&head);
+    }
     let r = match Demux::open(path)? {
         Demux::Mp4(r) => r,
         Demux::Mkv(r) => return demux::keyframes(&r),
@@ -820,10 +823,6 @@ pub fn cut(mut buf: AudioBuffer, skip: usize, want: Option<usize>) -> AudioBuffe
         buf.samples.resize(w * ch, 0.0);
     }
     buf
-}
-
-pub fn decode_audio(r: &Arc<Reader>, i: usize, from: f64, to: f64) -> Result<AudioBuffer> {
-    decode_track(&Demux::Mp4(r.clone()), i, from, to).map(|(b, _)| b)
 }
 
 pub fn on_grid(start: f64, origin: f64, step: f64) -> f64 {
