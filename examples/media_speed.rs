@@ -7,8 +7,9 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use pito_codecs::media::{
-    Choice, ExportOptions, Piece, Prefs, Rgba, VideoFrame, decode_video, decode_video_gpu, export,
-    first_frame, frames_at, probe, to_rgba, to_rgba_height,
+    AudioBuffer, Choice, ExportOptions, Piece, Prefs, Rgba, VideoFrame, decode_video,
+    decode_video_gpu, export, export_with_audio, first_frame, frames_at, probe, to_rgba,
+    to_rgba_height,
 };
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
@@ -21,11 +22,31 @@ fn run() -> Res<()> {
     let mut args = std::env::args().skip(1);
     let path = PathBuf::from(
         args.next()
-            .ok_or("usage: media_speed <file> [ffmpeg|auto|cpu|gpu]")?,
+            .ok_or("usage: media_speed <file> [ffmpeg|auto|cpu|gpu|probe|cuts [n]]")?,
     );
     let mode = args.next();
     if mode.as_deref() == Some("gpu") {
         return gpu_playback(&path);
+    }
+    if mode.as_deref() == Some("probe") {
+        let t = Instant::now();
+        let p = probe(&path, &Prefs::default())?;
+        say!(
+            "probe {:.1} ms: {:.3} s, {}/{} fps, {:?} frames",
+            t.elapsed().as_secs_f64() * 1e3,
+            p.duration,
+            p.fps.0,
+            p.fps.1,
+            p.frames
+        )?;
+        return Ok(());
+    }
+    if mode.as_deref() == Some("cuts") {
+        let n = match args.next() {
+            Some(n) => n.parse()?,
+            None => 300,
+        };
+        return cuts(&path, n);
     }
     let prefs = match mode.as_deref() {
         Some("auto") => Prefs::default(),
@@ -146,6 +167,61 @@ fn run() -> Res<()> {
         done.frames,
         done.frames as f64 / s
     )?;
+    Ok(())
+}
+
+fn cuts(path: &std::path::Path, n: usize) -> Res<()> {
+    let prefs = Prefs::default();
+    let p = probe(path, &prefs)?;
+    let slot = p.duration / n.max(1) as f64;
+    let pieces: Vec<Piece> = (0..n)
+        .map(|k| {
+            let from = k as f64 * slot + slot * ((k * 13 % 7) as f64 / 20.0);
+            let len = slot * (0.05 + (k * 37 % 57) as f64 / 100.0);
+            Piece {
+                path: path.to_path_buf(),
+                from,
+                to: (from + len).min(p.duration),
+            }
+        })
+        .collect();
+    let seconds: f64 = pieces.iter().map(|x| x.to - x.from).sum();
+    let out = PathBuf::from("tmp/speed-cuts.mp4");
+    let t = Instant::now();
+    let mut at = 0usize;
+    let done = export_with_audio(
+        &out,
+        &pieces,
+        ExportOptions {
+            prefs,
+            ..ExportOptions::default()
+        },
+        |_, frames| {
+            let mut buf = AudioBuffer::new(48_000, 2);
+            buf.samples = (at..at + frames)
+                .flat_map(|k| {
+                    let s = (k as f64 * 440.0 * std::f64::consts::TAU / 48_000.0).sin() as f32;
+                    [s * 0.25, s * 0.25]
+                })
+                .collect();
+            at += frames;
+            Ok(buf)
+        },
+        |_| true,
+    )?;
+    let s = t.elapsed().as_secs_f64();
+    say!(
+        "{n} cuts, {seconds:.1} s of video in {s:.2} s ({:.0}x realtime) on {}: {} frames, {} copied, {} encoded, smart {}",
+        seconds / s,
+        done.video.route,
+        done.frames,
+        done.copied,
+        done.encoded,
+        done.smart
+    )?;
+    for r in &done.reasons {
+        say!("  {r}")?;
+    }
     Ok(())
 }
 

@@ -118,6 +118,13 @@ impl Demux {
         }
     }
 
+    pub fn samples(&self, track: usize) -> usize {
+        match self {
+            Demux::Mp4(r) => r.tracks.get(track).map_or(0, |t| t.samples.len()),
+            Demux::Mkv(r) => r.tracks.get(track).map_or(0, |t| t.samples.len()),
+        }
+    }
+
     pub fn read_into(&self, track: usize, i: usize, buf: &mut Vec<u8>) -> Result<()> {
         match self {
             Demux::Mp4(r) => r.read_into(track, i, buf),
@@ -222,19 +229,80 @@ pub fn hevc_profile(c: &HevcConfig) -> (String, u8) {
     (name.to_string(), c.bit_depth_luma.max(8))
 }
 
+pub fn probe_head(r: &mkv::Reader) -> Result<Option<Probe>> {
+    let (v, t) = mkv_video(r)?;
+    let Some(ns) = t.default_duration.filter(|d| *d > 0) else {
+        return Ok(None);
+    };
+    let Some(last) = r.cues.iter().rev().find(|c| c.track == t.number) else {
+        return Ok(None);
+    };
+    let mut stream = r.stream();
+    let mut data = Vec::new();
+    let mut first: Option<Vec<u8>> = None;
+    let mut start = 0i64;
+    let mut seen = 0;
+    while seen < 16 {
+        let Some(b) = stream.next_into(&mut data)? else {
+            break;
+        };
+        if b.track != v {
+            continue;
+        }
+        if first.is_none() && b.keyframe && t.codec() == Some(Codec::Vp9) {
+            first = Some(data.clone());
+        }
+        start = start.min(b.pts);
+        seen += 1;
+    }
+    if seen == 0 {
+        return Ok(None);
+    }
+    stream.seek(v, t.seconds(last.time as i64))?;
+    let mut end: Option<i64> = None;
+    while let Some(b) = stream.next_into(&mut data)? {
+        if b.track == v {
+            end = end.max(Some(b.pts.saturating_add(b.duration as i64)));
+        }
+    }
+    let Some(end) = end else {
+        return Ok(None);
+    };
+    let duration = t.seconds(end.saturating_sub(start)).max(0.0);
+    describe(r, t, (duration, 1e9 / ns as f64, None), first).map(Some)
+}
+
 pub fn probe(r: &mkv::Reader) -> Result<Probe> {
     let (v, t) = mkv_video(r)?;
-    let (width, height) = t
-        .video
-        .as_ref()
-        .map(|i| (i.pixel_width, i.pixel_height))
-        .unwrap_or((t.width, t.height));
     let duration = t.duration_seconds();
     let fps = match t.default_duration.filter(|d| *d > 0) {
         Some(ns) => 1e9 / ns as f64,
         None if duration > 0.0 => t.samples.len() as f64 / duration,
         None => 0.0,
     };
+    let keyframe = match t.codec() {
+        Some(Codec::Vp9) => t
+            .samples
+            .iter()
+            .position(|s| s.keyframe)
+            .and_then(|i| r.read(v, i).ok()),
+        _ => None,
+    };
+    let frames = Some(t.samples.len() as u64);
+    describe(r, t, (duration, fps, frames), keyframe)
+}
+
+fn describe(
+    r: &mkv::Reader,
+    t: &mkv::Track,
+    (duration, fps, frames): (f64, f64, Option<u64>),
+    keyframe: Option<Vec<u8>>,
+) -> Result<Probe> {
+    let (width, height) = t
+        .video
+        .as_ref()
+        .map(|i| (i.pixel_width, i.pixel_height))
+        .unwrap_or((t.width, t.height));
     let (profile, bit_depth) = match t.codec() {
         Some(Codec::H264) => AvcConfig::parse(&t.codec_private)
             .map(|c| avc_profile(c.profile))
@@ -242,12 +310,9 @@ pub fn probe(r: &mkv::Reader) -> Result<Probe> {
         Some(Codec::Hevc) => HevcConfig::parse(&t.codec_private)
             .map(|c| hevc_profile(&c))
             .unwrap_or((String::new(), 8)),
-        Some(Codec::Vp9) => t
-            .samples
-            .iter()
-            .position(|s| s.keyframe)
-            .and_then(|i| r.read(v, i).ok())
-            .and_then(|data| crate::vp9::keyframe_info(&data))
+        Some(Codec::Vp9) => keyframe
+            .as_deref()
+            .and_then(crate::vp9::keyframe_info)
             .map(|k| (format!("Profile {}", k.profile), k.bit_depth.max(8) as u8))
             .unwrap_or((String::new(), 8)),
         _ => (String::new(), 8),
@@ -283,9 +348,19 @@ pub fn probe(r: &mkv::Reader) -> Result<Probe> {
         video_codec_name: t.codec_name().to_string(),
         profile,
         bit_depth,
-        frames: Some(t.samples.len() as u64),
+        frames,
         audio,
     })
+}
+
+pub fn frame_count(path: &Path) -> Result<u64> {
+    match Demux::open(path)? {
+        Demux::Mp4(r) => Ok(r
+            .video()
+            .and_then(|v| r.tracks.get(v))
+            .map_or(0, |t| t.samples.len()) as u64),
+        Demux::Mkv(r) => Ok(mkv_video(&r)?.1.samples.len() as u64),
+    }
 }
 
 pub fn keyframes(r: &mkv::Reader) -> Result<Vec<f64>> {

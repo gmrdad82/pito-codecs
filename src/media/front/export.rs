@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use super::ffmpeg::{Child, Ffmpeg, pix_fmt};
-use super::mux::{Premix, Sound, premixed_m4a};
+use super::mux::{Planner, Premix, Sound, gop_mp4, premixed_m4a};
 use super::picture::Blender;
 use super::probe::keyframes;
 use super::route::{Caps, Picked, Prefs, pick_encode};
@@ -338,7 +338,7 @@ fn export_to(
             && s.probe.bit_depth == first.bit_depth
             && s.probe.rotation == first.rotation
     });
-    let smart = opts.overlay.is_none() && same && size == (first.width, first.height);
+    let readable = sources.iter().all(|s| s.demux.is_some());
     let ffmpeg = match (&caps.ffmpeg, video.route) {
         (Some(f), Route::Ffmpeg) => Some(f.clone()),
         (_, Route::Cpu | Route::Gpu) => None,
@@ -348,7 +348,28 @@ fn export_to(
             ));
         }
     };
-    let smart = smart && (ffmpeg.is_some() || sources.iter().all(|s| s.mp4().is_some()));
+    let why = if opts.overlay.is_some() {
+        Some("an overlay is drawn on every frame, so the whole export is re-encoded".to_string())
+    } else if !same {
+        Some(match sources.iter().find(|s| s.probe.video_codec != Some(video.codec)) {
+            Some(s) => format!(
+                "the source video is {}, the export {}, so the whole export is re-encoded",
+                s.probe.video_codec_name, video.codec
+            ),
+            None => "the sources differ in frame rate, size, depth or rotation, so the whole export is re-encoded".to_string(),
+        })
+    } else if size != (first.width, first.height) {
+        Some(format!(
+            "the picture's odd size {}x{} is evened, so the whole export is re-encoded",
+            first.width, first.height
+        ))
+    } else if ffmpeg.is_none() && !readable {
+        Some("our MP4 and MKV readers can't index a source to copy it, so the whole export is re-encoded".to_string())
+    } else {
+        None
+    };
+    let smart = why.is_none();
+    reasons.extend(why);
     let work = std::path::absolute(out.with_extension("parts"))?;
     if work.exists() {
         std::fs::remove_dir_all(&work).map_err(|e| Error::at(&work, e))?;
@@ -395,7 +416,12 @@ fn export_to(
         ),
     };
     let _ = std::fs::remove_dir_all(&work);
-    let (copied, encoded) = result?;
+    let (copied, encoded, planned) = result?;
+    for r in planned {
+        if !reasons.contains(&r) {
+            reasons.push(r);
+        }
+    }
     Ok(Exported {
         path: out.to_path_buf(),
         frames: copied + encoded,
@@ -417,16 +443,23 @@ fn run(
     out: &Path,
     progress: Tell,
     mut premix: Option<Premix>,
-) -> Result<(u64, u64)> {
+) -> Result<(u64, u64, Vec<String>)> {
     let (mut copied, mut encoded) = (0u64, 0u64);
     let mut list = String::new();
     let exact = premix.is_some();
     let kbps = opts.audio_kbps;
+    let mut planner = Planner::default();
     if smart {
-        let (plan, order) = job.plan(&opts.prefs, |_, p, _| Ok(vec![p]))?;
+        let jobref = &*job;
+        let (plan, order) = jobref.plan(&opts.prefs, |si, p, keys| {
+            planner.split(jobref, (si, p), keys, false)
+        })?;
+        let mut at = 0i64;
         for &i in &order {
             let file = job.work.join(format!("part-{i:05}.ts"));
-            list.push_str(&format!("file '{}'\n", file.display()));
+            let frames = plan[i].1.frames();
+            list.push_str(&listed(job, &file, at, frames));
+            at += frames;
             match plan[i].1 {
                 Part::Copy { frames, .. } => copied += frames as u64,
                 Part::Encode { frames, .. } => encoded += frames as u64,
@@ -513,7 +546,8 @@ fn run(
             }
         });
         outcome?;
-        return join(job, f, video, &list, (&mix, exact), out, progress).map(|_| (copied, encoded));
+        return join(job, f, video, &list, (&mix, exact), out, progress)
+            .map(|_| (copied, encoded, planner.reasons));
     } else {
         job.tell(progress, Stage::Encoding)?;
         let file = job.work.join("whole.ts");
@@ -534,7 +568,7 @@ fn run(
         }
         enc.finish()?;
         encoded = at as u64;
-        list.push_str(&format!("file '{}'\n", file.display()));
+        list.push_str(&listed(job, &file, 0, at));
     }
     job.tell(progress, Stage::Mixing)?;
     let mix = job.work.join("mix.m4a");
@@ -545,7 +579,23 @@ fn run(
         }
     }
     join(job, f, video, &list, (&mix, exact), out, progress)?;
-    Ok((copied, encoded))
+    Ok((copied, encoded, planner.reasons))
+}
+
+fn micros(job: &Job, frames: i64) -> i128 {
+    let num = frames as i128 * job.fps.1 as i128 * 1_000_000;
+    let den = (job.fps.0 as i128).max(1);
+    (2 * num + den).div_euclid(2 * den)
+}
+
+fn listed(job: &Job, file: &Path, at: i64, frames: i64) -> String {
+    let us = micros(job, at + frames) - micros(job, at);
+    format!(
+        "file '{}'\nduration {}.{:06}\n",
+        file.display(),
+        us.div_euclid(1_000_000),
+        us.rem_euclid(1_000_000)
+    )
 }
 
 fn join(
@@ -603,6 +653,25 @@ fn join(
 }
 
 fn copy(f: &Ffmpeg, job: &Job, si: usize, from: i64, frames: i64, file: &Path) -> Result<()> {
+    if job.sources[si].demux.is_some() {
+        let gop = file.with_extension("mp4");
+        gop_mp4(job, si, from, frames, &gop)?;
+        let args: Vec<String> = vec![
+            "-i".into(),
+            gop.display().to_string(),
+            "-map".into(),
+            "0:v:0".into(),
+            "-c:v".into(),
+            "copy".into(),
+            "-f".into(),
+            "mpegts".into(),
+            file.display().to_string(),
+        ];
+        let done = f.run_args(&args);
+        let _ = std::fs::remove_file(&gop);
+        done?;
+        return padded(file);
+    }
     let seek = job.seconds(from) + job.seconds(1) / 2.0;
     let args: Vec<String> = vec![
         "-ss".into(),
@@ -622,7 +691,29 @@ fn copy(f: &Ffmpeg, job: &Job, si: usize, from: i64, frames: i64, file: &Path) -
         "mpegts".into(),
         file.display().to_string(),
     ];
-    f.run_args(&args).map(|_| ())
+    f.run_args(&args)?;
+    padded(file)
+}
+
+const TS_PACKET: usize = 188;
+const TS_FLOOR: u64 = 64 * TS_PACKET as u64;
+
+fn padded(file: &Path) -> Result<()> {
+    let len = std::fs::metadata(file)
+        .map_err(|e| Error::at(file, e))?
+        .len();
+    if len >= TS_FLOOR {
+        return Ok(());
+    }
+    let mut null = [0xffu8; TS_PACKET];
+    null[..4].copy_from_slice(&[0x47, 0x1f, 0xff, 0x10]);
+    let count = (TS_FLOOR - len).div_ceil(TS_PACKET as u64) as usize;
+    let mut out = std::fs::OpenOptions::new()
+        .append(true)
+        .open(file)
+        .map_err(|e| Error::at(file, e))?;
+    out.write_all(&null.repeat(count))
+        .map_err(|e| Error::at(file, e))
 }
 
 pub(super) fn reencode(
@@ -788,7 +879,8 @@ fn edge(
     ]);
     args.extend(tail.post.iter().cloned());
     args.extend(["-f".into(), "mpegts".into(), file.display().to_string()]);
-    f.run_args(&args).map(|_| ())
+    f.run_args(&args)?;
+    padded(file)
 }
 
 impl Encoder {
@@ -897,11 +989,16 @@ fn mix_args(job: &Job, opts: &ExportOptions, out: &Path) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
     let mut graph = String::new();
     let mut joined = String::new();
+    let (mut at, mut first) = (0i64, 0i64);
     for (i, piece) in job.pieces.iter().enumerate() {
         let src = &job.sources[job.index[i]];
         let (a, b) = job.span(piece);
         let start = job.seconds(a);
         let dur = job.seconds(b - a);
+        at += b - a;
+        let end = (job.seconds(at) * 48_000.0).round() as i64;
+        let n = (end - first).max(0);
+        first = end;
         args.extend([
             "-ss".into(),
             format!("{start:.6}"),
@@ -924,7 +1021,7 @@ fn mix_args(job: &Job, opts: &ExportOptions, out: &Path) -> Vec<String> {
             .collect();
         if tracks.is_empty() {
             graph.push_str(&format!(
-                "anullsrc=r=48000:cl=stereo,atrim=end={dur:.6}[p{i}];"
+                "anullsrc=r=48000:cl=stereo,atrim=end_sample={n}[p{i}];"
             ));
         } else {
             let mut labels = String::new();
@@ -935,7 +1032,7 @@ fn mix_args(job: &Job, opts: &ExportOptions, out: &Path) -> Vec<String> {
                 labels.push_str(&format!("[p{i}t{t}]"));
             }
             graph.push_str(&format!(
-                "{labels}amix=inputs={}:normalize=0:duration=longest,apad=whole_dur={dur:.6},atrim=end={dur:.6},asetpts=N/SR/TB[p{i}];",
+                "{labels}amix=inputs={}:normalize=0:duration=longest,apad=whole_len={n},atrim=end_sample={n},asetpts=N/SR/TB[p{i}];",
                 tracks.len()
             ));
         }
