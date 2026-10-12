@@ -139,61 +139,41 @@ impl Picked {
 }
 
 pub fn pick_decode(codec: Codec, prefs: &Prefs, caps: &Caps) -> Result<Picked> {
-    let mut reasons = Vec::new();
-    let mut ffmpeg_codec = None;
-    let order: &[Route] = match &prefs.decode {
-        Choice::Auto => &[Route::Gpu, Route::Cpu],
-        Choice::Gpu => &[Route::Gpu, Route::Cpu],
-        Choice::Cpu => &[Route::Cpu],
-        Choice::Ffmpeg(user) => {
-            ffmpeg_codec = user.codec.clone();
-            &[Route::Ffmpeg, Route::Gpu, Route::Cpu]
-        }
+    let (order, ffmpeg_codec): (&[Route], _) = match &prefs.decode {
+        Choice::Auto | Choice::Gpu => (&[Route::Gpu, Route::Cpu], None),
+        Choice::Cpu => (&[Route::Cpu], None),
+        Choice::Ffmpeg(user) => (&[Route::Ffmpeg, Route::Gpu, Route::Cpu], user.codec.clone()),
     };
-    for &route in order {
-        if codec == Codec::Aac && route == Route::Gpu {
-            continue;
-        }
-        if caps.has(route, codec, Direction::Decode) {
-            return Ok(Picked {
-                route,
-                codec,
-                ffmpeg_codec: if route == Route::Ffmpeg {
-                    ffmpeg_codec
-                } else {
-                    None
-                },
-                reasons,
-            });
-        }
-        reasons.push(caps.why_not(route, codec, Direction::Decode));
-    }
-    Err(Error::Unsupported(format!(
-        "can't decode {codec}: {}",
-        reasons.join("; ")
-    )))
+    let tries = order.iter().map(|&r| (r, codec)).collect();
+    pick(codec, Direction::Decode, tries, ffmpeg_codec, caps)
 }
 
 pub fn pick_encode(codec: Codec, prefs: &Prefs, caps: &Caps) -> Result<Picked> {
-    let mut reasons = Vec::new();
-    let mut ffmpeg_codec = None;
-    let mut tries: Vec<(Route, Codec)> = Vec::new();
-    match &prefs.encode {
+    let (tries, ffmpeg_codec) = match &prefs.encode {
         Choice::Ffmpeg(user) => {
-            ffmpeg_codec = user.codec.clone();
-            tries.push((Route::Ffmpeg, codec));
+            let mut tries = vec![(Route::Ffmpeg, codec)];
             tries.extend(native_order(codec, prefs, &[Route::Gpu, Route::Cpu]));
+            (tries, user.codec.clone())
         }
-        Choice::Auto | Choice::Gpu => {
-            tries.extend(native_order(codec, prefs, &[Route::Gpu, Route::Cpu]))
-        }
-        Choice::Cpu => tries.extend(native_order(codec, prefs, &[Route::Cpu])),
-    }
+        Choice::Auto | Choice::Gpu => (native_order(codec, prefs, &[Route::Gpu, Route::Cpu]), None),
+        Choice::Cpu => (native_order(codec, prefs, &[Route::Cpu]), None),
+    };
+    pick(codec, Direction::Encode, tries, ffmpeg_codec, caps)
+}
+
+fn pick(
+    codec: Codec,
+    dir: Direction,
+    tries: Vec<(Route, Codec)>,
+    ffmpeg_codec: Option<String>,
+    caps: &Caps,
+) -> Result<Picked> {
+    let mut reasons = Vec::new();
     for (route, c) in tries {
         if c == Codec::Aac && route == Route::Gpu {
             continue;
         }
-        if caps.has(route, c, Direction::Encode) {
+        if caps.has(route, c, dir) {
             if c != codec {
                 reasons.push(format!("encoding {c} on the {route} instead"));
             }
@@ -208,13 +188,17 @@ pub fn pick_encode(codec: Codec, prefs: &Prefs, caps: &Caps) -> Result<Picked> {
                 reasons,
             });
         }
-        let why = caps.why_not(route, c, Direction::Encode);
+        let why = caps.why_not(route, c, dir);
         if !reasons.contains(&why) {
             reasons.push(why);
         }
     }
+    let verb = match dir {
+        Direction::Decode => "decode",
+        Direction::Encode => "encode",
+    };
     Err(Error::Unsupported(format!(
-        "can't encode {codec}: {}",
+        "can't {verb} {codec}: {}",
         reasons.join("; ")
     )))
 }

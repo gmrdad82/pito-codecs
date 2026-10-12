@@ -9,13 +9,15 @@ use crate::gpu::{
     Rate as GpuRate,
 };
 use crate::h264::{Bitstream, Encoder, EncoderConfig, Preset, Profile, Rate};
-use crate::mp4::{AvcConfig, HevcConfig, SampleEntry, TrackConfig, Writer, rotation_matrix};
+use crate::mp4::{
+    AvcConfig, HevcConfig, Reader, SampleEntry, Track, TrackConfig, Writer, rotation_matrix,
+};
 
-use super::export::{ExportOptions, Job, Part, Progress, Stage, Tell, parts, reencode};
+use super::audio::ffmpeg_pcm;
+use super::export::{ExportOptions, Job, Part, Progress, Stage, Tell, reencode};
 use super::ffmpeg::Ffmpeg;
-use super::native::{decode_audio, threads};
-use super::probe::keyframes;
-use super::route::Picked;
+use super::native::{at_rate, decode_audio, gop_start, shape, threads, video_track};
+use super::route::{Picked, Prefs};
 use crate::media::{AudioBuffer, Codec, Error, Frame, Packet, PixelFormat, Result, Route};
 
 const RATE: u32 = 48_000;
@@ -82,6 +84,7 @@ impl Mux {
     }
 }
 
+#[derive(Default)]
 struct Entries {
     ids: HashMap<Vec<u8>, u32>,
     first: Option<SampleEntry>,
@@ -223,18 +226,7 @@ fn encode_edge(
 ) -> Result<Edge> {
     let mut enc = encoder(job, video, crf, true, frames, threads)?;
     let mut packets = Vec::new();
-    let mut quiet = Job {
-        pieces: job.pieces,
-        sources: job.sources.clone(),
-        index: job.index.clone(),
-        fps: job.fps,
-        size: job.size,
-        format: job.format,
-        total: 0,
-        done: 0,
-        work: job.work.clone(),
-        route: job.route,
-    };
+    let mut quiet = job.quiet();
     reencode(
         &mut quiet,
         si,
@@ -259,34 +251,6 @@ fn encode_edge(
     })
 }
 
-fn pcm_ffmpeg(f: &Ffmpeg, path: &Path, track: usize, start: f64, dur: f64) -> Result<AudioBuffer> {
-    let args: Vec<String> = vec![
-        "-ss".into(),
-        format!("{start:.6}"),
-        "-t".into(),
-        format!("{dur:.6}"),
-        "-i".into(),
-        path.display().to_string(),
-        "-map".into(),
-        format!("0:a:{track}"),
-        "-vn".into(),
-        "-ac".into(),
-        "2".into(),
-        "-ar".into(),
-        RATE.to_string(),
-        "-f".into(),
-        "f32le".into(),
-        "-".into(),
-    ];
-    let raw = f.run_args(&args)?;
-    let mut buf = AudioBuffer::new(RATE, 2);
-    buf.samples = raw
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
-    Ok(buf)
-}
-
 fn mix(
     job: &Job,
     gains: &[f32],
@@ -301,7 +265,7 @@ fn mix(
             return Err(Error::Cancelled);
         }
         let src = &job.sources[job.index[i]];
-        let (a, b) = (job.frame_of(piece.from), job.frame_of(piece.to));
+        let (a, b) = job.span(piece);
         let start = job.seconds(a);
         let dur = job.seconds(b - a);
         let first = (job.seconds(at) * RATE as f64).round() as usize;
@@ -314,21 +278,17 @@ fn mix(
             if g <= 0.0 {
                 continue;
             }
-            let buf = match (&src.reader, ffmpeg) {
+            let buf = match (src.mp4(), ffmpeg) {
                 (Some(r), _) => {
                     let ids = r.audio();
                     let id = *ids
                         .get(t.index)
                         .ok_or_else(|| Error::Invalid(format!("no audio track {}", t.index)))?;
-                    let raw = decode_audio(r, id, start, start + dur)?;
-                    let stereo = crate::aac::downmix_stereo(&raw);
-                    if stereo.rate == RATE {
-                        stereo
-                    } else {
-                        crate::aac::resample(&stereo, RATE)
-                    }
+                    at_rate(shape(decode_audio(r, id, start, start + dur)?, 2)?, RATE)
                 }
-                (None, Some(f)) => pcm_ffmpeg(f, &src.path, t.index, start, dur)?,
+                (None, Some(f)) => {
+                    ffmpeg_pcm(f, &src.path, t.index, Some(start), Some(dur), RATE, 2)?
+                }
                 (None, None) => {
                     return Err(Error::Unsupported(
                         "this file's audio needs ffmpeg picked in the settings".to_string(),
@@ -366,18 +326,7 @@ pub(super) fn run(
     let part = job.work.join("joined.mp4");
     let stop = AtomicBool::new(false);
     let gains = opts.audio_gains.clone();
-    let audio_job = Job {
-        pieces: job.pieces,
-        sources: job.sources.clone(),
-        index: job.index.clone(),
-        fps: job.fps,
-        size: job.size,
-        format: job.format,
-        total: 0,
-        done: 0,
-        work: job.work.clone(),
-        route: job.route,
-    };
+    let audio_job = job.quiet();
     let (copied, encoded, mut mux, audio) = std::thread::scope(|s| -> Result<_> {
         let (aj, gains, stop_ref, aac) = (&audio_job, &gains, &stop, &mut aac);
         let audio = s.spawn(move || mix(aj, gains, ffmpeg, aac, stop_ref));
@@ -416,13 +365,7 @@ pub(super) fn run(
     }
     mux.w.finish_faststart()?;
     std::fs::rename(&part, out).map_err(|e| Error::at(out, e))?;
-    if !progress(&Progress {
-        stage: Stage::Joining,
-        done: 1.0,
-        encoder: job.route,
-    }) {
-        return Err(Error::Cancelled);
-    }
+    job.finish(progress)?;
     Ok((copied, encoded))
 }
 
@@ -470,11 +413,7 @@ fn whole_video(
             let Some(x) = enc.extradata() else {
                 return Ok(());
             };
-            let mut entries = Entries {
-                ids: HashMap::new(),
-                first: None,
-                later: Vec::new(),
-            };
+            let mut entries = Entries::default();
             entries.id(x.clone(), entry_for(codec, &x, w, h)?);
             *mux = Some(open_mux(rotation, entries, timescale, fd, part)?);
         }
@@ -487,8 +426,7 @@ fn whole_video(
     };
     let mut at = 0i64;
     for n in 0..job.pieces.len() {
-        let piece = &job.pieces[n];
-        let (a, b) = (job.frame_of(piece.from), job.frame_of(piece.to));
+        let (a, b) = job.span(&job.pieces[n]);
         let si = job.index[n];
         let mut sink = |f: &Frame| -> Result<()> {
             let packets = enc.encode(f)?;
@@ -512,19 +450,44 @@ fn whole_video(
     Ok((0, at as u64, mux))
 }
 
+struct Gop<'a> {
+    reader: &'a Reader,
+    track: usize,
+    t: &'a Track,
+    start: usize,
+    base: i64,
+    ft: f64,
+}
+
+impl<'a> Gop<'a> {
+    fn at(job: &'a Job<'_>, si: usize, from: i64) -> Result<Self> {
+        let reader: &Reader = job.sources[si].reader()?;
+        let (track, t) = video_track(reader)?;
+        let start = gop_start(t, job.seconds(from));
+        Ok(Gop {
+            reader,
+            track,
+            t,
+            start,
+            base: t.presentation(start).unwrap_or(0),
+            ft: t.timescale as f64 * job.fps.1 as f64 / job.fps.0 as f64,
+        })
+    }
+
+    fn frame(&self, ticks: i64) -> i64 {
+        (ticks.saturating_sub(self.base) as f64 / self.ft).round() as i64
+    }
+}
+
 fn closed_prefix(job: &Job, si: usize, from: i64, frames: i64) -> Result<i64> {
-    let r = job.sources[si].reader()?;
-    let v = r.video().ok_or_else(|| Error::Invalid("no video".into()))?;
-    let t = &r.tracks[v];
-    let ka = t.keyframe_before(t.sample_at(t.ticks(job.seconds(from))).unwrap_or(0));
-    let base = t.presentation(ka).unwrap_or(0);
-    let ft = t.timescale as f64 * job.fps.1 as f64 / job.fps.0 as f64;
+    let g = Gop::at(job, si, from)?;
+    let t = g.t;
     let (mut best, mut most) = (0i64, -1i64);
-    for (n, k) in (ka..t.samples.len()).enumerate() {
+    for (n, k) in (g.start..t.samples.len()).enumerate() {
         if n > 0 && t.samples[k].keyframe {
             break;
         }
-        let rel = (t.presentation(k).unwrap_or(0).saturating_sub(base) as f64 / ft).round() as i64;
+        let rel = g.frame(t.presentation(k).unwrap_or(0));
         if rel >= frames || rel < 0 {
             break;
         }
@@ -545,49 +508,25 @@ fn smart_video(
     progress: Tell,
     stop: &AtomicBool,
 ) -> Result<(u64, u64, Mux)> {
-    let mut keys: HashMap<usize, Vec<i64>> = HashMap::new();
-    let mut plan: Vec<(usize, Part)> = Vec::new();
-    let mut order: Vec<usize> = Vec::new();
-    for (n, piece) in job.pieces.iter().enumerate() {
-        let si = job.index[n];
-        if let std::collections::hash_map::Entry::Vacant(slot) = keys.entry(si) {
-            slot.insert(
-                keyframes(&job.sources[si].path, &super::route::Prefs::default())?
-                    .into_iter()
-                    .map(|t| job.frame_of(t))
-                    .collect(),
-            );
-        }
-        let (a, b) = (job.frame_of(piece.from), job.frame_of(piece.to));
-        let mut split = Vec::new();
-        for p in parts(a, b, &keys[&si]) {
-            match p {
-                Part::Encode { from, frames } if keys[&si].contains(&from) => {
-                    let j = closed_prefix(job, si, from, frames)?;
-                    if j > 0 {
-                        split.push(Part::Copy { from, frames: j });
-                    }
-                    if frames > j {
-                        split.push(Part::Encode {
-                            from: from + j,
-                            frames: frames - j,
-                        });
-                    }
+    let (plan, order) = job.plan(&Prefs::default(), |si, part, keys| {
+        Ok(match part {
+            Part::Encode { from, frames } if keys.contains(&from) => {
+                let j = closed_prefix(job, si, from, frames)?;
+                let mut split = Vec::new();
+                if j > 0 {
+                    split.push(Part::Copy { from, frames: j });
                 }
-                p => split.push(p),
+                if frames > j {
+                    split.push(Part::Encode {
+                        from: from + j,
+                        frames: frames - j,
+                    });
+                }
+                split
             }
-        }
-        for p in split {
-            let i = match plan.iter().position(|q| *q == (si, p)) {
-                Some(i) => i,
-                None => {
-                    plan.push((si, p));
-                    plan.len() - 1
-                }
-            };
-            order.push(i);
-        }
-    }
+            p => vec![p],
+        })
+    })?;
     let edges: Vec<usize> = (0..plan.len())
         .filter(|&i| matches!(plan[i].1, Part::Encode { .. }))
         .collect();
@@ -595,13 +534,7 @@ fn smart_video(
     let per = (threads() * 2 / workers).max(2);
     let next = AtomicUsize::new(0);
     let (tx, rx) = mpsc::channel::<(usize, Result<Edge>)>();
-    let total: i64 = plan
-        .iter()
-        .map(|(_, p)| match p {
-            Part::Copy { frames, .. } | Part::Encode { frames, .. } => *frames,
-        })
-        .sum::<i64>()
-        .max(1);
+    let total: i64 = plan.iter().map(|(_, p)| p.frames()).sum::<i64>().max(1);
     let mut done_frames = 0i64;
     let mut encoded_edges: HashMap<usize, Edge> = HashMap::new();
     std::thread::scope(|s| -> Result<()> {
@@ -652,11 +585,7 @@ fn smart_video(
         }
         Ok(())
     })?;
-    let mut entries = Entries {
-        ids: HashMap::new(),
-        first: None,
-        later: Vec::new(),
-    };
+    let mut entries = Entries::default();
     let mut entry_of: HashMap<usize, u32> = HashMap::new();
     for &i in &order {
         if entry_of.contains_key(&i) {
@@ -665,8 +594,7 @@ fn smart_video(
         let (si, p) = plan[i];
         let id = match p {
             Part::Copy { .. } => {
-                let r = job.sources[si].reader()?;
-                let t = &r.tracks[r.video().ok_or_else(|| Error::Invalid("no video".into()))?];
+                let (_, t) = video_track(job.sources[si].reader()?)?;
                 let entry = t
                     .entry()
                     .cloned()
@@ -697,24 +625,18 @@ fn smart_video(
         let entry = entry_of.get(&i).copied().unwrap_or(0);
         match p {
             Part::Copy { from, frames } => {
-                let r = job.sources[si].reader()?;
-                let v = r.video().ok_or_else(|| Error::Invalid("no video".into()))?;
-                let t = &r.tracks[v];
-                let ka = t.keyframe_before(t.sample_at(t.ticks(job.seconds(from))).unwrap_or(0));
-                let kb = ka.saturating_add(frames as usize).min(t.samples.len());
-                let base = t.presentation(ka).unwrap_or(0);
-                let ft = t.timescale as f64 * job.fps.1 as f64 / job.fps.0 as f64;
-                for k in ka..kb {
+                let g = Gop::at(job, si, from)?;
+                let t = g.t;
+                let end = g.start.saturating_add(frames as usize).min(t.samples.len());
+                for k in g.start..end {
                     let smp = t.samples[k];
                     let pts = smp.pts.saturating_add(t.edit_offset);
                     let dts = smp.dts.saturating_add(t.edit_offset);
-                    let rp = (pts.saturating_sub(base) as f64 / ft).round() as i64;
-                    let rd = (dts.saturating_sub(base) as f64 / ft).round() as i64;
-                    r.read_into(v, k, &mut buf)?;
+                    g.reader.read_into(g.track, k, &mut buf)?;
                     mux.push(
                         &buf,
-                        at.saturating_add(rp).saturating_mul(fd),
-                        at.saturating_add(rd).saturating_mul(fd),
+                        at.saturating_add(g.frame(pts)).saturating_mul(fd),
+                        at.saturating_add(g.frame(dts)).saturating_mul(fd),
                         smp.keyframe,
                         entry,
                     )?;
@@ -737,10 +659,7 @@ fn smart_video(
                 encoded += frames as u64;
             }
         }
-        let frames = match p {
-            Part::Copy { frames, .. } | Part::Encode { frames, .. } => frames,
-        };
-        at += frames;
+        at += p.frames();
     }
     Ok((copied, encoded, mux))
 }

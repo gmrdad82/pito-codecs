@@ -51,7 +51,7 @@ pub fn to_rgba_color(frame: &Frame, height: u32, color: Color) -> Rgba {
     if height == 0 || height >= frame.height || frame.height == 0 {
         return rgba_of(frame, c);
     }
-    let w = ((frame.width as u64 * height as u64 / frame.height as u64) as u32).max(2) & !1;
+    let w = fit_width(frame.width, frame.height, height);
     rgba_of(&resize(frame, w, height), c)
 }
 
@@ -66,8 +66,15 @@ pub fn scale_to_height(img: &Rgba, height: u32) -> Rgba {
     if height == 0 || img.height == 0 || img.height == height {
         return img.clone();
     }
-    let width = ((img.width as u64 * height as u64 / img.height as u64) as u32).max(2) & !1;
-    scale(img, width, height)
+    scale(img, fit_width(img.width, img.height, height), height)
+}
+
+pub(super) fn even(v: u32) -> u32 {
+    v.max(2) & !1
+}
+
+pub(super) fn fit_width(width: u32, height: u32, to: u32) -> u32 {
+    even((width as u64 * to as u64 / height as u64) as u32)
 }
 
 pub fn scale(img: &Rgba, width: u32, height: u32) -> Rgba {

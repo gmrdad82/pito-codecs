@@ -5,7 +5,7 @@ use std::process::{ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread::JoinHandle;
 
-use crate::media::{Codec, Direction, Error, Result};
+use crate::media::{Codec, Direction, Error, PixelFormat, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listed {
@@ -182,26 +182,24 @@ impl Ffmpeg {
         output(c, "ffmpeg")
     }
 
-    pub fn probe_flat(&self, args: &[&str], path: &Path) -> Result<BTreeMap<String, String>> {
+    fn ffprobe(&self, of: &str, args: &[&str], path: &Path) -> Result<Vec<u8>> {
         let probe = self.ffprobe.as_ref().ok_or_else(|| {
             Error::Unsupported(format!("no ffprobe next to {}", self.path.display()))
         })?;
         let mut c = Command::new(probe);
-        c.args(["-v", "error", "-of", "flat"]).args(args).arg(path);
+        c.args(["-v", "error", "-of", of]).args(args).arg(path);
         background(&mut c);
-        Ok(flat(&String::from_utf8_lossy(&output(c, "ffprobe")?)))
+        output(c, "ffprobe")
+    }
+
+    pub fn probe_flat(&self, args: &[&str], path: &Path) -> Result<BTreeMap<String, String>> {
+        Ok(flat(&String::from_utf8_lossy(
+            &self.ffprobe("flat", args, path)?,
+        )))
     }
 
     pub fn probe_csv(&self, args: &[&str], path: &Path) -> Result<String> {
-        let probe = self.ffprobe.as_ref().ok_or_else(|| {
-            Error::Unsupported(format!("no ffprobe next to {}", self.path.display()))
-        })?;
-        let mut c = Command::new(probe);
-        c.args(["-v", "error", "-of", "csv=p=0"])
-            .args(args)
-            .arg(path);
-        background(&mut c);
-        Ok(String::from_utf8_lossy(&output(c, "ffprobe")?).into_owned())
+        Ok(String::from_utf8_lossy(&self.ffprobe("csv=p=0", args, path)?).into_owned())
     }
 
     pub fn spawn(&self, args: &[String], stdin: bool, stdout: bool) -> Result<Child> {
@@ -289,13 +287,21 @@ pub fn codec_name(codec: Codec) -> &'static str {
 }
 
 pub fn codec_of(name: &str) -> Option<Codec> {
-    match name {
-        "h264" => Some(Codec::H264),
-        "hevc" => Some(Codec::Hevc),
-        "aac" => Some(Codec::Aac),
-        "vp9" => Some(Codec::Vp9),
-        "opus" => Some(Codec::Opus),
-        _ => None,
+    [
+        Codec::H264,
+        Codec::Hevc,
+        Codec::Aac,
+        Codec::Vp9,
+        Codec::Opus,
+    ]
+    .into_iter()
+    .find(|&c| codec_name(c) == name)
+}
+
+pub fn pix_fmt(format: PixelFormat) -> &'static str {
+    match format {
+        PixelFormat::Yuv420p8 => "yuv420p",
+        PixelFormat::Yuv420p10 => "yuv420p10le",
     }
 }
 

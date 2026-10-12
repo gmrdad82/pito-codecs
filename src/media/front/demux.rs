@@ -1,13 +1,11 @@
-use std::collections::HashMap;
 use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
-use std::time::SystemTime;
+use std::path::Path;
+use std::sync::{Arc, LazyLock};
 
 use crate::mkv;
-use crate::mp4::{AvcConfig, CodecConfig, HevcConfig, Reader};
+use crate::mp4::{AvcConfig, CodecConfig, HevcConfig, Reader, Track};
 
-use super::native::{self, rational};
+use super::native::{self, Readers, cached, rational, sorted};
 use super::probe::{AudioTrack, Probe};
 use crate::media::{Codec, Error, Result, TimeBase};
 
@@ -26,30 +24,9 @@ pub struct Stream {
     pub color: Option<(u8, bool)>,
 }
 
-type Key = (PathBuf, u64, Option<SystemTime>);
-
-fn mkv_readers() -> &'static Mutex<HashMap<Key, Arc<mkv::Reader>>> {
-    static READERS: OnceLock<Mutex<HashMap<Key, Arc<mkv::Reader>>>> = OnceLock::new();
-    READERS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 fn mkv_reader(path: &Path) -> Result<Arc<mkv::Reader>> {
-    let meta = std::fs::metadata(path).map_err(|e| Error::at(path, e))?;
-    let key = (path.to_path_buf(), meta.len(), meta.modified().ok());
-    if let Some(r) = mkv_readers()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&key)
-    {
-        return Ok(r.clone());
-    }
-    let r = Arc::new(mkv::Reader::open(path)?);
-    let mut map = mkv_readers().lock().unwrap_or_else(PoisonError::into_inner);
-    if map.len() >= 64 {
-        map.clear();
-    }
-    map.insert(key, r.clone());
-    Ok(r)
+    static READERS: Readers<mkv::Reader> = LazyLock::new(Default::default);
+    cached(&READERS, path, |p| mkv::Reader::open(p))
 }
 
 fn is_matroska(path: &Path) -> bool {
@@ -60,10 +37,23 @@ fn is_matroska(path: &Path) -> bool {
         && magic == [0x1a, 0x45, 0xdf, 0xa3]
 }
 
+fn mp4_track(r: &Reader, i: usize) -> Result<&Track> {
+    r.tracks
+        .get(i)
+        .ok_or_else(|| Error::Invalid(format!("no track {i}")))
+}
+
 fn mkv_track(r: &mkv::Reader, i: usize) -> Result<&mkv::Track> {
     r.tracks
         .get(i)
         .ok_or_else(|| Error::Invalid(format!("no track {i}")))
+}
+
+fn mkv_video(r: &mkv::Reader) -> Result<(usize, &mkv::Track)> {
+    let v = r
+        .video()
+        .ok_or_else(|| Error::Invalid("no video track".to_string()))?;
+    Ok((v, mkv_track(r, v)?))
 }
 
 impl Demux {
@@ -125,35 +115,17 @@ impl Demux {
     pub fn seek(&self, track: usize, from: f64) -> Result<(usize, i64)> {
         match self {
             Demux::Mp4(r) => {
-                let t = r
-                    .tracks
-                    .get(track)
-                    .ok_or_else(|| Error::Invalid(format!("no track {track}")))?;
+                let t = mp4_track(r, track)?;
                 let at = t.sample_at(t.ticks(from.max(0.0))).unwrap_or(0);
                 Ok((t.keyframe_before(at), t.presentation(at).unwrap_or(0)))
             }
             Demux::Mkv(r) => {
                 let t = mkv_track(r, track)?;
-                let want = t.ticks(from.max(0.0));
-                let first = t
-                    .samples
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(_, s)| s.pts)
-                    .map_or(0, |(i, _)| i);
-                let at = t
-                    .samples
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, s)| s.pts <= want)
-                    .max_by_key(|(_, s)| s.pts)
-                    .map_or(first, |(i, _)| i);
-                let key = (0..=at)
-                    .rev()
-                    .find(|&i| t.samples.get(i).is_some_and(|s| s.keyframe))
-                    .unwrap_or(0);
-                let start = t.samples.get(at).map_or(0, |s| s.pts);
-                Ok((key, start))
+                let at = t.sample_at(t.ticks(from.max(0.0))).unwrap_or(0);
+                Ok((
+                    t.keyframe_before(at),
+                    t.samples.get(at).map_or(0, |s| s.pts),
+                ))
             }
         }
     }
@@ -161,10 +133,7 @@ impl Demux {
     pub fn stream(&self, track: usize) -> Result<Stream> {
         match self {
             Demux::Mp4(r) => {
-                let t = r
-                    .tracks
-                    .get(track)
-                    .ok_or_else(|| Error::Invalid(format!("no track {track}")))?;
+                let t = mp4_track(r, track)?;
                 let codec = t.codec();
                 let extradata = t.extradata().unwrap_or_default();
                 let color = codec.and_then(|c| crate::gpu::color(c, &extradata));
@@ -234,10 +203,7 @@ pub fn hevc_profile(c: &HevcConfig) -> (String, u8) {
 }
 
 pub fn probe(r: &mkv::Reader) -> Result<Probe> {
-    let v = r
-        .video()
-        .ok_or_else(|| Error::Invalid("no video track".to_string()))?;
-    let t = mkv_track(r, v)?;
+    let (v, t) = mkv_video(r)?;
     let (width, height) = t
         .video
         .as_ref()
@@ -303,17 +269,12 @@ pub fn probe(r: &mkv::Reader) -> Result<Probe> {
 }
 
 pub fn keyframes(r: &mkv::Reader) -> Result<Vec<f64>> {
-    let v = r
-        .video()
-        .ok_or_else(|| Error::Invalid("no video track".to_string()))?;
-    let t = mkv_track(r, v)?;
-    let mut keys: Vec<f64> = t
-        .samples
-        .iter()
-        .filter(|s| s.keyframe)
-        .map(|s| t.seconds(s.pts).max(0.0))
-        .collect();
-    keys.sort_by(f64::total_cmp);
-    keys.dedup();
-    Ok(keys)
+    let (_, t) = mkv_video(r)?;
+    Ok(sorted(
+        t.samples
+            .iter()
+            .filter(|s| s.keyframe)
+            .map(|s| t.seconds(s.pts).max(0.0))
+            .collect(),
+    ))
 }

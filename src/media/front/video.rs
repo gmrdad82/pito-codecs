@@ -6,9 +6,9 @@ use crate::gpu::{GpuFrame, GpuScaler};
 use crate::mp4::Reader;
 
 use super::demux::Demux;
-use super::ffmpeg::{Child, Ffmpeg};
+use super::ffmpeg::{Child, Ffmpeg, pix_fmt};
 use super::native;
-use super::picture::{Color, resize};
+use super::picture::{Color, even, fit_width, resize};
 use super::probe::{Probe, probe};
 use super::route::{Caps, Choice, Prefs, pick_decode};
 use crate::media::{Error, Frame, PixelFormat, Result, Route, TimeBase};
@@ -21,7 +21,6 @@ pub struct Source {
     pub reasons: Vec<String>,
     pub ffmpeg: Option<Ffmpeg>,
     pub ffmpeg_codec: Option<String>,
-    pub reader: Option<Arc<Reader>>,
     pub demux: Option<Demux>,
 }
 
@@ -35,7 +34,6 @@ pub fn source(path: &Path, prefs: &Prefs) -> Result<Source> {
     let probe = probe(path, prefs)?;
     let caps = Caps::detect(prefs);
     let demux = Demux::open(path).ok();
-    let reader = demux.as_ref().and_then(Demux::mp4).cloned();
     let (mut route, mut reasons, mut ffmpeg_codec) = match probe.video_codec {
         Some(codec) => {
             let p = pick_decode(codec, prefs, &caps)?;
@@ -73,7 +71,6 @@ pub fn source(path: &Path, prefs: &Prefs) -> Result<Source> {
         reasons,
         ffmpeg: caps.ffmpeg,
         ffmpeg_codec,
-        reader,
         demux,
     })
 }
@@ -98,15 +95,18 @@ impl Source {
         })
     }
 
+    pub fn mp4(&self) -> Option<&Arc<Reader>> {
+        self.demux.as_ref().and_then(Demux::mp4)
+    }
+
     pub fn reader(&self) -> Result<&Arc<Reader>> {
-        self.reader
-            .as_ref()
+        self.mp4()
             .ok_or_else(|| Error::Unsupported("our MP4 reader can't open this file".to_string()))
     }
 }
 
 enum Inner {
-    Ffmpeg(Child),
+    Ffmpeg { child: Child, next: i64, got: u64 },
     Native(Box<native::Frames>, (u32, u32)),
 }
 
@@ -118,9 +118,7 @@ pub struct Video {
     pub height: u32,
     pub format: PixelFormat,
     pub time_base: TimeBase,
-    next: i64,
     left: Option<u64>,
-    got: u64,
 }
 
 pub fn decode_video(path: &Path, from: f64, height: Option<u32>, prefs: &Prefs) -> Result<Video> {
@@ -128,12 +126,7 @@ pub fn decode_video(path: &Path, from: f64, height: Option<u32>, prefs: &Prefs) 
     let p = &src.probe;
     let size = height
         .filter(|h| *h > 0 && p.height > 0 && *h != p.height)
-        .map(|h| {
-            (
-                ((p.width as u64 * h as u64 / p.height as u64) as u32).max(2) & !1,
-                h,
-            )
-        });
+        .map(|h| (fit_width(p.width, p.height, h), h));
     open(&src, from, None, size, None)
 }
 
@@ -147,32 +140,22 @@ pub fn open(
     let p = &src.probe;
     match src.route {
         Route::Cpu | Route::Gpu => {
-            let decoded =
-                native::Frames::open(src.demux()?.clone(), from, native::threads(), src.route)?;
+            let decoded = native::Frames::open(src.demux()?.clone(), from, src.route)?;
             let mut reasons = src.reasons.clone();
             reasons.extend(decoded.reason.clone());
-            let format = if p.bit_depth <= 8 {
-                PixelFormat::Yuv420p8
-            } else {
-                PixelFormat::Yuv420p10
-            };
             return Ok(native_video(
                 decoded,
                 reasons,
                 size.unwrap_or((p.width, p.height)),
                 fps.unwrap_or(p.fps),
-                format,
+                format_of(p),
                 frames,
             ));
         }
         Route::Ffmpeg => {}
     }
     let f = src.ffmpeg()?;
-    let format = if p.bit_depth > 8 {
-        PixelFormat::Yuv420p10
-    } else {
-        PixelFormat::Yuv420p8
-    };
+    let format = format_of(p);
     let (width, out_height) = size.unwrap_or((p.width, p.height));
     if width == 0 || out_height == 0 {
         return Err(Error::Invalid(format!("a picture of {width}x{out_height}")));
@@ -205,25 +188,23 @@ pub fn open(
         "-f".into(),
         "rawvideo".into(),
         "-pix_fmt".into(),
-        match format {
-            PixelFormat::Yuv420p8 => "yuv420p",
-            PixelFormat::Yuv420p10 => "yuv420p10le",
-        }
-        .into(),
+        pix_fmt(format).into(),
         "-".into(),
     ]);
     let child = f.spawn(&args, false, true)?;
     Ok(Video {
-        inner: Inner::Ffmpeg(child),
+        inner: Inner::Ffmpeg {
+            child,
+            next: frame_at(from.max(0.0), fps),
+            got: 0,
+        },
         route: Route::Ffmpeg,
         reasons: src.reasons.clone(),
         width,
         height: out_height,
         format,
         time_base: TimeBase::new(fps.1, fps.0),
-        next: (from.max(0.0) * fps.0 as f64 / fps.1.max(1) as f64).round() as i64,
         left: frames,
-        got: 0,
     })
 }
 
@@ -238,32 +219,24 @@ impl Video {
         if self.left == Some(0) {
             return Ok(None);
         }
-        let child = match &mut self.inner {
-            Inner::Ffmpeg(child) => child,
+        let (child, next, got) = match &mut self.inner {
+            Inner::Ffmpeg { child, next, got } => (child, next, got),
             Inner::Native(frames, fps) => {
                 let Some(mut frame) = frames.next_frame()? else {
                     return Ok(None);
                 };
-                let seconds = frames.seconds(frame.pts);
-                frame.pts = (seconds * fps.0 as f64 / fps.1.max(1) as f64).round() as i64;
+                frame.pts = frame_at(frames.seconds(frame.pts), *fps);
                 frame.time_base = self.time_base;
                 if (frame.width, frame.height) != (self.width, self.height) {
                     frame = resize(&frame, self.width, self.height);
                 }
-                self.got += 1;
                 if let Some(n) = self.left.as_mut() {
                     *n -= 1;
                 }
                 return Ok(Some(frame));
             }
         };
-        let mut frame = Frame::new(
-            self.format,
-            self.width,
-            self.height,
-            self.next,
-            self.time_base,
-        );
+        let mut frame = Frame::new(self.format, self.width, self.height, *next, self.time_base);
         let Some(out) = child.stdout.as_mut() else {
             return Ok(None);
         };
@@ -273,7 +246,7 @@ impl Video {
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof && i == 0 => {
                     self.left = Some(0);
                     let err = child.stderr_now();
-                    if !err.is_empty() && self.got == 0 {
+                    if !err.is_empty() && *got == 0 {
                         return Err(Error::Backend(format!("ffmpeg: {err}")));
                     }
                     return Ok(None);
@@ -281,8 +254,8 @@ impl Video {
                 Err(e) => return Err(Error::Io(e)),
             }
         }
-        self.next += 1;
-        self.got += 1;
+        *next += 1;
+        *got += 1;
         if let Some(n) = self.left.as_mut() {
             *n -= 1;
         }
@@ -358,8 +331,16 @@ impl std::fmt::Debug for GpuVideo {
     }
 }
 
-fn even(v: u32) -> u32 {
-    v.max(2) & !1
+fn format_of(p: &Probe) -> PixelFormat {
+    if p.bit_depth > 8 {
+        PixelFormat::Yuv420p10
+    } else {
+        PixelFormat::Yuv420p8
+    }
+}
+
+pub(super) fn frame_at(seconds: f64, fps: (u32, u32)) -> i64 {
+    (seconds * fps.0 as f64 / fps.1.max(1) as f64).round() as i64
 }
 
 fn stream_color(src: &Source) -> Color {
@@ -378,30 +359,16 @@ pub fn decode_video_gpu(
     prefs: &Prefs,
 ) -> Result<GpuVideo> {
     let src = source(path, prefs)?;
-    open_gpu(&src, from, size, None)
-}
-
-pub fn open_gpu(
-    src: &Source,
-    from: f64,
-    size: Option<(u32, u32)>,
-    fps: Option<(u32, u32)>,
-) -> Result<GpuVideo> {
     let p = &src.probe;
     let size = size
         .filter(|&(w, h)| w > 0 && h > 0)
         .map(|(w, h)| (even(w), even(h)))
         .unwrap_or((p.width, p.height));
-    let fps = fps.unwrap_or(p.fps);
-    let color = stream_color(src);
-    let format = if p.bit_depth <= 8 {
-        PixelFormat::Yuv420p8
-    } else {
-        PixelFormat::Yuv420p10
-    };
+    let fps = p.fps;
+    let color = stream_color(&src);
+    let format = format_of(p);
     if src.route == Route::Gpu {
-        let frames =
-            native::Frames::open(src.demux()?.clone(), from, native::threads(), Route::Gpu)?;
+        let frames = native::Frames::open(src.demux()?.clone(), from, Route::Gpu)?;
         let mut reasons = src.reasons.clone();
         reasons.extend(frames.reason.clone());
         if frames.route() == Route::Gpu {
@@ -437,7 +404,7 @@ pub fn open_gpu(
         let video = native_video(frames, reasons, size, fps, format, None);
         return Ok(GpuVideo::cpu(video, color));
     }
-    let video = open(src, from, None, Some(size), Some(fps))?;
+    let video = open(&src, from, None, Some(size), Some(fps))?;
     Ok(GpuVideo::cpu(video, color))
 }
 
@@ -457,9 +424,7 @@ fn native_video(
         height: size.1,
         format,
         time_base: TimeBase::new(fps.1, fps.0),
-        next: 0,
         left,
-        got: 0,
     }
 }
 
@@ -505,8 +470,7 @@ impl GpuVideo {
         let Some(mut frame) = frames.next_gpu()? else {
             return Ok(None);
         };
-        let seconds = frames.seconds(frame.pts());
-        let pts = (seconds * fps.0 as f64 / fps.1.max(1) as f64).round() as i64;
+        let pts = frame_at(frames.seconds(frame.pts()), fps);
         if !frame.on_gpu() {
             let Some(mut cpu) = frame.into_cpu() else {
                 return Ok(None);

@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock, PoisonError};
-use std::time::SystemTime;
+use std::path::Path;
+use std::sync::{LazyLock, Mutex, PoisonError};
 
 use super::ffmpeg::{Ffmpeg, codec_of};
+use super::native::{Key, key, sorted};
 use super::route::Prefs;
 use crate::media::{Codec, Error, Result};
 
@@ -49,74 +49,59 @@ pub struct AudioTrack {
     pub default: bool,
 }
 
-type Key = (PathBuf, u64, Option<SystemTime>);
-
+#[derive(Default)]
 struct Known {
     probe: Option<Probe>,
     keys: Option<Vec<f64>>,
 }
 
-fn known() -> &'static Mutex<HashMap<Key, Known>> {
-    static KNOWN: OnceLock<Mutex<HashMap<Key, Known>>> = OnceLock::new();
-    KNOWN.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn key(path: &Path) -> Result<Key> {
-    let meta = std::fs::metadata(path).map_err(|e| Error::at(path, e))?;
-    Ok((path.to_path_buf(), meta.len(), meta.modified().ok()))
-}
-
-fn remember(k: Key, f: impl FnOnce(&mut Known)) {
-    let mut map = known().lock().unwrap_or_else(PoisonError::into_inner);
+fn known<T: Clone>(
+    path: &Path,
+    field: fn(&mut Known) -> &mut Option<T>,
+    make: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    static KNOWN: LazyLock<Mutex<HashMap<Key, Known>>> = LazyLock::new(Default::default);
+    let k = key(path)?;
+    if let Some(v) = KNOWN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get_mut(&k)
+        .and_then(|e| field(e).clone())
+    {
+        return Ok(v);
+    }
+    let v = make()?;
+    let mut map = KNOWN.lock().unwrap_or_else(PoisonError::into_inner);
     if map.len() > 4096 {
         map.clear();
     }
-    f(map.entry(k).or_insert(Known {
-        probe: None,
-        keys: None,
-    }));
+    *field(map.entry(k).or_default()) = Some(v.clone());
+    Ok(v)
 }
 
 pub fn probe(path: &Path, prefs: &Prefs) -> Result<Probe> {
-    let k = key(path)?;
-    if let Some(p) = known()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&k)
-        .and_then(|e| e.probe.clone())
-    {
-        return Ok(p);
-    }
-    let p = match super::native::probe(path) {
-        Ok(p) => p,
-        Err(native) => match container_ffmpeg(prefs) {
-            Ok(f) => from_flat(&f.probe_flat(&["-show_format", "-show_streams"], path)?)?,
-            Err(_) => return Err(native),
+    known(
+        path,
+        |k| &mut k.probe,
+        || match super::native::probe(path) {
+            Ok(p) => Ok(p),
+            Err(native) => match container_ffmpeg(prefs) {
+                Ok(f) => from_flat(&f.probe_flat(&["-show_format", "-show_streams"], path)?),
+                Err(_) => Err(native),
+            },
         },
-    };
-    remember(k, |e| e.probe = Some(p.clone()));
-    Ok(p)
+    )
 }
 
 pub fn keyframes(path: &Path, prefs: &Prefs) -> Result<Vec<f64>> {
-    let k = key(path)?;
-    if let Some(keys) = known()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&k)
-        .and_then(|e| e.keys.clone())
-    {
-        return Ok(keys);
-    }
-    let keys = match super::native::keyframes(path) {
-        Ok(k) => k,
-        Err(native) => match keyframes_of(path, prefs) {
-            Ok(k) => k,
-            Err(_) => return Err(native),
+    known(
+        path,
+        |k| &mut k.keys,
+        || match super::native::keyframes(path) {
+            Ok(k) => Ok(k),
+            Err(native) => keyframes_of(path, prefs).map_err(|_| native),
         },
-    };
-    remember(k, |e| e.keys = Some(keys.clone()));
-    Ok(keys)
+    )
 }
 
 fn keyframes_of(path: &Path, prefs: &Prefs) -> Result<Vec<f64>> {
@@ -130,17 +115,16 @@ fn keyframes_of(path: &Path, prefs: &Prefs) -> Result<Vec<f64>> {
         ],
         path,
     )?;
-    let mut keys: Vec<f64> = listing
-        .lines()
-        .filter_map(|l| {
-            let (t, flags) = l.trim().split_once(',')?;
-            flags.contains('K').then_some(())?;
-            t.parse::<f64>().ok().filter(|t| *t >= 0.0)
-        })
-        .collect();
-    keys.sort_by(f64::total_cmp);
-    keys.dedup();
-    Ok(keys)
+    Ok(sorted(
+        listing
+            .lines()
+            .filter_map(|l| {
+                let (t, flags) = l.trim().split_once(',')?;
+                flags.contains('K').then_some(())?;
+                t.parse::<f64>().ok().filter(|t| *t >= 0.0)
+            })
+            .collect(),
+    ))
 }
 
 pub(crate) fn container_ffmpeg(prefs: &Prefs) -> Result<Ffmpeg> {

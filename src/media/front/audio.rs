@@ -2,6 +2,7 @@ use std::path::Path;
 
 use rayon::prelude::*;
 
+use super::ffmpeg::Ffmpeg;
 use super::probe::{container_ffmpeg, probe};
 use super::route::{Caps, Prefs, pick_decode};
 use crate::media::{AudioBuffer, Codec, Error, Result, Route};
@@ -49,12 +50,37 @@ pub fn audio_pcm_range(
     if end.is_some_and(|e| e <= start) {
         return Ok(AudioBuffer::new(rate, channels));
     }
+    let buf = ffmpeg_pcm(
+        &f,
+        path,
+        track,
+        (from > 0.0).then_some(from),
+        end.map(|_| to - from),
+        rate,
+        channels,
+    )?;
+    Ok(super::native::cut(
+        buf,
+        0,
+        end.map(|e| e.saturating_sub(start)),
+    ))
+}
+
+pub(super) fn ffmpeg_pcm(
+    f: &Ffmpeg,
+    path: &Path,
+    track: usize,
+    from: Option<f64>,
+    seconds: Option<f64>,
+    rate: u32,
+    channels: u16,
+) -> Result<AudioBuffer> {
     let mut args: Vec<String> = Vec::new();
-    if from > 0.0 {
+    if let Some(from) = from {
         args.extend(["-ss".into(), format!("{from:.6}")]);
     }
-    if end.is_some() {
-        args.extend(["-t".into(), format!("{:.6}", to - from)]);
+    if let Some(seconds) = seconds {
+        args.extend(["-t".into(), format!("{seconds:.6}")]);
     }
     args.extend([
         "-i".into(),
@@ -76,11 +102,7 @@ pub fn audio_pcm_range(
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
-    Ok(super::native::cut(
-        buf,
-        0,
-        end.map(|e| e.saturating_sub(start)),
-    ))
+    Ok(buf)
 }
 
 pub fn audio_mix(

@@ -3,11 +3,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::ffmpeg::{Child, Ffmpeg};
+use super::ffmpeg::{Child, Ffmpeg, pix_fmt};
 use super::picture::Blender;
 use super::probe::keyframes;
 use super::route::{Caps, Picked, Prefs, pick_encode};
-use super::video::{Source, open, source};
+use super::video::{Source, frame_at, open, source};
 use crate::media::{Codec, Error, Frame, PixelFormat, Result, Rgba, Route};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -76,6 +76,14 @@ pub enum Part {
     Encode { from: i64, frames: i64 },
 }
 
+impl Part {
+    pub(super) fn frames(self) -> i64 {
+        match self {
+            Part::Copy { frames, .. } | Part::Encode { frames, .. } => frames,
+        }
+    }
+}
+
 pub fn parts(in_f: i64, out_f: i64, keys: &[i64]) -> Vec<Part> {
     if out_f <= in_f {
         return Vec::new();
@@ -115,6 +123,7 @@ pub fn parts(in_f: i64, out_f: i64, keys: &[i64]) -> Vec<Part> {
     out
 }
 
+#[derive(Clone)]
 pub(super) struct Job<'a> {
     pub(super) pieces: &'a [Piece],
     pub(super) sources: Vec<Source>,
@@ -130,9 +139,70 @@ pub(super) struct Job<'a> {
 
 pub(super) type Tell<'a> = &'a mut dyn FnMut(&Progress) -> bool;
 
+pub(super) type Plan = (Vec<(usize, Part)>, Vec<usize>);
+
 impl Job<'_> {
     pub(super) fn frame_of(&self, seconds: f64) -> i64 {
-        (seconds * self.fps.0 as f64 / self.fps.1 as f64).round() as i64
+        frame_at(seconds, self.fps)
+    }
+
+    pub(super) fn span(&self, piece: &Piece) -> (i64, i64) {
+        (self.frame_of(piece.from), self.frame_of(piece.to))
+    }
+
+    pub(super) fn quiet(&self) -> Self {
+        Job {
+            total: 0,
+            done: 0,
+            ..self.clone()
+        }
+    }
+
+    pub(super) fn plan(
+        &self,
+        prefs: &Prefs,
+        mut split: impl FnMut(usize, Part, &[i64]) -> Result<Vec<Part>>,
+    ) -> Result<Plan> {
+        let mut keys: HashMap<usize, Vec<i64>> = HashMap::new();
+        let mut plan: Vec<(usize, Part)> = Vec::new();
+        let mut order = Vec::new();
+        for (n, piece) in self.pieces.iter().enumerate() {
+            let si = self.index[n];
+            if let std::collections::hash_map::Entry::Vacant(slot) = keys.entry(si) {
+                slot.insert(
+                    keyframes(&self.sources[si].path, prefs)?
+                        .into_iter()
+                        .map(|t| self.frame_of(t))
+                        .collect(),
+                );
+            }
+            let (a, b) = self.span(piece);
+            for part in parts(a, b, &keys[&si]) {
+                for p in split(si, part, &keys[&si])? {
+                    let i = match plan.iter().position(|q| *q == (si, p)) {
+                        Some(i) => i,
+                        None => {
+                            plan.push((si, p));
+                            plan.len() - 1
+                        }
+                    };
+                    order.push(i);
+                }
+            }
+        }
+        Ok((plan, order))
+    }
+
+    pub(super) fn finish(&self, progress: Tell) -> Result<()> {
+        if progress(&Progress {
+            stage: Stage::Joining,
+            done: 1.0,
+            encoder: self.route,
+        }) {
+            Ok(())
+        } else {
+            Err(Error::Cancelled)
+        }
     }
 
     pub(super) fn seconds(&self, frames: i64) -> f64 {
@@ -256,7 +326,7 @@ pub fn export(
             ));
         }
     };
-    let smart = smart && (ffmpeg.is_some() || sources.iter().all(|s| s.reader.is_some()));
+    let smart = smart && (ffmpeg.is_some() || sources.iter().all(|s| s.mp4().is_some()));
     let work = std::path::absolute(out.with_extension("parts"))?;
     if work.exists() {
         std::fs::remove_dir_all(&work).map_err(|e| Error::at(&work, e))?;
@@ -315,44 +385,19 @@ fn run(
     let (mut copied, mut encoded) = (0u64, 0u64);
     let mut list = String::new();
     if smart {
-        let mut keys: HashMap<usize, Vec<i64>> = HashMap::new();
-        let mut plan: Vec<(usize, Part)> = Vec::new();
-        for (n, piece) in job.pieces.iter().enumerate() {
-            let si = job.index[n];
-            if let std::collections::hash_map::Entry::Vacant(slot) = keys.entry(si) {
-                slot.insert(
-                    keyframes(&job.sources[si].path, &opts.prefs)?
-                        .into_iter()
-                        .map(|t| job.frame_of(t))
-                        .collect(),
-                );
-            }
-            let (a, b) = (job.frame_of(piece.from), job.frame_of(piece.to));
-            for part in parts(a, b, &keys[&si]) {
-                let file = match plan.iter().position(|q| *q == (si, part)) {
-                    Some(i) => job.work.join(format!("part-{i:05}.ts")),
-                    None => {
-                        plan.push((si, part));
-                        job.work.join(format!("part-{:05}.ts", plan.len() - 1))
-                    }
-                };
-                list.push_str(&format!("file '{}'\n", file.display()));
-                match part {
-                    Part::Copy { frames, .. } => copied += frames as u64,
-                    Part::Encode { frames, .. } => encoded += frames as u64,
-                }
+        let (plan, order) = job.plan(&opts.prefs, |_, p, _| Ok(vec![p]))?;
+        for &i in &order {
+            let file = job.work.join(format!("part-{i:05}.ts"));
+            list.push_str(&format!("file '{}'\n", file.display()));
+            match plan[i].1 {
+                Part::Copy { frames, .. } => copied += frames as u64,
+                Part::Encode { frames, .. } => encoded += frames as u64,
             }
         }
-        let tail = edge_tail(f, job, video, opts.crf)?;
+        let tail = tail(f, job, video, opts.crf, true)?;
         let mix = job.work.join("mix.m4a");
         let mix_args = mix_args(job, opts, &mix);
-        let total: i64 = plan
-            .iter()
-            .map(|(_, p)| match p {
-                Part::Copy { frames, .. } | Part::Encode { frames, .. } => *frames,
-            })
-            .sum::<i64>()
-            .max(1);
+        let total: i64 = plan.iter().map(|(_, p)| p.frames()).sum::<i64>().max(1);
         let next = std::sync::atomic::AtomicUsize::new(0);
         let stop = std::sync::atomic::AtomicBool::new(false);
         let (tx, rx) = std::sync::mpsc::channel::<Result<i64>>();
@@ -426,10 +471,10 @@ fn run(
     } else {
         job.tell(progress, Stage::Encoding)?;
         let file = job.work.join("whole.ts");
-        let mut enc = Encoder::open(f, job, video, opts.crf, false, &file)?;
+        let mut enc = Encoder::open(f, job, video, opts.crf, &file)?;
         let mut at = 0i64;
         for (n, piece) in job.pieces.iter().enumerate() {
-            let (a, b) = (job.frame_of(piece.from), job.frame_of(piece.to));
+            let (a, b) = job.span(piece);
             reencode(
                 job,
                 job.index[n],
@@ -500,14 +545,7 @@ fn join(
     ]);
     f.run_args(&join)?;
     std::fs::rename(&part, out).map_err(|e| Error::at(out, e))?;
-    if !progress(&Progress {
-        stage: Stage::Joining,
-        done: 1.0,
-        encoder: Route::Ffmpeg,
-    }) {
-        return Err(Error::Cancelled);
-    }
-    Ok(())
+    job.finish(progress)
 }
 
 fn copy(f: &Ffmpeg, job: &Job, si: usize, from: i64, frames: i64, file: &Path) -> Result<()> {
@@ -606,22 +644,20 @@ fn convert_depth(frame: &Frame, format: PixelFormat) -> Frame {
         frame.time_base,
     );
     for (o, i) in out.planes.iter_mut().zip(&frame.planes) {
-        for y in 0..i.height {
-            for x in 0..i.width {
-                let v = match frame.format {
-                    PixelFormat::Yuv420p8 => i.data[y * i.stride + x] as u16 * 4,
-                    PixelFormat::Yuv420p10 => {
-                        let k = y * i.stride + x * 2;
-                        u16::from_le_bytes([i.data[k], i.data[k + 1]])
+        let rows = o
+            .data
+            .chunks_mut(o.stride.max(1))
+            .zip(i.data.chunks(i.stride.max(1)));
+        for (dst, src) in rows.take(i.height) {
+            match format {
+                PixelFormat::Yuv420p8 => {
+                    for (d, s) in dst.iter_mut().zip(src.chunks_exact(2)).take(i.width) {
+                        *d = ((u16::from_le_bytes([s[0], s[1]]) + 2) / 4).min(255) as u8;
                     }
-                };
-                match format {
-                    PixelFormat::Yuv420p8 => {
-                        o.data[y * o.stride + x] = ((v + 2) / 4).min(255) as u8;
-                    }
-                    PixelFormat::Yuv420p10 => {
-                        let k = y * o.stride + x * 2;
-                        o.data[k..k + 2].copy_from_slice(&v.to_le_bytes());
+                }
+                PixelFormat::Yuv420p10 => {
+                    for (d, &s) in dst.chunks_exact_mut(2).zip(src).take(i.width) {
+                        d.copy_from_slice(&(s as u16 * 4).to_le_bytes());
                     }
                 }
             }
@@ -671,10 +707,6 @@ fn tail(f: &Ffmpeg, job: &Job, video: &Picked, crf: u8, edge: bool) -> Result<Ta
     Ok(Tail { pre, post })
 }
 
-fn edge_tail(f: &Ffmpeg, job: &Job, video: &Picked, crf: u8) -> Result<Tail> {
-    tail(f, job, video, crf, true)
-}
-
 fn edge(
     f: &Ffmpeg,
     job: &Job,
@@ -706,19 +738,9 @@ fn edge(
 }
 
 impl Encoder {
-    fn open(
-        f: &Ffmpeg,
-        job: &Job,
-        video: &Picked,
-        crf: u8,
-        edge: bool,
-        file: &Path,
-    ) -> Result<Encoder> {
-        let t = tail(f, job, video, crf, edge)?;
-        let pix = match job.format {
-            PixelFormat::Yuv420p8 => "yuv420p",
-            PixelFormat::Yuv420p10 => "yuv420p10le",
-        };
+    fn open(f: &Ffmpeg, job: &Job, video: &Picked, crf: u8, file: &Path) -> Result<Encoder> {
+        let t = tail(f, job, video, crf, false)?;
+        let pix = pix_fmt(job.format);
         let mut args = t.pre;
         args.extend([
             "-f".into(),
@@ -744,12 +766,7 @@ impl Encoder {
             return Err(Error::Backend("ffmpeg closed its input".to_string()));
         };
         for p in &frame.planes {
-            let row = p.width
-                * if frame.format == PixelFormat::Yuv420p10 {
-                    2
-                } else {
-                    1
-                };
+            let row = p.width * frame.format.bytes_per_sample();
             let ok = if p.stride == row {
                 input.write_all(&p.data)
             } else {
@@ -775,7 +792,6 @@ fn encoder_args(name: &str, codec: Codec, crf: u8, job: &Job, edge: bool) -> Vec
     let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
     let crf_edge = if edge { crf.saturating_sub(2) } else { crf };
     let q = crf_edge.to_string();
-    let ten = job.format == PixelFormat::Yuv420p10;
     let mut a = s(&["-c:v", name]);
     match name {
         "libx264" => a.extend(s(&[
@@ -792,7 +808,7 @@ fn encoder_args(name: &str, codec: Codec, crf: u8, job: &Job, edge: bool) -> Vec
             "-crf",
             &q,
             "-pix_fmt",
-            if ten { "yuv420p10le" } else { "yuv420p" },
+            pix_fmt(job.format),
             "-x265-params",
             "log-level=error",
         ])),
@@ -829,7 +845,7 @@ fn mix_args(job: &Job, opts: &ExportOptions, out: &Path) -> Vec<String> {
     let mut joined = String::new();
     for (i, piece) in job.pieces.iter().enumerate() {
         let src = &job.sources[job.index[i]];
-        let (a, b) = (job.frame_of(piece.from), job.frame_of(piece.to));
+        let (a, b) = job.span(piece);
         let start = job.seconds(a);
         let dur = job.seconds(b - a);
         args.extend([

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, PoisonError};
 use std::time::SystemTime;
 
 use rayon::prelude::*;
@@ -10,7 +10,7 @@ use crate::mp4::{CodecConfig, Reader, Track};
 
 use super::demux::{self, Demux, Stream};
 
-use super::picture::{Color, rotate, to_rgba_color};
+use super::picture::{Color, fit_width, rotate, to_rgba_color};
 use super::probe::{AudioTrack, Probe};
 use crate::media::{AudioBuffer, Codec, Direction, Error, Frame, Packet, Result, Rgba, Route};
 
@@ -55,30 +55,40 @@ pub fn cpu() -> Vec<(Codec, Direction)> {
     ]
 }
 
-type Key = (PathBuf, u64, Option<SystemTime>);
+pub(super) type Key = (PathBuf, u64, Option<SystemTime>);
 
-fn readers() -> &'static Mutex<HashMap<Key, Arc<Reader>>> {
-    static READERS: OnceLock<Mutex<HashMap<Key, Arc<Reader>>>> = OnceLock::new();
-    READERS.get_or_init(|| Mutex::new(HashMap::new()))
+pub(super) fn key(path: &Path) -> Result<Key> {
+    let meta = std::fs::metadata(path).map_err(|e| Error::at(path, e))?;
+    Ok((path.to_path_buf(), meta.len(), meta.modified().ok()))
 }
 
-pub fn reader(path: &Path) -> Result<Arc<Reader>> {
-    let meta = std::fs::metadata(path).map_err(|e| Error::at(path, e))?;
-    let key = (path.to_path_buf(), meta.len(), meta.modified().ok());
-    if let Some(r) = readers()
+pub(super) type Readers<R> = LazyLock<Mutex<HashMap<Key, Arc<R>>>>;
+
+pub(super) fn cached<R>(
+    readers: &Readers<R>,
+    path: &Path,
+    open: impl FnOnce(&Path) -> Result<R>,
+) -> Result<Arc<R>> {
+    let key = key(path)?;
+    if let Some(r) = readers
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .get(&key)
     {
         return Ok(r.clone());
     }
-    let r = Arc::new(Reader::open(path)?);
-    let mut map = readers().lock().unwrap_or_else(PoisonError::into_inner);
+    let r = Arc::new(open(path)?);
+    let mut map = readers.lock().unwrap_or_else(PoisonError::into_inner);
     if map.len() >= 64 {
         map.clear();
     }
     map.insert(key, r.clone());
     Ok(r)
+}
+
+pub fn reader(path: &Path) -> Result<Arc<Reader>> {
+    static READERS: Readers<Reader> = LazyLock::new(Default::default);
+    cached(&READERS, path, |p| Reader::open(p))
 }
 
 pub fn rational(fps: f64) -> (u32, u32) {
@@ -96,17 +106,25 @@ pub fn rational(fps: f64) -> (u32, u32) {
     (((fps * 1000.0).round() as u32).max(1), 1000)
 }
 
-fn video_track(r: &Reader) -> Result<(usize, &Track)> {
+pub(super) fn video_track(r: &Reader) -> Result<(usize, &Track)> {
     let v = r
         .video()
         .ok_or_else(|| Error::Invalid("no video track".to_string()))?;
     Ok((v, &r.tracks[v]))
 }
 
-const GENERIC: [&str; 8] = [
+pub(super) fn gop_start(t: &Track, seconds: f64) -> usize {
+    t.keyframe_before(t.sample_at(t.ticks(seconds)).unwrap_or(0))
+}
+
+pub(super) fn sorted(mut keys: Vec<f64>) -> Vec<f64> {
+    keys.sort_by(f64::total_cmp);
+    keys.dedup();
+    keys
+}
+
+const GENERIC: [&str; 6] = [
     "handler",
-    "soundhandler",
-    "videohandler",
     "gpac",
     "l-smash",
     "core media",
@@ -137,12 +155,12 @@ pub fn probe(path: &Path) -> Result<Probe> {
         .map(|(index, i)| {
             let a = &r.tracks[i];
             let name = a.name.trim();
+            let lower = name.to_lowercase();
             AudioTrack {
                 index,
                 stream: i,
-                title: (!name.is_empty()
-                    && !GENERIC.iter().any(|g| name.to_lowercase().contains(g)))
-                .then(|| name.to_string()),
+                title: (!name.is_empty() && !GENERIC.iter().any(|g| lower.contains(g)))
+                    .then(|| name.to_string()),
                 language: (!a.language.is_empty() && a.language != "und")
                     .then(|| a.language.clone()),
                 codec: a.config().map(|c| c.name()).unwrap_or_default(),
@@ -174,15 +192,13 @@ pub fn keyframes(path: &Path) -> Result<Vec<f64>> {
         Demux::Mkv(r) => return demux::keyframes(&r),
     };
     let (_, t) = video_track(&r)?;
-    let mut keys: Vec<f64> = t
-        .keyframes()
-        .iter()
-        .filter_map(|&k| t.presentation(k as usize))
-        .map(|p| t.seconds(p).max(0.0))
-        .collect();
-    keys.sort_by(f64::total_cmp);
-    keys.dedup();
-    Ok(keys)
+    Ok(sorted(
+        t.keyframes()
+            .iter()
+            .filter_map(|&k| t.presentation(k as usize))
+            .map(|p| t.seconds(p).max(0.0))
+            .collect(),
+    ))
 }
 
 pub enum Decoder {
@@ -361,9 +377,9 @@ pub struct Frames {
 }
 
 impl Frames {
-    pub fn open(demux: Demux, from: f64, threads: usize, route: Route) -> Result<Frames> {
+    pub fn open(demux: Demux, from: f64, route: Route) -> Result<Frames> {
         let track = demux.video()?;
-        let (dec, reason) = Decoder::for_route(&demux.stream(track)?, threads, route)?;
+        let (dec, reason) = Decoder::for_route(&demux.stream(track)?, threads(), route)?;
         let (next, start) = demux.seek(track, from)?;
         Ok(Frames {
             reason,
@@ -460,8 +476,7 @@ impl Frames {
 
 pub fn still(reader: &Reader, dec: &mut Decoder, at: f64, height: u32) -> Result<Rgba> {
     let (track, t) = video_track(reader)?;
-    let i = t.keyframe_before(t.sample_at(t.ticks(at.max(0.0))).unwrap_or(0));
-    let packet = reader.packet(track, i)?;
+    let packet = reader.packet(track, gop_start(t, at.max(0.0)))?;
     let mut frames = dec.decode(&packet)?;
     frames.extend(dec.flush()?);
     let mut frames = frames.into_iter();
@@ -473,8 +488,7 @@ pub fn still(reader: &Reader, dec: &mut Decoder, at: f64, height: u32) -> Result
     }
     let rotation = t.rotation();
     let pre = if rotation % 180 == 90 && frame.height > 0 {
-        let w = (height as u64 * frame.height as u64 / frame.width.max(1) as u64) as u32;
-        w.max(2) & !1
+        fit_width(frame.height, frame.width.max(1), height)
     } else {
         height
     };
@@ -558,7 +572,7 @@ fn piece(
     Ok(cut(buf, pad, end.map(|e| e - start)))
 }
 
-fn at_rate(buf: AudioBuffer, rate: u32) -> AudioBuffer {
+pub(super) fn at_rate(buf: AudioBuffer, rate: u32) -> AudioBuffer {
     if buf.rate == rate {
         buf
     } else {

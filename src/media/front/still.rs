@@ -39,8 +39,10 @@ pub fn frames_at(path: &Path, times: &[f64], height: u32, prefs: &Prefs) -> Resu
             let (src, next, out, times) = (&src, &next, &out, &times);
             s.spawn(move || {
                 let route = if w == 0 { src.route } else { Route::Cpu };
-                let mut dec = match (src.route, &src.reader) {
-                    (Route::Cpu | Route::Gpu, Some(r)) => native::still_decoder(r, route).ok(),
+                let mut dec = match (src.route, src.mp4()) {
+                    (Route::Cpu | Route::Gpu, Some(r)) => {
+                        native::still_decoder(r, route).ok().map(|d| (r, d))
+                    }
                     _ => None,
                 };
                 loop {
@@ -50,10 +52,7 @@ pub fn frames_at(path: &Path, times: &[f64], height: u32, prefs: &Prefs) -> Resu
                     let got =
                         std::panic::catch_unwind(AssertUnwindSafe(|| match (repeat, &mut dec) {
                             (true, _) => None,
-                            (false, Some(d)) => Some(match &src.reader {
-                                Some(r) => native::still(r, d, t, height),
-                                None => Err(src.native()),
-                            }),
+                            (false, Some((r, d))) => Some(native::still(r, d, t, height)),
                             (false, None) => Some(still(src, t, height)),
                         }));
                     let got = got.unwrap_or_else(|_| {
