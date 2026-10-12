@@ -508,24 +508,147 @@ fn picture(dec: &mut Decoder, packet: &Packet, rotation: u16, at: f64, height: u
     for f in frames {
         dec.recycle(f);
     }
+    let color = dec.color();
+    let img = rgba(&frame, rotation, height, color);
+    dec.recycle(frame);
+    Ok(img)
+}
+
+fn rgba(frame: &Frame, rotation: u16, height: u32, color: Color) -> Rgba {
     let pre = if rotation % 180 == 90 && frame.height > 0 {
         let w = (height as u64 * frame.height as u64 / frame.width.max(1) as u64) as u32;
         w.max(2) & !1
     } else {
         height
     };
-    let img = to_rgba_color(&frame, pre, dec.color());
-    dec.recycle(frame);
-    Ok(rotate(&img, rotation))
+    rotate(&to_rgba_color(frame, pre, color), rotation)
+}
+
+pub enum Packets<'a> {
+    Indexed {
+        d: &'a Demux,
+        track: usize,
+        next: usize,
+    },
+    Mkv {
+        r: &'a crate::mkv::Reader,
+        cur: &'a mut crate::mkv::Cursor,
+        track: usize,
+    },
+}
+
+impl Packets<'_> {
+    fn next(&mut self, buf: &mut Vec<u8>) -> Result<Option<(i64, i64, bool)>> {
+        match self {
+            Packets::Indexed { d, track, next } => {
+                let Some(s) = d.sample(*track, *next) else {
+                    return Ok(None);
+                };
+                d.read_into(*track, *next, buf)?;
+                *next += 1;
+                Ok(Some(s))
+            }
+            Packets::Mkv { r, cur, track } => Ok(cur
+                .next_of(r, Some(*track), buf)?
+                .map(|b| (b.pts, b.pts, b.keyframe))),
+        }
+    }
+}
+
+fn decode_any(dec: &mut Decoder, p: Option<&Packet>) -> Result<Vec<GpuFrame>> {
+    match (dec, p) {
+        (Decoder::Gpu(d), Some(p)) => d.decode_gpu(p),
+        (Decoder::Gpu(d), None) => d.flush_gpu(),
+        (d, Some(p)) => Ok(d.decode(p)?.into_iter().map(GpuFrame::cpu).collect()),
+        (d, None) => Ok(d.flush()?.into_iter().map(GpuFrame::cpu).collect()),
+    }
+}
+
+fn release(dec: &mut Decoder, f: GpuFrame) {
+    if !f.on_gpu()
+        && let Some(c) = f.into_cpu()
+    {
+        dec.recycle(c);
+    }
+}
+
+fn shown(dec: &Decoder, f: &GpuFrame, rotation: u16, height: u32, tagged: Color) -> Result<Rgba> {
+    let frame = f.download()?;
+    let color = match dec {
+        Decoder::Gpu(_) => tagged,
+        d => d.color(),
+    };
+    Ok(rgba(&frame, rotation, height, color))
+}
+
+pub fn exact(
+    src: &mut Packets,
+    dec: &mut Decoder,
+    targets: &[i64],
+    rotation: u16,
+    height: u32,
+    tagged: Color,
+) -> Result<Vec<Rgba>> {
+    let mut out: Vec<Rgba> = Vec::with_capacity(targets.len());
+    let mut held: Option<GpuFrame> = None;
+    let mut buf = Vec::new();
+    let mut flushed = false;
+    while out.len() < targets.len() && !flushed {
+        let frames = match src.next(&mut buf)? {
+            Some((pts, dts, keyframe)) => {
+                let p = Packet {
+                    data: std::mem::take(&mut buf),
+                    pts,
+                    dts,
+                    keyframe,
+                };
+                let got = decode_any(dec, Some(&p));
+                buf = p.data;
+                got?
+            }
+            None => {
+                flushed = true;
+                decode_any(dec, None)?
+            }
+        };
+        for f in frames {
+            while let Some(&t) = targets.get(out.len())
+                && f.pts() > t
+            {
+                let pick = held.as_ref().unwrap_or(&f);
+                out.push(shown(dec, pick, rotation, height, tagged)?);
+            }
+            if out.len() == targets.len() {
+                release(dec, f);
+            } else if let Some(old) = held.replace(f) {
+                release(dec, old);
+            }
+        }
+    }
+    while out.len() < targets.len() {
+        let pick = held
+            .as_ref()
+            .ok_or_else(|| Error::Invalid("no picture at that time".to_string()))?;
+        out.push(shown(dec, pick, rotation, height, tagged)?);
+    }
+    if let Some(h) = held.take() {
+        release(dec, h);
+    }
+    if !flushed {
+        for f in decode_any(dec, None)? {
+            release(dec, f);
+        }
+    }
+    Ok(out)
 }
 
 pub fn still_decoder(reader: &Arc<Reader>, route: Route) -> Result<Decoder> {
-    video_decoder(&Demux::Mp4(reader.clone()), route)
+    video_decoder(&Demux::Mp4(reader.clone()), route, 1)
 }
 
-pub fn video_decoder(demux: &Demux, route: Route) -> Result<Decoder> {
+pub fn video_decoder(demux: &Demux, route: Route, threads: usize) -> Result<Decoder> {
     let track = demux.video()?;
-    Ok(Decoder::for_route(&demux.stream(track)?, 1, route)?.0)
+    Ok(Decoder::for_route(&demux.stream(track)?, threads.max(1), route)?.0)
 }
 
 pub const PAD: f64 = 0.02;

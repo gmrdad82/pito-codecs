@@ -15,9 +15,9 @@ use std::process::Command;
 use std::sync::{Arc, OnceLock};
 
 use pito_codecs::media::{
-    AudioBuffer, Choice, Codec, ExportOptions, Frame, IN_FLIGHT, Piece, Prefs, Rgba, VideoFrame,
-    audio_mix, audio_pcm, audio_pcm_range, audio_stream, decode_video, decode_video_gpu, export,
-    first_frame, frames_at, probe,
+    AudioBuffer, Choice, Codec, ExportOptions, Frame, IN_FLIGHT, Piece, Prefs, Rgba, Seek,
+    VideoFrame, audio_mix, audio_pcm, audio_pcm_range, audio_stream, decode_video,
+    decode_video_gpu, export, first_frame, frames_at, frames_at_seek, probe,
 };
 
 fn have_ffmpeg() -> bool {
@@ -879,7 +879,7 @@ fn recording() -> &'static Path {
                     "-f",
                     "lavfi",
                     "-i",
-                    "anoisesrc=r=48000:d=180:a=0.3",
+                    "anoisesrc=r=48000:d=180:a=0.3:seed=7",
                     "-filter_complex",
                     "[1][2]amerge=inputs=2[a]",
                     "-map",
@@ -1054,4 +1054,54 @@ fn a_range_past_the_end_returns_only_what_the_track_has() {
     let whole = audio_pcm(clip(), 0, 48_000, false, &prefs).unwrap();
     let aac = audio_pcm_range(clip(), 0, 4.0, 16.0, 48_000, 2, &prefs).unwrap();
     assert_eq!(aac.frames(), whole.frames() - 4 * 48_000);
+}
+
+#[test]
+fn an_exact_still_inside_the_first_gop_of_a_fade_is_not_the_keyframe() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let cpu = Prefs {
+        decode: Choice::Cpu,
+        ..Prefs::default()
+    };
+    for name in ["fade-in.mp4", "fade-in.mkv"] {
+        let path = dir().join(name);
+        if !path.exists() {
+            ffmpeg_make(
+                &path,
+                &[
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=s=320x240:r=30:d=10,fade=in:0:90",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "ultrafast",
+                    "-bf",
+                    "2",
+                    "-g",
+                    "120",
+                    "-keyint_min",
+                    "120",
+                    "-sc_threshold",
+                    "0",
+                    "-pix_fmt",
+                    "yuv420p",
+                ],
+            );
+        }
+        let theirs = frames_at_seek(&path, &[1.5], 120, Seek::Exact, &Prefs::ffmpeg()).unwrap();
+        for prefs in [cpu.clone(), Prefs::default()] {
+            let key = frames_at(&path, &[1.5], 120, &prefs).unwrap();
+            assert!(!lit(&key[0]), "{name}: the keyframe at 0 is not black");
+            let ours =
+                frames_at_seek(&path, &[1.5, 0.5, 1.5, 6.0], 120, Seek::Exact, &prefs).unwrap();
+            assert!(lit(&ours[0]) && lit(&ours[3]), "{name}");
+            assert!(ours[0].data == ours[2].data && ours[0].data != ours[1].data);
+            let d = mean_diff(&ours[0], &theirs[0]);
+            assert!(d < 6.0, "{name}: {d}");
+        }
+    }
 }
