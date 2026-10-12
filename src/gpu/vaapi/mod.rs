@@ -114,6 +114,19 @@ fn backend(e: impl std::fmt::Display) -> Error {
     Error::Backend(e.to_string())
 }
 
+pub const MIN_WIDTH: u32 = 352;
+
+pub const MIN_HEIGHT: u32 = 240;
+
+pub fn large_enough(width: u32, height: u32) -> Result<()> {
+    if width < MIN_WIDTH || height < MIN_HEIGHT {
+        return Err(Error::Unsupported(format!(
+            "VA-API H.264 and HEVC take pictures from {MIN_WIDTH}x{MIN_HEIGHT}, not {width}x{height}: smaller ones faulted AMD's video engine"
+        )));
+    }
+    Ok(())
+}
+
 fn unsupported(what: &str) -> Error {
     Error::Unsupported(format!("the hardware decoder does not take {what}"))
 }
@@ -145,6 +158,7 @@ fn open_front(codec: Codec, framing: Framing, sets: &[Vec<u8>]) -> Result<(Front
                 crop: sps.crop_rect(),
                 bits: 8,
             };
+            large_enough(sps.width(), sps.height())?;
             let session = Session::new(profiles, (sps.width(), sps.height()), count, geometry)
                 .map_err(Error::Backend)?;
             let name = format!("VA-API H.264 ({})", session.vendor());
@@ -178,6 +192,7 @@ fn open_front(codec: Codec, framing: Framing, sets: &[Vec<u8>]) -> Result<(Front
                 crop: sps.crop_rect(),
                 bits,
             };
+            large_enough(sps.width, sps.height)?;
             let session = Session::new(profiles, size, count, geometry).map_err(Error::Backend)?;
             let name = format!("VA-API HEVC ({})", session.vendor());
             let front = hevc::Front::new(session, framing, size, bits, sets)?;

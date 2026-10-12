@@ -251,6 +251,7 @@ impl VaEncoder {
                 )));
             }
         }
+        super::large_enough(config.width, config.height)?;
         let (max_l0, max_l1) = if supported(entry[2]) {
             (entry[2] & 0xffff, (entry[2] >> 16) & 0xffff)
         } else {
