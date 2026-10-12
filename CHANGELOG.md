@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.0.5 — 2026-10-12
+
+Recordings of 100 GB and more: memory that doesn't grow with the file, fast probes with or without Cues, and exports that use about a quarter of the memory.
+
+### Added
+
+- `audio_mix_stream` streams the mix of every audio track, with the same rules as `audio_mix`.
+
+### Changed
+
+- `probe` of an MKV without Cues reads its head and tail: milliseconds instead of a pass over the whole file. `Probe.frames` is `None` there too; `frame_count` gives the count.
+- `keyframes` and `frame_count` read block headers in one sequential pass with bounded memory, and seeks in a Cue-less MKV bisect its clusters.
+- The full MKV index the media front builds holds video blocks only, about half the memory.
+- Exports write each re-encoded edge as it finishes, and a track mix streams in one-second steps, so a long export's peak memory stays near 0.2 GB.
+- Audio reads use large sequential windows, at disk speed.
+
+### Fixed
+
+- An exported MP4's mvhd, tkhd, mdhd and edit-list durations reach the last frame's end; they could be two frames short.
+- Every feature builds on its own.
+
 ## v1.0.4 — 2026-10-12
 
 Exports of MKV recordings smart-cut, every join is exact, and probing a large MKV reads only its head.
