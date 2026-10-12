@@ -1052,6 +1052,11 @@ impl Session {
         self.display.vendor()
     }
 
+    pub fn direct(&mut self) {
+        self.staged = false;
+        self.staging = None;
+    }
+
     fn image(&mut self) -> Result<VAImage, String> {
         if let Some(image) = self.image {
             return Ok(image);

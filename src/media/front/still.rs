@@ -286,7 +286,15 @@ fn mkv_stills(
     let stills = spread(
         jobs.len(),
         route,
-        |rt| (native::video_decoder(&d, rt, threads), mkv::Cursor::new(r)),
+        |rt| {
+            let dec = native::video_decoder(&d, rt, threads).map(|mut dec| {
+                if seek == Seek::Keyframe {
+                    dec.stills();
+                }
+                dec
+            });
+            (dec, mkv::Cursor::new(r))
+        },
         |(dec, cur), j| {
             let dec = dec.as_mut().map_err(|e| Error::Backend(e.to_string()))?;
             let batch = jobs.get(j).ok_or_else(failed)?;

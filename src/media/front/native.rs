@@ -270,6 +270,12 @@ impl Decoder {
         }
     }
 
+    pub fn stills(&mut self) {
+        if let Decoder::Gpu(d) = self {
+            d.stills();
+        }
+    }
+
     pub fn new(st: &Stream, threads: usize) -> Result<Decoder> {
         let tb = st.time_base;
         match (st.codec, &st.avc) {
@@ -665,7 +671,9 @@ pub fn exact(
 }
 
 pub fn still_decoder(reader: &Arc<Reader>, route: Route) -> Result<Decoder> {
-    video_decoder(&Demux::Mp4(reader.clone()), route, 1)
+    let mut dec = video_decoder(&Demux::Mp4(reader.clone()), route, 1)?;
+    dec.stills();
+    Ok(dec)
 }
 
 pub fn video_decoder(demux: &Demux, route: Route, threads: usize) -> Result<Decoder> {
