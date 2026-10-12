@@ -220,13 +220,21 @@ impl Lazy {
             Some(n0) => {
                 let origin = first_s;
                 let mut pos = 0u64;
+                let before = from - time_base.seconds(2);
                 if from > origin + n0 as f64 / rate
-                    && let Some((b, data)) = l.landing(from, ticks(from))?
+                    && let Some((b, data)) = l.landing(before, ticks(before))?
                 {
                     let n = sound.pcm_frames(data.len() as u32).unwrap_or(0);
                     let at = on_grid(time_base.seconds(b.pts), origin, n as f64 / rate);
-                    pos = ((at - origin) * rate).round().max(0.0) as u64;
-                    l.held.push_back((b, data));
+                    if at <= from {
+                        pos = ((at - origin) * rate).round().max(0.0) as u64;
+                        l.held.push_back((b, data));
+                    } else {
+                        l.spare.push(data);
+                        if let Some(b) = l.rewind()? {
+                            l.held.push_back(b);
+                        }
+                    }
                 }
                 loop {
                     if l.held.is_empty() {
@@ -324,13 +332,17 @@ impl Lazy {
     }
 
     fn restart(&mut self) -> Result<()> {
-        self.cur.rewind(&self.r);
-        self.eof = false;
-        self.prev = None;
-        if let Some((_, d)) = self.pull()? {
+        if let Some((_, d)) = self.rewind()? {
             self.spare.push(d);
         }
         Ok(())
+    }
+
+    fn rewind(&mut self) -> Result<Option<(Block, Vec<u8>)>> {
+        self.cur.rewind(&self.r);
+        self.eof = false;
+        self.prev = None;
+        self.pull()
     }
 
     fn pull(&mut self) -> Result<Option<(Block, Vec<u8>)>> {
