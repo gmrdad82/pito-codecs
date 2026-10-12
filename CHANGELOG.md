@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.1.0 — 2026-10-12
+
+One home for each shared public type. Every old path still compiles, marked deprecated.
+
+### Added
+
+- `media::length_prefixed_to_annexb`, `media::threads` and `mp4::AvcConfig::parameter_sets_annexb`, which `pcod` now uses instead of its own copies.
+
+### Changed
+
+- `Rgba`, `Rate` and `Bitstream` each live once in `media`. `filter::Rgba`, `webp::Rgba`, `h264::Rate`, `gpu::Rate`, `h264::Bitstream` and `gpu::Bitstream` are deprecated aliases of them, so existing code keeps compiling and values are interchangeable.
+- `media::Rate` and `media::Bitstream` derive `Hash`, and `media::Rgba` has `stride()`.
+
 ## v1.0.5 — 2026-10-12
 
 Recordings of 100 GB and more: memory that doesn't grow with the file, fast probes with or without Cues, and exports that use about a quarter of the memory.
