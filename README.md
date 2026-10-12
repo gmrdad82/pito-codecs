@@ -52,7 +52,7 @@ Where ffmpeg wins:
 
 ## What it is
 
-**Formats.** GPU means VA-API, VideoToolbox, NVENC or Media Foundation, as the Status section says; for containers and images, decode is reading and encode is writing.
+**Formats.** GPU means VA-API, VideoToolbox, NVENC or Media Foundation, as the Status section says; NVENC and Media Foundation are built and pass their unit tests but are untested on their hardware. For containers and images, decode is reading and encode is writing.
 
 | Format | Decode CPU | Decode GPU | Encode CPU | Encode GPU |
 | --- | --- | --- | --- | --- |
