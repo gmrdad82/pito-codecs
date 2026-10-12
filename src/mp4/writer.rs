@@ -769,7 +769,11 @@ impl<W: Write + Seek> Writer<W> {
 }
 
 impl<W: Read + Write + Seek> Writer<W> {
-    pub fn finish_faststart(mut self) -> Result<W> {
+    pub fn finish_faststart(self) -> Result<W> {
+        self.finish_faststart_with(|_, _| true)
+    }
+
+    pub fn finish_faststart_with(mut self, mut moved: impl FnMut(u64, u64) -> bool) -> Result<W> {
         self.finish_mdat()?;
         let mut moov = self.build_moov(0, false)?;
         let mut co64 = false;
@@ -794,6 +798,9 @@ impl<W: Read + Write + Seek> Writer<W> {
             self.w.read_exact(&mut buf[..n])?;
             self.w.seek(SeekFrom::Start(cur + shift))?;
             self.w.write_all(&buf[..n])?;
+            if !moved(end - cur, end - start) {
+                return Err(Error::Cancelled);
+            }
         }
         self.w.seek(SeekFrom::Start(start))?;
         self.w.write_all(&moov)?;

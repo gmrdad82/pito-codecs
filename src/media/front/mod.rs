@@ -3,6 +3,7 @@ mod demux;
 mod export;
 mod feed;
 mod ffmpeg;
+mod frames;
 #[cfg(test)]
 mod malformed;
 mod mux;
@@ -21,8 +22,9 @@ pub use export::{
     parts,
 };
 pub use ffmpeg::{Ffmpeg, Listed};
+pub use frames::{Canvas, export_frames};
 pub use picture::{
-    Color, blend, rotate, scale, scale_to_height, to_rgba, to_rgba_color, to_rgba_height,
+    Blender, Color, blend, rotate, scale, scale_to_height, to_rgba, to_rgba_color, to_rgba_height,
 };
 pub use probe::{AudioTrack, Probe, frame_count, keyframes, probe};
 pub use route::{Caps, Choice, Fallback, Picked, Prefs, UserFfmpeg, pick_decode, pick_encode};

@@ -20,7 +20,8 @@ pub struct Piece {
 }
 
 const MAX_SECONDS: f64 = 1e7;
-const MAX_FPS: u32 = 1000;
+pub(super) const MAX_FPS: u32 = 1000;
+pub(super) const WRITTEN: f32 = 0.95;
 
 pub type Overlay = Box<dyn FnMut(f64, u32, u32) -> Option<Arc<Rgba>> + Send>;
 
@@ -215,11 +216,10 @@ impl Job<'_> {
         let done = if self.total == 0 {
             0.0
         } else {
-            self.done as f32 / self.total as f32 * 0.9
+            (self.done as f32 / self.total as f32).min(1.0) * WRITTEN
         };
         let done = match stage {
-            Stage::Mixing => 0.9,
-            Stage::Joining => 0.95,
+            Stage::Mixing | Stage::Joining => WRITTEN,
             _ => done,
         };
         if progress(&Progress {
@@ -532,7 +532,7 @@ fn run(
                         piece: k + 1,
                         pieces: plan.len() + 1,
                     },
-                    done: done as f32 / total as f32 * 0.9,
+                    done: done as f32 / total as f32 * WRITTEN,
                     encoder: Route::Ffmpeg,
                 });
                 if !keep {

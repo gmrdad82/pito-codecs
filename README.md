@@ -209,6 +209,20 @@ Export an edit with audio you mixed yourself: the callback gets each piece's ind
 let done = export_with_audio("edit.mp4".as_ref(), &pieces, ExportOptions::default(), |piece, samples| mixer.render(piece, samples), |_| true)?;
 ```
 
+Export frames you made yourself, at your own size and rate: the frame callback gets each frame's index and the last frame back to reuse and returns `None` to end, and the audio callback gets the frames so far and the samples that cover them:
+
+```rust
+let canvas = Canvas { width: 1080, height: 1920, fps: (60, 1), frames: Some(600) };
+let done = export_frames("vertical.mp4".as_ref(), canvas, ExportOptions::default(), |n, spent| comp.render(n, spent), |frames, samples| mixer.render(frames, samples), |_| true)?;
+```
+
+Draw one RGBA overlay on many frames without copying it each time: a `Blender` keeps the overlay it was given, and an `Arc` of the same image draws straight away.
+
+```rust
+let mut blender = Blender::new();
+blender.draw(&mut frame, &watermark);
+```
+
 `pcod` (`src/bin/pcod.rs`) is a small command line over the library, and it is what the GIF above shows: `pcod decode clip.mp4 --route gpu`, or from a checkout `cargo run --release --bin pcod -- decode clip.mp4 --route gpu`. It is behind the `cli` feature, on by default, so a library user with `default-features = false` never builds clap.
 
 ## Routes
