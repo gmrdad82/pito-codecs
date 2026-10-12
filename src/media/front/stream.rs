@@ -6,7 +6,7 @@ use crate::aac::Resampler;
 use super::feed::Feed;
 use super::ffmpeg::Child;
 use super::native::{self, PAD, shape};
-use super::probe::container_ffmpeg;
+use super::probe::{container_ffmpeg, probe};
 use super::route::{Caps, Prefs, pick_decode};
 use super::sound::Sound;
 use crate::media::{AudioBuffer, Codec, Error, Result, Route};
@@ -31,7 +31,22 @@ impl std::fmt::Debug for AudioStream {
 enum Inner {
     Native(Box<Native>),
     Ffmpeg { child: Child, got: bool },
+    Mix(Vec<Part>),
     Done,
+}
+
+struct Part {
+    stream: AudioStream,
+    gain: f32,
+    pending: Vec<f32>,
+    at: usize,
+    ended: bool,
+}
+
+impl Part {
+    fn frames(&self) -> usize {
+        self.pending.len() / 2 - self.at
+    }
 }
 
 struct Native {
@@ -107,6 +122,83 @@ pub fn audio_stream(
         channels,
         inner: Inner::Ffmpeg { child, got: false },
     })
+}
+
+pub fn audio_mix_stream(
+    path: &Path,
+    gains: &[f32],
+    from: f64,
+    rate: u32,
+    prefs: &Prefs,
+) -> Result<AudioStream> {
+    if rate == 0 {
+        return Err(Error::Invalid(format!("a sample rate of {rate}")));
+    }
+    if !from.is_finite() {
+        return Err(Error::Invalid(format!("a stream from {from}")));
+    }
+    let mut parts = Vec::new();
+    for t in probe(path, prefs)?.audio {
+        let gain = gains.get(t.index).copied().unwrap_or(1.0);
+        if gain > 0.0 {
+            parts.push(Part {
+                stream: audio_stream(path, t.index, from, rate, 2, prefs)?,
+                gain,
+                pending: Vec::new(),
+                at: 0,
+                ended: false,
+            });
+        }
+    }
+    let route = if parts.iter().any(|p| p.stream.route == Route::Ffmpeg) {
+        Route::Ffmpeg
+    } else {
+        Route::Cpu
+    };
+    Ok(AudioStream {
+        route,
+        rate,
+        channels: 2,
+        inner: Inner::Mix(parts),
+    })
+}
+
+fn mix(parts: &mut [Part], rate: u32) -> Result<Option<AudioBuffer>> {
+    let want = rate as usize;
+    for p in parts.iter_mut() {
+        while !p.ended && p.frames() < want {
+            match p.stream.next() {
+                Some(b) => {
+                    if p.at > 0 {
+                        p.pending.drain(..p.at * 2);
+                        p.at = 0;
+                    }
+                    p.pending.extend_from_slice(&b?.samples);
+                }
+                None => p.ended = true,
+            }
+        }
+    }
+    let n = parts
+        .iter()
+        .map(|p| p.frames().min(want))
+        .max()
+        .unwrap_or(0);
+    if n == 0 {
+        return Ok(None);
+    }
+    let mut out = AudioBuffer::new(rate, 2);
+    out.samples = vec![0.0; n * 2];
+    for p in parts.iter_mut() {
+        let m = p.frames().min(n);
+        let from = p.at * 2;
+        let got = p.pending.get(from..from + m * 2).unwrap_or_default();
+        for (o, s) in out.samples.iter_mut().zip(got) {
+            *o += s * p.gain;
+        }
+        p.at += m;
+    }
+    Ok(Some(out))
 }
 
 impl Native {
@@ -245,6 +337,7 @@ impl AudioStream {
         let block = self.rate as usize * self.channels as usize * 4;
         match &mut self.inner {
             Inner::Native(n) => n.read(),
+            Inner::Mix(parts) => mix(parts, self.rate),
             Inner::Done => Ok(None),
             Inner::Ffmpeg { child, got } => {
                 let mut bytes = vec![0u8; block];

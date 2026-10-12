@@ -10,6 +10,7 @@ use crate::media::{Error, Packet, Result};
 use crate::mp4::{ByteSource, TrackKind};
 
 const WIN: usize = 64 * 1024;
+const MAX_WIN: usize = 4 << 20;
 const MAX_META: u64 = 256 << 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,6 +28,7 @@ impl Default for Options {
 pub(crate) struct Cache {
     buf: Vec<u8>,
     start: u64,
+    win: usize,
 }
 
 pub(crate) struct Io<'a, S: ByteSource + ?Sized> {
@@ -70,36 +72,72 @@ impl<'a, S: ByteSource + ?Sized> Io<'a, S> {
         Self { src, len, cache }
     }
 
+    pub(crate) fn with_len(src: &'a S, len: u64, cache: &'a mut Cache) -> Self {
+        Self { src, len, cache }
+    }
+
+    fn cached(&self, pos: u64, end: u64) -> Option<std::ops::Range<usize>> {
+        let c = &*self.cache;
+        let from = usize::try_from(pos.checked_sub(c.start)?).ok()?;
+        let to = usize::try_from(end.checked_sub(c.start)?).ok()?;
+        (from <= to && to <= c.buf.len()).then_some(from..to)
+    }
+
+    fn refill(&mut self, pos: u64) -> Result<()> {
+        let c = &*self.cache;
+        let end = c.start.saturating_add(c.buf.len() as u64);
+        let ahead = !c.buf.is_empty() && pos >= c.start && pos <= end.saturating_add(c.win as u64);
+        let win = if ahead {
+            c.win.saturating_mul(2).clamp(WIN, MAX_WIN)
+        } else {
+            WIN
+        };
+        let fill = self.len.saturating_sub(pos).min(win as u64) as usize;
+        let mut buf = std::mem::take(&mut self.cache.buf);
+        buf.resize(fill, 0);
+        let read = self.src.read_at(pos, &mut buf);
+        if read.is_err() {
+            buf.clear();
+        }
+        self.cache.buf = buf;
+        self.cache.start = pos;
+        self.cache.win = win;
+        Ok(read?)
+    }
+
     pub(crate) fn peek(&mut self, pos: u64, n: usize) -> Result<&[u8]> {
         let n = n.min(WIN);
         if pos >= self.len {
             return Ok(&[]);
         }
-        let want_end = (pos + n as u64).min(self.len);
-        let c = &*self.cache;
-        if !(pos >= c.start && want_end <= c.start + c.buf.len() as u64) {
-            let fill = ((self.len - pos) as usize).min(WIN);
-            let mut buf = std::mem::take(&mut self.cache.buf);
-            buf.resize(fill, 0);
-            self.src.read_at(pos, &mut buf)?;
-            self.cache.buf = buf;
-            self.cache.start = pos;
-        }
-        let o = (pos - self.cache.start) as usize;
-        Ok(&self.cache.buf[o..o + (want_end - pos) as usize])
+        let want_end = pos.saturating_add(n as u64).min(self.len);
+        let range = match self.cached(pos, want_end) {
+            Some(r) => r,
+            None => {
+                self.refill(pos)?;
+                self.cached(pos, want_end).ok_or_else(eof)?
+            }
+        };
+        self.cache.buf.get(range).ok_or_else(eof)
     }
 
     pub(crate) fn read_into(&mut self, pos: u64, n: u64, out: &mut Vec<u8>) -> Result<()> {
-        if pos.checked_add(n).is_none_or(|e| e > self.len) {
-            return Err(eof());
+        let end = pos
+            .checked_add(n)
+            .filter(|&e| e <= self.len)
+            .ok_or_else(eof)?;
+        if let Some(r) = self.cached(pos, end) {
+            out.extend_from_slice(self.cache.buf.get(r).unwrap_or_default());
+            return Ok(());
         }
-        let at = out.len();
-        if n as usize <= WIN / 2 {
-            let b = self.peek(pos, n as usize)?;
+        let n = usize::try_from(n).map_err(|_| eof())?;
+        if n <= WIN / 2 {
+            let b = self.peek(pos, n)?;
             out.extend_from_slice(b);
             return Ok(());
         }
-        out.resize(at + n as usize, 0);
+        let at = out.len();
+        out.resize(at.checked_add(n).ok_or_else(eof)?, 0);
         self.src.read_at(pos, &mut out[at..])?;
         Ok(())
     }
@@ -680,6 +718,24 @@ pub(crate) fn read_frame<S: ByteSource + ?Sized>(
     data.resize(prefix.len() + size as usize, 0);
     src.read_at(offset, &mut data[prefix.len()..])?;
     Ok(())
+}
+
+pub(crate) fn read_frame_io<S: ByteSource + ?Sized>(
+    io: &mut Io<'_, S>,
+    t: &Track,
+    offset: u64,
+    size: u32,
+    data: &mut Vec<u8>,
+) -> Result<()> {
+    if !t.frames_readable() {
+        return Err(Error::Unsupported(format!(
+            "compressed or encrypted frames in track {}",
+            t.number
+        )));
+    }
+    data.clear();
+    data.extend_from_slice(t.stripped_header().unwrap_or(&[]));
+    io.read_into(offset, size as u64, data)
 }
 
 fn fill_durations(t: &mut Track) {

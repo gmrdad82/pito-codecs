@@ -27,5 +27,5 @@ pub use picture::{
 pub use probe::{AudioTrack, Probe, frame_count, keyframes, probe};
 pub use route::{Caps, Choice, Fallback, Picked, Prefs, UserFfmpeg, pick_decode, pick_encode};
 pub use still::{Seek, first_frame, frames_at, frames_at_seek};
-pub use stream::{AudioStream, audio_stream};
+pub use stream::{AudioStream, audio_mix_stream, audio_stream};
 pub use video::{GpuVideo, IN_FLIGHT, Video, VideoFrame, decode_video, decode_video_gpu};

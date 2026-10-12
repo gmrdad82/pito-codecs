@@ -229,14 +229,23 @@ pub fn hevc_profile(c: &HevcConfig) -> (String, u8) {
     (name.to_string(), c.bit_depth_luma.max(8))
 }
 
+const TAIL_SPAN: u64 = 16 << 20;
+const MAX_TAIL_SPAN: u64 = 256 << 20;
+
+fn video_end(stream: &mut mkv::Stream<'_, std::fs::File>, v: usize) -> Result<Option<i64>> {
+    let mut end: Option<i64> = None;
+    while let Some(b) = stream.next_block(Some(v))? {
+        end = end.max(Some(b.pts.saturating_add(b.duration as i64)));
+    }
+    Ok(end)
+}
+
 pub fn probe_head(r: &mkv::Reader) -> Result<Option<Probe>> {
     let (v, t) = mkv_video(r)?;
     let Some(ns) = t.default_duration.filter(|d| *d > 0) else {
         return Ok(None);
     };
-    let Some(last) = r.cues.iter().rev().find(|c| c.track == t.number) else {
-        return Ok(None);
-    };
+    let last = r.cues.iter().rev().find(|c| c.track == t.number);
     let mut stream = r.stream();
     let mut data = Vec::new();
     let mut first: Option<Vec<u8>> = None;
@@ -258,13 +267,26 @@ pub fn probe_head(r: &mkv::Reader) -> Result<Option<Probe>> {
     if seen == 0 {
         return Ok(None);
     }
-    stream.seek(v, t.seconds(last.time as i64))?;
-    let mut end: Option<i64> = None;
-    while let Some(b) = stream.next_into(&mut data)? {
-        if b.track == v {
-            end = end.max(Some(b.pts.saturating_add(b.duration as i64)));
+    let end = match last {
+        Some(last) => {
+            stream.seek(v, t.seconds(last.time as i64))?;
+            video_end(&mut stream, v)?
         }
-    }
+        None => {
+            let mut span = TAIL_SPAN;
+            loop {
+                if stream.tail(span)?
+                    && let Some(end) = video_end(&mut stream, v)?
+                {
+                    break Some(end);
+                }
+                if span >= MAX_TAIL_SPAN || span >= r.len() {
+                    break None;
+                }
+                span *= 4;
+            }
+        }
+    };
     let Some(end) = end else {
         return Ok(None);
     };
@@ -354,6 +376,18 @@ fn describe(
 }
 
 pub fn frame_count(path: &Path) -> Result<u64> {
+    if let Some(r) = mkv_head(path)? {
+        let (v, t) = mkv_video(&r)?;
+        if r.indexed {
+            return Ok(t.samples.len() as u64);
+        }
+        let mut stream = r.stream();
+        let mut n = 0u64;
+        while stream.next_block(Some(v))?.is_some() {
+            n += 1;
+        }
+        return Ok(n);
+    }
     match Demux::open(path)? {
         Demux::Mp4(r) => Ok(r
             .video()
@@ -364,7 +398,17 @@ pub fn frame_count(path: &Path) -> Result<u64> {
 }
 
 pub fn keyframes(r: &mkv::Reader) -> Result<Vec<f64>> {
-    let (_, t) = mkv_video(r)?;
+    let (v, t) = mkv_video(r)?;
+    if !r.indexed {
+        let mut stream = r.stream();
+        let mut keys = Vec::new();
+        while let Some(b) = stream.next_block(Some(v))? {
+            if b.keyframe {
+                keys.push(t.seconds(b.pts).max(0.0));
+            }
+        }
+        return Ok(sorted(keys));
+    }
     Ok(sorted(
         t.samples
             .iter()

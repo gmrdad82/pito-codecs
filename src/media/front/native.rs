@@ -194,6 +194,9 @@ pub fn probe(path: &Path) -> Result<Probe> {
 }
 
 pub fn keyframes(path: &Path) -> Result<Vec<f64>> {
+    if let Some(head) = demux::mkv_head(path)? {
+        return demux::keyframes(&head);
+    }
     let r = match Demux::open(path)? {
         Demux::Mp4(r) => r,
         Demux::Mkv(r) => return demux::keyframes(&r),
