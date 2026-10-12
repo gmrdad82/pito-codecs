@@ -1759,3 +1759,120 @@ fn a_mix_stream_equals_the_whole_mix_with_and_without_cues() {
         }
     }
 }
+
+fn two_tones(name: &str, codec: &str) -> PathBuf {
+    let out = dir().join(name);
+    if !out.exists() {
+        ffmpeg_make(
+            &out,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:r=10:d=20",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=f=440:r=48000:d=20,volume=0.4",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=f=660:r=48000:d=20,volume=0.4",
+                "-map",
+                "0",
+                "-map",
+                "1",
+                "-map",
+                "2",
+                "-ac",
+                "2",
+                "-c:v",
+                "libx264",
+                "-g",
+                "20",
+                "-c:a",
+                codec,
+            ],
+        );
+    }
+    out
+}
+
+fn off(got: &[f32], want: &[f32], limit: f32) -> Option<usize> {
+    if got.len() != want.len() {
+        return Some(got.len().min(want.len()));
+    }
+    got.iter()
+        .zip(want)
+        .position(|(a, b)| (a - b).abs() > limit)
+}
+
+#[test]
+fn every_audio_range_and_stream_start_cuts_the_whole_decode() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let prefs = Prefs::default();
+    let pcm = two_tones("ranged-pcm.mkv", "pcm_s16le");
+    let files = [
+        (pcm.clone(), 0.0),
+        (without_cues(&pcm, "ranged-pcm-no-cues.mkv"), 0.0),
+        (two_tones("ranged-pcm.mp4", "pcm_s16le"), 0.0),
+        (two_tones("ranged-aac.mkv", "aac"), 1e-5),
+        (two_tones("ranged-aac.mp4", "aac"), 1e-5),
+        (two_tones("ranged-opus.mkv", "libopus"), 2e-3),
+    ];
+    let mut ranges: Vec<(usize, usize)> = vec![
+        (9_600, 33_600),
+        (29_600, 33_600),
+        (40_960, 44_960),
+        (41_460, 45_460),
+        (307_201, 311_297),
+        (0, 48_000),
+        (48_000, 144_000),
+        (144_000, 336_000),
+        (336_000, 720_000),
+        (900_000, 960_000),
+    ];
+    ranges.extend((0..8).map(|k| (9_600 + 4_000 * k, 13_600 + 4_000 * k)));
+    ranges.extend((0..60).map(|k| (20_000 + 337 * k, 22_000 + 337 * k)));
+    for (file, limit) in &files {
+        let name = file.file_name().unwrap().to_string_lossy();
+        let whole: Vec<Vec<f32>> = (0..2)
+            .map(|t| audio_pcm(file, t, 48_000, false, &prefs).unwrap().samples)
+            .collect();
+        for (t, all) in whole.iter().enumerate() {
+            assert!(all.len() >= 960_000 * 2, "{name} track {t}");
+            for &(a, b) in &ranges {
+                let (from, to) = (a as f64 / 48_000.0, b as f64 / 48_000.0);
+                let got = audio_pcm_range(file, t, from, to, 48_000, 2, &prefs).unwrap();
+                let at = off(&got.samples, &all[a * 2..b * 2], *limit);
+                assert!(at.is_none(), "{name} track {t} [{a}, {b}) at {at:?}");
+            }
+        }
+        for &(a, b) in ranges.iter().take(10) {
+            let from = a as f64 / 48_000.0;
+            for (t, all) in whole.iter().enumerate() {
+                let got: Vec<f32> = audio_stream(file, t, from, 48_000, 2, &prefs)
+                    .unwrap()
+                    .flat_map(|b| b.unwrap().samples)
+                    .take((b - a) * 2)
+                    .collect();
+                let at = off(&got, &all[a * 2..b * 2], *limit);
+                assert!(at.is_none(), "{name} stream {t} from {a} at {at:?}");
+            }
+            let mixed: Vec<f32> = audio_mix_stream(file, &[0.5, 2.0], from, 48_000, &prefs)
+                .unwrap()
+                .flat_map(|b| b.unwrap().samples)
+                .take((b - a) * 2)
+                .collect();
+            let want: Vec<f32> = whole[0][a * 2..b * 2]
+                .iter()
+                .zip(&whole[1][a * 2..b * 2])
+                .map(|(x, y)| 0.0 + x * 0.5 + y * 2.0)
+                .collect();
+            let at = off(&mixed, &want, limit * 3.0);
+            assert!(at.is_none(), "{name} mix from {a} at {at:?}");
+        }
+    }
+}
