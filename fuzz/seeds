@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+target=${1:?usage: fuzz/seeds <target>}
+dir="fuzz/corpus/$target"
+mkdir -p "$dir"
+
+if ! command -v ffmpeg >/dev/null; then
+  echo "fuzz/seeds: no ffmpeg, leaving $dir empty" >&2
+  exit 0
+fi
+
+ff() { ffmpeg -hide_banner -loglevel error -nostdin -y "$@" || echo "fuzz/seeds: skipped ${*: -1}" >&2; }
+video=(-f lavfi -i "testsrc2=size=96x64:rate=12" -t 0.5)
+audio=(-f lavfi -i "sine=frequency=440:sample_rate=48000" -t 0.5)
+
+mp4_seeds() {
+  ff "${video[@]}" "${audio[@]}" -c:v libx264 -preset ultrafast -c:a aac -movflags +faststart "$dir/h264-aac.mp4"
+  ff "${video[@]}" -c:v libx264 -preset ultrafast -bf 2 -movflags frag_keyframe+empty_moov "$dir/fragmented.mp4"
+  ff "${video[@]}" "${audio[@]}" -c:v libx265 -preset ultrafast -tag:v hvc1 -c:a aac "$dir/hevc-aac.mp4"
+  ff "${audio[@]}" -c:a pcm_s16le -f mov "$dir/pcm.mov"
+  ff "${audio[@]}" -c:a pcm_s24be -f mov "$dir/pcm24.mov"
+  ff "${audio[@]}" -c:a libopus -strict -2 "$dir/opus.mp4"
+  ff "${video[@]}" -c:v libx264 -preset ultrafast -vf "transpose=1" -metadata:s:v rotate=90 "$dir/rotated.mp4"
+}
+
+mkv_seeds() {
+  ff "${video[@]}" "${audio[@]}" -c:v libx264 -preset ultrafast -c:a aac "$dir/h264-aac.mkv"
+  ff "${video[@]}" "${audio[@]}" -c:v libvpx-vp9 -deadline realtime -cpu-used 8 -c:a libopus "$dir/vp9-opus.webm"
+  ff "${video[@]}" "${audio[@]}" -c:v libx265 -preset ultrafast -c:a pcm_s16le "$dir/hevc-pcm.mkv"
+  ff "${audio[@]}" -c:a aac "$dir/aac.mka"
+  ff "${video[@]}" -c:v libx264 -preset ultrafast -bf 2 -reserve_index_space 0 -cues_to_front 1 "$dir/cues-front.mkv"
+}
+
+case "$target" in
+  mp4)
+    mp4_seeds
+    ;;
+  mkv)
+    mkv_seeds
+    ;;
+  probe)
+    mp4_seeds
+    mkv_seeds
+    ;;
+  h264)
+    ff "${video[@]}" -c:v libx264 -preset ultrafast -bf 2 -f h264 "$dir/cabac.h264"
+    ff "${video[@]}" -c:v libx264 -preset ultrafast -x264-params cabac=0:bframes=0 -f h264 "$dir/cavlc.h264"
+    ;;
+  hevc)
+    ff "${video[@]}" -c:v libx265 -preset ultrafast -f hevc "$dir/x265.hevc"
+    ff "${video[@]}" -c:v libx265 -preset ultrafast -x265-params "bframes=0:wpp=1" -f hevc "$dir/x265-wpp.hevc"
+    ;;
+  vp9_ivf)
+    ff "${video[@]}" -c:v libvpx-vp9 -deadline realtime -cpu-used 8 -f ivf "$dir/vp9.ivf"
+    ff "${video[@]}" -c:v libvpx-vp9 -deadline realtime -cpu-used 8 -lag-in-frames 4 -auto-alt-ref 1 -f ivf "$dir/vp9-altref.ivf"
+    ;;
+  aac_adts)
+    ff "${audio[@]}" -c:a aac -f adts "$dir/sine.aac"
+    ff -f lavfi -i "sine=frequency=440:sample_rate=48000" -t 0.5 -ac 2 -c:a aac -f adts "$dir/stereo.aac"
+    ;;
+  opus)
+    ff "${audio[@]}" -c:a libopus -f ogg "$dir/sine.opus"
+    ff -f lavfi -i "sine=frequency=440:sample_rate=48000" -t 0.5 -ac 2 -c:a libopus -f ogg "$dir/stereo.opus"
+    ;;
+  pcm)
+    ff "${audio[@]}" -ac 2 -f s16le "$dir/raw.s16"
+    { printf '\x11\x02\x80\x0f\x00\x00'; cat "$dir/raw.s16"; } > "$dir/s16le-stereo.pcm"
+    { printf '\x2b\x01\xa0\x0f\x00\x00'; cat "$dir/raw.s16"; } > "$dir/f32be-mono.pcm"
+    rm -f "$dir/raw.s16"
+    ;;
+  *)
+    echo "fuzz/seeds: unknown target $target" >&2
+    exit 2
+    ;;
+esac
+
+ls -l "$dir"
