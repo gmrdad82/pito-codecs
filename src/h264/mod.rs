@@ -6,7 +6,7 @@ mod enc;
 #[cfg(test)]
 mod tests;
 
-use crate::media::{Error, Frame, Packet, PixelFormat, Plane, Result, TimeBase};
+use crate::media::{self, Error, Frame, Packet, PixelFormat, Plane, Result, TimeBase};
 
 pub use dec::ColorInfo;
 pub use enc::{Preset, Profile};
@@ -112,19 +112,11 @@ fn enc_error(e: enc::Error) -> Error {
     Error::Invalid(format!("h264 encoder: {e}"))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Rate {
-    Crf(u8),
-    Bitrate(u32),
-    Vbr { kbps: u32, max_kbps: u32 },
-    Qp(u8),
-}
+#[deprecated(note = "use pito_codecs::media::Rate")]
+pub type Rate = crate::media::Rate;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Bitstream {
-    LengthPrefixed,
-    AnnexB,
-}
+#[deprecated(note = "use pito_codecs::media::Bitstream")]
+pub type Bitstream = crate::media::Bitstream;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EncoderConfig {
@@ -133,11 +125,11 @@ pub struct EncoderConfig {
     pub fps: (u32, u32),
     pub profile: Profile,
     pub preset: Preset,
-    pub rate: Rate,
+    pub rate: media::Rate,
     pub gop: u32,
     pub b_frames: u8,
     pub threads: usize,
-    pub bitstream: Bitstream,
+    pub bitstream: media::Bitstream,
 }
 
 impl Default for EncoderConfig {
@@ -148,11 +140,11 @@ impl Default for EncoderConfig {
             fps: (30, 1),
             profile: Profile::High,
             preset: Preset::Balanced,
-            rate: Rate::Crf(23),
+            rate: media::Rate::Crf(23),
             gop: 250,
             b_frames: 2,
             threads: 0,
-            bitstream: Bitstream::LengthPrefixed,
+            bitstream: media::Bitstream::LengthPrefixed,
         }
     }
 }
@@ -170,20 +162,20 @@ impl Encoder {
         cfg.profile = config.profile;
         cfg.preset = config.preset;
         cfg.rate = match config.rate {
-            Rate::Crf(q) => enc::RateControl::Crf(f32::from(q)),
-            Rate::Bitrate(kbps) => enc::RateControl::Cbr { kbps },
-            Rate::Vbr { kbps, max_kbps } => enc::RateControl::Vbr {
+            media::Rate::Crf(q) => enc::RateControl::Crf(f32::from(q)),
+            media::Rate::Bitrate(kbps) => enc::RateControl::Cbr { kbps },
+            media::Rate::Vbr { kbps, max_kbps } => enc::RateControl::Vbr {
                 target_kbps: kbps,
                 max_kbps,
             },
-            Rate::Qp(q) => enc::RateControl::Qp(q),
+            media::Rate::Qp(q) => enc::RateControl::Qp(q),
         };
         cfg.keyint = config.gop;
         cfg.bframes = config.b_frames;
         cfg.threads = config.threads;
         cfg.format = match config.bitstream {
-            Bitstream::LengthPrefixed => enc::PacketFormat::LengthPrefixed,
-            Bitstream::AnnexB => enc::PacketFormat::AnnexB,
+            media::Bitstream::LengthPrefixed => enc::PacketFormat::LengthPrefixed,
+            media::Bitstream::AnnexB => enc::PacketFormat::AnnexB,
         };
         let inner = enc::Encoder::new(cfg).map_err(enc_error)?;
         Ok(Self {

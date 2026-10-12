@@ -30,7 +30,8 @@ use objc2_video_toolbox::{
 
 use super::{Locked, NV12_VIDEO, P010_VIDEO, codec_type, label, planes};
 use crate::gpu::nal;
-use crate::gpu::{Bitstream, EncoderConfig, GpuFrame, Profile, Rate};
+use crate::gpu::{EncoderConfig, GpuFrame, Profile};
+use crate::media::{Bitstream, Rate};
 use crate::media::{Codec, Error, Frame, Packet, PixelFormat, Result, TimeBase};
 
 enum Output {

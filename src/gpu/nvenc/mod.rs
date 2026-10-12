@@ -11,7 +11,8 @@ use std::sync::OnceLock;
 use session::{Locked, Session, Setup};
 
 use crate::gpu::nal;
-use crate::gpu::{Backend, Bitstream, Direction, EncoderBackend, EncoderConfig, Profile, Rate};
+use crate::gpu::{Backend, Direction, EncoderBackend, EncoderConfig, Profile};
+use crate::media::{Bitstream, Rate};
 use crate::media::{Codec, Error, Frame, Packet, PixelFormat, Plane, Result};
 
 const DEPTH: usize = 6;

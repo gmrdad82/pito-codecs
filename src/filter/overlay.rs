@@ -1,5 +1,6 @@
-use super::color::{ColorSpec, Rgba};
+use super::color::ColorSpec;
 use super::plane::{Sample, check, samples_mut};
+use crate::media::Rgba;
 use crate::media::{Error, Frame, PixelFormat, Result};
 
 #[derive(Debug, Clone)]

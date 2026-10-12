@@ -1,6 +1,6 @@
 use super::lzw::LzwDecoder;
 use super::{Error, Result};
-use crate::filter::Rgba;
+use crate::media::Rgba;
 use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
 

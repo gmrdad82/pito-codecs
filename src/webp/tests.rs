@@ -1,5 +1,6 @@
 use super::oracle::{dir, ffmpeg, lib, source};
-use super::{Rgba, decode, decode_animation, info};
+use super::{decode, decode_animation, info};
+use crate::media::Rgba;
 
 fn ffmpeg_webp(
     name: &str,

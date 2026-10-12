@@ -104,6 +104,15 @@ impl AvcConfig {
         }
     }
 
+    pub fn parameter_sets_annexb(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for nal in self.sps.iter().chain(&self.pps) {
+            out.extend_from_slice(&[0, 0, 0, 1]);
+            out.extend_from_slice(nal);
+        }
+        out
+    }
+
     pub fn parse(data: &[u8]) -> Result<Self> {
         let mut c = Cur::new(data, "avcC");
         let _version = c.u8()?;

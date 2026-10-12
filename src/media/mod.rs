@@ -1,6 +1,15 @@
+mod nal;
 mod types;
 
+pub use nal::length_prefixed_to_annexb;
 pub use types::*;
+
+pub fn threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(16)
+}
 
 #[cfg(any(
     feature = "hevc",

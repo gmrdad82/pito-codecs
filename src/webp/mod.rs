@@ -9,10 +9,11 @@ mod riff;
 mod tests;
 mod vp8;
 
-pub use crate::filter::Rgba;
+#[deprecated(note = "use pito_codecs::media::Rgba")]
+pub type Rgba = crate::media::Rgba;
 pub use anim::{AnimDecoder, AnimEncoder, Animation, Frame, FrameRef, decode_animation};
 
-use crate::media::Result;
+use crate::media::{self, Result};
 use riff::{Chunks, invalid, u24};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,7 +94,7 @@ pub fn info(data: &[u8]) -> Result<Info> {
     Ok(parse(data)?.info)
 }
 
-pub fn decode(data: &[u8]) -> Result<Rgba> {
+pub fn decode(data: &[u8]) -> Result<media::Rgba> {
     let parsed = parse(data)?;
     if parsed.info.animated {
         let mut dec = AnimDecoder::from_parsed(parsed);
@@ -103,12 +104,12 @@ pub fn decode(data: &[u8]) -> Result<Rgba> {
         };
     }
     let piece = parsed.pieces[0];
-    let mut out = Rgba::new(piece.width, piece.height);
+    let mut out = media::Rgba::new(piece.width, piece.height);
     decode_piece(&piece, &mut out.data)?;
     Ok(out)
 }
 
-pub fn encode(image: &Rgba, options: &Options) -> Result<Vec<u8>> {
+pub fn encode(image: &media::Rgba, options: &Options) -> Result<Vec<u8>> {
     check_image(image)?;
     let (body, alpha) = encode_piece(image, options)?;
     let mut w = riff::Writer::new();
@@ -123,7 +124,7 @@ pub fn encode(image: &Rgba, options: &Options) -> Result<Vec<u8>> {
     w.finish()
 }
 
-pub(crate) fn encode_piece(image: &Rgba, options: &Options) -> Result<(Vec<u8>, bool)> {
+pub(crate) fn encode_piece(image: &media::Rgba, options: &Options) -> Result<(Vec<u8>, bool)> {
     let alpha = image.data.chunks_exact(4).any(|p| p[3] != 255);
     let mut out = Vec::new();
     if options.lossless {
@@ -138,7 +139,7 @@ pub(crate) fn encode_piece(image: &Rgba, options: &Options) -> Result<(Vec<u8>, 
     Ok((out, alpha))
 }
 
-pub(crate) fn check_image(image: &Rgba) -> Result<()> {
+pub(crate) fn check_image(image: &media::Rgba) -> Result<()> {
     if image.width == 0 || image.height == 0 || image.width > 16383 || image.height > 16383 {
         return Err(crate::media::Error::Unsupported(format!(
             "webp: {}x{} (each side 1 to 16383)",

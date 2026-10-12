@@ -37,7 +37,7 @@ fn stream() -> Vec<Packet> {
         gop: 4,
         b_frames: 0,
         threads: 1,
-        bitstream: h264::Bitstream::AnnexB,
+        bitstream: pito_codecs::media::Bitstream::AnnexB,
         ..h264::EncoderConfig::default()
     })
     .unwrap();

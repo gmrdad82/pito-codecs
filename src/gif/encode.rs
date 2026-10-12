@@ -1,7 +1,7 @@
 use super::lzw::LzwEncoder;
 use super::quant::{Dither, Histogram, Lut, Mapper, Palette};
 use super::{Error, Result};
-use crate::filter::Rgba;
+use crate::media::Rgba;
 use rayon::prelude::*;
 use std::cell::RefCell;
 
