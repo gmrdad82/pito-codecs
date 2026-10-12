@@ -1,21 +1,16 @@
 #![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 
-mod bits;
 mod cabac;
 mod decoder;
-mod dpb;
-mod error;
 pub(crate) mod filter;
 mod grid;
 mod hvcc;
 mod inter;
 mod intra;
 mod mvpred;
-mod params;
 mod pel;
 mod picture;
 mod simd;
-mod slice;
 mod slicedec;
 #[rustfmt::skip]
 #[allow(dead_code)]

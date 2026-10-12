@@ -23,9 +23,9 @@ use objc2_video_toolbox::{
 use super::order::{Key, Order};
 use super::{Locked, NV12_FULL, NV12_VIDEO, P010_FULL, P010_VIDEO, codec_type, label, planes};
 use crate::gpu::nal::{self, Framing};
-use crate::gpu::syntax::bits::unescape_rbsp;
-use crate::gpu::syntax::{h264 as h264_syntax, hevc as hevc_syntax};
 use crate::media::{Codec, Error, Frame, Packet, PixelFormat, Result};
+use crate::syntax::bits::unescape_rbsp;
+use crate::syntax::{h264 as h264_syntax, hevc as hevc_syntax};
 
 const IN_FLIGHT: usize = 4;
 

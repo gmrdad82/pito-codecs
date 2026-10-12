@@ -1,4 +1,4 @@
-use crate::h264::bits::{BitWriter, escape_rbsp};
+use crate::syntax::bits::{BitWriter, escape_rbsp};
 
 pub const NAL_SLICE: u8 = 1;
 pub const NAL_IDR: u8 = 5;

@@ -2,13 +2,13 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use super::Picture;
-use crate::gpu::syntax::bits::unescape_rbsp;
-use crate::gpu::syntax::hevc::dpb::{
+use crate::media::{Error, Result};
+use crate::syntax::bits::unescape_rbsp;
+use crate::syntax::hevc::dpb::{
     Dpb, Marking, Output, OutputMeta, PocState, Ref, RefPicSet, build_ref_lists,
 };
-use crate::gpu::syntax::hevc::params::{Layout, Pps, ScalingList, Sps};
-use crate::gpu::syntax::hevc::slice::{NalHeader, SliceHeader, SliceType, nal_type};
-use crate::media::{Error, Result};
+use crate::syntax::hevc::params::{Layout, Pps, ScalingList, Sps};
+use crate::syntax::hevc::slice::{NalHeader, SliceHeader, SliceType, nal_type};
 
 use super::Accel;
 use super::ffi::{
@@ -221,7 +221,7 @@ impl<A: Accel> Front<A> {
                 hdr,
                 |id| {
                     let missing =
-                        |what: String| crate::gpu::syntax::error::Error::MissingParameterSet(what);
+                        |what: String| crate::syntax::error::Error::MissingParameterSet(what);
                     let pps = ppss
                         .get(id as usize)
                         .and_then(Option::as_ref)
@@ -244,7 +244,7 @@ impl<A: Accel> Front<A> {
         let (sh, pps, sps) = result
             .ok_or_else(|| decode_err("empty slice"))?
             .map_err(decode_err)?;
-        sps.check_supported().map_err(decode_err)?;
+        sps.check_gpu().map_err(decode_err)?;
         pps.check_supported().map_err(decode_err)?;
         if first {
             self.start_picture(&sh, &sps, &pps, pts, frames)?;
@@ -446,7 +446,10 @@ impl<A: Accel> Front<A> {
 }
 
 fn output_meta(pts: i64) -> OutputMeta {
-    OutputMeta { pts }
+    OutputMeta {
+        pts,
+        ..Default::default()
+    }
 }
 
 fn flag(on: bool, bit: u32) -> u32 {

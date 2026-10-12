@@ -37,9 +37,6 @@ impl<'a> BitReader<'a> {
     pub fn bits_left(&self) -> usize {
         (self.data.len() * 8).saturating_sub(self.pos)
     }
-    pub fn is_byte_aligned(&self) -> bool {
-        self.pos.is_multiple_of(8)
-    }
     pub fn byte_align(&mut self) {
         self.pos = self.pos.div_ceil(8) * 8;
     }
@@ -123,14 +120,6 @@ impl<'a> BitReader<'a> {
         } else {
             -((k / 2) as i32)
         })
-    }
-
-    pub fn read_te(&mut self, max: u32) -> Result<u32> {
-        if max > 1 {
-            self.read_ue()
-        } else {
-            Ok(!self.read_bit()? as u32)
-        }
     }
 
     pub fn more_rbsp_data(&self) -> bool {
@@ -230,9 +219,22 @@ impl BitWriter {
         self.align_zero();
         self.buf
     }
-    pub fn bytes(&self) -> &[u8] {
-        &self.buf
+}
+
+pub fn unescape_rbsp_marked(data: &[u8]) -> (Vec<u8>, Vec<u32>) {
+    let mut out = Vec::with_capacity(data.len());
+    let mut removed = Vec::new();
+    let mut zeros = 0;
+    for (i, &b) in data.iter().enumerate() {
+        if zeros >= 2 && b == 3 {
+            zeros = 0;
+            removed.push(i as u32);
+            continue;
+        }
+        out.push(b);
+        zeros = if b == 0 { zeros + 1 } else { 0 };
     }
+    (out, removed)
 }
 
 pub fn unescape_rbsp(data: &[u8]) -> Vec<u8> {
@@ -310,19 +312,4 @@ pub fn length_prefixed_nals(data: &[u8], length_size: usize) -> Result<Vec<&[u8]
         i += len;
     }
     Ok(out)
-}
-
-pub fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ 0xEDB8_8320
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    !crc
 }

@@ -1,5 +1,5 @@
-use crate::h264::dec::error::{Result, ensure};
-use crate::h264::dec::slice::{Mmco, SliceHeader, SliceType};
+use crate::syntax::error::{Result, ensure};
+use crate::syntax::h264::slice::{Mmco, SliceHeader, SliceType};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -9,7 +9,7 @@ pub enum RefMark {
     Long,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct OutputMeta {
     pub pts: i64,
     pub crop: (u32, u32, u32, u32),

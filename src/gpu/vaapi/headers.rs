@@ -1,4 +1,4 @@
-use crate::gpu::syntax::bits::{BitWriter, escape_rbsp};
+use crate::syntax::bits::{BitWriter, escape_rbsp};
 
 pub const LOG2_MAX_FRAME_NUM: u32 = 16;
 pub const LOG2_MAX_POC_LSB_H264: u32 = 16;

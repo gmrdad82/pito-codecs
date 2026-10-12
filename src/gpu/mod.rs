@@ -2,8 +2,6 @@
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 mod biplanar;
 mod nal;
-#[allow(dead_code, clippy::needless_range_loop)]
-mod syntax;
 
 #[cfg(test)]
 mod tests;
@@ -150,16 +148,16 @@ pub(crate) fn color(codec: Codec, extradata: &[u8]) -> Option<(u8, bool)> {
             let nal = sets
                 .iter()
                 .find(|n| n.first().is_some_and(|h| h & 0x1f == 7))?;
-            let rbsp = syntax::bits::unescape_rbsp(nal.get(1..)?);
-            let vui = syntax::h264::params::Sps::parse(&rbsp).ok()?.vui?;
+            let rbsp = crate::syntax::bits::unescape_rbsp(nal.get(1..)?);
+            let vui = crate::syntax::h264::params::Sps::parse(&rbsp).ok()?.vui?;
             Some((vui.matrix_coefficients, vui.full_range))
         }
         Codec::Hevc => {
             let nal = sets
                 .iter()
                 .find(|n| n.first().is_some_and(|h| (h >> 1) & 0x3f == 33))?;
-            let rbsp = syntax::bits::unescape_rbsp(nal.get(2..)?);
-            let vui = syntax::hevc::params::Sps::parse(&rbsp).ok()?.vui?;
+            let rbsp = crate::syntax::bits::unescape_rbsp(nal.get(2..)?);
+            let vui = crate::syntax::hevc::params::Sps::parse(&rbsp).ok()?.vui?;
             Some((vui.matrix_coefficients, vui.full_range))
         }
         _ => None,

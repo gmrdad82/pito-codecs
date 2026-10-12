@@ -1,4 +1,4 @@
-use crate::h264::bits::BitWriter;
+use crate::syntax::bits::BitWriter;
 
 use crate::h264::enc::cabac::{BinSink, CabacEncoder, CabacEstimator, Contexts, CostTable};
 use crate::h264::enc::deblock::{BandPlane, DeblockParams, deblock_row};

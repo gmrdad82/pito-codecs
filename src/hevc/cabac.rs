@@ -1,5 +1,5 @@
-use crate::hevc::error::{Result, ensure};
 use crate::hevc::spec_tables::{CABAC_INIT, NUM_CTX};
+use crate::syntax::error::{Result, ensure};
 
 #[rustfmt::skip]
 pub(crate) static RANGE_TAB_LPS: [[u8; 4]; 64] = [

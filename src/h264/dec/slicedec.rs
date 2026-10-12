@@ -1,15 +1,15 @@
-use crate::h264::bits::BitReader;
 use crate::h264::dec::cavlc;
 use crate::h264::dec::deblock;
-use crate::h264::dec::error::{Result, ensure, invalid};
 use crate::h264::dec::inter::{Mc, Weight};
 use crate::h264::dec::intra::{self, Avail};
 use crate::h264::dec::mbtypes::*;
-use crate::h264::dec::params::{Pps, Sps};
 use crate::h264::dec::picture::*;
-use crate::h264::dec::slice::{SliceHeader, SliceType};
 use crate::h264::dec::tables::*;
 use crate::h264::dec::transform::{self, LevelScale};
+use crate::syntax::bits::BitReader;
+use crate::syntax::error::{Result, ensure, invalid};
+use crate::syntax::h264::params::{Pps, Sps};
+use crate::syntax::h264::slice::{SliceHeader, SliceType};
 
 const RING: usize = 4;
 

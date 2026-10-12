@@ -1,9 +1,9 @@
 use crate::h264::dec::cabac::Cabac;
-use crate::h264::dec::error::{Result, ensure, invalid};
 use crate::h264::dec::mbtypes::*;
 use crate::h264::dec::picture::MbKind;
-use crate::h264::dec::slice::SliceType;
 use crate::h264::dec::slicedec::{MbCur, SliceDecoder};
+use crate::syntax::error::{Result, ensure, invalid};
+use crate::syntax::h264::slice::SliceType;
 
 #[rustfmt::skip]
 const SIG8_FRAME: [u8; 63] = [

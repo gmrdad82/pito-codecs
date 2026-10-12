@@ -1,5 +1,5 @@
-use crate::gpu::syntax::bits::unescape_rbsp;
 use crate::media::{Codec, Error, Result};
+use crate::syntax::bits::unescape_rbsp;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Framing {
@@ -215,7 +215,7 @@ pub fn build_avcc(sps: &[Vec<u8>], pps: &[Vec<u8>]) -> Result<Vec<u8>> {
     }
     if matches!(first[1], 100 | 110 | 122 | 144) {
         let rbsp = unescape_rbsp(&first[1..]);
-        let parsed = crate::gpu::syntax::h264::params::Sps::parse(&rbsp)
+        let parsed = crate::syntax::h264::params::Sps::parse(&rbsp)
             .map_err(|e| Error::Invalid(e.to_string()))?;
         out.push(0xfc | (parsed.chroma_format_idc as u8 & 3));
         out.push(0xf8 | (parsed.bit_depth_luma.saturating_sub(8) as u8 & 7));
@@ -234,7 +234,7 @@ pub fn build_hvcc(vps: &[Vec<u8>], sps: &[Vec<u8>], pps: &[Vec<u8>]) -> Result<V
     let ptl = rbsp
         .get(1..13)
         .ok_or_else(|| Error::Invalid("SPS too short for hvcC".into()))?;
-    let parsed = crate::gpu::syntax::hevc::params::Sps::parse(&rbsp)
+    let parsed = crate::syntax::hevc::params::Sps::parse(&rbsp)
         .map_err(|e| Error::Invalid(e.to_string()))?;
     let sub_layers = (rbsp[0] >> 1) & 7;
     let nesting = rbsp[0] & 1;

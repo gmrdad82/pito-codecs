@@ -1,7 +1,7 @@
-use crate::hevc::bits::{annexb_nals, unescape_rbsp};
-use crate::hevc::params::Sps;
-use crate::hevc::slice::nal_type;
 use crate::media::{Error, Result};
+use crate::syntax::bits::{annexb_nals, unescape_rbsp};
+use crate::syntax::hevc::params::Sps;
+use crate::syntax::hevc::slice::nal_type;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hvcc {
@@ -108,7 +108,7 @@ impl Hvcc {
         config.profile.copy_from_slice(&head[1..13]);
         config.temporal_layers = ((head[0] >> 1) & 7) + 1;
         config.temporal_id_nested = head[0] & 1 != 0;
-        let parsed = Sps::parse(&rbsp)?;
+        let parsed = Sps::parse(&rbsp).map_err(|e| e.media("hevc"))?;
         config.chroma_format = parsed.chroma_format_idc as u8;
         config.bit_depth_luma = parsed.bit_depth_luma as u8;
         config.bit_depth_chroma = parsed.bit_depth_chroma as u8;

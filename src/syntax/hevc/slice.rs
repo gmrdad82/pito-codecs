@@ -1,6 +1,6 @@
-use crate::hevc::bits::BitReader;
-use crate::hevc::error::{Result, ensure, invalid};
-use crate::hevc::params::{Pps, Sps, StRps};
+use crate::syntax::bits::BitReader;
+use crate::syntax::error::{Result, ensure, invalid};
+use crate::syntax::hevc::params::{Pps, Sps, StRps};
 
 pub mod nal_type {
     pub const RADL_N: u8 = 6;

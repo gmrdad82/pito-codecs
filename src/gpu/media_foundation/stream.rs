@@ -1,8 +1,8 @@
 use super::device::SurfaceFormat;
 use crate::gpu::nal;
-use crate::gpu::syntax::bits::unescape_rbsp;
-use crate::gpu::syntax::{h264, hevc};
 use crate::media::{Codec, Error, Result};
+use crate::syntax::bits::unescape_rbsp;
+use crate::syntax::{h264, hevc};
 
 pub const MAX_SIDE: u32 = 8192;
 
@@ -69,7 +69,7 @@ pub fn plan(codec: Codec, sets: &[Vec<u8>]) -> Result<Plan> {
                     sps.chroma_format_idc
                 )));
             }
-            let format = match (sps.ptl.profile_idc, bits) {
+            let format = match (sps.profile_idc, bits) {
                 (1..=3, 8) => SurfaceFormat::Nv12,
                 (2, 10) => SurfaceFormat::P010,
                 (p, b) => {

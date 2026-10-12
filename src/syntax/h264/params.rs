@@ -1,6 +1,6 @@
 use super::tables::*;
-use crate::gpu::syntax::bits::BitReader;
-use crate::gpu::syntax::error::{Result, ensure, unsupported};
+use crate::syntax::bits::BitReader;
+use crate::syntax::error::{Result, ensure, unsupported};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScalingMatrices {
@@ -14,10 +14,6 @@ impl ScalingMatrices {
             m4: [[16; 16]; 6],
             m8: [[16; 64]; 6],
         }
-    }
-    pub fn is_flat(&self) -> bool {
-        self.m4.iter().all(|m| m.iter().all(|&v| v == 16))
-            && self.m8.iter().all(|m| m.iter().all(|&v| v == 16))
     }
 }
 
@@ -159,7 +155,7 @@ pub struct HrdParameters {
 }
 
 fn parse_hrd(r: &mut BitReader) -> Result<HrdParameters> {
-    let cpb_cnt = r.read_ue()? + 1;
+    let cpb_cnt = r.read_ue()?.saturating_add(1);
     ensure!(cpb_cnt <= 32, "cpb_cnt_minus1 out of range");
     let mut h = HrdParameters {
         cpb_cnt,
@@ -365,8 +361,8 @@ impl Sps {
             if chroma_format_idc == 3 {
                 separate_colour_plane = r.read_flag()?;
             }
-            bit_depth_luma = r.read_ue()? + 8;
-            bit_depth_chroma = r.read_ue()? + 8;
+            bit_depth_luma = r.read_ue()?.saturating_add(8);
+            bit_depth_chroma = r.read_ue()?.saturating_add(8);
             ensure!(
                 bit_depth_luma <= 14 && bit_depth_chroma <= 14,
                 "bit depth out of range"
@@ -378,7 +374,7 @@ impl Sps {
                 scaling_lists = parse_scaling_lists(&mut r, count, None)?;
             }
         }
-        let log2_max_frame_num = r.read_ue()? + 4;
+        let log2_max_frame_num = r.read_ue()?.saturating_add(4);
         ensure!(log2_max_frame_num <= 16, "log2_max_frame_num out of range");
         let pic_order_cnt_type = r.read_ue()?;
         ensure!(pic_order_cnt_type <= 2, "pic_order_cnt_type out of range");
@@ -388,7 +384,7 @@ impl Sps {
         let mut offset_for_top_to_bottom_field = 0;
         let mut offset_for_ref_frame = Vec::new();
         if pic_order_cnt_type == 0 {
-            log2_max_poc_lsb = r.read_ue()? + 4;
+            log2_max_poc_lsb = r.read_ue()?.saturating_add(4);
             ensure!(
                 log2_max_poc_lsb <= 16,
                 "log2_max_pic_order_cnt_lsb out of range"
@@ -409,18 +405,14 @@ impl Sps {
         let max_num_ref_frames = r.read_ue()?;
         ensure!(max_num_ref_frames <= 16, "max_num_ref_frames out of range");
         let gaps_in_frame_num_allowed = r.read_flag()?;
-        let pic_width_in_mbs = r.read_ue()? + 1;
-        let pic_height_in_map_units = r.read_ue()? + 1;
+        let pic_width_in_mbs = r.read_ue()?.saturating_add(1);
+        let pic_height_in_map_units = r.read_ue()?.saturating_add(1);
         ensure!(
             pic_width_in_mbs <= 1024 && pic_height_in_map_units <= 1024,
             "picture too large"
         );
         let frame_mbs_only = r.read_flag()?;
-        let mb_adaptive_frame_field = if !frame_mbs_only {
-            r.read_flag()?
-        } else {
-            false
-        };
+        let mb_adaptive_frame_field = !frame_mbs_only && r.read_flag()?;
         let direct_8x8_inference = r.read_flag()?;
         let frame_crop = if r.read_flag()? {
             Some((r.read_ue()?, r.read_ue()?, r.read_ue()?, r.read_ue()?))
@@ -618,7 +610,6 @@ pub struct Pps {
     pub constrained_intra_pred: bool,
     pub redundant_pic_cnt_present: bool,
     pub transform_8x8_mode: bool,
-    pub pic_scaling_matrix_present: bool,
     pub second_chroma_qp_index_offset: i32,
     pub scaling: ScalingMatrices,
 }
@@ -634,13 +625,13 @@ impl Pps {
             .get(sps_id as usize)
             .and_then(|s| s.as_ref())
             .ok_or_else(|| {
-                crate::gpu::syntax::error::Error::MissingParameterSet(format!(
+                crate::syntax::error::Error::MissingParameterSet(format!(
                     "SPS {sps_id} for PPS {id}"
                 ))
             })?;
         let entropy_coding_mode = r.read_flag()?;
         let bottom_field_pic_order_in_frame_present = r.read_flag()?;
-        let num_slice_groups = r.read_ue()? + 1;
+        let num_slice_groups = r.read_ue()?.saturating_add(1);
         ensure!(num_slice_groups <= 8, "num_slice_groups out of range");
         let mut slice_group_map_type = 0;
         if num_slice_groups > 1 {
@@ -662,7 +653,7 @@ impl Pps {
                     r.read_ue()?;
                 }
                 6 => {
-                    let n = r.read_ue()? + 1;
+                    let n = r.read_ue()?.saturating_add(1);
                     let bits = 32 - (num_slice_groups - 1).leading_zeros();
                     for _ in 0..n {
                         r.read_bits(bits)?;
@@ -671,8 +662,8 @@ impl Pps {
                 _ => {}
             }
         }
-        let num_ref_idx_l0_default_active = r.read_ue()? + 1;
-        let num_ref_idx_l1_default_active = r.read_ue()? + 1;
+        let num_ref_idx_l0_default_active = r.read_ue()?.saturating_add(1);
+        let num_ref_idx_l1_default_active = r.read_ue()?.saturating_add(1);
         ensure!(
             num_ref_idx_l0_default_active <= 32 && num_ref_idx_l1_default_active <= 32,
             "num_ref_idx_default_active out of range"
@@ -690,13 +681,11 @@ impl Pps {
         let constrained_intra_pred = r.read_flag()?;
         let redundant_pic_cnt_present = r.read_flag()?;
         let mut transform_8x8_mode = false;
-        let mut pic_scaling_matrix_present = false;
         let mut second_chroma_qp_index_offset = chroma_qp_index_offset;
         let mut scaling = sps.scaling.clone();
         if r.more_rbsp_data() {
             transform_8x8_mode = r.read_flag()?;
-            pic_scaling_matrix_present = r.read_flag()?;
-            if pic_scaling_matrix_present {
+            if r.read_flag()? {
                 let count = 6 + if sps.chroma_format_idc != 3 { 2 } else { 6 }
                     * transform_8x8_mode as usize;
                 let lists = if sps.seq_scaling_matrix_present {
@@ -730,7 +719,6 @@ impl Pps {
             constrained_intra_pred,
             redundant_pic_cnt_present,
             transform_8x8_mode,
-            pic_scaling_matrix_present,
             second_chroma_qp_index_offset,
             scaling,
         })

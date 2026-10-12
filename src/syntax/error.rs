@@ -1,5 +1,4 @@
-use crate::hevc::bits::BitError;
-use std::fmt;
+use crate::syntax::bits::BitError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -9,8 +8,8 @@ pub enum Error {
     MissingParameterSet(String),
 }
 
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Bitstream(e) => write!(f, "bitstream error: {e}"),
             Error::Invalid(s) => write!(f, "invalid bitstream: {s}"),
@@ -20,18 +19,20 @@ impl fmt::Display for Error {
     }
 }
 
-impl From<BitError> for Error {
-    fn from(e: BitError) -> Self {
-        Error::Bitstream(e)
+impl std::error::Error for Error {}
+
+impl Error {
+    pub fn media(self, codec: &str) -> crate::media::Error {
+        match self {
+            Error::Unsupported(s) => crate::media::Error::Unsupported(format!("{codec}: {s}")),
+            e => crate::media::Error::Invalid(format!("{codec}: {e}")),
+        }
     }
 }
 
-impl From<Error> for crate::media::Error {
-    fn from(e: Error) -> Self {
-        match e {
-            Error::Unsupported(s) => crate::media::Error::Unsupported(format!("hevc: {s}")),
-            other => crate::media::Error::Invalid(format!("hevc: {other}")),
-        }
+impl From<BitError> for Error {
+    fn from(e: BitError) -> Self {
+        Error::Bitstream(e)
     }
 }
 
@@ -48,7 +49,7 @@ pub(crate) fn unsupported<T>(msg: impl Into<String>) -> Result<T> {
 macro_rules! ensure {
     ($cond:expr, $($arg:tt)+) => {
         if !$cond {
-            return Err($crate::hevc::error::Error::Invalid(format!($($arg)+)));
+            return Err($crate::syntax::error::Error::Invalid(format!($($arg)+)));
         }
     };
 }

@@ -1,6 +1,6 @@
-use crate::h264::bits::BitReader;
-use crate::h264::dec::error::{Result, ensure};
-use crate::h264::dec::params::{Pps, Sps};
+use crate::syntax::bits::BitReader;
+use crate::syntax::error::{Result, ensure};
+use crate::syntax::h264::params::{Pps, Sps};
 
 pub mod nal_type {
     pub const SLICE: u8 = 1;
@@ -98,6 +98,7 @@ pub struct SliceHeader {
     pub nal_ref_idc: u8,
     pub idr: bool,
     pub first_mb_in_slice: u32,
+    pub slice_type_raw: u32,
     pub slice_type: SliceType,
     pub pps_id: u32,
     pub frame_num: u32,
@@ -376,6 +377,7 @@ impl SliceHeader {
                 nal_ref_idc: nal.nal_ref_idc,
                 idr,
                 first_mb_in_slice,
+                slice_type_raw,
                 slice_type,
                 pps_id,
                 frame_num,

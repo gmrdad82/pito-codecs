@@ -1,10 +1,13 @@
-use super::slice::SliceHeader;
-use crate::gpu::syntax::error::{Result, ensure};
+use crate::syntax::error::{Result, ensure};
+use crate::syntax::hevc::slice::SliceHeader;
 use std::sync::Arc;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct OutputMeta {
     pub pts: i64,
+    pub crop: (u32, u32, u32, u32),
+    pub bit_depth: u32,
+    pub draft: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,7 +28,6 @@ pub struct Entry<F> {
 
 pub struct Output<F> {
     pub frame: F,
-    pub poc: i32,
     pub meta: Arc<OutputMeta>,
 }
 
@@ -82,7 +84,6 @@ impl<F: Clone> Dpb<F> {
         e.needed_for_output = false;
         outs.push(Output {
             frame: e.frame.clone(),
-            poc: e.poc,
             meta: e.meta.clone(),
         });
         self.remove_unused();

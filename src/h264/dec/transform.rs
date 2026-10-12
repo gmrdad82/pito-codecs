@@ -1,5 +1,5 @@
-use crate::h264::dec::params::ScalingMatrices;
 use crate::h264::dec::tables::{norm_adjust4, norm_adjust8};
+use crate::syntax::h264::params::ScalingMatrices;
 
 #[derive(Clone)]
 pub struct LevelScale {

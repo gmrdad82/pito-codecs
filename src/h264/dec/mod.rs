@@ -7,23 +7,19 @@ mod cavlc;
 mod cavlc_tables;
 mod deblock;
 mod decoder;
-pub mod dpb;
-mod error;
 mod inter;
 mod intra;
 mod mbtypes;
-pub mod params;
 mod picture;
 #[cfg(target_arch = "x86_64")]
 mod simd;
-pub mod slice;
 mod slicedec;
 
 mod tables;
 mod transform;
 
+pub use crate::syntax::error::Error;
 pub use decoder::Decoder;
-pub use error::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ColorInfo {

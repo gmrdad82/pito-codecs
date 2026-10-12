@@ -1,10 +1,12 @@
-use crate::hevc::bits::BitReader;
-use crate::hevc::error::{Result, ensure, unsupported};
-use crate::hevc::spec_tables::{DEFAULT_SCALING_INTER, DEFAULT_SCALING_INTRA};
-use crate::hevc::tables::scan_diag;
+use super::tables::scan_diag;
+use super::tables::{DEFAULT_SCALING_INTER, DEFAULT_SCALING_INTRA};
+use crate::syntax::bits::BitReader;
+use crate::syntax::error::{Result, ensure, unsupported};
 
-pub fn skip_ptl(r: &mut BitReader, max_sub_layers_minus1: u32) -> Result<()> {
-    r.skip(2 + 1 + 5 + 32 + 4 + 43 + 1 + 8)?;
+pub fn profile_idc(r: &mut BitReader, max_sub_layers_minus1: u32) -> Result<u8> {
+    r.skip(2 + 1)?;
+    let profile_idc = r.read_bits(5)? as u8;
+    r.skip(32 + 4 + 43 + 1 + 8)?;
     let n = max_sub_layers_minus1 as usize;
     let mut sub_profile = [false; 8];
     let mut sub_level = [false; 8];
@@ -25,7 +27,7 @@ pub fn skip_ptl(r: &mut BitReader, max_sub_layers_minus1: u32) -> Result<()> {
             r.skip(8)?;
         }
     }
-    Ok(())
+    Ok(profile_idc)
 }
 
 fn skip_sub_layer_hrd(r: &mut BitReader, cpb_cnt: u32, sub_pic: bool) -> Result<()> {
@@ -397,6 +399,7 @@ impl StRps {
 #[derive(Clone, Debug)]
 pub struct Sps {
     pub max_sub_layers_minus1: u32,
+    pub profile_idc: u8,
     pub id: u32,
     pub chroma_format_idc: u32,
     pub separate_colour_plane: bool,
@@ -445,7 +448,7 @@ impl Sps {
             "sps_max_sub_layers_minus1 out of range"
         );
         r.skip(1)?;
-        skip_ptl(&mut r, max_sub_layers_minus1)?;
+        let profile_idc = profile_idc(&mut r, max_sub_layers_minus1)?;
         let id = r.read_ue()?;
         ensure!(id < 16, "sps_seq_parameter_set_id out of range");
         let chroma_format_idc = r.read_ue()?;
@@ -580,6 +583,7 @@ impl Sps {
         }
         Ok(Sps {
             max_sub_layers_minus1,
+            profile_idc,
             id,
             chroma_format_idc,
             separate_colour_plane,
@@ -660,15 +664,26 @@ impl Sps {
     }
 
     pub fn check_supported(&self) -> Result<()> {
+        self.check(
+            self.bit_depth_luma == self.bit_depth_chroma && matches!(self.bit_depth_luma, 8 | 10),
+            " (only 8 or 10)",
+        )
+    }
+
+    pub fn check_gpu(&self) -> Result<()> {
+        self.check(self.bit_depth_luma <= 12 && self.bit_depth_chroma <= 12, "")
+    }
+
+    fn check(&self, depth: bool, only: &str) -> Result<()> {
         if self.chroma_format_idc != 1 {
             return unsupported(format!(
                 "chroma_format_idc {} (only 4:2:0)",
                 self.chroma_format_idc
             ));
         }
-        if self.bit_depth_luma != self.bit_depth_chroma || !matches!(self.bit_depth_luma, 8 | 10) {
+        if !depth {
             return unsupported(format!(
-                "bit depth {}/{} (only 8 or 10)",
+                "bit depth {}/{}{only}",
                 self.bit_depth_luma, self.bit_depth_chroma
             ));
         }
@@ -887,6 +902,8 @@ impl Pps {
 
 #[derive(Clone, Debug)]
 pub struct Layout {
+    pub col_bd: Vec<u32>,
+    pub row_bd: Vec<u32>,
     pub rs_to_ts: Vec<u32>,
     pub ts_to_rs: Vec<u32>,
     pub tile_id: Vec<u32>,
@@ -969,6 +986,8 @@ impl Layout {
             }
         }
         Ok(Layout {
+            col_bd,
+            row_bd,
             rs_to_ts,
             ts_to_rs,
             tile_id,

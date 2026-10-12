@@ -12,12 +12,12 @@ mod vp9;
 mod abi_tests;
 
 use crate::gpu::nal::{self, Framing};
-use crate::gpu::syntax::bits::unescape_rbsp;
-use crate::gpu::syntax::{h264 as h264_syntax, hevc as hevc_syntax};
 use crate::gpu::{
     Backend, DecoderBackend, Direction, EncoderBackend, EncoderConfig, GpuFrame, GpuInner,
 };
 use crate::media::{Codec, Error, Frame, Packet, Result};
+use crate::syntax::bits::unescape_rbsp;
+use crate::syntax::{h264 as h264_syntax, hevc as hevc_syntax};
 
 impl Picture {
     pub fn into_frame(self) -> Result<Frame> {
@@ -151,7 +151,7 @@ fn open_front(codec: Codec, framing: Framing, sets: &[Vec<u8>]) -> Result<(Front
             let rbsp = parameter_set(sets, 2, |h| (h >> 1) & 0x3f == 33)
                 .ok_or_else(|| Error::Invalid("no HEVC SPS".into()))?;
             let sps = hevc_syntax::params::Sps::parse(&rbsp).map_err(backend)?;
-            sps.check_supported()
+            sps.check_gpu()
                 .map_err(|e| Error::Unsupported(e.to_string()))?;
             let bits = sps.bit_depth_luma;
             if sps.chroma_format_idc != 1 || sps.bit_depth_chroma != bits || sps.range_extension {
@@ -160,10 +160,10 @@ fn open_front(codec: Codec, framing: Framing, sets: &[Vec<u8>]) -> Result<(Front
                     sps.chroma_format_idc
                 )));
             }
-            let profiles = hevc_profiles(sps.ptl.profile_idc, bits).ok_or_else(|| {
+            let profiles = hevc_profiles(sps.profile_idc, bits).ok_or_else(|| {
                 Error::Unsupported(format!(
                     "HEVC profile {} at {bits}-bit on the GPU",
-                    sps.ptl.profile_idc
+                    sps.profile_idc
                 ))
             })?;
             let count = (sps.max_dec_pic_buffering as usize)

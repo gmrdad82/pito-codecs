@@ -2,13 +2,13 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use super::Picture;
-use crate::gpu::syntax::bits::unescape_rbsp;
-use crate::gpu::syntax::h264::dpb::{Dpb, DpbEntry, Output, OutputMeta, RefMark};
-use crate::gpu::syntax::h264::params::{Pps, Sps};
-use crate::gpu::syntax::h264::slice::{
+use crate::media::{Error, Result};
+use crate::syntax::bits::unescape_rbsp;
+use crate::syntax::h264::dpb::{Dpb, DpbEntry, Output, OutputMeta, RefMark};
+use crate::syntax::h264::params::{Pps, Sps};
+use crate::syntax::h264::slice::{
     NalHeader, Poc, PocState, SliceHeader, SliceType, is_new_picture, nal_type,
 };
-use crate::media::{Error, Result};
 
 use super::Accel;
 use super::ffi::{
@@ -206,8 +206,7 @@ impl<A: Accel> Front<A> {
             found = None;
             let (ppss, spss) = (&self.ppss, &self.spss);
             let parsed = SliceHeader::parse(&rbsp, hdr, |id| {
-                let missing =
-                    |what: String| crate::gpu::syntax::error::Error::MissingParameterSet(what);
+                let missing = |what: String| crate::syntax::error::Error::MissingParameterSet(what);
                 let pps = ppss
                     .get(id as usize)
                     .and_then(Option::as_ref)
@@ -512,7 +511,10 @@ fn va_ref(e: &DpbEntry<Surface>, surfaces: &[ffi::VASurfaceID]) -> VAPictureH264
 }
 
 fn output_meta(pts: i64) -> OutputMeta {
-    OutputMeta { pts }
+    OutputMeta {
+        pts,
+        ..Default::default()
+    }
 }
 
 fn flag(on: bool, bit: u32) -> u32 {

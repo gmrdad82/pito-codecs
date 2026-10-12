@@ -16,6 +16,18 @@ pub mod mp4;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 
+#[cfg(any(feature = "h264", feature = "hevc", feature = "gpu"))]
+#[cfg_attr(
+    not(all(
+        feature = "h264",
+        feature = "hevc",
+        feature = "gpu",
+        target_os = "linux"
+    )),
+    allow(dead_code)
+)]
+mod syntax;
+
 #[cfg(feature = "filter")]
 pub mod filter;
 

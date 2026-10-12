@@ -1,5 +1,5 @@
 use crate::h264::dec::cabac_tables::CABAC_INIT_MN;
-use crate::h264::dec::error::{Result, ensure};
+use crate::syntax::error::{Result, ensure};
 
 #[rustfmt::skip]
 pub(crate) static RANGE_TAB_LPS: [[u8; 4]; 64] = [
