@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.2.1 — 2026-10-12
+
+### Fixed
+
+- An audio range or stream from an MKV PCM track starts on the right sample: a block whose millisecond timestamp rounds to the start could make the seek land after it and shift the range by up to one block.
+
 ## v1.2.0 — 2026-10-12
 
 Exports from the app's own frames at any size, a public blend without copies, export progress that follows real work, GPU stills about 3x faster, and the audit's second hardening wave.
