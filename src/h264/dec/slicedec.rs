@@ -127,7 +127,6 @@ pub struct PicState {
     pub mb_w: usize,
     pub mb_h: usize,
     pub poc: i32,
-    pub decoded_mbs: usize,
     pub frame: FrameRef,
     pub reference: bool,
     row_count: Vec<u16>,
@@ -146,7 +145,6 @@ impl PicState {
             mb_w,
             mb_h,
             poc: frame.poc,
-            decoded_mbs: 0,
             frame,
             reference: true,
             row_count: vec![0; mb_h],
@@ -162,7 +160,6 @@ impl PicState {
         self.slices.clear();
         self.planes = unsafe { frame.writer() };
         self.poc = frame.poc;
-        self.decoded_mbs = 0;
         self.frame = frame;
         self.row_count.fill(0);
         self.rows_recon = 0;
@@ -172,7 +169,6 @@ impl PicState {
 
     #[inline]
     pub fn mb_done(&mut self, addr: usize) {
-        self.decoded_mbs += 1;
         let r = addr / self.mb_w;
         self.row_count[r] += 1;
         if self.row_count[r] as usize >= self.mb_w && r == self.rows_recon {

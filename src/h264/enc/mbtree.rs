@@ -18,7 +18,7 @@ pub struct Costs {
     blocks: Vec<Block>,
 }
 
-fn intra_cost(cur: &LowRes, x0: usize, y0: usize) -> u32 {
+pub(super) fn intra_cost(cur: &LowRes, x0: usize, y0: usize) -> u32 {
     let mut blk = [0u8; 64];
     let mut best = u32::MAX;
     let base = y0 * cur.w + x0;

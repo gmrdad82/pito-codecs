@@ -32,7 +32,6 @@ pub struct DpbEntry<F> {
 
 pub struct Dpb<F> {
     pub entries: Vec<DpbEntry<F>>,
-    pub max_long_term_frame_idx: Option<u32>,
     pub capacity: usize,
     pub max_reorder: usize,
 }
@@ -46,7 +45,6 @@ impl<F: Clone> Dpb<F> {
     pub fn new() -> Self {
         Dpb {
             entries: Vec::new(),
-            max_long_term_frame_idx: None,
             capacity: 16,
             max_reorder: 16,
         }
@@ -107,7 +105,6 @@ impl<F: Clone> Dpb<F> {
         } else {
             self.flush(out);
         }
-        self.max_long_term_frame_idx = None;
     }
 
     fn sliding_window(
@@ -367,13 +364,11 @@ impl<F: Clone> Dpb<F> {
                             e.mark = RefMark::Unused;
                         }
                     }
-                    self.max_long_term_frame_idx = if max == 0 { None } else { Some(max - 1) };
                 }
                 5 => {
                     for e in &mut self.entries {
                         e.mark = RefMark::Unused;
                     }
-                    self.max_long_term_frame_idx = None;
                     had5 = true;
                 }
                 6 => {
@@ -408,13 +403,11 @@ impl<F: Clone> Dpb<F> {
         let mut had5 = false;
         if sh.nal_ref_idc != 0 {
             if sh.idr {
-                if sh.long_term_reference {
-                    mark = RefMark::Long;
-                    self.max_long_term_frame_idx = Some(0);
+                mark = if sh.long_term_reference {
+                    RefMark::Long
                 } else {
-                    mark = RefMark::Short;
-                    self.max_long_term_frame_idx = None;
-                }
+                    RefMark::Short
+                };
             } else {
                 let mut cur_long = None;
                 if sh.adaptive_ref_pic_marking {

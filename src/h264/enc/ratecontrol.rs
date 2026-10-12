@@ -44,7 +44,6 @@ pub struct RateControl {
     vbv_max_bits_per_frame: f64,
     vbv_size: f64,
     vbv_fill: f64,
-    last_q: f64,
     prior: Option<(f64, f64)>,
     inter_s: f64,
     inter_n: u64,
@@ -70,7 +69,6 @@ impl RateControl {
             vbv_max_bits_per_frame: max,
             vbv_size: size,
             vbv_fill: size * 0.9,
-            last_q: 0.0,
             prior: None,
             inter_s: 0.0,
             inter_n: 0,
@@ -137,7 +135,6 @@ impl RateControl {
                 qp += 0.5;
             }
         }
-        self.last_q = qp;
         qp
     }
 

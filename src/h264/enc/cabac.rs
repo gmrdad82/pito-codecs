@@ -31,7 +31,6 @@ pub struct CabacEncoder {
     buf: Vec<u8>,
     acc: u64,
     nbits: u32,
-    bins: u64,
 }
 
 impl CabacEncoder {
@@ -45,7 +44,6 @@ impl CabacEncoder {
             buf: header,
             acc: 0,
             nbits: 0,
-            bins: 0,
         }
     }
 
@@ -106,7 +104,6 @@ impl CabacEncoder {
 impl BinSink for CabacEncoder {
     #[inline]
     fn decision(&mut self, ctx: usize, bin: u32) {
-        self.bins += 1;
         let s = self.ctx.0[ctx];
         let state = (s >> 1) as usize;
         let mps = (s & 1) as u32;
@@ -125,7 +122,6 @@ impl BinSink for CabacEncoder {
 
     #[inline]
     fn bypass(&mut self, bin: u32) {
-        self.bins += 1;
         self.low <<= 1;
         if bin != 0 {
             self.low += self.range;
@@ -142,7 +138,6 @@ impl BinSink for CabacEncoder {
     }
 
     fn terminate(&mut self, bin: u32) {
-        self.bins += 1;
         self.range -= 2;
         if bin != 0 {
             self.low += self.range;

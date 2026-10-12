@@ -24,18 +24,14 @@ pub struct EncParams {
     pub mbh: usize,
     pub cabac: bool,
     pub t8x8: bool,
-    pub i4x4: bool,
     pub i8x8: bool,
     pub partitions: bool,
     pub me_range: i32,
-    pub subpel: u8,
     pub subpel_rounds: u8,
     pub rd: bool,
     pub chroma_qp_offset: i32,
-    pub decimate: bool,
     pub adaptive_t8: bool,
     pub always_intra: bool,
-    pub cavlc_clamp: bool,
 }
 
 pub struct FrameEnc<'a> {
@@ -87,20 +83,8 @@ pub struct Band<'b> {
     pub cbase: usize,
 }
 
-#[derive(Default, Clone, Debug)]
-pub struct SliceStats {
-    pub bits: u64,
-    pub intra: u32,
-    pub skip: u32,
-    pub inter: u32,
-    pub qp_sum: u64,
-    pub mbs: u32,
-}
-
 pub struct SliceOut {
     pub nal: Vec<u8>,
-    #[allow(dead_code)]
-    pub stats: SliceStats,
 }
 
 #[derive(Clone, Copy)]
@@ -194,20 +178,17 @@ pub struct SliceEnc<'a, 'b> {
     band: Band<'b>,
     mbs: &'b mut [MbInfo],
     mbase: usize,
-    y0: usize,
     refs: [Option<RefPic<'b>>; 2],
     vlim: isize,
-    slice_no: u16,
     last_qp: u8,
     prev_dqp_nz: bool,
     cabac: Option<CabacEncoder>,
     cavlc: Option<BitWriter>,
     skip_run: u32,
-    stats: SliceStats,
 }
 
 impl<'a, 'b> SliceEnc<'a, 'b> {
-    pub fn new(f: &'a FrameEnc<'a>, slice_no: u16) -> Self {
+    pub fn new(f: &'a FrameEnc<'a>) -> Self {
         SliceEnc {
             f,
             band: Band {
@@ -221,25 +202,20 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
             },
             mbs: &mut [],
             mbase: 0,
-            y0: 0,
             refs: [None, None],
             vlim: 0,
-            slice_no,
             last_qp: f.qp,
             prev_dqp_nz: false,
             cabac: None,
             cavlc: None,
             skip_run: 0,
-            stats: SliceStats::default(),
         }
     }
 
     pub fn start(&mut self) {
         let f = self.f;
-        let mut hdr = f.hdr.clone();
-        hdr.first_mb = (self.y0 * f.p.mbw) as u32;
         let mut bw = BitWriter::new();
-        hdr.write(&mut bw);
+        f.hdr.write(&mut bw);
         if f.p.cabac {
             while !bw.is_byte_aligned() {
                 bw.write_bit(true);
@@ -342,10 +318,8 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
             w.rbsp_trailing();
             w.finish()
         };
-        self.stats.bits = rbsp.len() as u64 * 8;
         SliceOut {
             nal: nal(f.nal_ref_idc, f.nal_type, &rbsp),
-            stats: self.stats,
         }
     }
 
@@ -355,7 +329,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
     }
 
     fn avail(&self, mx: usize, my: usize) -> Avail {
-        let top = my > self.y0;
+        let top = my > 0;
         Avail {
             left: mx > 0,
             top,
@@ -445,7 +419,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
         }
         let nx = mx as i32 + dx;
         let ny = my as i32 + dy;
-        if nx < 0 || nx >= self.f.p.mbw as i32 || ny < self.y0 as i32 {
+        if nx < 0 || nx >= self.f.p.mbw as i32 || ny < 0 {
             return None;
         }
         let m = self.mb(nx as usize, ny as usize);
@@ -602,18 +576,8 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
             self.prev_dqp_nz = false;
         }
         c.info.qp = self.last_qp;
-        c.info.slice = self.slice_no + 1;
         c.info.kind = kind;
         c.info.cbp = if kind.is_skip() { 0 } else { c.code.cbp };
-        self.stats.mbs += 1;
-        self.stats.qp_sum += c.info.qp as u64;
-        if kind.is_intra() {
-            self.stats.intra += 1;
-        } else if kind.is_skip() {
-            self.stats.skip += 1;
-        } else {
-            self.stats.inter += 1;
-        }
         let idx = (my - self.mbase) * self.f.p.mbw + mx;
         self.mbs[idx] = c.info;
         let av = self.avail(mx, my);
@@ -752,7 +716,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
                 let mut t = fdct4(&d);
                 dc[b] = t[0];
                 quant4(&mut t, qt, qpc, dz, true);
-                if self.f.p.cavlc_clamp {
+                if !self.f.p.cabac {
                     for v in t.iter_mut().skip(1) {
                         *v = (*v).clamp(-cavlc::MAX_LEVEL, cavlc::MAX_LEVEL);
                     }
@@ -765,7 +729,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
                 c.code.cac[comp * 4 + b] = scan;
                 coefs[comp][b] = t;
             }
-            if !intra && self.f.p.decimate && ac_score < 7 {
+            if !intra && ac_score < 7 {
                 for b in 0..4 {
                     c.code.cac[comp * 4 + b] = [0; 16];
                     for k in 1..16 {
@@ -774,7 +738,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
                 }
             }
             let (mut lv, _) = quant_chroma_dc(&dc, qt, qpc, dz);
-            if self.f.p.cavlc_clamp {
+            if !self.f.p.cabac {
                 for v in lv.iter_mut() {
                     *v = (*v).clamp(-cavlc::MAX_LEVEL, cavlc::MAX_LEVEL);
                 }
@@ -857,7 +821,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
     ) -> u8 {
         let qt = self.f.qt;
         let qbits = 15 + (qp / 6) as u32;
-        let lim = if self.f.p.cavlc_clamp {
+        let lim = if !self.f.p.cabac {
             cavlc::MAX_LEVEL
         } else {
             i32::MAX
@@ -985,7 +949,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
         qp: u8,
         c: &mut Cand,
     ) {
-        let dec = self.f.p.decimate;
+        let dec = true;
         let (use8, cbpl) = if !self.f.p.t8x8 {
             (
                 false,
@@ -1085,7 +1049,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
             let mut t = fdct4(&d);
             dc[by * 4 + bx] = t[0];
             quant4(&mut t, qt, qp, Deadzone::INTRA, true);
-            if self.f.p.cavlc_clamp {
+            if !self.f.p.cabac {
                 for v in t.iter_mut() {
                     *v = (*v).clamp(-cavlc::MAX_LEVEL, cavlc::MAX_LEVEL);
                 }
@@ -1093,7 +1057,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
             coefs[blk] = t;
         }
         let (mut dcl, _) = quant_luma_dc(&dc, qt, qp, Deadzone::INTRA);
-        if self.f.p.cavlc_clamp {
+        if !self.f.p.cabac {
             for v in dcl.iter_mut() {
                 *v = (*v).clamp(-cavlc::MAX_LEVEL, cavlc::MAX_LEVEL);
             }
@@ -1383,7 +1347,7 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
             }
             let mut t = fdct4(&d);
             let nz = quant4(&mut t, qt, qp, Deadzone::INTRA, false);
-            if self.f.p.cavlc_clamp {
+            if !self.f.p.cabac {
                 for v in t.iter_mut() {
                     *v = (*v).clamp(-cavlc::MAX_LEVEL, cavlc::MAX_LEVEL);
                 }
@@ -1570,8 +1534,8 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
             c
         };
         let mut best: Option<Box<Cand>> = None;
-        let try_nxn = p.i4x4
-            && (inter_cost == u64::MAX || cost16 < inter_cost + inter_cost / 4 || p.always_intra);
+        let try_nxn =
+            inter_cost == u64::MAX || cost16 < inter_cost + inter_cost / 4 || p.always_intra;
         if !try_nxn {
             return mk16();
         }
@@ -1722,41 +1686,36 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
             satd(src, sstride, buf, 16, w, h) + ((lam * mv_bits(mv, mvp)) >> 8)
         };
         let mut bs = scost(best, &mut buf);
-        if p.subpel >= 1 {
-            for step in [2, 1] {
-                if step == 1 && p.subpel < 2 {
-                    break;
+        for step in [2, 1] {
+            let rounds = if step == 1 {
+                1 + p.subpel_rounds as usize
+            } else {
+                1
+            };
+            for _ in 0..rounds {
+                let c = best;
+                for (dx, dy) in [
+                    (-1, 0),
+                    (1, 0),
+                    (0, -1),
+                    (0, 1),
+                    (-1, -1),
+                    (1, -1),
+                    (-1, 1),
+                    (1, 1),
+                ] {
+                    let m = Mv::new(c.x as i32 + dx * step, c.y as i32 + dy * step);
+                    if !self.mv_ok(bx, by, w, h, m) {
+                        continue;
+                    }
+                    let k = scost(m, &mut buf);
+                    if k < bs {
+                        bs = k;
+                        best = m;
+                    }
                 }
-                let rounds = if step == 1 {
-                    1 + p.subpel_rounds as usize
-                } else {
-                    1
-                };
-                for _ in 0..rounds {
-                    let c = best;
-                    for (dx, dy) in [
-                        (-1, 0),
-                        (1, 0),
-                        (0, -1),
-                        (0, 1),
-                        (-1, -1),
-                        (1, -1),
-                        (-1, 1),
-                        (1, 1),
-                    ] {
-                        let m = Mv::new(c.x as i32 + dx * step, c.y as i32 + dy * step);
-                        if !self.mv_ok(bx, by, w, h, m) {
-                            continue;
-                        }
-                        let k = scost(m, &mut buf);
-                        if k < bs {
-                            bs = k;
-                            best = m;
-                        }
-                    }
-                    if best == c {
-                        break;
-                    }
+                if best == c {
+                    break;
                 }
             }
         }
@@ -1959,16 +1918,8 @@ impl<'a, 'b> SliceEnc<'a, 'b> {
             }
             skip_pred = Some((y, u, v));
         }
-        let mut cands = vec![skip_mv, Mv::ZERO];
-        let colo = r.mbs[my * f.p.mbw + mx];
-        if colo.ref_idx[0][0] >= 0 {
-            cands.push(colo.mv[0][0]);
-        }
-        let (mv16, mvp16, cost16) = {
-            let (m, p, c) = self.search_part(mx, my, &r, Part::P16x16, 0, src, lam, skip_mv);
-            (m, p, c)
-        };
-        let _ = cands;
+        let (mv16, mvp16, cost16) =
+            self.search_part(mx, my, &r, Part::P16x16, 0, src, lam, skip_mv);
         let mut best_part = Part::P16x16;
         let mut best_mvs = mv16;
         let mut best_mvps = mvp16;

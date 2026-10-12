@@ -129,18 +129,8 @@ pub fn idct4_add(d: &[i32; 16], dst: &mut [u8], stride: usize) {
     }
 }
 
-#[allow(dead_code)]
-pub fn idct4_dc_add(dc: i32, dst: &mut [u8], stride: usize) {
-    let v = (dc + 32) >> 6;
-    for i in 0..4 {
-        for p in &mut dst[i * stride..i * stride + 4] {
-            *p = clip_u8(*p as i32 + v);
-        }
-    }
-}
-
 #[inline(always)]
-fn idct8_1d(d: [i32; 8]) -> [i32; 8] {
+pub(in crate::h264) fn idct8_1d(d: [i32; 8]) -> [i32; 8] {
     let a0 = d[0] + d[4];
     let a4 = d[0] - d[4];
     let a2 = (d[2] >> 1) - d[6];

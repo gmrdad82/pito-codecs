@@ -12,11 +12,11 @@ mod intra;
 pub(super) mod mbtypes;
 mod picture;
 #[cfg(target_arch = "x86_64")]
-mod simd;
+pub(super) mod simd;
 mod slicedec;
 
 pub(super) mod tables;
-mod transform;
+pub(super) mod transform;
 
 pub use crate::syntax::error::Error;
 pub use decoder::Decoder;

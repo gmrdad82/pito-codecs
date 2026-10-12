@@ -16,11 +16,6 @@ pub fn nal(nal_ref_idc: u8, nal_type: u8, rbsp: &[u8]) -> Vec<u8> {
 
 #[derive(Clone, Debug)]
 pub struct Vui {
-    pub sar: (u16, u16),
-    pub video_full_range: bool,
-    pub colour_primaries: u8,
-    pub transfer: u8,
-    pub matrix: u8,
     pub num_units_in_tick: u32,
     pub time_scale: u32,
     pub max_num_reorder_frames: u32,
@@ -78,25 +73,16 @@ impl Sps {
         }
         w.write_bit(true);
         let v = &self.vui;
-        let has_sar = v.sar != (0, 0);
-        w.write_bit(has_sar);
-        if has_sar {
-            if v.sar == (1, 1) {
-                w.write_bits(1, 8);
-            } else {
-                w.write_bits(255, 8);
-                w.write_bits(v.sar.0 as u32, 16);
-                w.write_bits(v.sar.1 as u32, 16);
-            }
-        }
+        w.write_bit(true);
+        w.write_bits(1, 8);
         w.write_bit(false);
         w.write_bit(true);
         w.write_bits(5, 3);
-        w.write_bit(v.video_full_range);
+        w.write_bit(false);
         w.write_bit(true);
-        w.write_bits(v.colour_primaries as u32, 8);
-        w.write_bits(v.transfer as u32, 8);
-        w.write_bits(v.matrix as u32, 8);
+        w.write_bits(1, 8);
+        w.write_bits(1, 8);
+        w.write_bits(1, 8);
         w.write_bit(false);
         w.write_bit(true);
         w.write_bits(v.num_units_in_tick, 32);
@@ -182,23 +168,6 @@ pub fn sei_user_data_rbsp(text: &str) -> Vec<u8> {
     w.finish()
 }
 
-pub fn sei_hdr_rbsp(mastering: Option<&[u8; 24]>, cll: Option<(u16, u16)>) -> Vec<u8> {
-    let mut w = BitWriter::new();
-    if let Some(m) = mastering {
-        w.write_bits(137, 8);
-        w.write_bits(24, 8);
-        w.write_bytes(m);
-    }
-    if let Some((a, b)) = cll {
-        w.write_bits(144, 8);
-        w.write_bits(4, 8);
-        w.write_bits(a as u32, 16);
-        w.write_bits(b as u32, 16);
-    }
-    w.rbsp_trailing();
-    w.finish()
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SliceType {
     P = 0,
@@ -208,7 +177,6 @@ pub enum SliceType {
 
 #[derive(Clone, Debug)]
 pub struct SliceHeader {
-    pub first_mb: u32,
     pub slice_type: SliceType,
     pub nal_ref_idc: u8,
     pub idr: bool,
@@ -228,7 +196,7 @@ pub struct SliceHeader {
 
 impl SliceHeader {
     pub fn write(&self, w: &mut BitWriter) {
-        w.write_ue(self.first_mb);
+        w.write_ue(0);
         w.write_ue(self.slice_type as u32);
         w.write_ue(0);
         w.write_bits(self.frame_num, self.log2_max_frame_num);
@@ -288,17 +256,6 @@ pub fn avcc(sps_nal: &[u8], pps_nal: &[u8], profile_idc: u8, constraint: u8, lev
         v.push(0);
     }
     v
-}
-
-pub fn level_at_least(requested: u8, needed: u8) -> u8 {
-    const VALID: [u8; 19] = [
-        10, 11, 12, 13, 20, 21, 22, 30, 31, 32, 40, 41, 42, 50, 51, 52, 60, 61, 62,
-    ];
-    if VALID.contains(&requested) && requested >= needed {
-        requested
-    } else {
-        needed
-    }
 }
 
 pub fn pick_level(

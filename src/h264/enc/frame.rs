@@ -139,7 +139,7 @@ pub fn encode_frame(ctx: &Ctx, job: &Job, scratch: &mut Scratch) -> SliceOut {
     };
     let mbh = ctx.p.mbh;
     let (ys, cs) = (pic.ys, pic.cs);
-    let mut se = SliceEnc::new(&fe, 0);
+    let mut se = SliceEnc::new(&fe);
     se.start();
     let mut pr = Progress {
         yb: 0,
