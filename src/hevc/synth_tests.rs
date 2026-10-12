@@ -167,6 +167,15 @@ fn sps(pcm_loop_filter_disabled: bool) -> Vec<u8> {
 }
 
 fn sps_with(pcm_loop_filter_disabled: bool, window: Option<[u32; 4]>) -> Vec<u8> {
+    sps_sized(pcm_loop_filter_disabled, window, W as u32, H as u32)
+}
+
+fn sps_sized(
+    pcm_loop_filter_disabled: bool,
+    window: Option<[u32; 4]>,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
     let mut w = BitWriter::new();
     w.write_bits(0, 4);
     w.write_bits(0, 3);
@@ -174,8 +183,8 @@ fn sps_with(pcm_loop_filter_disabled: bool, window: Option<[u32; 4]>) -> Vec<u8>
     ptl(&mut w);
     w.write_ue(0);
     w.write_ue(1);
-    w.write_ue(W as u32);
-    w.write_ue(H as u32);
+    w.write_ue(width);
+    w.write_ue(height);
     w.write_bit(window.is_some());
     for v in window.into_iter().flatten() {
         w.write_ue(v);
@@ -772,4 +781,16 @@ fn conformance_window_past_the_picture_stays_inside_it() {
             assert!(p.planes[0].data.len() >= p.width as usize);
         }
     }
+}
+
+#[test]
+fn pictures_above_the_largest_level_are_refused() {
+    let parse = |width, height| {
+        let n = sps_sized(false, None, width, height);
+        crate::syntax::hevc::params::Sps::parse(&crate::syntax::bits::unescape_rbsp(&n[6..]))
+    };
+    assert!(parse(W as u32, H as u32).is_ok());
+    assert!(parse(8192, 4352).is_ok());
+    assert!(parse(8192, 4368).is_err());
+    assert!(parse(16384, 16384).is_err());
 }
