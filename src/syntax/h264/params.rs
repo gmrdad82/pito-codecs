@@ -664,6 +664,10 @@ impl Pps {
                 }
                 6 => {
                     let n = r.read_ue()?.saturating_add(1);
+                    ensure!(
+                        n <= sps.pic_width_in_mbs * sps.pic_height_in_map_units,
+                        "pic_size_in_map_units out of range"
+                    );
                     let bits = 32 - (num_slice_groups - 1).leading_zeros();
                     for _ in 0..n {
                         r.read_bits(bits)?;
