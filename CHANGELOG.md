@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.0.3 — 2026-10-12
+
+Long MKV recordings open, play audio and give stills without reading the whole file.
+
+### Added
+
+- `audio_stream` streams a track's audio in sample-aligned blocks from any start time, with the same resample and downmix as `audio_pcm_range`, from MP4 and MKV (PCM, AAC, Opus) or through ffmpeg.
+- `frames_at_seek` with `Seek::Exact` gives the frame at the asked time, decoding forward from its keyframe; `Seek::Keyframe` keeps the fast keyframe still.
+- `export_with_audio` takes the app's own premixed audio, one buffer per piece, and writes it as AAC, sample-exact against the video.
+- `first_frame`, `frames_at` and filmstrips read MKV and WebM, seeking through their Cues.
+
+### Changed
+
+- Audio and stills open an MKV from its head (SeekHead, Tracks, Cues) instead of indexing every block: about 0.1 ms instead of hundreds of milliseconds to seconds on long recordings.
+
+### Fixed
+
+- A range that runs past the end of a track returns only the samples the track has, so a buffer shorter than asked means the track ended; before, it was padded with silence.
+
 ## v1.0.2 — 2026-10-12
 
 Native audio from every container we read, and a simpler crate: about 7,200 lines fewer, with every output byte-identical to v1.0.1.
