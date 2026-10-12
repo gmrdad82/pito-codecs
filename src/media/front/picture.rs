@@ -164,13 +164,8 @@ impl Blender {
                 fitted = scale(layer, frame.width, frame.height);
                 &fitted
             };
-            let img = Rgba {
-                width: image.width,
-                height: image.height,
-                data: image.data.clone(),
-            };
             self.layer =
-                filter::Overlay::new(&img, spec(Color::default(), frame.height), frame.format)
+                filter::Overlay::new(image, spec(Color::default(), frame.height), frame.format)
                     .ok()
                     .map(|o| (layer.clone(), o));
         }
