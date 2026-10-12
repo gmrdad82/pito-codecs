@@ -433,6 +433,7 @@ impl Cursor {
             .get(track)
             .ok_or_else(|| Error::Invalid(format!("no track {track}")))?;
         let last = clusters.last().copied().filter(|_| loose);
+        let mut warnings = Vec::new();
         for &at in clusters {
             let mut io = Io::with_len(r.source(), r.len(), &mut self.cache);
             let Some(h) = io.header(at, r.segment_end)? else {
@@ -441,7 +442,6 @@ impl Cursor {
             if h.id != CLUSTER {
                 continue;
             }
-            let mut warnings = Vec::new();
             let mut keys: Vec<FrameRef> = Vec::new();
             let ci = scan_cluster(
                 &mut io,

@@ -5,6 +5,7 @@ use crate::mp4::source::ByteSource;
 use crate::mp4::{too_large, truncated};
 use std::collections::HashMap;
 use std::fs::File;
+use std::num::NonZeroU64;
 use std::path::Path;
 
 const MAX_SAMPLES: usize = 1 << 26;
@@ -299,8 +300,11 @@ impl<S: ByteSource> Reader<S> {
 
     pub fn packet(&self, track: usize, index: usize) -> Result<Packet> {
         let data = self.read(track, index)?;
-        let t = &self.tracks[track];
-        let s = t.samples[index];
+        let (t, s) = self
+            .tracks
+            .get(track)
+            .and_then(|t| Some((t, *t.samples.get(index)?)))
+            .ok_or_else(|| Error::Invalid(format!("no sample {index} in track {track}")))?;
         Ok(Packet {
             data,
             pts: s.pts.saturating_add(t.edit_offset),
@@ -436,8 +440,9 @@ fn open<S: ByteSource>(src: S) -> Result<Reader<S>> {
             _ => {}
         }
     }
+    let mut room = len;
     for p in trak_payloads {
-        let t = parse_trak(p, file.timescale, file.quicktime, len)?;
+        let t = parse_trak(p, file.timescale, file.quicktime, len, &mut room)?;
         file.tracks.push(t);
     }
     let mut next_dts: Vec<i64> = file
@@ -499,7 +504,13 @@ fn rescale(v: i128, from: u32, to: u32) -> i64 {
     (v * to as i128 / from as i128).clamp(i64::MIN as i128, i64::MAX as i128) as i64
 }
 
-fn parse_trak(p: &[u8], movie_timescale: u32, quicktime: bool, file_len: u64) -> Result<Track> {
+fn parse_trak(
+    p: &[u8],
+    movie_timescale: u32,
+    quicktime: bool,
+    file_len: u64,
+    room: &mut u64,
+) -> Result<Track> {
     let mut t = Track {
         id: 0,
         kind: TrackKind::Other,
@@ -612,7 +623,7 @@ fn parse_trak(p: &[u8], movie_timescale: u32, quicktime: bool, file_len: u64) ->
         }
     }
     if let Some(stbl) = minf.and_then(|m| find(m, b"stbl")) {
-        parse_stbl(stbl, &mut t, quicktime, file_len)?;
+        parse_stbl(stbl, &mut t, quicktime, file_len, room)?;
     }
     if let Some(n) = name {
         t.name = n;
@@ -655,7 +666,24 @@ impl SttsCursor<'_> {
     }
 }
 
-fn parse_stbl(stbl: &[u8], t: &mut Track, is_qt: bool, file_len: u64) -> Result<()> {
+fn chunk_capacity(stsc: &[(u32, u32, u32)], chunks: usize) -> u64 {
+    let end = chunks as u64 + 1;
+    stsc.iter()
+        .enumerate()
+        .map(|(i, &(first, spc, _))| {
+            let next = stsc.get(i + 1).map_or(end, |n| (n.0 as u64).min(end));
+            next.saturating_sub(first as u64).saturating_mul(spc as u64)
+        })
+        .fold(0u64, u64::saturating_add)
+}
+
+fn parse_stbl(
+    stbl: &[u8],
+    t: &mut Track,
+    is_qt: bool,
+    file_len: u64,
+    room: &mut u64,
+) -> Result<()> {
     let mut stts: Vec<(u32, u32)> = Vec::new();
     let mut ctts: Vec<(u32, u32)> = Vec::new();
     let mut stss: Option<Vec<u32>> = None;
@@ -709,12 +737,16 @@ fn parse_stbl(stbl: &[u8], t: &mut Track, is_qt: bool, file_len: u64) -> Result<
                 c.full_header()?;
                 const_size = c.u32()?;
                 let n = c.u32()? as usize;
-                if const_size == 0 {
-                    c.check_count(n, 4)?;
-                    sizes = (0..n).map(|_| c.u32()).collect::<Result<_>>()?;
-                    sample_count = n;
-                } else {
-                    sample_count = (n as u64).min(file_len / const_size as u64) as usize;
+                match NonZeroU64::new(const_size as u64) {
+                    None => {
+                        c.check_count(n, 4)?;
+                        sizes = (0..n).map(|_| c.u32()).collect::<Result<_>>()?;
+                        sample_count = n;
+                    }
+                    Some(size) => {
+                        sample_count =
+                            usize::try_from((n as u64).min(file_len / size)).unwrap_or(usize::MAX);
+                    }
                 }
             }
             b"stz2" => {
@@ -822,6 +854,13 @@ fn parse_stbl(stbl: &[u8], t: &mut Track, is_qt: bool, file_len: u64) -> Result<
             }
         }
     } else {
+        let capacity = chunk_capacity(&stsc, chunks.len());
+        let mut sample_count = sample_count.min(usize::try_from(capacity).unwrap_or(usize::MAX));
+        if let Some(size) = NonZeroU64::new(const_size as u64) {
+            let fit = usize::try_from(*room / size).unwrap_or(usize::MAX);
+            sample_count = sample_count.min(fit);
+            *room = room.saturating_sub((sample_count as u64).saturating_mul(size.get()));
+        }
         if sample_count > MAX_SAMPLES {
             return Err(too_large("sample count"));
         }

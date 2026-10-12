@@ -438,6 +438,8 @@ pub struct Sps {
     pub extension_flags: u8,
 }
 
+const MAX_LUMA_PS: u64 = 35_651_584;
+
 impl Sps {
     pub fn parse(rbsp: &[u8]) -> Result<Sps> {
         let mut r = BitReader::new(rbsp);
@@ -461,7 +463,11 @@ impl Sps {
         let width = r.read_ue()?;
         let height = r.read_ue()?;
         ensure!(
-            width > 0 && height > 0 && width <= 16888 && height <= 16888,
+            width > 0
+                && height > 0
+                && width <= 16888
+                && height <= 16888
+                && width as u64 * height as u64 <= MAX_LUMA_PS,
             "picture size {width}x{height} out of range"
         );
         let mut conf_win = (0, 0, 0, 0);
@@ -908,15 +914,13 @@ impl Pps {
 
 #[derive(Clone, Debug)]
 pub struct Layout {
-    pub col_bd: Vec<u32>,
-    pub row_bd: Vec<u32>,
     pub rs_to_ts: Vec<u32>,
     pub ts_to_rs: Vec<u32>,
     pub tile_id: Vec<u32>,
 }
 
 impl Layout {
-    pub fn new(sps: &Sps, pps: &Pps) -> Result<Layout> {
+    pub fn tile_bounds(sps: &Sps, pps: &Pps) -> Result<(Vec<u32>, Vec<u32>)> {
         let (w, h) = (sps.pic_width_in_ctbs(), sps.pic_height_in_ctbs());
         let (nc, nr) = (pps.num_tile_columns, pps.num_tile_rows);
         ensure!(nc <= w && nr <= h, "more tiles than CTBs");
@@ -953,6 +957,15 @@ impl Layout {
             acc += r;
             row_bd.push(acc);
         }
+        Ok((col_bd, row_bd))
+    }
+
+    pub fn new(sps: &Sps, pps: &Pps) -> Result<Layout> {
+        let (w, h) = (sps.pic_width_in_ctbs(), sps.pic_height_in_ctbs());
+        let (nc, nr) = (pps.num_tile_columns, pps.num_tile_rows);
+        let (col_bd, row_bd) = Self::tile_bounds(sps, pps)?;
+        let colw: Vec<u32> = col_bd.windows(2).map(|b| b[1] - b[0]).collect();
+        let rowh: Vec<u32> = row_bd.windows(2).map(|b| b[1] - b[0]).collect();
         let n = (w * h) as usize;
         let mut rs_to_ts = vec![0u32; n];
         for rs in 0..w * h {
@@ -992,8 +1005,6 @@ impl Layout {
             }
         }
         Ok(Layout {
-            col_bd,
-            row_bd,
             rs_to_ts,
             ts_to_rs,
             tile_id,

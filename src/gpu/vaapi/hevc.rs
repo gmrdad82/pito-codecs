@@ -519,7 +519,7 @@ pub fn picture_params(
         )
         | flag(sh.nal.is_irap(), s::RAP_PIC)
         | flag(sh.nal.is_idr(), s::IDR_PIC);
-    let layout = Layout::new(sps, pps).map_err(backend)?;
+    let (col_bd, row_bd) = Layout::tile_bounds(sps, pps).map_err(backend)?;
     let mut column_width_minus1 = [0u16; 19];
     let mut row_height_minus1 = [0u16; 21];
     if pps.tiles_enabled {
@@ -533,8 +533,8 @@ pub fn picture_params(
             }
             Ok(())
         };
-        sizes(&layout.col_bd, &mut column_width_minus1)?;
-        sizes(&layout.row_bd, &mut row_height_minus1)?;
+        sizes(&col_bd, &mut column_width_minus1)?;
+        sizes(&row_bd, &mut row_height_minus1)?;
     }
     let narrow = |v: u32| u16::try_from(v).map_err(|_| backend("picture too large"));
     Ok(VAPictureParameterBufferHEVC {

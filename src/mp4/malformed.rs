@@ -247,3 +247,70 @@ fn runs_of_empty_samples_are_bounded() {
     let r = Reader::new(Sparse(empty_run(3), 1 << 31)).unwrap();
     assert_eq!(r.tracks[0].samples.len(), 3);
 }
+
+fn one_track() -> Vec<u8> {
+    let mut w = Writer::new(
+        Cursor::new(Vec::new()),
+        Options {
+            brand: Brand::Mp4,
+            reserve: 0,
+        },
+    )
+    .unwrap();
+    let v = w
+        .add_track(TrackConfig::new(SampleEntry::h264(avc(), 64, 48), 90_000))
+        .unwrap();
+    for i in 0..4i64 {
+        let p = Packet {
+            data: vec![0, 0, 0, 3, 0x65, i as u8, 7],
+            pts: i * 3000,
+            dts: i * 3000,
+            keyframe: i == 0,
+        };
+        w.push(v, &p).unwrap();
+    }
+    w.finish().unwrap().into_inner()
+}
+
+fn at(d: &[u8], kind: &[u8; 4]) -> usize {
+    d.windows(4).position(|w| w == kind).unwrap()
+}
+
+fn be32(d: &[u8], at: usize) -> u32 {
+    u32::from_be_bytes(d[at..at + 4].try_into().unwrap())
+}
+
+#[test]
+fn sample_tables_are_bounded_by_the_chunk_table_and_the_file() {
+    let mut d = one_track();
+    let stsz = at(&d, b"stsz");
+    d[stsz + 8..stsz + 16].copy_from_slice(&[0, 0, 0, 1, 0xFF, 0xFF, 0xFF, 0xFF]);
+    let stsc = at(&d, b"stsc");
+    for e in 0..be32(&d, stsc + 8) as usize {
+        let o = stsc + 16 + e * 12;
+        d[o..o + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+    }
+    let trak = at(&d, b"trak") - 4;
+    let size = be32(&d, trak) as usize;
+    let copy = d[trak..trak + size].to_vec();
+    for _ in 0..16 {
+        d.splice(trak..trak, copy.iter().copied());
+    }
+    let moov = at(&d, b"moov") - 4;
+    let grown = be32(&d, moov) + 16 * size as u32;
+    d[moov..moov + 4].copy_from_slice(&grown.to_be_bytes());
+    d.extend(bx(b"free", &vec![0; 1 << 16]));
+    let r = Reader::new(d.as_slice()).unwrap();
+    assert_eq!(r.tracks.len(), 17);
+    let total: usize = r.tracks.iter().map(|t| t.samples.len()).sum();
+    assert!(total <= d.len(), "{total} samples in {} bytes", d.len());
+}
+
+#[test]
+fn packet_out_of_range_is_an_error() {
+    let d = one_track();
+    let r = Reader::new(d.as_slice()).unwrap();
+    assert!(r.packet(0, 0).is_ok());
+    assert!(r.packet(0, usize::MAX).is_err());
+    assert!(r.packet(usize::MAX, 0).is_err());
+}

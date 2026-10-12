@@ -30,6 +30,7 @@ regressions() {
     mkv)
       cluster "$webm_head" 600 "81000082ff$(printf '00%.0s' $(seq 255))" > "$dir/xiph-empty.webm"
       cluster "$webm_head" 1 "81000084fe07" "8100018009" > "$dir/fixed-lacing.webm"
+      { hex "$webm_head"; python3 -c 'import sys; sys.stdout.buffer.write(bytes.fromhex("1f43b6758100") * 12000 + bytes.fromhex("1f43b67584e78100ff") * 8000)'; } > "$dir/near-miss.webm"
       ;;
   esac
 }
@@ -53,6 +54,24 @@ audio=(-f lavfi -i "sine=frequency=440:sample_rate=48000" -t 0.5)
 
 mp4_seeds() {
   ff "${video[@]}" "${audio[@]}" -c:v libx264 -preset ultrafast -c:a aac -movflags +faststart "$dir/h264-aac.mp4"
+  python3 - "$dir/h264-aac.mp4" "$dir/chunk-table.mp4" <<'PY' || echo "fuzz/seeds: skipped chunk-table.mp4" >&2
+import sys
+d = bytearray(open(sys.argv[1], "rb").read())
+def be(at):
+    return int.from_bytes(d[at:at + 4], "big")
+s = d.find(b"stsz")
+d[s + 8:s + 16] = bytes([0, 0, 0, 1, 255, 255, 255, 255])
+c = d.find(b"stsc")
+for e in range(be(c + 8)):
+    o = c + 16 + e * 12
+    d[o:o + 4] = b"\xff\xff\xff\xff"
+t = d.find(b"trak") - 4
+n = be(t)
+d[t:t] = bytes(d[t:t + n]) * 8
+m = d.find(b"moov") - 4
+d[m:m + 4] = (be(m) + 8 * n).to_bytes(4, "big")
+open(sys.argv[2], "wb").write(d)
+PY
   ff "${video[@]}" -c:v libx264 -preset ultrafast -bf 2 -movflags frag_keyframe+empty_moov "$dir/fragmented.mp4"
   ff "${video[@]}" "${audio[@]}" -c:v libx265 -preset ultrafast -tag:v hvc1 -c:a aac "$dir/hevc-aac.mp4"
   ff "${audio[@]}" -c:a pcm_s16le -f mov "$dir/pcm.mov"
@@ -88,6 +107,7 @@ case "$target" in
     ff "${video[@]}" -c:v libx265 -preset ultrafast -f hevc "$dir/x265.hevc"
     ff "${video[@]}" -c:v libx265 -preset ultrafast -x265-params "bframes=0:wpp=1" -f hevc "$dir/x265-wpp.hevc"
     ff -f lavfi -i "testsrc2=size=90x60:rate=12" -t 0.5 -c:v libx265 -preset ultrafast -f hevc "$dir/x265-window.hevc"
+    ff -f lavfi -i "color=gray:size=8192x4368:rate=1" -frames:v 1 -c:v libx265 -preset ultrafast -f hevc "$dir/above-level.hevc"
     ;;
   vp9_ivf)
     ff "${video[@]}" -c:v libvpx-vp9 -deadline realtime -cpu-used 8 -f ivf "$dir/vp9.ivf"

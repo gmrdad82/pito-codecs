@@ -199,3 +199,34 @@ fn fixed_lacing_needs_a_byte_per_frame() {
     let r = Reader::new(data.as_slice()).unwrap();
     assert_eq!(r.tracks[0].samples.len(), 1);
 }
+
+#[test]
+fn resync_never_rescans_bytes_it_has_scanned() {
+    let started = std::time::Instant::now();
+    let units: [&[u8]; 2] = [
+        &[0x1F, 0x43, 0xB6, 0x75, 0x81, 0x00],
+        &[0x1F, 0x43, 0xB6, 0x75, 0x84, 0xE7, 0x81, 0x00, 0xFF],
+    ];
+    for unit in units {
+        let mut d = head_of(true);
+        while d.len() < 300_000 {
+            d.extend_from_slice(unit);
+        }
+        let r = Reader::new(d.as_slice()).unwrap();
+        assert!(r.warnings.len() <= 257);
+        let mut s = r.stream();
+        while let Ok(Some(_)) = s.next_packet() {}
+        let _ = s.seek(0, 0.25);
+        let _ = s.next_packet();
+    }
+    assert!(started.elapsed().as_millis() < 2000);
+}
+
+#[test]
+fn packet_out_of_range_is_an_error() {
+    let data = good(true);
+    let r = Reader::new(data.as_slice()).unwrap();
+    assert!(r.packet(0, 0).is_ok());
+    assert!(r.packet(0, usize::MAX).is_err());
+    assert!(r.packet(usize::MAX, 0).is_err());
+}
