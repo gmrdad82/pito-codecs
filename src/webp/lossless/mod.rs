@@ -7,8 +7,9 @@ mod lz77;
 mod transform;
 mod writer;
 
-use super::{Options, Rgba};
+use super::Options;
 use crate::media::Result;
+use crate::media::Rgba;
 use decode::{Decoder, Out};
 pub(super) use encode::Policy;
 use encode::encode_image;

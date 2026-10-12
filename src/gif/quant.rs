@@ -1,5 +1,5 @@
 use super::{Error, Result};
-use crate::filter::Rgba;
+use crate::media::Rgba;
 use rayon::prelude::*;
 use std::sync::LazyLock;
 

@@ -1,4 +1,4 @@
-use super::Rgba;
+use crate::media::Rgba;
 use libloading::{Library, Symbol};
 use std::ffi::{c_float, c_int, c_void};
 use std::path::{Path, PathBuf};

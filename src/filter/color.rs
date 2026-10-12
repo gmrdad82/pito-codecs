@@ -119,27 +119,6 @@ pub(crate) struct Levels {
     pub c_range: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Rgba {
-    pub width: u32,
-    pub height: u32,
-    pub data: Vec<u8>,
-}
-
-impl Rgba {
-    pub fn new(width: u32, height: u32) -> Self {
-        Rgba {
-            width,
-            height,
-            data: vec![0; width as usize * height as usize * 4],
-        }
-    }
-
-    pub fn stride(&self) -> usize {
-        self.width as usize * 4
-    }
-}
-
 pub(crate) fn fixed(v: f64) -> i32 {
     (v * (1 << FRAC) as f64).round() as i32
 }

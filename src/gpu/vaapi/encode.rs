@@ -4,7 +4,8 @@ use super::ffi::{self, VAPictureH264, VAPictureHEVC};
 use super::headers::{self, Packed};
 use super::va::{EncodeSession, EncodeSetup, GpuSurface};
 use crate::gpu::nal;
-use crate::gpu::{Bitstream, EncoderConfig, Profile, Rate};
+use crate::gpu::{EncoderConfig, Profile};
+use crate::media::{Bitstream, Rate};
 use crate::media::{Codec, Error, Frame, Packet, Result, TimeBase};
 
 const DEPTH: usize = 4;

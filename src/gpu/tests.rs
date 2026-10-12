@@ -3,7 +3,8 @@ use std::process::Command;
 use std::time::Instant;
 
 use super::nal;
-use super::{Bitstream, Direction, EncoderConfig, HwDecoder, HwEncoder, Profile, Rate, available};
+use super::{Direction, EncoderConfig, HwDecoder, HwEncoder, Profile, available};
+use crate::media::{Bitstream, Rate};
 use crate::media::{Codec, Frame, Packet, PixelFormat, TimeBase};
 
 fn dir() -> PathBuf {

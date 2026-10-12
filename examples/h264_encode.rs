@@ -6,7 +6,8 @@ use std::io::{Read, Write};
 use std::process::ExitCode;
 use std::time::Instant;
 
-use pito_codecs::h264::{Bitstream, Encoder, EncoderConfig, Preset, Rate};
+use pito_codecs::h264::{Encoder, EncoderConfig, Preset};
+use pito_codecs::media::{Bitstream, Rate};
 use pito_codecs::media::{Frame, PixelFormat, Plane, TimeBase};
 
 fn main() -> ExitCode {

@@ -424,10 +424,10 @@ fn encode_cpu(frames: &[Frame], w: u32, h: u32) -> Res<(f64, Vec<u8>)> {
         width: w,
         height: h,
         fps: (60, 1),
-        rate: h264::Rate::Crf(23),
+        rate: pito_codecs::media::Rate::Crf(23),
         gop: 250,
         b_frames: 2,
-        bitstream: h264::Bitstream::AnnexB,
+        bitstream: pito_codecs::media::Bitstream::AnnexB,
         ..h264::EncoderConfig::default()
     })?;
     let mut out = Vec::new();
@@ -451,10 +451,10 @@ fn encode_gpu(frames: &[Frame], w: u32, h: u32, codec: Codec) -> Res<(f64, Vec<u
             height: h,
             fps: (60, 1),
             profile: gpu::Profile::High,
-            rate: gpu::Rate::Qp(23),
+            rate: pito_codecs::media::Rate::Qp(23),
             gop: 250,
             b_frames: 0,
-            bitstream: gpu::Bitstream::AnnexB,
+            bitstream: pito_codecs::media::Bitstream::AnnexB,
         },
     )?;
     let name = enc.name().to_string();
@@ -851,10 +851,10 @@ impl Bench {
                             height: t.height,
                             fps: (60, 1),
                             profile: gpu::Profile::High,
-                            rate: gpu::Rate::Qp(23),
+                            rate: pito_codecs::media::Rate::Qp(23),
                             gop: 250,
                             b_frames: 0,
-                            bitstream: gpu::Bitstream::AnnexB,
+                            bitstream: pito_codecs::media::Bitstream::AnnexB,
                         },
                     )?;
                     let mut buf = Vec::new();

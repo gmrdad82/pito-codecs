@@ -27,7 +27,7 @@ fn spec(color: Color, height: u32) -> ColorSpec {
 }
 
 fn rgba_of(frame: &Frame, spec: ColorSpec) -> Rgba {
-    let mut out = filter::Rgba::new(frame.width, frame.height);
+    let mut out = Rgba::new(frame.width, frame.height);
     if filter::yuv_to_rgba(frame, spec, &mut out).is_err() {
         return Rgba::new(frame.width, frame.height);
     }
@@ -158,7 +158,7 @@ impl Blender {
                 fitted = scale(layer, frame.width, frame.height);
                 &fitted
             };
-            let img = filter::Rgba {
+            let img = Rgba {
                 width: image.width,
                 height: image.height,
                 data: image.data.clone(),

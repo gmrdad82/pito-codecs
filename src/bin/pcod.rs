@@ -8,7 +8,7 @@ use std::time::Instant;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use pito_codecs::gpu::{self, Backend, HwDecoder, HwEncoder};
 use pito_codecs::media::{
-    Caps, Choice, Codec, Fallback, Packet, Prefs, Route, TimeBase, VideoFrame as Picture,
+    self, Caps, Choice, Codec, Fallback, Packet, Prefs, Route, TimeBase, VideoFrame as Picture,
     pick_decode, pick_encode, probe,
 };
 use pito_codecs::mp4::{
@@ -182,28 +182,7 @@ fn show(out: &mut impl Write, file: &Path) -> Result<(), Fail> {
 }
 
 fn threads_of(wanted: Option<usize>) -> usize {
-    wanted.filter(|n| *n > 0).unwrap_or_else(|| {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-            .min(16)
-    })
-}
-
-fn length_prefixed_to_annexb(out: &mut Vec<u8>, data: &[u8], length: usize) {
-    let mut pos = 0;
-    while length > 0 && pos + length <= data.len() {
-        let n = data[pos..pos + length]
-            .iter()
-            .fold(0usize, |a, &b| (a << 8) | b as usize);
-        pos += length;
-        let Some(nal) = data.get(pos..pos + n) else {
-            break;
-        };
-        out.extend_from_slice(&[0, 0, 0, 1]);
-        out.extend_from_slice(nal);
-        pos += n;
-    }
+    wanted.filter(|n| *n > 0).unwrap_or_else(media::threads)
 }
 
 enum Decoder {
@@ -224,11 +203,7 @@ impl Decoder {
             Some(CodecConfig::Avc(c)) => {
                 let mut dec = h264::Decoder::with_threads(threads);
                 dec.set_time_base(time_base);
-                let mut params = Vec::new();
-                for nal in c.sps.iter().chain(&c.pps) {
-                    params.extend_from_slice(&[0, 0, 0, 1]);
-                    params.extend_from_slice(nal);
-                }
+                let params = c.parameter_sets_annexb();
                 Ok(Decoder::H264 {
                     dec: Box::new(dec),
                     length: c.length_size.clamp(1, 4) as usize,
@@ -265,7 +240,7 @@ impl Decoder {
                 if p.keyframe {
                     buf.extend_from_slice(params);
                 }
-                length_prefixed_to_annexb(buf, &p.data, *length);
+                media::length_prefixed_to_annexb(buf, &p.data, *length);
                 let packet = Packet {
                     data: std::mem::take(buf),
                     pts: p.pts,
@@ -438,11 +413,11 @@ impl Encoder {
             fps,
             profile: h264::Profile::High,
             preset: h264::Preset::Balanced,
-            rate: h264::Rate::Crf(crf),
+            rate: media::Rate::Crf(crf),
             gop: gop_of(fps),
             b_frames: 2,
             threads,
-            bitstream: h264::Bitstream::LengthPrefixed,
+            bitstream: media::Bitstream::LengthPrefixed,
         })?;
         Ok(Encoder::Cpu(Box::new(e)))
     }
@@ -457,10 +432,10 @@ impl Encoder {
             } else {
                 gpu::Profile::High
             },
-            rate: gpu::Rate::Crf(crf),
+            rate: media::Rate::Crf(crf),
             gop: gop_of(fps),
             b_frames: 0,
-            bitstream: gpu::Bitstream::LengthPrefixed,
+            bitstream: media::Bitstream::LengthPrefixed,
         };
         Ok(Encoder::Gpu(Box::new(HwEncoder::new(codec, &config)?)))
     }

@@ -1,6 +1,7 @@
 use super::riff::{self, invalid};
-use super::{Info, Options, Parsed, Piece, Rgba, check_image, decode_piece, encode_piece, parse};
+use super::{Info, Options, Parsed, Piece, check_image, decode_piece, encode_piece, parse};
 use crate::media::Result;
+use crate::media::Rgba;
 
 pub struct Frame {
     pub image: Rgba,

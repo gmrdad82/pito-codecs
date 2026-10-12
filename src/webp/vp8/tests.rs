@@ -1,5 +1,6 @@
+use super::super::Options;
 use super::super::oracle::{self, lib};
-use super::super::{Options, Rgba};
+use crate::media::Rgba;
 
 fn vp8_chunk(file: &[u8]) -> &[u8] {
     let mut at = 12;

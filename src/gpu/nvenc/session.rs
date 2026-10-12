@@ -3,8 +3,8 @@ use std::sync::OnceLock;
 
 use super::device::Device;
 use super::ffi::*;
-use crate::gpu::Rate;
 use crate::media::Codec;
+use crate::media::Rate;
 
 struct Api {
     list: NV_ENCODE_API_FUNCTION_LIST,
