@@ -140,6 +140,12 @@ pub struct Blender {
     layer: Option<(Arc<Rgba>, filter::Overlay)>,
 }
 
+impl Default for Blender {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Blender {
     pub fn new() -> Self {
         Blender { layer: None }
@@ -201,5 +207,25 @@ mod tests {
         let bottom = &rgb.data[(3 * 4) * 4..(3 * 4) * 4 + 3];
         assert!(bottom.iter().all(|c| c.abs_diff(bottom[0]) <= 1));
         assert_eq!(f.planes[0].data[15], 100);
+    }
+
+    #[test]
+    fn a_kept_blender_paints_what_a_fresh_blend_paints() {
+        let mut layer = Rgba::new(64, 36);
+        for (i, px) in layer.data.chunks_exact_mut(4).enumerate() {
+            px.copy_from_slice(&[(i * 7) as u8, 200, (i * 3) as u8, (i % 256) as u8]);
+        }
+        let layer = Arc::new(layer);
+        let mut kept = Blender::default();
+        for shade in [40u8, 170, 230] {
+            let mut a = Frame::new(PixelFormat::Yuv420p8, 64, 36, 0, TimeBase::new(1, 30));
+            for (k, p) in a.planes.iter_mut().enumerate() {
+                p.data.fill(shade.wrapping_add(k as u8 * 30));
+            }
+            let mut b = a.clone();
+            kept.draw(&mut a, &layer);
+            blend(&mut b, &layer);
+            assert_eq!(a, b, "{shade}");
+        }
     }
 }

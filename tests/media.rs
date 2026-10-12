@@ -15,10 +15,10 @@ use std::process::Command;
 use std::sync::{Arc, OnceLock};
 
 use pito_codecs::media::{
-    AudioBuffer, Choice, Codec, ExportOptions, Frame, IN_FLIGHT, Piece, Prefs, Rgba, Seek,
-    VideoFrame, audio_mix, audio_mix_stream, audio_pcm, audio_pcm_range, audio_stream,
-    decode_video, decode_video_gpu, export, export_with_audio, first_frame, frame_count, frames_at,
-    frames_at_seek, keyframes, probe,
+    AudioBuffer, Canvas, Choice, Codec, ExportOptions, Frame, IN_FLIGHT, Piece, PixelFormat, Prefs,
+    Progress, Rgba, Seek, TimeBase, VideoFrame, audio_mix, audio_mix_stream, audio_pcm,
+    audio_pcm_range, audio_stream, decode_video, decode_video_gpu, export, export_frames,
+    export_with_audio, first_frame, frame_count, frames_at, frames_at_seek, keyframes, probe,
 };
 
 fn have_ffmpeg() -> bool {
@@ -483,6 +483,126 @@ fn an_export_ending_on_a_copied_gop_lasts_to_its_last_frame_in_the_headers() {
         assert_eq!(done.frames, 144, "{name}");
         header_durations_match_the_samples(&out, name);
     }
+}
+
+fn steady(told: &[f32], name: &str) {
+    assert_eq!(told.last(), Some(&1.0), "{name}");
+    let mut last = 0.0f32;
+    for &d in told {
+        assert!(d + 1e-6 >= last, "{name}: progress fell from {last} to {d}");
+        assert!(
+            d - last <= 0.06,
+            "{name}: progress jumped from {last} to {d}"
+        );
+        last = d;
+    }
+}
+
+fn picture(n: u64, size: (u32, u32), spent: Option<Frame>) -> Frame {
+    let mut f = spent.unwrap_or_else(|| {
+        Frame::new(
+            PixelFormat::Yuv420p8,
+            size.0,
+            size.1,
+            0,
+            TimeBase::new(1, 30),
+        )
+    });
+    let (w, h) = (f.width as usize, f.height as usize);
+    let stride = f.planes[0].stride;
+    for y in 0..h {
+        for (x, px) in f.planes[0].data[y * stride..y * stride + w]
+            .iter_mut()
+            .enumerate()
+        {
+            *px = (16 + (x + y + n as usize * 3) % 200) as u8;
+        }
+    }
+    for p in &mut f.planes[1..] {
+        p.data.fill(128);
+    }
+    f
+}
+
+#[test]
+fn caller_made_frames_export_at_their_size_with_sample_exact_audio() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let size = (360, 640);
+    let fps = (30_000, 1_001);
+    let count = 299u64;
+    let total = 478_878usize;
+    let out = dir().join("frames-360x640.mp4");
+    let mut asked = Vec::new();
+    let mut told = Vec::new();
+    let mut at = 0usize;
+    let canvas = Canvas {
+        width: size.0,
+        height: size.1,
+        fps,
+        frames: Some(count),
+    };
+    let done = export_frames(
+        &out,
+        canvas,
+        ExportOptions::default(),
+        |n, spent| Ok((n < count).then(|| VideoFrame::Cpu(picture(n, size, spent)))),
+        |upto, frames| {
+            asked.push((upto, frames));
+            let mut buf = AudioBuffer::new(48_000, 2);
+            buf.samples = (at..at + frames).flat_map(|k| [tone(k), tone(k)]).collect();
+            at += frames;
+            Ok(buf)
+        },
+        |p: &Progress| {
+            told.push(p.done);
+            true
+        },
+    )
+    .unwrap();
+    assert_eq!(done.frames, count);
+    steady(&told, "frames");
+    assert_eq!(asked.last().map(|a| a.0), Some(count));
+    assert_eq!(asked.iter().map(|a| a.1).sum::<usize>(), total);
+    assert!(asked.windows(2).all(|w| w[0].0 < w[1].0));
+    let shape = ffprobe(
+        &out,
+        &[
+            "-count_frames",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height,nb_read_frames",
+            "-of",
+            "csv=p=0",
+        ],
+    );
+    assert_eq!(shape, "360,640,299");
+    assert!(decodes_clean(&out));
+    let pcm = ffmpeg_f32(&out);
+    assert_eq!(pcm.len(), total * 2);
+    let want: Vec<f32> = (0..total).flat_map(|k| [tone(k), tone(k)]).collect();
+    let span = 96_000 * 2..100_096 * 2;
+    assert!(worst(&pcm[span.clone()], &want[span]) < 0.01);
+    header_durations_match_the_samples(&out, "frames");
+    let wrong = export_frames(
+        &out,
+        canvas,
+        ExportOptions::default(),
+        |n, _| {
+            let s = if n == 7 { (352, 240) } else { size };
+            Ok((n < 20).then(|| VideoFrame::Cpu(picture(n, s, None))))
+        },
+        |_, frames| {
+            let mut buf = AudioBuffer::new(48_000, 2);
+            buf.samples = vec![0.0; frames * 2];
+            Ok(buf)
+        },
+        |_| true,
+    )
+    .unwrap_err();
+    assert!(wrong.to_string().contains("frame 7"), "{wrong}");
 }
 
 fn tone(k: usize) -> f32 {
@@ -1419,6 +1539,7 @@ fn three_hundred_short_cuts_join_without_drift_on_every_route() {
     let total = want.len() as u64;
     for (name, prefs) in routes() {
         let out = dir().join(format!("drift-{name}.mp4"));
+        let mut told = Vec::new();
         let done = export(
             &out,
             &pieces,
@@ -1426,10 +1547,14 @@ fn three_hundred_short_cuts_join_without_drift_on_every_route() {
                 prefs,
                 ..ExportOptions::default()
             },
-            |_| true,
+            |p| {
+                told.push(p.done);
+                true
+            },
         )
         .unwrap();
         assert!(done.smart, "{name}: {:?}", done.reasons);
+        steady(&told, name);
         assert_eq!(done.frames, total, "{name}");
         assert!(done.copied > 0 && done.encoded > 0, "{name}: {done:?}");
         let got = frame_numbers(&out);

@@ -20,6 +20,8 @@ pub use overlay::Overlay;
 pub use packed::{
     Chroma, Order, Packed, PackedMut, packed_to_yuv, rgba_to_yuv, yuv_to_packed, yuv_to_rgba,
 };
+#[allow(unused_imports)]
+pub(crate) use plane::check as check_frame;
 pub use resample::{Resampler, resample};
 pub use scale::{Kernel, Scaler, scale};
 
