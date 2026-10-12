@@ -163,6 +163,10 @@ fn vps() -> Vec<u8> {
 }
 
 fn sps(pcm_loop_filter_disabled: bool) -> Vec<u8> {
+    sps_with(pcm_loop_filter_disabled, None)
+}
+
+fn sps_with(pcm_loop_filter_disabled: bool, window: Option<[u32; 4]>) -> Vec<u8> {
     let mut w = BitWriter::new();
     w.write_bits(0, 4);
     w.write_bits(0, 3);
@@ -172,7 +176,10 @@ fn sps(pcm_loop_filter_disabled: bool) -> Vec<u8> {
     w.write_ue(1);
     w.write_ue(W as u32);
     w.write_ue(H as u32);
-    w.write_bits(0, 1);
+    w.write_bit(window.is_some());
+    for v in window.into_iter().flatten() {
+        w.write_ue(v);
+    }
     w.write_ue(0);
     w.write_ue(0);
     w.write_ue(4);
@@ -742,4 +749,27 @@ fn row_aligned_slices_decode_in_parallel() {
         },
     ];
     run("row_slices", None, false, segs);
+}
+
+#[test]
+fn conformance_window_past_the_picture_stays_inside_it() {
+    let (stream, expect) = sequence(&None, true, whole(WC * HC));
+    let plain = sps(true);
+    let at = stream
+        .windows(plain.len())
+        .position(|w| w == plain.as_slice())
+        .unwrap();
+    let far = (W as u32 - 2) / 2;
+    let window = [far, (1 << 31) - far, 0, 0];
+    let mut s = stream[..at].to_vec();
+    s.extend(sps_with(true, Some(window)));
+    s.extend_from_slice(&stream[at + plain.len()..]);
+    for threads in [1, 4] {
+        let pics = decode_all(&s, threads);
+        assert_eq!(pics.len(), expect.len());
+        for p in &pics {
+            assert!(p.width >= 1 && p.width <= W as u32 && p.height == H as u32);
+            assert!(p.planes[0].data.len() >= p.width as usize);
+        }
+    }
 }

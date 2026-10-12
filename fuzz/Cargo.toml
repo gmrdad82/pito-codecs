@@ -1,0 +1,83 @@
+[package]
+name = "pito-codecs-fuzz"
+version = "0.0.0"
+publish = false
+license = "MIT"
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.pito-codecs]
+path = ".."
+
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "mp4"
+path = "fuzz_targets/mp4.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mkv"
+path = "fuzz_targets/mkv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "probe"
+path = "fuzz_targets/probe.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h264"
+path = "fuzz_targets/h264.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hevc"
+path = "fuzz_targets/hevc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vp9_ivf"
+path = "fuzz_targets/vp9_ivf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "aac_adts"
+path = "fuzz_targets/aac_adts.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "opus"
+path = "fuzz_targets/opus.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pcm"
+path = "fuzz_targets/pcm.rs"
+test = false
+doc = false
+bench = false

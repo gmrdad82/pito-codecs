@@ -12,6 +12,7 @@ use crate::mp4::{ByteSource, TrackKind};
 const WIN: usize = 64 * 1024;
 const MAX_WIN: usize = 4 << 20;
 const MAX_META: u64 = 256 << 20;
+const MAX_SAMPLES: usize = 1 << 26;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Options {
@@ -625,6 +626,7 @@ impl<S: ByteSource> Reader<S> {
             video_only,
             parsed: HashSet::new(),
             frames: Vec::new(),
+            room: len / 2,
         };
         w.walk(&mut io, &mut head)?;
         for t in &mut head.tracks {
@@ -794,6 +796,7 @@ struct Walker {
     video_only: bool,
     parsed: HashSet<u64>,
     frames: Vec<(u64, u32)>,
+    room: u64,
 }
 
 impl Walker {
@@ -830,6 +833,8 @@ impl Walker {
                         .collect();
                     let tracks = &r.tracks;
                     let video_only = self.video_only;
+                    let room = &mut self.room;
+                    let mut full = false;
                     let ci = scan_cluster(
                         io,
                         &h,
@@ -838,11 +843,19 @@ impl Walker {
                         &mut r.warnings,
                         &mut self.frames,
                         |b, frames| {
-                            if video_only && tracks[b.track].kind != TrackKind::Video {
+                            if full || video_only && tracks[b.track].kind != TrackKind::Video {
                                 return;
                             }
                             expand(b, frames, &tracks[b.track], scale, 0, |f| {
-                                samples[f.track].push(Sample {
+                                let Some(list) = samples.get_mut(f.track) else {
+                                    return;
+                                };
+                                if *room == 0 || list.len() >= MAX_SAMPLES {
+                                    full = true;
+                                    return;
+                                }
+                                *room -= 1;
+                                list.push(Sample {
                                     offset: f.offset,
                                     size: f.size,
                                     pts: f.pts,
@@ -857,6 +870,11 @@ impl Walker {
                     )?;
                     for (t, s) in r.tracks.iter_mut().zip(samples) {
                         t.samples = s;
+                    }
+                    if full {
+                        return Err(Error::Invalid(
+                            "more frames than a Matroska file of this size can index".into(),
+                        ));
                     }
                     r.clusters.push(ci);
                     pos = ci.end.max(h.data_start());

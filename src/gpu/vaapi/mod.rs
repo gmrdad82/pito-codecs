@@ -452,3 +452,23 @@ pub fn driver() -> Result<String> {
         .map(|d| d.vendor().to_string())
         .map_err(Error::Backend)
 }
+
+#[cfg(all(test, feature = "h264"))]
+mod tests {
+    #[test]
+    fn crop_offsets_past_the_picture_are_refused_before_a_session() {
+        let (_, _, sps, pps) = crate::h264::tests::far_cropped_stream();
+        let mut avcc = vec![1, sps[1], sps[2], sps[3], 0xff, 0xe1];
+        avcc.extend_from_slice(&(sps.len() as u16).to_be_bytes());
+        avcc.extend_from_slice(&sps);
+        avcc.push(1);
+        avcc.extend_from_slice(&(pps.len() as u16).to_be_bytes());
+        avcc.extend_from_slice(&pps);
+        let refused = |e: &crate::media::Error| e.to_string().contains("frame cropping");
+        let sets = [sps.clone(), pps.clone()];
+        let front = super::open_front(crate::media::Codec::H264, super::Framing::Length(4), &sets);
+        assert!(front.err().is_some_and(|e| refused(&e)));
+        let decoder = super::VaDecoder::new(crate::media::Codec::H264, &avcc);
+        assert!(decoder.err().is_some_and(|e| refused(&e)));
+    }
+}

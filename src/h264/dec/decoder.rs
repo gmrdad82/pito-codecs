@@ -187,7 +187,7 @@ impl Decoder {
             let Some(o) = self.out_queue.pop_front() else {
                 break;
             };
-            pics.push(make_picture(&o, &self.shared));
+            pics.push(make_picture(&o, &self.shared)?);
         }
         Ok(pics)
     }
@@ -201,7 +201,7 @@ impl Decoder {
         let pics = self
             .out_queue
             .drain(..)
-            .map(|o| make_picture(&o, shared))
+            .filter_map(|o| make_picture(&o, shared).ok())
             .collect();
         while let Some(f) = self.in_flight.pop_front() {
             f.wait_complete();
@@ -385,13 +385,16 @@ impl Decoder {
                     *next_id += 1;
                     let planes = match &last {
                         Some(f) if f.mb_w == mb_w && f.mb_h() == mb_h => {
-                            let mut p = Planes::new(mb_w * 16, mb_h * 16);
-                            let (y, u, v) =
-                                f.copy_cropped((0, 0, mb_w * 16, mb_h * 16), Default::default());
-                            p.y = y;
-                            p.cb = u;
-                            p.cr = v;
-                            p
+                            match f.copy_cropped((0, 0, mb_w * 16, mb_h * 16), Default::default()) {
+                                Ok((y, u, v)) => {
+                                    let mut p = Planes::new(mb_w * 16, mb_h * 16);
+                                    p.y = y;
+                                    p.cb = u;
+                                    p.cr = v;
+                                    p
+                                }
+                                Err(_) => Planes::gray(mb_w * 16, mb_h * 16),
+                            }
                         }
                         _ => Planes::gray(mb_w * 16, mb_h * 16),
                     };
@@ -546,16 +549,27 @@ fn run_job(frame: FrameRef, slices: Vec<SliceJob>, crop: Crop, shared: &Shared) 
                 y_stride: frame.width,
                 uv_stride: frame.cwidth,
             },
-            None => {
-                let (y, u, v) = frame.copy_cropped(crop, shared.buffers());
-                Output3 {
+            None => match frame.copy_cropped(crop, shared.buffers()) {
+                Ok((y, u, v)) => Output3 {
                     y,
                     u,
                     v,
                     y_stride: crop.2,
                     uv_stride: crop.2.div_ceil(2),
+                },
+                Err(e) => {
+                    if let Ok(mut slot) = shared.error.lock() {
+                        slot.get_or_insert(e);
+                    }
+                    Output3 {
+                        y: Vec::new(),
+                        u: Vec::new(),
+                        v: Vec::new(),
+                        y_stride: 0,
+                        uv_stride: 0,
+                    }
                 }
-            }
+            },
         };
         frame.set_output(out);
     }
@@ -589,7 +603,7 @@ fn output_meta(sps: &Sps, pts: i64) -> OutputMeta {
     }
 }
 
-fn make_picture(o: &Output<FrameRef>, shared: &Shared) -> Picture {
+fn make_picture(o: &Output<FrameRef>, shared: &Shared) -> Result<Picture> {
     let (cx, cy, cw, ch) = o.meta.crop;
     let (cx, cy, cw, ch) = (cx as usize, cy as usize, cw as usize, ch as usize);
     let out = match o.frame.take_output() {
@@ -601,7 +615,7 @@ fn make_picture(o: &Output<FrameRef>, shared: &Shared) -> Picture {
             std::thread::yield_now();
         },
         None => {
-            let (y, u, v) = o.frame.copy_cropped((cx, cy, cw, ch), shared.buffers());
+            let (y, u, v) = o.frame.copy_cropped((cx, cy, cw, ch), shared.buffers())?;
             Output3 {
                 y,
                 u,
@@ -619,7 +633,21 @@ fn make_picture(o: &Output<FrameRef>, shared: &Shared) -> Picture {
         uv_stride,
     } = out;
     let (ccw, cch) = (cw.div_ceil(2), ch.div_ceil(2));
-    Picture {
+    let holds = |len: usize, stride: usize, w: usize, h: usize| {
+        h > 0
+            && w <= stride
+            && stride
+                .checked_mul(h - 1)
+                .and_then(|n| n.checked_add(w))
+                .is_some_and(|n| n <= len)
+    };
+    ensure!(
+        holds(y.len(), y_stride, cw, ch)
+            && holds(u.len(), uv_stride, ccw, cch)
+            && holds(v.len(), uv_stride, ccw, cch),
+        "picture planes smaller than the crop"
+    );
+    Ok(Picture {
         width: cw as u32,
         height: ch as u32,
         chroma_width: ccw as u32,
@@ -636,5 +664,5 @@ fn make_picture(o: &Output<FrameRef>, shared: &Shared) -> Picture {
             transfer: o.meta.transfer_characteristics,
             matrix: o.meta.matrix_coefficients,
         },
-    }
+    })
 }

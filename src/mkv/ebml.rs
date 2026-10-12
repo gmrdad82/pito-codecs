@@ -233,6 +233,9 @@ pub fn parse_lacing(lacing: Lacing, data: &[u8]) -> Result<Vec<(usize, usize)>> 
         }
         Lacing::FixedSize => {
             let rest = data.len() - pos;
+            if rest < count {
+                return invalid("fixed-size lacing with empty frames");
+            }
             if !rest.is_multiple_of(count) {
                 return invalid("fixed-size lacing does not divide block");
             }
@@ -355,6 +358,8 @@ mod tests {
         let f = parse_lacing(Lacing::FixedSize, &d).unwrap();
         assert_eq!(frames(&d, &f), [&[1u8, 1][..], &[2, 2], &[3, 3]]);
         assert!(parse_lacing(Lacing::FixedSize, &[2, 1, 1]).is_err());
+        assert!(parse_lacing(Lacing::FixedSize, &[254, 7]).is_err());
+        assert!(parse_lacing(Lacing::FixedSize, &[3]).is_err());
         assert_eq!(parse_lacing(Lacing::None, &[9, 9]).unwrap(), [(0, 2)]);
         assert_eq!(Lacing::from_flags(0x80 | 0x06), Lacing::Ebml);
         assert_eq!(Lacing::from_flags(0x02), Lacing::Xiph);

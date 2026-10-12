@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.1.1 — 2026-10-12
+
+Hardening for files from anywhere: malformed headers are refused instead of crashing or allocating without bound, and every parser is fuzzed on CI.
+
+### Added
+
+- `media::Pcm`, the PCM sample converter the readers use.
+- Fuzzing on GitHub CI for the MP4 and MKV readers, probe, the H.264, HEVC and VP9 decoders, AAC, Opus and PCM: a short run on every push and a longer one nightly.
+
+### Fixed
+
+- H.264 crop offsets are checked without wrapping, so a picture is never sliced outside its planes; the HEVC conformance window always stays inside the picture.
+- An indexed MKV open keeps at most 2^26 samples per track and no more samples than half the file's bytes; laced frames need at least one byte each.
+- Fragmented MP4 runs of empty samples are bounded.
+
 ## v1.1.0 — 2026-10-12
 
 One home for each shared public type. Every old path still compiles, marked deprecated.
