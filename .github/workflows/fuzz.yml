@@ -46,7 +46,9 @@ jobs:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
           restore-keys: fuzz-corpus-${{ matrix.target }}-
-      - run: fuzz/seeds ${{ matrix.target }}
+      - run: fuzz/seeds "$TARGET"
+        env:
+          TARGET: ${{ matrix.target }}
       - name: Fuzz ${{ matrix.target }}
         run: |
           case "$EVENT" in
