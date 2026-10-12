@@ -2,6 +2,7 @@ use std::sync::LazyLock;
 
 use super::bool::{BoolWriter, cost};
 use super::tables::*;
+use crate::vp9::header::inv_remap_prob;
 use crate::vp9::probs::{Counts, FrameContext};
 
 pub struct BitWriter {
@@ -64,16 +65,11 @@ pub struct Uncompressed {
 }
 
 pub fn tile_cols_bounds(mi_cols: u32) -> (u32, u32) {
-    let sb_cols = mi_cols.div_ceil(8);
-    let mut min_log2 = 0;
-    while (64 << min_log2) < sb_cols {
-        min_log2 += 1;
-    }
-    let mut max_log2 = 1;
-    while (sb_cols >> max_log2) >= 4 {
-        max_log2 += 1;
-    }
-    (min_log2, max_log2 - 1)
+    let sb_cols = mi_cols.div_ceil(8) as usize;
+    (
+        super::rc::min_log2_tile_cols(sb_cols) as u32,
+        super::rc::max_log2_tile_cols(sb_cols) as u32,
+    )
 }
 
 pub fn write_uncompressed(h: &Uncompressed, compressed_size: usize) -> Vec<u8> {
@@ -171,27 +167,6 @@ pub fn write_uncompressed(h: &Uncompressed, compressed_size: usize) -> Vec<u8> {
     }
     w.put(compressed_size as u32, 16);
     w.buf
-}
-
-fn inv_recenter_nonneg(v: i32, m: i32) -> i32 {
-    if v > 2 * m {
-        v
-    } else if v & 1 != 0 {
-        m - ((v + 1) >> 1)
-    } else {
-        m + (v >> 1)
-    }
-}
-
-fn inv_remap_prob(delta: usize, prob: u8) -> u8 {
-    let v = INV_MAP_TABLE[delta.min(254)] as i32;
-    let m = prob as i32 - 1;
-    let r = if (m << 1) <= 255 {
-        1 + inv_recenter_nonneg(v, m)
-    } else {
-        255 - inv_recenter_nonneg(v, 255 - 1 - m)
-    };
-    r.clamp(1, 255) as u8
 }
 
 static REMAP: LazyLock<Vec<[u8; 256]>> = LazyLock::new(|| {

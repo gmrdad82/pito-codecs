@@ -43,7 +43,7 @@ macro_rules! adst4 {
 adst4!(iadst4_narrow, i32);
 adst4!(iadst4_wide, i64);
 
-fn iwht4(x: [i32; 4], shift: u32) -> [i32; 4] {
+pub(crate) fn iwht4(x: [i32; 4], shift: u32) -> [i32; 4] {
     let mut a = x[0] >> shift;
     let mut c = x[1] >> shift;
     let mut d = x[2] >> shift;

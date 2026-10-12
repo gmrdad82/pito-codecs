@@ -472,7 +472,7 @@ fn inv_recenter_nonneg(v: i32, m: i32) -> i32 {
     }
 }
 
-fn inv_remap_prob(delta: usize, prob: u8) -> u8 {
+pub(crate) fn inv_remap_prob(delta: usize, prob: u8) -> u8 {
     let v = INV_MAP_TABLE[delta.min(254)] as i32;
     let m = prob as i32 - 1;
     let r = if (m << 1) <= 255 {

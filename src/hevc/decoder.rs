@@ -79,16 +79,9 @@ impl Default for Decoder {
     }
 }
 
-fn default_threads() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .min(16)
-}
-
 impl Decoder {
     pub fn new() -> Self {
-        Self::with_threads(default_threads())
+        Self::with_threads(crate::media::default_threads())
     }
 
     pub fn with_threads(threads: usize) -> Self {

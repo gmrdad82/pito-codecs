@@ -4,6 +4,7 @@ use super::mvref::{MvEnv, use_mv_hp};
 use super::tables::*;
 use crate::vp9::header::Segmentation;
 use crate::vp9::probs::{Counts, FrameContext};
+use crate::vp9::tile::{single_ref_p1_ctx, single_ref_p2_ctx};
 
 pub type CoefTable<const N: usize> = [[[[[[u32; N]; 6]; 6]; 2]; 2]; 4];
 
@@ -229,19 +230,6 @@ fn pareto_cost(pp: &[u8; 8], token: usize) -> u32 {
         8 => cost(true, pp[0]) + cost(true, pp[3]) + cost(false, pp[5]) + cost(true, pp[6]),
         9 => cost(true, pp[0]) + cost(true, pp[3]) + cost(true, pp[5]) + cost(false, pp[7]),
         _ => cost(true, pp[0]) + cost(true, pp[3]) + cost(true, pp[5]) + cost(true, pp[7]),
-    }
-}
-
-#[inline]
-pub fn token_of(v: u32) -> usize {
-    match v {
-        0..=4 => v as usize,
-        5..=6 => 5,
-        7..=10 => 6,
-        11..=18 => 7,
-        19..=34 => 8,
-        35..=66 => 9,
-        _ => 10,
     }
 }
 
@@ -845,7 +833,7 @@ impl<'a, S: Sink> TileWriter<'a, S> {
             }
             self.w.put(true, p[1]);
             check_eob = true;
-            let tk = token_of(v);
+            let tk = super::tx::token(v);
             if tk == 1 {
                 self.w.put(false, p[2]);
                 counts.token[t][i][j][band][ctx][1] += 1;
@@ -917,129 +905,4 @@ pub fn tx_type_of(
     } else {
         MODE2TXFM[m.y_mode as usize]
     }
-}
-
-pub fn single_ref_p1_ctx(avail_u: bool, avail_l: bool, a: [i8; 2], l: [i8; 2]) -> usize {
-    let (above_intra, left_intra) = (a[0] <= INTRA_FRAME, l[0] <= INTRA_FRAME);
-    let (above_single, left_single) = (a[1] <= NONE, l[1] <= NONE);
-    (if avail_u && avail_l {
-        if above_intra && left_intra {
-            2
-        } else if left_intra {
-            if above_single {
-                4 * (a[0] == LAST_FRAME) as u8
-            } else {
-                1 + (a[0] == LAST_FRAME || a[1] == LAST_FRAME) as u8
-            }
-        } else if above_intra {
-            if left_single {
-                4 * (l[0] == LAST_FRAME) as u8
-            } else {
-                1 + (l[0] == LAST_FRAME || l[1] == LAST_FRAME) as u8
-            }
-        } else if above_single && left_single {
-            2 * (a[0] == LAST_FRAME) as u8 + 2 * (l[0] == LAST_FRAME) as u8
-        } else if !above_single && !left_single {
-            1 + (a[0] == LAST_FRAME
-                || a[1] == LAST_FRAME
-                || l[0] == LAST_FRAME
-                || l[1] == LAST_FRAME) as u8
-        } else {
-            let rfs = if above_single { a[0] } else { l[0] };
-            let crf1 = if above_single { l[0] } else { a[0] };
-            let crf2 = if above_single { l[1] } else { a[1] };
-            if rfs == LAST_FRAME {
-                3 + (crf1 == LAST_FRAME || crf2 == LAST_FRAME) as u8
-            } else {
-                (crf1 == LAST_FRAME || crf2 == LAST_FRAME) as u8
-            }
-        }
-    } else if avail_u {
-        if above_intra {
-            2
-        } else if above_single {
-            4 * (a[0] == LAST_FRAME) as u8
-        } else {
-            1 + (a[0] == LAST_FRAME || a[1] == LAST_FRAME) as u8
-        }
-    } else if avail_l {
-        if left_intra {
-            2
-        } else if left_single {
-            4 * (l[0] == LAST_FRAME) as u8
-        } else {
-            1 + (l[0] == LAST_FRAME || l[1] == LAST_FRAME) as u8
-        }
-    } else {
-        2
-    }) as usize
-}
-
-pub fn single_ref_p2_ctx(avail_u: bool, avail_l: bool, a: [i8; 2], l: [i8; 2]) -> usize {
-    const G: i8 = GOLDEN_FRAME;
-    const L: i8 = LAST_FRAME;
-    let (above_intra, left_intra) = (a[0] <= INTRA_FRAME, l[0] <= INTRA_FRAME);
-    let (above_single, left_single) = (a[1] <= NONE, l[1] <= NONE);
-    (if avail_u && avail_l {
-        if above_intra && left_intra {
-            2
-        } else if left_intra {
-            if above_single {
-                if a[0] == L { 3 } else { 4 * (a[0] == G) as u8 }
-            } else {
-                1 + 2 * (a[0] == G || a[1] == G) as u8
-            }
-        } else if above_intra {
-            if left_single {
-                if l[0] == L { 3 } else { 4 * (l[0] == G) as u8 }
-            } else {
-                1 + 2 * (l[0] == G || l[1] == G) as u8
-            }
-        } else if above_single && left_single {
-            if a[0] == L && l[0] == L {
-                3
-            } else if a[0] == L {
-                4 * (l[0] == G) as u8
-            } else if l[0] == L {
-                4 * (a[0] == G) as u8
-            } else {
-                2 * (a[0] == G) as u8 + 2 * (l[0] == G) as u8
-            }
-        } else if !above_single && !left_single {
-            if a[0] == l[0] && a[1] == l[1] {
-                3 * (a[0] == G || a[1] == G) as u8
-            } else {
-                2
-            }
-        } else {
-            let rfs = if above_single { a[0] } else { l[0] };
-            let crf1 = if above_single { l[0] } else { a[0] };
-            let crf2 = if above_single { l[1] } else { a[1] };
-            if rfs == G {
-                3 + (crf1 == G || crf2 == G) as u8
-            } else if rfs == ALTREF_FRAME {
-                (crf1 == G || crf2 == G) as u8
-            } else {
-                1 + 2 * (crf1 == G || crf2 == G) as u8
-            }
-        }
-    } else if avail_u {
-        if above_intra || (a[0] == L && above_single) {
-            2
-        } else if above_single {
-            4 * (a[0] == G) as u8
-        } else {
-            3 * (a[0] == G || a[1] == G) as u8
-        }
-    } else if avail_l {
-        if left_intra || (l[0] == L && left_single) {
-            2
-        } else if left_single {
-            4 * (l[0] == G) as u8
-        } else {
-            3 * (l[0] == G || l[1] == G) as u8
-        }
-    } else {
-        2
-    }) as usize
 }

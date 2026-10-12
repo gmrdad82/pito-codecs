@@ -11,6 +11,14 @@ pub use types::*;
 ))]
 pub(crate) mod isa;
 
+#[cfg(any(feature = "hevc", feature = "vp9"))]
+pub(crate) fn default_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(16)
+}
+
 #[cfg(all(
     feature = "h264",
     feature = "hevc",

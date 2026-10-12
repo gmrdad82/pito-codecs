@@ -12,25 +12,12 @@ pub mod mvcost;
 #[cfg(test)]
 mod tests;
 
-pub const DC_PRED: u8 = 0;
-pub const V_PRED: u8 = 1;
-pub const H_PRED: u8 = 2;
-pub const D45_PRED: u8 = 3;
-pub const D135_PRED: u8 = 4;
-pub const D117_PRED: u8 = 5;
-pub const D153_PRED: u8 = 6;
-pub const D207_PRED: u8 = 7;
-pub const D63_PRED: u8 = 8;
-pub const TM_PRED: u8 = 9;
-pub const NEARESTMV: u8 = 10;
-pub const NEARMV: u8 = 11;
-pub const ZEROMV: u8 = 12;
-pub const NEWMV: u8 = 13;
+pub use crate::vp9::tables::{
+    ALTREF_FRAME, BLOCK_8X8, BLOCK_64X64, COMPANDED_MVREF_THRESH, D45_PRED, D63_PRED, D117_PRED,
+    D135_PRED, D153_PRED, D207_PRED, DC_PRED, GOLDEN_FRAME, H_PRED, INTRA_FRAME, LAST_FRAME,
+    NEARESTMV, NEARMV, NEWMV, TM_PRED, V_PRED, ZEROMV,
+};
 
-pub const INTRA_FRAME: i8 = 0;
-pub const LAST_FRAME: i8 = 1;
-pub const GOLDEN_FRAME: i8 = 2;
-pub const ALTREF_FRAME: i8 = 3;
 pub const NONE_FRAME: i8 = -1;
 
 pub const EIGHTTAP: u8 = 0;
@@ -39,13 +26,9 @@ pub const EIGHTTAP_SHARP: u8 = 2;
 pub const BILINEAR: u8 = 3;
 
 pub const BLOCK_4X4: u8 = 0;
-pub const BLOCK_8X8: u8 = 3;
-pub const BLOCK_64X64: u8 = 12;
 
 pub const BLOCK_W: [usize; 13] = [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64];
 pub const BLOCK_H: [usize; 13] = [4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64];
-
-pub const COMPANDED_MVREF_THRESH: i32 = 8;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Mv {

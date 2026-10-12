@@ -1,4 +1,4 @@
-use super::entropy::{Costs, single_ref_p1_ctx};
+use super::entropy::Costs;
 use super::frame::{MiInfo, Mv, PAD, Picture, SbCoefs, SharedGrid, TxRef};
 use super::mvref::{MvEnv, RefMvs, use_mv_hp};
 use super::pred::inter::{self, BlockPos};
@@ -11,6 +11,7 @@ use super::pred::mvcost::MvCost;
 use super::pred::{self, Plane};
 use super::tables::*;
 use super::tx::{self, Quant};
+use crate::vp9::tile::single_ref_p1_ctx;
 
 pub struct Speed {
     pub intra_modes: &'static [u8],
