@@ -305,6 +305,111 @@ fn mix(
     Ok(packets)
 }
 
+pub(super) type Premix<'a> = &'a mut (dyn FnMut(usize, usize) -> Result<AudioBuffer> + Send);
+
+pub(super) enum Sound<'a> {
+    Tracks(Option<&'a Ffmpeg>),
+    Premixed(Premix<'a>),
+}
+
+fn aac_encoder(kbps: u32) -> Result<crate::aac::Encoder> {
+    crate::aac::Encoder::new(crate::aac::EncoderConfig {
+        rate: RATE,
+        channels: 2,
+        bitrate: kbps.clamp(32, 512) * 1000,
+    })
+}
+
+fn check(piece: usize, frames: usize, buf: &AudioBuffer) -> Result<()> {
+    if buf.rate != RATE || buf.channels != 2 {
+        return Err(Error::Invalid(format!(
+            "piece {piece}: the audio is {} Hz with {} channels, the export takes {RATE} Hz stereo",
+            buf.rate, buf.channels
+        )));
+    }
+    if frames.checked_mul(2) != Some(buf.samples.len()) {
+        return Err(Error::Invalid(format!(
+            "piece {piece}: {} audio samples per channel, the piece needs {frames}",
+            buf.samples.len() / 2
+        )));
+    }
+    if let Some(k) = buf.samples.iter().position(|s| !s.is_finite()) {
+        return Err(Error::Invalid(format!(
+            "piece {piece}: audio sample {} is not a finite number",
+            k / 2
+        )));
+    }
+    Ok(())
+}
+
+fn premixed(
+    job: &Job,
+    audio: Premix,
+    enc: &mut crate::aac::Encoder,
+    stop: &AtomicBool,
+) -> Result<(Vec<Packet>, u64)> {
+    let mut packets = Vec::new();
+    let (mut at, mut first) = (0i64, 0usize);
+    for (i, piece) in job.pieces.iter().enumerate() {
+        if stop.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        let (a, b) = job.span(piece);
+        at += b - a;
+        let end = (job.seconds(at) * RATE as f64).round() as usize;
+        let n = end.saturating_sub(first);
+        first = end;
+        let buf = audio(i, n)?;
+        check(i, n, &buf)?;
+        packets.extend(enc.encode(&buf)?);
+    }
+    packets.extend(enc.flush());
+    Ok((packets, first as u64))
+}
+
+fn audio_track(
+    w: &mut Writer<File>,
+    enc: &crate::aac::Encoder,
+    kbps: u32,
+    packets: &[Packet],
+    total: Option<u64>,
+) -> Result<()> {
+    let priming = enc.priming() as i64;
+    let mut cfg = TrackConfig::new(
+        SampleEntry::aac(enc.extradata(), 2, RATE, kbps.clamp(32, 512) * 1000),
+        RATE,
+    );
+    cfg.media_start = Some(priming);
+    let a = w.add_track(cfg)?;
+    let (Some(total), Some((last, rest))) = (total, packets.split_last()) else {
+        for p in packets {
+            w.push(a, p)?;
+        }
+        return Ok(());
+    };
+    w.set_movie_timescale(RATE);
+    for p in rest {
+        w.push(a, p)?;
+    }
+    let end = priming.saturating_add(i64::try_from(total).unwrap_or(i64::MAX));
+    let duration = u32::try_from(end.saturating_sub(last.pts).max(1)).unwrap_or(u32::MAX);
+    w.push_timed(a, last, duration)
+}
+
+pub(super) fn premixed_m4a(
+    job: &Job,
+    audio: Premix,
+    kbps: u32,
+    stop: &AtomicBool,
+    path: &Path,
+) -> Result<()> {
+    let mut enc = aac_encoder(kbps)?;
+    let (packets, total) = premixed(job, audio, &mut enc, stop)?;
+    let mut w = Writer::create(path)?;
+    audio_track(&mut w, &enc, kbps, &packets, Some(total))?;
+    w.finish().map(|_| ())
+}
+
 pub(super) fn run(
     job: &mut Job,
     video: &Picked,
@@ -312,15 +417,9 @@ pub(super) fn run(
     smart: bool,
     out: &Path,
     progress: Tell,
-    ffmpeg: Option<&Ffmpeg>,
+    sound: Sound,
 ) -> Result<(u64, u64)> {
-    let mut aac = crate::aac::Encoder::new(crate::aac::EncoderConfig {
-        rate: RATE,
-        channels: 2,
-        bitrate: opts.audio_kbps.clamp(32, 512) * 1000,
-    })?;
-    let asc = aac.extradata();
-    let priming = aac.priming();
+    let mut aac = aac_encoder(opts.audio_kbps)?;
     let fd = job.fps.1 as i64 * 64;
     let timescale = job.fps.0.saturating_mul(64);
     let part = job.work.join("joined.mp4");
@@ -329,7 +428,10 @@ pub(super) fn run(
     let audio_job = job.quiet();
     let (copied, encoded, mut mux, audio) = std::thread::scope(|s| -> Result<_> {
         let (aj, gains, stop_ref, aac) = (&audio_job, &gains, &stop, &mut aac);
-        let audio = s.spawn(move || mix(aj, gains, ffmpeg, aac, stop_ref));
+        let audio = s.spawn(move || match sound {
+            Sound::Tracks(ffmpeg) => mix(aj, gains, ffmpeg, aac, stop_ref).map(|p| (p, None)),
+            Sound::Premixed(p) => premixed(aj, p, aac, stop_ref).map(|(p, n)| (p, Some(n))),
+        });
         let video = if smart {
             smart_video(
                 job,
@@ -354,15 +456,8 @@ pub(super) fn run(
     })?;
     job.tell(progress, Stage::Joining)?;
     mux.close()?;
-    let mut cfg = TrackConfig::new(
-        SampleEntry::aac(asc, 2, RATE, opts.audio_kbps.clamp(32, 512) * 1000),
-        RATE,
-    );
-    cfg.media_start = Some(priming as i64);
-    let a = mux.w.add_track(cfg)?;
-    for p in &audio {
-        mux.w.push(a, p)?;
-    }
+    let (packets, total) = audio;
+    audio_track(&mut mux.w, &aac, opts.audio_kbps, &packets, total)?;
     mux.w.finish_faststart()?;
     std::fs::rename(&part, out).map_err(|e| Error::at(out, e))?;
     job.finish(progress)?;

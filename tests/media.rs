@@ -16,8 +16,8 @@ use std::sync::{Arc, OnceLock};
 
 use pito_codecs::media::{
     AudioBuffer, Choice, Codec, ExportOptions, Frame, IN_FLIGHT, Piece, Prefs, Rgba, VideoFrame,
-    audio_mix, audio_pcm, audio_pcm_range, decode_video, decode_video_gpu, export, first_frame,
-    frames_at, probe,
+    audio_mix, audio_pcm, audio_pcm_range, decode_video, decode_video_gpu, export,
+    export_with_audio, first_frame, frames_at, probe,
 };
 
 fn have_ffmpeg() -> bool {
@@ -352,6 +352,90 @@ fn a_three_piece_export_with_a_repeat_smart_cuts_to_the_frame_on_every_route() {
         .unwrap();
         assert!((audio - 5.6).abs() < 0.05, "{name}: {audio}");
     }
+}
+
+fn tone(k: usize) -> f32 {
+    (k as f64 * 440.0 * std::f64::consts::TAU / 48_000.0).sin() as f32 * 0.5
+}
+
+#[test]
+fn a_premixed_export_keeps_its_tone_whole_and_sample_exact_on_every_route() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let pieces = [(1.1, 3.4), (0.5, 1.5), (4.0, 4.52)].map(|(from, to)| Piece {
+        path: clip().to_path_buf(),
+        from,
+        to,
+    });
+    let total = 229 * 800;
+    for (name, prefs) in routes() {
+        let out = dir().join(format!("premixed-{name}.mp4"));
+        let mut asked = Vec::new();
+        let mut at = 0usize;
+        let done = export_with_audio(
+            &out,
+            &pieces,
+            ExportOptions {
+                prefs,
+                ..ExportOptions::default()
+            },
+            |piece, frames| {
+                asked.push((piece, frames));
+                let mut buf = AudioBuffer::new(48_000, 2);
+                buf.samples = (at..at + frames).flat_map(|k| [tone(k), tone(k)]).collect();
+                at += frames;
+                Ok(buf)
+            },
+            |_| true,
+        )
+        .unwrap();
+        assert_eq!(done.frames, 229, "{name}");
+        assert_eq!(asked, [(0, 110_400), (1, 48_000), (2, 24_800)], "{name}");
+        assert!(decodes_clean(&out), "{name}");
+        let pcm = ffmpeg_f32(&out);
+        assert_eq!(pcm.len(), total * 2, "{name}");
+        let ours =
+            audio_pcm_range(&out, 0, 0.0, f64::INFINITY, 48_000, 2, &Prefs::default()).unwrap();
+        assert_eq!(ours.frames(), total, "{name}");
+        let want: Vec<f32> = (0..total).flat_map(|k| [tone(k), tone(k)]).collect();
+        for cut in [110_400usize, 158_400] {
+            let span = (cut - 2_048) * 2..(cut + 2_048) * 2;
+            let d = worst(&pcm[span.clone()], &want[span]);
+            println!("{name}: worst sample difference around {cut}: {d}");
+            assert!(d < 0.01, "{name} at {cut}: {d}");
+        }
+    }
+    let bad = |frames: usize| {
+        let mut buf = AudioBuffer::new(48_000, 2);
+        buf.samples = vec![0.0; frames * 2];
+        buf
+    };
+    let out = dir().join("premixed-bad.mp4");
+    let short = export_with_audio(
+        &out,
+        &pieces,
+        ExportOptions::default(),
+        |piece, frames| Ok(bad(if piece == 1 { frames - 1 } else { frames })),
+        |_| true,
+    )
+    .unwrap_err();
+    assert!(short.to_string().contains("piece 1"), "{short}");
+    let nan = export_with_audio(
+        &out,
+        &pieces,
+        ExportOptions::default(),
+        |piece, frames| {
+            let mut buf = bad(frames);
+            if piece == 2 {
+                buf.samples[7] = f32::NAN;
+            }
+            Ok(buf)
+        },
+        |_| true,
+    )
+    .unwrap_err();
+    assert!(nan.to_string().contains("piece 2"), "{nan}");
 }
 
 #[test]
