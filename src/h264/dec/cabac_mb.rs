@@ -2,19 +2,9 @@ use crate::h264::dec::cabac::Cabac;
 use crate::h264::dec::mbtypes::*;
 use crate::h264::dec::picture::MbKind;
 use crate::h264::dec::slicedec::{MbCur, SliceDecoder};
+use crate::h264::dec::tables::{LAST8, SIG8_FRAME};
 use crate::syntax::error::{Result, ensure, invalid};
 use crate::syntax::h264::slice::SliceType;
-
-#[rustfmt::skip]
-const SIG8_FRAME: [u8; 63] = [
-    0, 1, 2, 3, 4, 5, 5, 4, 4, 3, 3, 4, 4, 4, 5, 5, 4, 4, 4, 4, 3, 3, 6, 7, 7, 7, 8, 9, 10, 9, 8, 7,
-    7, 6, 11, 12, 13, 11, 6, 7, 8, 9, 14, 10, 9, 8, 6, 11, 12, 13, 11, 6, 9, 14, 10, 9, 11, 12, 13, 11, 14, 10, 12,
-];
-#[rustfmt::skip]
-const LAST8: [u8; 63] = [
-    0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-    3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 6, 6, 7, 7, 7, 7, 8, 8, 8,
-];
 
 const IDENT_CTX: [u8; 64] = {
     let mut t = [0u8; 64];

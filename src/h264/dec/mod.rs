@@ -1,21 +1,21 @@
 mod cabac;
 mod cabac_mb;
 #[rustfmt::skip]
-mod cabac_tables;
+pub(super) mod cabac_tables;
 mod cavlc;
 #[rustfmt::skip]
-mod cavlc_tables;
+pub(super) mod cavlc_tables;
 mod deblock;
 mod decoder;
 mod inter;
 mod intra;
-mod mbtypes;
+pub(super) mod mbtypes;
 mod picture;
 #[cfg(target_arch = "x86_64")]
 mod simd;
 mod slicedec;
 
-mod tables;
+pub(super) mod tables;
 mod transform;
 
 pub use crate::syntax::error::Error;

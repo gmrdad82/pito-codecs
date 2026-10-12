@@ -1,8 +1,9 @@
+use crate::h264::dec::tables::{LAST8, SIG8_FRAME};
 use crate::h264::enc::cabac::BinSink;
 use crate::h264::enc::mbinfo::{MbInfo, MbKind, Part};
 use crate::h264::enc::nal::SliceType;
 use crate::h264::enc::syntax::{MbCode, NbCtx};
-use crate::h264::enc::tables::{BLK4_XY, LAST8X8, SIG8X8_FRAME};
+use crate::h264::enc::tables::BLK4_XY;
 
 pub fn write_skip_flag<S: BinSink>(s: &mut S, nb: &NbCtx, skip: bool) {
     let cond = |m: Option<&MbInfo>| m.is_some_and(|m| !m.kind.is_skip()) as usize;
@@ -234,7 +235,7 @@ pub fn write_residual<S: BinSink>(s: &mut S, cat: Cat, coeffs: &[i16], cbf_inc: 
     for i in 0..n - 1 {
         let (si, li) = match cat {
             Cat::ChromaDc => (i.min(2), i.min(2)),
-            Cat::Luma8x8 => (SIG8X8_FRAME[i] as usize, LAST8X8[i] as usize),
+            Cat::Luma8x8 => (SIG8_FRAME[i] as usize, LAST8[i] as usize),
             _ => (i, i),
         };
         let sig = coeffs[i] != 0;

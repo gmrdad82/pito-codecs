@@ -1,6 +1,8 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod bits;
+#[cfg(any(feature = "h264", feature = "hevc"))]
+pub mod cabac;
 pub mod error;
 #[cfg(any(feature = "h264", feature = "gpu"))]
 pub mod h264;

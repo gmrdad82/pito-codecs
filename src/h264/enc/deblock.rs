@@ -1,5 +1,6 @@
+use crate::h264::dec::tables::{ALPHA, BETA, TC0};
 use crate::h264::enc::mbinfo::{MbInfo, Mv};
-use crate::h264::enc::tables::{ALPHA, BETA, TC0, chroma_qp};
+use crate::h264::enc::tables::chroma_qp;
 
 pub const MAX_REFS: usize = 4;
 

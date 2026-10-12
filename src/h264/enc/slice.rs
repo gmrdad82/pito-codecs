@@ -11,7 +11,7 @@ use crate::h264::enc::nal::{SliceHeader, SliceType, nal};
 use crate::h264::enc::picture::{BandMut, CHROMA_PAD, Frame, LUMA_PAD, RefPic, avg_into};
 use crate::h264::enc::residual;
 use crate::h264::enc::syntax::{MbCode, NbCtx};
-use crate::h264::enc::tables::{BLK4_XY, NUM_CTX, RASTER_TO_BLK4, ZIGZAG4, ZIGZAG8, chroma_qp};
+use crate::h264::enc::tables::{BLK4_XY, RASTER_TO_BLK4, ZIGZAG4, ZIGZAG8, chroma_qp};
 use crate::h264::enc::transform::{
     Deadzone, QuantTables, dequant_chroma_dc, dequant_luma_dc, dequant4, dequant8, fdct4, fdct8,
     idct4, idct8, quant_chroma_dc, quant_luma_dc, quant4, quant8,
@@ -49,7 +49,7 @@ pub struct FrameEnc<'a> {
     pub hdr: SliceHeader,
     pub nal_ref_idc: u8,
     pub nal_type: u8,
-    pub cabac_table: &'a [(i8, i8); NUM_CTX],
+    pub cabac_table: &'a [(i8, i8)],
     pub lam: &'a Lambdas,
 }
 

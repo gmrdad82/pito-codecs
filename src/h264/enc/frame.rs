@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::h264::dec::cabac_tables::CABAC_INIT_MN;
 use crate::h264::enc::cabac::CostTable;
 use crate::h264::enc::deblock::DeblockParams;
 use crate::h264::enc::nal::{SliceHeader, SliceType};
@@ -7,7 +8,6 @@ use crate::h264::enc::picture::{
     CHROMA_PAD, DONE, Frame, LUMA_PAD, Pic, copy_row, extend_rows, hpel_rows,
 };
 use crate::h264::enc::slice::{EncParams, FrameEnc, Lambdas, SliceEnc, SliceOut};
-use crate::h264::enc::tables::NUM_CTX;
 use crate::h264::enc::transform::QuantTables;
 
 const VMAX: usize = 96;
@@ -17,8 +17,6 @@ pub struct Ctx {
     pub qt: QuantTables,
     pub cost_tab: CostTable,
     pub lam: Lambdas,
-    pub cabac_i: Box<[(i8, i8); NUM_CTX]>,
-    pub cabac_pb: Box<[(i8, i8); NUM_CTX]>,
 }
 
 pub struct Job {
@@ -136,11 +134,7 @@ pub fn encode_frame(ctx: &Ctx, job: &Job, scratch: &mut Scratch) -> SliceOut {
         hdr: job.hdr.clone(),
         nal_ref_idc: job.nal_ref_idc,
         nal_type: job.nal_type,
-        cabac_table: if job.st == SliceType::I {
-            &ctx.cabac_i
-        } else {
-            &ctx.cabac_pb
-        },
+        cabac_table: &CABAC_INIT_MN[if job.st == SliceType::I { 3 } else { 0 }],
         lam: &ctx.lam,
     };
     let mbh = ctx.p.mbh;

@@ -1,4 +1,5 @@
-use crate::h264::enc::tables::{DEQUANT4, DEQUANT8, QUANT4, pos_class4, pos_class8};
+use crate::h264::dec::tables::{norm_adjust4, norm_adjust8};
+use crate::h264::enc::tables::{QUANT4, pos_class4};
 
 #[inline]
 pub fn fdct4(d: &[i32; 16]) -> [i32; 16] {
@@ -181,10 +182,10 @@ impl QuantTables {
         for q in 0..6 {
             for i in 0..16 {
                 mf4[q][i] = QUANT4[q][pos_class4(i)];
-                v4[q][i] = DEQUANT4[q][pos_class4(i)];
+                v4[q][i] = norm_adjust4(q, i) as i32;
             }
             for i in 0..64 {
-                let v = DEQUANT8[q][pos_class8(i)];
+                let v = norm_adjust8(q, i) as i32;
                 v8[q][i] = v;
                 let (x, y) = (i & 7, i >> 3);
                 mf8[q][i] = ((1u64 << 36) as f64 / (norm8[x] * norm8[y] * v as f64)).round() as i32;

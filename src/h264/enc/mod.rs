@@ -569,8 +569,6 @@ impl Encoder {
             qt: QuantTables::new(),
             cost_tab: CostTable::new(),
             lam: Lambdas::new(),
-            cabac_i: Box::new(tables::cabac_init_i()),
-            cabac_pb: Box::new(tables::cabac_init_pb0()),
         });
         let frame_threads = threads.clamp(1, 64);
         let frame_bytes = (mbw * 16 + 128) * (mbh * 16 + 128) * 2;
