@@ -4,7 +4,7 @@ use std::arch::x86_64::*;
 pub fn sad(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u32 {
     check(a, sa, b, sb, w, h);
     #[cfg(target_arch = "x86_64")]
-    if super::isa::avx2() {
+    if crate::media::isa::avx2() {
         return unsafe { sad_avx2(a, sa, b, sb, w, h) };
     }
     sad_scalar(a, sa, b, sb, w, h)
@@ -14,13 +14,13 @@ pub fn satd(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u32
     check(a, sa, b, sb, w, h);
     if w < 8 || h < 8 {
         #[cfg(target_arch = "x86_64")]
-        if super::isa::avx2() {
+        if crate::media::isa::avx2() {
             return unsafe { satd4_avx2(a, sa, b, sb, w, h) };
         }
         return satd4_scalar(a, sa, b, sb, w, h);
     }
     #[cfg(target_arch = "x86_64")]
-    if super::isa::avx2() {
+    if crate::media::isa::avx2() {
         return unsafe { satd8_avx2(a, sa, b, sb, w, h) };
     }
     satd8_scalar(a, sa, b, sb, w, h)
@@ -29,7 +29,7 @@ pub fn satd(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u32
 pub fn sse(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u32 {
     check(a, sa, b, sb, w, h);
     #[cfg(target_arch = "x86_64")]
-    if super::isa::avx2() && w >= 16 {
+    if crate::media::isa::avx2() && w >= 16 {
         return unsafe { sse_avx2(a, sa, b, sb, w, h) };
     }
     sse_scalar(a, sa, b, sb, w, h)

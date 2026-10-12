@@ -422,7 +422,7 @@ impl<'a> Decoder<'a> {
     }
 }
 
-crate::gif::isa::dispatch! {
+crate::media::isa::dispatch! {
     fn blit(src: &[u8], dst: &mut [u8], colors: &[[u8; 4]; 256], opaque: bool, t: usize) {
         if opaque {
             for (d, &i) in dst.chunks_exact_mut(4).zip(src) {

@@ -11,7 +11,7 @@ pub struct IntraEdge {
     pub bit_depth: u8,
 }
 
-crate::vp9::isa::dispatch! {
+crate::media::isa::dispatch! {
 pub fn predict<P: Pixel>(
     buf: &mut [P],
     stride: usize,

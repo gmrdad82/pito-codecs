@@ -2,6 +2,15 @@ mod types;
 
 pub use types::*;
 
+#[cfg(any(
+    feature = "hevc",
+    feature = "vp9",
+    feature = "gif",
+    feature = "webp",
+    feature = "opus"
+))]
+pub(crate) mod isa;
+
 #[cfg(all(
     feature = "h264",
     feature = "hevc",

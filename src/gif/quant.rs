@@ -394,7 +394,7 @@ fn kmeans(points: &[Point], mut centers: Vec<[f32; 3]>, rounds: usize) -> Vec<[f
     centers
 }
 
-crate::gif::isa::dispatch! {
+crate::media::isa::dispatch! {
     fn nearest_lab(soa: &Soa, p: [f32; 3]) -> usize {
         soa.nearest(p)
     }
@@ -432,7 +432,7 @@ impl Lut {
 
 const SLAB: usize = LEVELS * LEVELS * 4;
 
-crate::gif::isa::dispatch! {
+crate::media::isa::dispatch! {
     fn fill_slab(centers: &[[f32; 3]], br: usize, out: &mut [u8]) {
         let labs = &CELL_LAB[br * SLAB..(br + 1) * SLAB];
         let mut candidates: Vec<u8> = Vec::with_capacity(256);

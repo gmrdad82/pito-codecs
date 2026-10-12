@@ -58,7 +58,10 @@ pub fn predict<P: Pixel>(
     pred: &mut [P],
 ) {
     #[cfg(target_arch = "x86_64")]
-    if step_x == 16 && step_y == 16 && matches!(w, 4 | 8 | 16 | 32 | 64) && crate::vp9::isa::avx2()
+    if step_x == 16
+        && step_y == 16
+        && matches!(w, 4 | 8 | 16 | 32 | 64)
+        && crate::media::isa::avx2()
     {
         let (src, ss, so) = source(r, x >> 4, y >> 4, w, h, win);
         let (fx, fy) = ((x & 15) as usize, (y & 15) as usize);
@@ -88,7 +91,7 @@ pub fn predict<P: Pixel>(
     }
 }
 
-crate::vp9::isa::dispatch! {
+crate::media::isa::dispatch! {
 fn average<P: Pixel>(out: &mut [P], os: usize, pred: &[P], w: usize, h: usize) {
     for i in 0..h {
         for (d, &b) in out[i * os..i * os + w].iter_mut().zip(&pred[i * w..i * w + w]) {
@@ -98,7 +101,7 @@ fn average<P: Pixel>(out: &mut [P], os: usize, pred: &[P], w: usize, h: usize) {
 }
 }
 
-crate::vp9::isa::dispatch! {
+crate::media::isa::dispatch! {
 #[allow(clippy::too_many_arguments)]
 fn predict_portable<P: Pixel>(
     r: &RefPlane,
@@ -1127,7 +1130,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn simd_unscaled_matches_scalar() {
-        if !crate::vp9::isa::avx2() {
+        if !crate::media::isa::avx2() {
             return;
         }
         let mut seed = 0x9e37_79b9_7f4a_7c15u64;
@@ -1189,7 +1192,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn simd8_unscaled_matches_scalar() {
-        if !crate::vp9::isa::avx2() {
+        if !crate::media::isa::avx2() {
             return;
         }
         let mut seed = 0x2545_f491_4f6c_dd1du64;

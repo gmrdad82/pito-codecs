@@ -1,5 +1,5 @@
-use super::isa::dispatch;
 use super::*;
+use crate::media::isa::dispatch;
 use crate::vp9::spec_tables::SUBPEL_FILTERS;
 
 const WIN: usize = 64 + 7;
@@ -126,7 +126,7 @@ pub(super) fn h_pass(
     ds: usize,
 ) {
     #[cfg(target_arch = "x86_64")]
-    if super::isa::avx2() && src.len() >= so + (h - 1) * ss + w + super::mc_avx2::OVERREAD {
+    if crate::media::isa::avx2() && src.len() >= so + (h - 1) * ss + w + super::mc_avx2::OVERREAD {
         unsafe { super::mc_avx2::h_pass(src.as_ptr().add(so), ss, w, h, f, dst.as_mut_ptr(), ds) };
         return;
     }
@@ -144,7 +144,7 @@ pub(super) fn v_pass(
     ds: usize,
 ) {
     #[cfg(target_arch = "x86_64")]
-    if super::isa::avx2() {
+    if crate::media::isa::avx2() {
         unsafe { super::mc_avx2::v_pass(src.as_ptr().add(so), ss, w, h, f, dst.as_mut_ptr(), ds) };
         return;
     }

@@ -1,4 +1,4 @@
-use crate::opus::enc::isa::dispatch;
+use crate::media::isa::dispatch;
 use crate::opus::range::RangeEncoder;
 
 #[derive(Default)]
@@ -29,7 +29,7 @@ fn best_scalar(ax: &[f32], d: &[f32], rxy: f32, base: f32) -> usize {
 }
 
 dispatch! {
-    fn best(ax: &[f32], d: &[f32], rxy: f32, base: f32) -> usize {
+    fma: fn best(ax: &[f32], d: &[f32], rxy: f32, base: f32) -> usize {
         let n = ax.len();
         let m = n / L * L;
         let mut bn = [-1f32; L];

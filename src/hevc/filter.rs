@@ -240,7 +240,7 @@ fn luma_edges<P: Pel>(
     }
 }
 
-crate::hevc::isa::dispatch! {
+crate::media::isa::dispatch! {
 fn deblock_row<P: Pel>(pic: &PicState<P>, r: usize) {
     if !pic.deblocking_enabled_anywhere || pic.draft {
         return;
@@ -527,7 +527,7 @@ struct SaoCtb {
     near: [[bool; 3]; 3],
 }
 
-crate::hevc::isa::dispatch! {
+crate::media::isa::dispatch! {
 fn sao_row<P: Pel>(pic: &PicState<P>, r: usize, bottom: bool) {
     let ctb = 1usize << pic.log2_ctb;
     for c in 0..3 {

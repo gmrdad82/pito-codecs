@@ -1,5 +1,5 @@
+use crate::media::isa::dispatch;
 use crate::opus::celt::tables::{COMB_GAINS, OVERLAP};
-use crate::opus::enc::isa::dispatch;
 
 pub const MAX_PERIOD: usize = 1024;
 const MIN_PERIOD: usize = 15;
@@ -63,7 +63,7 @@ fn xcorr(x: &[f32], y: &[f32], out: &mut [f32]) {
         return;
     }
     #[cfg(target_arch = "x86_64")]
-    if crate::opus::enc::isa::avx2() {
+    if crate::media::isa::avx2_fma() {
         let done = unsafe { simd::xcorr(x, y, out) };
         for (k, o) in out.iter_mut().enumerate().skip(done) {
             *o = dot(x, &y[k..k + n]);
@@ -329,7 +329,7 @@ pub fn prefilter(raw: &[f32], out: &mut [f32], old: &Pf, new: &Pf, window: &[f32
 }
 
 dispatch! {
-    fn comb(src: &[f32], out: &mut [f32], t: usize, k: &[f32; 3]) {
+    fma: fn comb(src: &[f32], out: &mut [f32], t: usize, k: &[f32; 3]) {
         let n = out.len();
         let a = &src[..n];
         let b = &src[1..n + 1];

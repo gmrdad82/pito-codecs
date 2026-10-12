@@ -4,7 +4,6 @@ pub mod dist;
 pub mod halfpel;
 pub mod inter;
 pub mod intra;
-pub(crate) mod isa;
 #[cfg(target_arch = "x86_64")]
 mod mc_avx2;
 pub mod mode;

@@ -691,7 +691,7 @@ fn make_picture(o: &Output<FrameRef>, time_base: TimeBase) -> Image {
     ready.unwrap_or_else(|| convert(&o.frame, &o.meta, time_base, Default::default()))
 }
 
-crate::hevc::isa::dispatch! {
+crate::media::isa::dispatch! {
 fn convert(frame: &Frame, meta: &OutputMeta, time_base: TimeBase, bufs: [Vec<u8>; 3]) -> Image {
     let (cx, cy, cw, ch) = meta.crop;
     let (cx, cy, cw, ch) = (cx as usize, cy as usize, cw as usize, ch as usize);

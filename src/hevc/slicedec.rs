@@ -1739,7 +1739,7 @@ impl<'a, P: Pel> SliceDecoder<'a, P> {
 
     fn residual(&mut self, x0: i32, y0: i32, log2: u32, c: usize, qp: i32) -> Result<()> {
         #[cfg(target_arch = "x86_64")]
-        if crate::hevc::isa::avx2() {
+        if crate::media::isa::avx2() {
             return unsafe { self.residual_fast(x0, y0, log2, c, qp) };
         }
         self.residual_body(x0, y0, log2, c, qp)
