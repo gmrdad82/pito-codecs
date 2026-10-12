@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.0.2 — 2026-10-12
+
+Native audio from every container we read, and a simpler crate: about 7,200 lines fewer, with every output byte-identical to v1.0.1.
+
+### Added
+
+- MKV, WebM, MP4 and MOV audio in PCM (s16, s24, s32, f32, f64), AAC and Opus decodes natively through `audio_pcm`, `audio_pcm_range` and `audio_mix`.
+- `AudioTrack::native`, `Probe::video_native` and `Probe::unsupported` say which streams a file holds that pito-codecs doesn't decode, by codec name.
+- A Formats table in the README, with the formats it doesn't read.
+
+### Changed
+
+- The GPU routes parse H.264 and HEVC with the CPU decoders' own parameter sets, slices and DPB, including their overflow checks.
+- The H.264, VP9, Opus and AAC encoders use their decoders' spec tables and helpers instead of copies; one CABAC table set serves H.264 and HEVC.
+- One AVX2 check, one reader cache, one smart-cut plan, one route picker and one remux planner across the crate.
+
+### Fixed
+
+- AAC and Opus in MKV line up with the source to the sample (MKV's millisecond block times had put them up to 24 frames off).
+
 ## v1.0.1 — 2026-10-12
 
 H.264, HEVC and VP9 decode speed-ups and MKV and WebM playback, with one benchmark run on this code behind every chart and number in the README.
