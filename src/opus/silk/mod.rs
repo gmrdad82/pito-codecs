@@ -521,7 +521,7 @@ struct Ctrl {
     ltp_scale_q14: i32,
 }
 
-fn log2lin(in_log_q7: i32) -> i32 {
+pub(crate) fn log2lin(in_log_q7: i32) -> i32 {
     if in_log_q7 < 0 {
         return 0;
     }
@@ -537,7 +537,7 @@ fn log2lin(in_log_q7: i32) -> i32 {
     }
 }
 
-fn lpc_analysis_filter(out: &mut [i16], input: &[i16], b: &[i32], d: usize) {
+pub(crate) fn lpc_analysis_filter(out: &mut [i16], input: &[i16], b: &[i32], d: usize) {
     let len = out.len();
     for ix in d..len {
         let mut acc: i32 = 0;

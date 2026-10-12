@@ -57,41 +57,4 @@ impl<'a> BitReader<'a> {
     }
 }
 
-#[derive(Default, Clone)]
-pub struct BitWriter {
-    buf: Vec<u8>,
-    acc: u64,
-    nbits: u32,
-}
-
-impl BitWriter {
-    pub fn new() -> Self {
-        Self::default()
-    }
-    pub fn write_bits(&mut self, value: u32, n: u32) {
-        debug_assert!(n <= 32);
-        if n == 0 {
-            return;
-        }
-        let v = (value as u64) & ((1u64 << n) - 1);
-        self.acc = (self.acc << n) | v;
-        self.nbits += n;
-        while self.nbits >= 8 {
-            self.nbits -= 8;
-            self.buf.push((self.acc >> self.nbits) as u8);
-        }
-        self.acc &= (1u64 << self.nbits) - 1;
-    }
-    pub fn bit_len(&self) -> usize {
-        self.buf.len() * 8 + self.nbits as usize
-    }
-    pub fn align_zero(&mut self) {
-        if self.nbits > 0 {
-            self.write_bits(0, 8 - self.nbits);
-        }
-    }
-    pub fn finish(mut self) -> Vec<u8> {
-        self.align_zero();
-        self.buf
-    }
-}
+pub use crate::syntax::bits::BitWriter;

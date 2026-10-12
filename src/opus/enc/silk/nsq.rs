@@ -6,6 +6,7 @@ use crate::opus::silk::lpc::{
 use crate::opus::silk::tables::{
     CB_NB_10, CB_NB_20, CB_WB_10, CB_WB_20, LTP_TAPS_0, LTP_TAPS_1, LTP_TAPS_2,
 };
+use crate::opus::silk::{log2lin, lpc_analysis_filter};
 
 pub(crate) const MAX_FRAME: usize = 320;
 const MAX_SUBFR: usize = 80;
@@ -85,22 +86,6 @@ pub(crate) struct Ctrl {
     pub ltp_coef_q14: [i32; 4 * LTP_ORDER],
     pub ltp_scale_q14: i32,
     pub interp: bool,
-}
-
-pub(crate) fn log2lin(in_log_q7: i32) -> i32 {
-    if in_log_q7 < 0 {
-        return 0;
-    }
-    if in_log_q7 >= 3967 {
-        return i32::MAX;
-    }
-    let out = 1i32 << (in_log_q7 >> 7);
-    let frac = in_log_q7 & 0x7F;
-    if in_log_q7 < 2048 {
-        out + ((out * smlawb(frac, frac * (128 - frac), -174)) >> 7)
-    } else {
-        out + (out >> 7) * smlawb(frac, frac * (128 - frac), -174)
-    }
 }
 
 pub(crate) fn gain_q16(index: i32) -> i32 {
@@ -203,21 +188,6 @@ pub(crate) fn decode_params(st: &mut DecState, ind: &Indices, cond: Cond) -> Ctr
         ctrl.ltp_scale_q14 = [15565, 12288, 8192][ind.ltp_scale_index];
     }
     ctrl
-}
-
-fn lpc_analysis_filter(out: &mut [i16], input: &[i16], b: &[i32], d: usize) {
-    let len = out.len();
-    for ix in d..len {
-        let mut acc: i32 = 0;
-        for j in 0..d {
-            acc = acc.wrapping_add((input[ix - 1 - j] as i32).wrapping_mul(b[j]));
-        }
-        let v = ((input[ix] as i32) << 12).wrapping_sub(acc);
-        out[ix] = sat16(rshift_round(v, 12)) as i16;
-    }
-    for v in out.iter_mut().take(d.min(len)) {
-        *v = 0;
-    }
 }
 
 pub(crate) struct Shaping {

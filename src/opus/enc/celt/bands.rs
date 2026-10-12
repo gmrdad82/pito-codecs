@@ -1,31 +1,14 @@
 use crate::opus::celt::rate::{Mode, QTHETA_OFFSET, QTHETA_OFFSET_TWOPHASE, get_pulses};
 use crate::opus::celt::tables::*;
-use crate::opus::range::{BITRES, RangeEncoder, ilog};
+use crate::opus::range::{BITRES, RangeEncoder};
 
 use super::pvq::Pvq;
+use crate::opus::celt::bands::{
+    bitexact_cos, bitexact_log2tan, compute_qn, deinterleave_hadamard, exp_rotation1, frac_mul16,
+    haar1,
+};
 
 const SPREAD_NONE: usize = 0;
-
-fn exp_rotation1(x: &mut [f32], len: usize, stride: usize, c: f32, s: f32) {
-    let ms = -s;
-    if len <= stride {
-        return;
-    }
-    for i in 0..len - stride {
-        let x1 = x[i];
-        let x2 = x[i + stride];
-        x[i + stride] = c * x2 + s * x1;
-        x[i] = c * x1 + ms * x2;
-    }
-    if len >= 2 * stride + 1 {
-        for i in (0..=len - 2 * stride - 1).rev() {
-            let x1 = x[i];
-            let x2 = x[i + stride];
-            x[i + stride] = c * x2 + s * x1;
-            x[i] = c * x1 + ms * x2;
-        }
-    }
-}
 
 fn exp_rotation_forward(x: &mut [f32], len: usize, stride: usize, k: usize, spread: usize) {
     const SPREAD_FACTOR: [usize; 3] = [15, 10, 5];
@@ -51,83 +34,6 @@ fn exp_rotation_forward(x: &mut [f32], len: usize, stride: usize, k: usize, spre
         if stride2 != 0 {
             exp_rotation1(xs, sub, stride2, s, -c);
         }
-    }
-}
-
-pub(super) fn haar1(x: &mut [f32], n0: usize, stride: usize) {
-    let n0 = n0 >> 1;
-    const S: f32 = std::f32::consts::FRAC_1_SQRT_2;
-    for i in 0..stride {
-        for j in 0..n0 {
-            let a = x[stride * 2 * j + i] * S;
-            let b = x[stride * (2 * j + 1) + i] * S;
-            x[stride * 2 * j + i] = a + b;
-            x[stride * (2 * j + 1) + i] = a - b;
-        }
-    }
-}
-
-fn deinterleave_hadamard(
-    x: &mut [f32],
-    n0: usize,
-    stride: usize,
-    hadamard: bool,
-    tmp: &mut Vec<f32>,
-) {
-    let n = n0 * stride;
-    tmp.clear();
-    tmp.resize(n, 0.0);
-    if hadamard {
-        let ord = &ORDERY[stride - 2..2 * stride - 2];
-        for i in 0..stride {
-            for j in 0..n0 {
-                tmp[ord[i] * n0 + j] = x[j * stride + i];
-            }
-        }
-    } else {
-        for i in 0..stride {
-            for j in 0..n0 {
-                tmp[i * n0 + j] = x[j * stride + i];
-            }
-        }
-    }
-    x[..n].copy_from_slice(tmp);
-}
-
-#[inline]
-fn frac_mul16(a: i32, b: i32) -> i32 {
-    (16384 + (a as i16 as i32) * (b as i16 as i32)) >> 15
-}
-
-fn bitexact_cos(x: i32) -> i32 {
-    let x2 = (4096 + x * x) >> 13;
-    let x2 = (32767 - x2) + frac_mul16(x2, -7651 + frac_mul16(x2, 8277 + frac_mul16(-626, x2)));
-    1 + x2
-}
-
-fn bitexact_log2tan(isin: i32, icos: i32) -> i32 {
-    let lc = ilog(icos as u32);
-    let ls = ilog(isin as u32);
-    let icos = icos << (15 - lc);
-    let isin = isin << (15 - ls);
-    (ls - lc) * (1 << 11) + frac_mul16(isin, frac_mul16(isin, -2597) + 7932)
-        - frac_mul16(icos, frac_mul16(icos, -2597) + 7932)
-}
-
-fn compute_qn(n: i32, b: i32, offset: i32, pulse_cap: i32, stereo: bool) -> i32 {
-    const EXP2_TABLE8: [i32; 8] = [16384, 17866, 19483, 21247, 23170, 25267, 27554, 30048];
-    let mut n2 = 2 * n - 1;
-    if stereo && n == 2 {
-        n2 -= 1;
-    }
-    let mut qb = (b + n2 * offset) / n2;
-    qb = qb.min(b - pulse_cap - (4 << BITRES));
-    qb = qb.min(8 << BITRES);
-    if qb < (1 << BITRES >> 1) {
-        1
-    } else {
-        let qn = EXP2_TABLE8[(qb & 0x7) as usize] >> (14 - (qb >> BITRES));
-        (qn + 1) >> 1 << 1
     }
 }
 
