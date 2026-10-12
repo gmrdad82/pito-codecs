@@ -94,3 +94,19 @@ fn damaged_files_are_errors_not_crashes() {
     assert!(probe(&empty, &prefs).is_err());
     assert!(first_frame(&empty, 32, &prefs).is_err());
 }
+
+#[test]
+fn damaged_pcm_is_an_error() {
+    use super::sound::Pcm;
+    assert!(Pcm::new(16, false, true, false, 0, 48_000.0).is_err());
+    assert!(Pcm::new(16, false, true, false, 2, 0.0).is_err());
+    assert!(Pcm::new(16, false, true, false, 2, f64::NAN).is_err());
+    assert!(Pcm::new(16, false, true, false, 2, 1e12).is_err());
+    assert!(Pcm::new(12, false, true, false, 2, 48_000.0).is_err());
+    assert!(Pcm::new(16, true, true, false, 2, 48_000.0).is_err());
+    let pcm = Pcm::new(16, false, true, false, 2, 48_000.0).unwrap();
+    let mut out = Vec::new();
+    assert!(pcm.decode(&[1, 2, 3], &mut out).is_err());
+    assert!(pcm.decode(&[0, 128, 255, 127], &mut out).is_ok());
+    assert_eq!(out, [-1.0, 32767.0 / 32768.0]);
+}

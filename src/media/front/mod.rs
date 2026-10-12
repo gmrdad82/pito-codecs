@@ -9,6 +9,7 @@ mod native;
 mod picture;
 mod probe;
 mod route;
+mod sound;
 mod still;
 mod video;
 

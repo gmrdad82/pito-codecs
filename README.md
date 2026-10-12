@@ -16,7 +16,7 @@ Works on Linux x86-64 and arm64, Windows x86-64 and macOS on Apple Silicon; CI t
 | --- | --- | --- |
 | H.264 | CPU: Baseline, Main and High, progressive 8-bit 4:2:0, CAVLC and CABAC, bit-exact with ffmpeg. GPU: VA-API and VideoToolbox for the same profiles, bit-exact. | CPU: Baseline, Main and High with CABAC and B-frames; CRF, QP, CBR and VBR. GPU: VA-API High; VideoToolbox Main and High. |
 | H.265 | CPU: Main and Main 10, tiles and WPP, bit-exact with ffmpeg. GPU: VA-API and VideoToolbox, Main and Main 10, bit-exact. | GPU only: VA-API Main; VideoToolbox Main and Main 10. Without a GPU HEVC encoder it falls back to H.264 and says why. |
-| VP9 | CPU: profiles 0 to 3 (8, 10 and 12-bit; 4:2:0, 4:2:2 and 4:4:4), tiles, bit-exact with ffmpeg and libvpx. | CPU: profile 0, with motion search, trellis, rate control, AQ and tile threads. ffmpeg and libvpx decode it bit-exact to our reconstruction. |
+| VP9 | CPU: profiles 0 to 3 (8, 10 and 12-bit; 4:2:0, 4:2:2 and 4:4:4), tiles, bit-exact with ffmpeg and libvpx. GPU: VA-API for 8 and 10-bit 4:2:0, bit-exact. | CPU: profile 0, with motion search, trellis, rate control, AQ and tile threads. ffmpeg and libvpx decode it bit-exact to our reconstruction. |
 | AAC | AAC-LC, mono to 7.1. | AAC-LC, CBR and VBR. |
 | Opus | SILK, CELT, hybrid and multistream; the RFC 8251 conformance vectors decode to the reference's final range on every packet. | CELT, VBR and CBR, 6 to 510 kbps, decoded clean by libopus. **Experimental:** SILK and hybrid for speech decode clean in libopus but sound worse than libopus at low rates. |
 | MP4 and MOV | Tracks, sample tables, rotation, edit lists, fragmented files. | MP4 or MOV, faststart or fragmented; remux of a time range without re-encoding. |
@@ -52,9 +52,26 @@ Where ffmpeg wins:
 
 ## What it is
 
+**Formats.** GPU means VA-API, VideoToolbox, NVENC or Media Foundation, as the Status section says; NVENC and Media Foundation are built and pass their unit tests but are untested on their hardware. For containers and images, decode is reading and encode is writing.
+
+| Format | Decode CPU | Decode GPU | Encode CPU | Encode GPU |
+| --- | --- | --- | --- | --- |
+| H.264 | Yes | VA-API, VideoToolbox, Media Foundation | Yes | VA-API, VideoToolbox, NVENC |
+| H.265 | Yes | VA-API, VideoToolbox, Media Foundation | No | VA-API, VideoToolbox, NVENC |
+| VP9 | Yes | VA-API | Yes (profile 0) | No |
+| AAC | Yes (AAC-LC) | — | Yes (AAC-LC) | — |
+| Opus | Yes | — | Yes (CELT; SILK and hybrid experimental) | — |
+| PCM (s16, s24, s32, f32, f64) | Yes | — | No | — |
+| MP4 and MOV | Yes | — | Yes | — |
+| MKV and WebM | Yes | — | Yes | — |
+| GIF | Yes | — | Yes | — |
+| WebP | Yes | — | Yes | — |
+
+Not covered: AC3 and E-AC3, DTS, MP3, FLAC, Vorbis, ALAC, AV1, ProRes, DNxHD, MPEG-2 and VP8 video, and subtitle tracks.
+
 - **Speed first.** Decoders are threaded across rows and frames, SIMD kernels are picked at run time, and buffers are pooled. GPU frames stay on the GPU from decode to encode.
-- **Video:** H.264 and H.265 decode and encode on the CPU and the GPU (H.265 encodes on the GPU only), and VP9 decode and encode on the CPU.
-- **Audio:** AAC-LC and Opus decode and encode.
+- **Video:** H.264 and H.265 decode and encode on the CPU and the GPU (H.265 encodes on the GPU only), VP9 decode on the CPU and through VA-API, and VP9 encode on the CPU.
+- **Audio:** AAC-LC and Opus decode and encode, and PCM decode from MP4, MOV, MKV and WebM.
 - **Containers:** MP4, MOV, MKV and WebM read, write and remux; Ogg Opus.
 - **Images:** GIF and WebP, still and animated.
 - **Filters** between decode and encode (`filter`): scaling, colour, geometry, frame rate, overlays, resampling and loudness.
