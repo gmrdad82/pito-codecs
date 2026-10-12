@@ -30,6 +30,7 @@ front! {
     mod picture;
     mod probe;
     mod route;
+    mod sound;
     mod still;
     mod video;
     #[cfg(test)]

@@ -34,6 +34,30 @@ impl Probe {
             (self.width, self.height)
         }
     }
+
+    pub fn video_native(&self) -> bool {
+        matches!(
+            self.video_codec,
+            Some(Codec::H264 | Codec::Hevc | Codec::Vp9)
+        )
+    }
+
+    pub fn unsupported(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        let video = (!self.video_native()).then_some(self.video_codec_name.as_str());
+        let audio = self
+            .audio
+            .iter()
+            .filter(|a| !a.native())
+            .map(|a| a.codec.as_str());
+        for name in video.into_iter().chain(audio) {
+            let name = if name.is_empty() { "unknown" } else { name };
+            if !names.iter().any(|n| n == name) {
+                names.push(name.to_string());
+            }
+        }
+        names
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +71,14 @@ pub struct AudioTrack {
     pub rate: u32,
     pub bitrate: Option<u32>,
     pub default: bool,
+}
+
+impl AudioTrack {
+    pub fn native(&self) -> bool {
+        ["aac", "opus", "pcm"]
+            .iter()
+            .any(|c| self.codec.eq_ignore_ascii_case(c))
+    }
 }
 
 type Key = (PathBuf, u64, Option<SystemTime>);
