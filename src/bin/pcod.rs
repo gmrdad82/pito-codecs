@@ -6,10 +6,10 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
-use pito_codecs::gpu::{self, Backend, GpuFrame, HwDecoder, HwEncoder};
+use pito_codecs::gpu::{self, Backend, HwDecoder, HwEncoder};
 use pito_codecs::media::{
-    Caps, Choice, Codec, Fallback, Frame, Packet, Prefs, Route, TimeBase, pick_decode, pick_encode,
-    probe,
+    Caps, Choice, Codec, Fallback, Packet, Prefs, Route, TimeBase, VideoFrame as Picture,
+    pick_decode, pick_encode, probe,
 };
 use pito_codecs::mp4::{
     AvcConfig, CodecConfig, HevcConfig, Reader, SampleEntry, Track, TrackConfig, Writer,
@@ -204,11 +204,6 @@ fn length_prefixed_to_annexb(out: &mut Vec<u8>, data: &[u8], length: usize) {
         out.extend_from_slice(nal);
         pos += n;
     }
-}
-
-enum Picture {
-    Cpu(Frame),
-    Gpu(GpuFrame),
 }
 
 enum Decoder {

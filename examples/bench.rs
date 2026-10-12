@@ -472,7 +472,7 @@ fn encode_gpu(frames: &[Frame], w: u32, h: u32, codec: Codec) -> Res<(f64, Vec<u
 
 const BT709: &str = "setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709";
 
-fn psnr(dir: &Path, stream: &Path, format: &str, raw: &Path, w: u32, h: u32) -> Option<f64> {
+fn psnr(stream: &Path, format: &str, raw: &Path, w: u32, h: u32) -> Option<f64> {
     let size = format!("{w}x{h}");
     let (_, log) = ffmpeg_run(
         &[
@@ -503,7 +503,6 @@ fn psnr(dir: &Path, stream: &Path, format: &str, raw: &Path, w: u32, h: u32) -> 
         true,
     )
     .ok()?;
-    let _ = dir;
     let at = log.rfind("average:")? + "average:".len();
     log[at..].split_whitespace().next()?.parse().ok()
 }
@@ -525,7 +524,6 @@ impl Bench {
             })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn add(
         &mut self,
         id: &str,
@@ -578,10 +576,6 @@ impl Bench {
             for &(_, h) in sizes() {
                 let path = a.video[&(codec, h)].clone();
                 let pstr = path_str(&path);
-                let frames = Reader::open(&path)
-                    .ok()
-                    .and_then(|r| r.video().map(|v| r.tracks[v].samples.len() as u64))
-                    .unwrap_or(0);
                 let all = std::thread::available_parallelism()
                     .map_or(4, |n| n.get())
                     .min(16);
@@ -612,8 +606,7 @@ impl Bench {
                             .into(),
                             ..Measured::default()
                         };
-                        let mut n = frames;
-                        decode_ours(&path, mode)?;
+                        let (mut n, _) = decode_ours(&path, mode)?;
                         for _ in 0..runs {
                             let (count, s) = decode_ours(&path, mode)?;
                             n = count;
@@ -711,11 +704,11 @@ impl Bench {
                 |m: &mut Measured, ours: &[u8], theirs: &Path, ext: &str, fmt: &str| {
                     let ours_path = dir.join(format!("ours-{h}.{ext}"));
                     if fs::write(&ours_path, ours).is_ok()
-                        && let Some(p) = psnr(&dir, &ours_path, fmt, &raw, w, h)
+                        && let Some(p) = psnr(&ours_path, fmt, &raw, w, h)
                     {
                         m.details.insert("ours_psnr_db".into(), p);
                     }
-                    if let Some(p) = psnr(&dir, theirs, fmt, &raw, w, h) {
+                    if let Some(p) = psnr(theirs, fmt, &raw, w, h) {
                         m.details.insert("ffmpeg_psnr_db".into(), p);
                     }
                     m.details.insert("ours_bytes".into(), ours.len() as f64);
@@ -947,12 +940,10 @@ impl Bench {
                     let i = *r.audio().first().ok_or("no audio")?;
                     let mut dec = aac::Decoder::new(&r.tracks[i].extradata().ok_or("no config")?)?;
                     let mut buf = Vec::new();
-                    let mut frames = 0usize;
                     for k in 0..r.tracks[i].samples.len() {
                         r.read_into(i, k, &mut buf)?;
-                        frames += dec.decode_frame(&buf)?.frames();
+                        dec.decode_frame(&buf)?;
                     }
-                    let _ = frames;
                     Ok(t0.elapsed().as_secs_f64())
                 };
                 let mut m = Measured {
