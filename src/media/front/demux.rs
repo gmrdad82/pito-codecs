@@ -28,7 +28,7 @@ static MKV_READERS: Readers<mkv::Reader> = LazyLock::new(Default::default);
 static MKV_HEADS: Readers<mkv::Reader> = LazyLock::new(Default::default);
 
 fn mkv_reader(path: &Path) -> Result<Arc<mkv::Reader>> {
-    cached(&MKV_READERS, path, |p| mkv::Reader::open(p))
+    cached(&MKV_READERS, path, |p| mkv::Reader::open_video_index(p))
 }
 
 pub fn mkv_head(path: &Path) -> Result<Option<Arc<mkv::Reader>>> {

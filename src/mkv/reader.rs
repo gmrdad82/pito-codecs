@@ -518,6 +518,25 @@ impl Reader<File> {
             .map_err(|e| e.in_file(path))
     }
 
+    #[cfg_attr(
+        not(all(
+            feature = "h264",
+            feature = "hevc",
+            feature = "aac",
+            feature = "gpu",
+            feature = "filter",
+            feature = "vp9"
+        )),
+        allow(dead_code)
+    )]
+    pub(crate) fn open_video_index(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        File::open(path)
+            .map_err(Error::from)
+            .and_then(|f| Self::open_inner(f, Options::default(), true))
+            .map_err(|e| e.in_file(path))
+    }
+
     pub fn open_with(path: impl AsRef<Path>, options: Options) -> Result<Self> {
         let path = path.as_ref();
         File::open(path)
@@ -533,6 +552,10 @@ impl<S: ByteSource> Reader<S> {
     }
 
     pub fn with_options(source: S, options: Options) -> Result<Self> {
+        Self::open_inner(source, options, false)
+    }
+
+    fn open_inner(source: S, options: Options, video_only: bool) -> Result<Self> {
         let mut cache = Cache::default();
         let mut io = Io::new(&source, &mut cache);
         let len = io.len;
@@ -599,6 +622,7 @@ impl<S: ByteSource> Reader<S> {
         }
         let mut w = Walker {
             index: options.index,
+            video_only,
             parsed: HashSet::new(),
             frames: Vec::new(),
         };
@@ -767,6 +791,7 @@ fn fill_durations(t: &mut Track) {
 
 struct Walker {
     index: bool,
+    video_only: bool,
     parsed: HashSet<u64>,
     frames: Vec<(u64, u32)>,
 }
@@ -804,6 +829,7 @@ impl Walker {
                         .map(|t| std::mem::take(&mut t.samples))
                         .collect();
                     let tracks = &r.tracks;
+                    let video_only = self.video_only;
                     let ci = scan_cluster(
                         io,
                         &h,
@@ -812,6 +838,9 @@ impl Walker {
                         &mut r.warnings,
                         &mut self.frames,
                         |b, frames| {
+                            if video_only && tracks[b.track].kind != TrackKind::Video {
+                                return;
+                            }
                             expand(b, frames, &tracks[b.track], scale, 0, |f| {
                                 samples[f.track].push(Sample {
                                     offset: f.offset,
