@@ -2,7 +2,7 @@
 
 ## Why
 
-I wanted something smaller and faster, written natively in Rust, for the PITO family of apps and my games. One library each app can carry, with no external ffmpeg to download, bundle or keep in step, and the GPU used first.
+I wanted something smaller and faster, written natively in Rust, for the PITO MD family of apps and my games. One library each app can carry, with no external ffmpeg to download, bundle or keep in step, and the GPU used first.
 
 It is my own Rust, built for speed, that I can change and release on my own schedule, with fast iterations, instead of waiting on ffmpeg's and other projects' releases. Everything taken in is permissively licensed, so pito-codecs stays MIT.
 

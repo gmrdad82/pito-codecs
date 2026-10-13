@@ -432,7 +432,7 @@ pub struct OggWriter<W: Write> {
 impl<W: Write> OggWriter<W> {
     pub fn new(cfg: EncoderConfig, w: W) -> Result<OggWriter<W>> {
         let enc = Encoder::new(cfg)?;
-        let out = ogg::Writer::new(w, 0x5049_544f, &enc.head(), "PITO codecs")?;
+        let out = ogg::Writer::new(w, 0x5049_544f, &enc.head(), "PITO MD codecs")?;
         Ok(OggWriter { enc, out })
     }
 

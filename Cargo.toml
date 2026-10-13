@@ -1,6 +1,6 @@
 [package]
 name = "pito-codecs"
-description = "Video and audio codecs, containers and GPU routes in Rust for PITO apps"
+description = "Video and audio codecs, containers and GPU routes in Rust for PITO MD apps"
 version = "1.2.1"
 edition = "2024"
 rust-version = "1.97"
