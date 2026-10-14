@@ -44,7 +44,7 @@ On the 10-second 1080p60 clip from the [pcod guide](../pcod/):
 
 ```text
 362 frames, 200 copied, 162 encoded, smart true, video H.264 GPU
-  reason: frames stay on the GPU from decode to encode, overlay included, through VA-API
+  reason: frames stay on the GPU from decode to encode through VA-API
 ```
 
 The progress callback gets a `Progress` with the `stage` (`Cutting`, `Encoding`, `Mixing`, `Joining`), `done` from 0.0 to 1.0 and the encoder's route; returning `false` cancels the export with `Error::Cancelled`. The pieces can come from different files.
