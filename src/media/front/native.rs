@@ -47,14 +47,18 @@ pub fn gpu() -> (Vec<(Codec, Direction)>, Option<String>) {
 }
 
 pub fn cpu() -> Vec<(Codec, Direction)> {
-    vec![
+    let mut caps = vec![
         (Codec::H264, Direction::Decode),
         (Codec::H264, Direction::Encode),
         (Codec::Hevc, Direction::Decode),
         (Codec::Vp9, Direction::Decode),
         (Codec::Aac, Direction::Decode),
         (Codec::Aac, Direction::Encode),
-    ]
+    ];
+    if cfg!(feature = "mp3") {
+        caps.push((Codec::Mp3, Direction::Decode));
+    }
+    caps
 }
 
 pub(super) type Key = (PathBuf, u64, Option<SystemTime>);

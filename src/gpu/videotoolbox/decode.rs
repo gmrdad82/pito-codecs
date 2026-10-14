@@ -176,7 +176,7 @@ fn layout(codec: Codec, sets: &[Vec<u8>]) -> Result<Layout> {
                 sps.max_num_reorder as usize,
             )
         }
-        Codec::Aac | Codec::Vp9 | Codec::Opus => {
+        Codec::Aac | Codec::Vp9 | Codec::Opus | Codec::Mp3 => {
             return Err(Error::Unsupported(format!("{codec:?} on VideoToolbox")));
         }
     };

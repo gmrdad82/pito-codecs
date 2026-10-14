@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/gmrdad82/pito-codecs/actions/workflows/ci.yml/badge.svg)](https://github.com/gmrdad82/pito-codecs/actions/workflows/ci.yml) [![Version](https://img.shields.io/github/v/tag/gmrdad82/pito-codecs)](https://github.com/gmrdad82/pito-codecs/tags)
 
-pito-codecs is a pure Rust library of fast video, audio and image codecs and containers that run on the CPU and on the GPU. It covers H.264, H.265, VP9, AAC, Opus, MP4, MKV and WebM, GIF and WebP. It is part of [PITO MD](https://pitomd.com) and ships as one MIT Cargo package with a feature per part. It needs no ffmpeg: none is linked or bundled, and ffmpeg serves only as the test oracle and the benchmark reference.
+pito-codecs is a pure Rust library of fast video, audio and image codecs and containers that run on the CPU and on the GPU. It covers H.264, H.265, VP9, AAC, Opus, MP3, MP4, MKV and WebM, GIF and WebP. It is part of [PITO MD](https://pitomd.com) and ships as one MIT Cargo package with a feature per part. It needs no ffmpeg: none is linked or bundled, and ffmpeg serves only as the test oracle and the benchmark reference.
 
 Works on Linux x86-64 and arm64, Windows x86-64 and macOS on Apple Silicon; CI tests every push on all four.
 
@@ -19,6 +19,7 @@ Works on Linux x86-64 and arm64, Windows x86-64 and macOS on Apple Silicon; CI t
 | VP9 | CPU: profiles 0 to 3 (8, 10 and 12-bit; 4:2:0, 4:2:2 and 4:4:4), tiles, bit-exact with ffmpeg and libvpx. GPU: VA-API for 8 and 10-bit 4:2:0, bit-exact. | CPU: profile 0, with motion search, trellis, rate control, AQ and tile threads. ffmpeg and libvpx decode it bit-exact to our reconstruction. |
 | AAC | AAC-LC, mono to 7.1. | AAC-LC, CBR and VBR. |
 | Opus | SILK, CELT, hybrid and multistream; the RFC 8251 conformance vectors decode to the reference's final range on every packet. | CELT, VBR and CBR, 6 to 510 kbps, decoded clean by libopus. **Experimental:** SILK and hybrid for speech decode clean in libopus but sound worse than libopus at low rates. |
+| MP3 | MPEG-1, 2 and 2.5 audio, layers I, II and III, mono and stereo, CBR and VBR; within float rounding (about 1e-6) of ffmpeg's mp3float. | |
 | MP4 and MOV | Tracks, sample tables, rotation, edit lists, fragmented files. | MP4 or MOV, faststart or fragmented; remux of a time range without re-encoding. |
 | MKV and WebM | Tracks, lacing, Cues, seeking. | H.264, HEVC, VP9, Opus and AAC; WebM's codec rules enforced; remux. |
 | GIF | GIF87a and 89a, interlace, disposal, transparency, loops. | Oklab palettes, ordered or Floyd-Steinberg dither, frame differencing. |
@@ -61,17 +62,18 @@ Where ffmpeg wins:
 | VP9 | Yes | VA-API | Yes (profile 0) | No |
 | AAC | Yes (AAC-LC) | — | Yes (AAC-LC) | — |
 | Opus | Yes | — | Yes (CELT; SILK and hybrid experimental) | — |
+| MP3 (and MP2, MP1) | Yes | — | No | — |
 | PCM (s16, s24, s32, f32, f64) | Yes | — | No | — |
 | MP4 and MOV | Yes | — | Yes | — |
 | MKV and WebM | Yes | — | Yes | — |
 | GIF | Yes | — | Yes | — |
 | WebP | Yes | — | Yes | — |
 
-Not covered: AC3 and E-AC3, DTS, MP3, FLAC, Vorbis, ALAC, AV1, ProRes, DNxHD, MPEG-2 and VP8 video, and subtitle tracks.
+Not covered: AC3 and E-AC3, DTS, FLAC, Vorbis, ALAC, AV1, ProRes, DNxHD, MPEG-2 and VP8 video, and subtitle tracks.
 
 - **Speed first.** Decoders are threaded across rows and frames, SIMD kernels are picked at run time, and buffers are pooled. GPU frames stay on the GPU from decode to encode.
 - **Video:** H.264 and H.265 decode and encode on the CPU and the GPU (H.265 encodes on the GPU only), VP9 decode on the CPU and through VA-API, and VP9 encode on the CPU.
-- **Audio:** AAC-LC and Opus decode and encode, and PCM decode from MP4, MOV, MKV and WebM.
+- **Audio:** AAC-LC and Opus decode and encode, and MP3 and PCM decode from MP4, MOV, MKV and WebM.
 - **Containers:** MP4, MOV, MKV and WebM read, write and remux; Ogg Opus.
 - **Images:** GIF and WebP, still and animated.
 - **Filters** between decode and encode (`filter`): scaling, colour, geometry, frame rate, overlays, resampling and loudness.
@@ -133,6 +135,7 @@ pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v1.2.1",
 | `vp9` | VP9 decode and encode on the CPU. |
 | `aac` | AAC-LC decode and encode. |
 | `opus` | Opus decode and encode, Ogg Opus. |
+| `mp3` | MPEG audio decode (MP3, MP2 and MP1). |
 | `mp4` | MP4 and MOV read, write and remux. |
 | `mkv` | Matroska and WebM read, write and remux. |
 | `gif` | GIF decode and encode. |
