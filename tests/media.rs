@@ -172,7 +172,7 @@ fn min_psnr(out: &Path, src: &Path, ranges: &[(i64, i64)]) -> f64 {
     let log = out.with_extension("psnr");
     let name = log.file_name().unwrap().to_str().unwrap();
     graph.push_str(&format!(
-        "{joined}concat=n={}:v=1:a=0[ref];[0:v]setpts=PTS-STARTPTS[o];[o][ref]psnr=stats_file={name}",
+        "{joined}concat=n={}:v=1:a=0,settb=1,setpts=N[ref];[0:v]settb=1,setpts=N[o];[o][ref]psnr=stats_file={name}",
         ranges.len(),
     ));
     let ok = Command::new("ffmpeg")
@@ -2035,4 +2035,237 @@ fn a_vp9_cut_copies_its_middles_bit_exact_into_vp09_and_encodes_only_its_heads()
     let done = export_with_audio(&again, &piece, opts(), silent, |_| true).unwrap();
     assert!(done.smart && done.copied == 69, "{:?}", done.reasons);
     assert!(decodes_clean(&again));
+}
+
+fn late_start(ext: &str) -> PathBuf {
+    let base = dir().join("late-base.mkv");
+    if !base.exists() {
+        ffmpeg_make(
+            &base,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=s=352x240:r=24000/1001:d=40",
+                "-f",
+                "lavfi",
+                "-i",
+                "aevalsrc='if(lt(mod(t,1),0.1),0.5*sin(2*PI*440*t),0)':s=48000:d=40",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-g",
+                "48",
+                "-bf",
+                "2",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+            ],
+        );
+    }
+    let out = dir().join(format!("late-start.{ext}"));
+    if !out.exists() {
+        let base = base.to_str().unwrap();
+        ffmpeg_make(
+            &out,
+            &[
+                "-itsoffset",
+                "2999.747",
+                "-i",
+                base,
+                "-itsoffset",
+                "2999.997",
+                "-i",
+                base,
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-c",
+                "copy",
+            ],
+        );
+    }
+    out
+}
+
+fn ffmpeg_raw(path: &Path, at: f64, args: &[&str]) -> Vec<u8> {
+    let out = Command::new("ffmpeg")
+        .args(["-v", "error", "-ss", &format!("{at:.6}"), "-i"])
+        .arg(path)
+        .args(args)
+        .arg("-")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out.stdout
+}
+
+fn onset(samples: &[f32], rate: u32) -> f64 {
+    samples.iter().position(|s| s.abs() > 0.05).unwrap() as f64 / rate as f64
+}
+
+#[test]
+fn a_file_that_starts_late_counts_every_time_from_its_start() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let prefs = Prefs::default();
+    let cpu = Prefs {
+        decode: Choice::Cpu,
+        ..Prefs::default()
+    };
+    let gpu = pito_codecs::gpu::available()
+        .iter()
+        .any(|&(c, d, _)| c == Codec::H264 && d == pito_codecs::gpu::Direction::Decode);
+    for ext in ["mkv", "mp4"] {
+        let path = late_start(ext);
+        let p = probe(&path, &prefs).unwrap();
+        assert!((p.start - 2999.747).abs() < 0.002, "{ext}: {}", p.start);
+        assert!((p.duration - 40.0).abs() < 0.2, "{ext}: {}", p.duration);
+        assert!((p.video_start.unwrap() - 2999.747).abs() < 0.002, "{ext}");
+        let audio_start = p.audio[0].start.unwrap();
+        assert!((audio_start - 2999.99).abs() < 0.03, "{ext}: {audio_start}");
+
+        let times: Vec<f64> = ffprobe(
+            &path,
+            &[
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "packet=pts_time",
+                "-of",
+                "csv=p=0",
+            ],
+        )
+        .lines()
+        .map(|l| l.trim().parse::<f64>().unwrap() - p.start)
+        .filter(|t| *t >= 30.0)
+        .collect();
+        let at = times.iter().copied().fold(f64::INFINITY, f64::min);
+        let theirs = ffmpeg_raw(
+            &path,
+            at,
+            &[
+                "-map",
+                "0:v:0",
+                "-frames:v",
+                "1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "yuv420p",
+            ],
+        );
+        let frame = decode_video(&path, at, None, &cpu)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        let fps = p.fps.0 as f64 / p.fps.1 as f64;
+        assert_eq!(frame.pts, (at * fps).round() as i64, "{ext}");
+        let ours: Vec<u8> = frame.planes.iter().flat_map(|q| q.data.clone()).collect();
+        assert!(ours == theirs, "{ext}: the frame at {at:.4} s differs");
+        let mut on_gpu = decode_video_gpu(&path, at, None, &prefs).unwrap();
+        assert_eq!(on_gpu.on_gpu(), gpu, "{ext}: {:?}", on_gpu.reasons);
+        let g = on_gpu.next().unwrap().unwrap();
+        assert_eq!(g.pts(), frame.pts, "{ext}");
+        if gpu {
+            let g = match g {
+                VideoFrame::Gpu(g) => g.download().unwrap(),
+                VideoFrame::Cpu(f) => f,
+            };
+            let diff = luma_diff(&g, &frame);
+            assert!(diff < 1.0, "{ext}: {diff}");
+        }
+        let still = frames_at_seek(&path, &[at], 240, Seek::Exact, &cpu).unwrap();
+        let theirs_still =
+            frames_at_seek(&path, &[at], 240, Seek::Exact, &Prefs::ffmpeg()).unwrap();
+        let d = mean_diff(&still[0], &theirs_still[0]);
+        assert!(d < 6.0, "{ext}: {d}");
+
+        let ours = audio_pcm_range(&path, 0, 30.0, 35.0, 48_000, 1, &prefs).unwrap();
+        let theirs: Vec<f32> = ffmpeg_raw(
+            &path,
+            30.0,
+            &["-t", "5", "-map", "0:a:0", "-ac", "1", "-f", "f32le"],
+        )
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+        assert_eq!(ours.frames(), 240_000, "{ext}");
+        let (lag, w) = (-24i64..=24)
+            .map(|lag| {
+                let skip = lag.unsigned_abs() as usize;
+                let (a, b) = if lag < 0 {
+                    (&ours.samples[skip..], &theirs[..])
+                } else {
+                    (&ours.samples[..], &theirs[skip..])
+                };
+                let n = a.len().min(b.len()) - 48;
+                (lag, worst(&a[..n], &b[..n]))
+            })
+            .min_by(|x, y| x.1.total_cmp(&y.1))
+            .unwrap();
+        assert!(w < 0.01, "{ext}: {w} at a lag of {lag} samples");
+        let head = audio_pcm_range(&path, 0, 0.0, 1.0, 48_000, 1, &prefs).unwrap();
+        let o = onset(&head.samples, 48_000);
+        assert!((o - 0.25).abs() < 0.01, "{ext}: {o}");
+
+        let out = dir().join(format!("late-cut-{ext}.mp4"));
+        let done = export(
+            &out,
+            &[Piece {
+                path: path.clone(),
+                from: 10.0,
+                to: 20.0,
+            }],
+            ExportOptions {
+                prefs: prefs.clone(),
+                ..ExportOptions::default()
+            },
+            |_| true,
+        )
+        .unwrap();
+        assert!(done.smart && done.copied > 0, "{ext}");
+        assert!(decodes_clean(&out), "{ext}");
+        let first = (10.0 * fps).round() as i64;
+        let psnr = min_psnr(&out, &path, &[(first, first + done.frames as i64)]);
+        assert!(psnr > 40.0, "{ext}: {psnr}");
+        for s in ["v:0", "a:0"] {
+            let line = ffprobe(
+                &out,
+                &[
+                    "-select_streams",
+                    s,
+                    "-show_entries",
+                    "stream=start_time,duration",
+                    "-of",
+                    "csv=p=0",
+                ],
+            );
+            let (start, length) = line.split_once(',').unwrap();
+            let (start, length): (f64, f64) = (start.parse().unwrap(), length.parse().unwrap());
+            assert!(start.abs() < 0.05, "{ext} {s}: {start}");
+            assert!((length - 10.0).abs() < 0.06, "{ext} {s}: {length}");
+        }
+        let cut: Vec<f32> = ffmpeg_raw(&out, 0.0, &["-map", "0:a:0", "-ac", "1", "-f", "f32le"])
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        let o = onset(&cut, 48_000);
+        assert!(
+            (o - 0.25).abs() < 0.02,
+            "{ext}: the cut's audio starts at {o}"
+        );
+    }
 }
