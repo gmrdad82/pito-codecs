@@ -776,6 +776,51 @@ fn readback(path: &std::path::Path, choice: Choice) -> Res<()> {
     Ok(())
 }
 
+fn mark(w: u32, h: u32) -> Rgba {
+    let mut m = Rgba::new(w, h);
+    let (mw, mh) = ((w / 8).max(16), (h / 12).max(8));
+    let (x0, y0) = (w - mw - w / 40, h - mh - h / 30);
+    let r = mh as f32 / 2.0;
+    for y in 0..mh {
+        for x in 0..mw {
+            let cx = (x as f32 + 0.5).clamp(r, mw as f32 - r);
+            let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - r).powi(2)).sqrt();
+            let a = ((r - d + 0.5).clamp(0.0, 1.0) * 200.0) as u8;
+            let stripe = if (x / 6 + y / 6) % 2 == 0 { 255 } else { 40 };
+            let o = (((y0 + y) * w + x0 + x) * 4) as usize;
+            m.data[o..o + 4].copy_from_slice(&[stripe, 220, 255 - stripe / 2, a]);
+        }
+    }
+    m
+}
+
+fn caption(w: u32, h: u32, word: u64) -> Rgba {
+    let mut m = Rgba::new(w, h);
+    let (bh, y0) = (h / 10, h - h / 10 - h / 20);
+    let words = 3 + (word % 5) as u32;
+    let span = w * 3 / 5;
+    let x0 = (w - span) / 2;
+    for y in 0..bh {
+        for x in 0..span {
+            let k = x * words / span;
+            let edge = x % (span / words) < 4 || y < 3 || y + 3 >= bh;
+            let o = (((y0 + y) * w + x0 + x) * 4) as usize;
+            let px = if edge {
+                [0, 0, 0, 160]
+            } else {
+                let lit = (k as u64 + word).is_multiple_of(3);
+                if lit {
+                    [255, 230, 40, 235]
+                } else {
+                    [250, 250, 250, 220]
+                }
+            };
+            m.data[o..o + 4].copy_from_slice(&px);
+        }
+    }
+    m
+}
+
 fn xport(path: &std::path::Path, decode: Choice, encode: Choice, overlay: Option<&str>) -> Res<()> {
     let prefs = Prefs {
         decode,
@@ -783,14 +828,81 @@ fn xport(path: &std::path::Path, decode: Choice, encode: Choice, overlay: Option
         ..Prefs::default()
     };
     let p = probe(path, &prefs)?;
-    let out = PathBuf::from("tmp/rb/xport.mp4");
+    let out = PathBuf::from(std::env::var("OUT").unwrap_or_else(|_| "tmp/rb/xport.mp4".into()));
+    let crf = std::env::var("CRF")
+        .ok()
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(18);
+    let seconds = std::env::var("SECONDS")
+        .ok()
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(p.duration);
     let layer = std::sync::Arc::new(Rgba::new(p.width, p.height));
+    let marked = std::sync::Arc::new(mark(p.width & !1, p.height & !1));
+    let (w, h) = (p.width & !1, p.height & !1);
+    let mut said: Option<(u64, Arc<Rgba>)> = None;
     let overlay: Option<pito_codecs::media::Overlay> = match overlay {
-        Some("full") => Some(Box::new(move |_, _, _| Some(layer.clone()))),
+        Some("full") | Some("clear") => Some(Box::new(move |_, _, _| Some(layer.clone()))),
         Some("empty") => Some(Box::new(|_, _, _| None)),
+        Some("mark") => Some(Box::new(move |_, _, _| Some(marked.clone()))),
+        Some("captions") => Some(Box::new(move |t, _, _| {
+            let word = (t * 3.0) as u64;
+            if word % 7 == 6 {
+                return None;
+            }
+            match &said {
+                Some((n, l)) if *n == word => Some(l.clone()),
+                _ => {
+                    let l = Arc::new(caption(w, h, word));
+                    said = Some((word, l.clone()));
+                    Some(l)
+                }
+            }
+        })),
         _ => None,
     };
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sampler = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut prev = engines();
+            let mut window: std::collections::VecDeque<(Instant, Vec<(String, u64)>)> =
+                std::collections::VecDeque::new();
+            let mut worst: Vec<(String, u64, u64)> = Vec::new();
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                let now = engines();
+                let at = Instant::now();
+                for (name, v) in &now {
+                    let b = prev.iter().find(|(m, _)| m == name).map_or(0, |x| x.1);
+                    let step = v.saturating_sub(b);
+                    match worst.iter_mut().find(|(n, _, _)| n == name) {
+                        Some(slot) => slot.1 = slot.1.max(step),
+                        None => worst.push((name.clone(), step, 0)),
+                    }
+                }
+                window.push_back((at, now.clone()));
+                while window
+                    .front()
+                    .is_some_and(|(t, _)| at.duration_since(*t).as_micros() > 16_700)
+                {
+                    window.pop_front();
+                }
+                if let Some((_, first)) = window.front() {
+                    for (name, v) in &now {
+                        let b = first.iter().find(|(m, _)| m == name).map_or(0, |x| x.1);
+                        if let Some(slot) = worst.iter_mut().find(|(n, _, _)| n == name) {
+                            slot.2 = slot.2.max(v.saturating_sub(b));
+                        }
+                    }
+                }
+                prev = now;
+            }
+            worst
+        })
+    };
     let before = engines();
+    let cpu_before = cpu_seconds();
     let t = Instant::now();
     let mut route = String::new();
     let done = export(
@@ -798,11 +910,17 @@ fn xport(path: &std::path::Path, decode: Choice, encode: Choice, overlay: Option
         &[Piece {
             path: path.to_path_buf(),
             from: 0.0,
-            to: p.duration,
+            to: seconds.min(p.duration),
         }],
         ExportOptions {
             prefs,
             overlay,
+            crf,
+            video: if std::env::var("VIDEO").as_deref() == Ok("hevc") {
+                Codec::Hevc
+            } else {
+                Codec::H264
+            },
             ..ExportOptions::default()
         },
         |pr| {
@@ -813,7 +931,10 @@ fn xport(path: &std::path::Path, decode: Choice, encode: Choice, overlay: Option
         },
     )?;
     let s = t.elapsed().as_secs_f64();
+    let cpu = cpu_seconds() - cpu_before;
     let after = engines();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let worst = sampler.join().unwrap_or_default();
     say!(
         "export {} enc {route}: {} frames ({} encoded) in {s:.2} s: {:.1} fps",
         path.display(),
@@ -821,13 +942,39 @@ fn xport(path: &std::path::Path, decode: Choice, encode: Choice, overlay: Option
         done.encoded,
         done.frames as f64 / s
     )?;
+    say!("  cpu {cpu:.1} s ({:.1} cores busy)", cpu / s)?;
+    for r in &done.reasons {
+        say!("  why: {r}")?;
+    }
     let busy: Vec<String> = after
         .iter()
         .map(|(name, v)| {
             let b = before.iter().find(|(m, _)| m == name).map_or(0, |x| x.1);
-            format!("{name} {:.1} ms", (v - b) as f64 / 1e6)
+            let per = (v - b) as f64 / 1e6 / done.frames.max(1) as f64;
+            let (ms, win) = worst
+                .iter()
+                .find(|(n, _, _)| n == name)
+                .map_or((0.0, 0.0), |w| (w.1 as f64 / 1e6, w.2 as f64 / 1e6));
+            format!(
+                "{name} {:.1} ms ({per:.2} ms/frame, worst 1 ms tick {ms:.2} ms, worst 16.7 ms window {win:.1} ms)",
+                (v - b) as f64 / 1e6
+            )
         })
         .collect();
-    say!("  engines: {}", busy.join(", "))?;
+    say!("  engines: {}", busy.join("; "))?;
     Ok(())
+}
+
+fn cpu_seconds() -> f64 {
+    let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+    let fields: Vec<&str> = stat
+        .rsplit_once(')')
+        .map_or(Vec::new(), |(_, rest)| rest.split_whitespace().collect());
+    let tick = |i: usize| {
+        fields
+            .get(i)
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0)
+    };
+    (tick(11) + tick(12)) / 100.0
 }

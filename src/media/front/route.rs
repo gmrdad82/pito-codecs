@@ -170,8 +170,10 @@ pub(super) fn export_decode(
     prefs: &Prefs,
     caps: &Caps,
     threads: usize,
+    resident: bool,
 ) -> Option<String> {
     let switch = prefs.decode == Choice::Auto
+        && !resident
         && decode == Route::Gpu
         && encode == Route::Gpu
         && threads >= EXPORT_CPU_THREADS
@@ -319,9 +321,12 @@ mod tests {
         let both = caps(&[(Codec::H264, D)], &[(Codec::H264, D)]);
         let auto = Prefs::default();
         let switch = |decode, encode, prefs: &Prefs, caps: &Caps, threads| {
-            export_decode(Codec::H264, decode, encode, prefs, caps, threads).is_some()
+            export_decode(Codec::H264, decode, encode, prefs, caps, threads, false).is_some()
         };
         assert!(switch(Route::Gpu, Route::Gpu, &auto, &both, 32));
+        assert!(
+            export_decode(Codec::H264, Route::Gpu, Route::Gpu, &auto, &both, 32, true).is_none()
+        );
         assert!(!switch(Route::Gpu, Route::Cpu, &auto, &both, 32));
         assert!(!switch(Route::Gpu, Route::Gpu, &auto, &both, 8));
         let gpu = Prefs {

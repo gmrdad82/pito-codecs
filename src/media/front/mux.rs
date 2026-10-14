@@ -16,6 +16,7 @@ use super::demux::Demux;
 use super::export::{ExportOptions, Job, Part, Progress, Stage, Tell, WRITTEN, reencode};
 use super::ffmpeg::Ffmpeg;
 use super::native::{threads, video_track};
+use super::resident::Resident;
 use super::route::{Picked, Prefs};
 use super::video::frame_at;
 use crate::media::{AudioBuffer, Codec, Error, Frame, Packet, PixelFormat, Result, Route};
@@ -134,6 +135,23 @@ impl VEnc {
         matches!(self, VEnc::Gpu(_))
     }
 
+    pub(super) fn composes(&self) -> bool {
+        matches!(self, VEnc::Gpu(e) if e.composes())
+    }
+
+    pub(super) fn encode_gpu_over(
+        &mut self,
+        f: &crate::gpu::GpuFrame,
+        layer: &std::sync::Arc<crate::media::Rgba>,
+    ) -> Result<Vec<Packet>> {
+        match self {
+            VEnc::Gpu(e) => e.encode_gpu_over(f, layer),
+            _ => Err(Error::Unsupported(
+                "this encoder can't draw an overlay on the GPU".to_string(),
+            )),
+        }
+    }
+
     pub(super) fn flush(&mut self) -> Result<Vec<Packet>> {
         match self {
             VEnc::Cpu(e) => e.flush(),
@@ -215,8 +233,8 @@ pub(super) fn gpu_check(
     size: (u32, u32),
     fps: (u32, u32),
     format: PixelFormat,
-) -> Result<()> {
-    HwEncoder::new(codec, &gpu_config(codec, size, fps, format, 20, 60)).map(|_| ())
+) -> Result<bool> {
+    HwEncoder::new(codec, &gpu_config(codec, size, fps, format, 20, 60)).map(|e| e.composes())
 }
 
 fn encoder(
@@ -781,7 +799,6 @@ pub(super) fn run(
             )
         } else {
             whole_video(job, video, opts, timescale, fd, &part, progress)
-                .map(|(c, e, m)| (c, e, m, Vec::new()))
         };
         if video.is_err() {
             stop.store(true, Ordering::Relaxed);
@@ -919,33 +936,48 @@ fn whole_video(
     fd: i64,
     part: &Path,
     progress: Tell,
-) -> Result<(u64, u64, Mux)> {
+) -> Result<(u64, u64, Mux, Vec<String>)> {
     job.tell(progress, Stage::Encoding)?;
     let mut enc = encoder(job, video, opts.crf, false, 0, 0)?;
     let rotation = job.sources[job.index[0]].probe.rotation;
     let mut out = Sink::new(video.codec, job.size, rotation, (timescale, fd), part);
+    let mut resident = Resident::new(&enc);
     let mut at = 0i64;
     for n in 0..job.pieces.len() {
         let (a, b) = job.span(&job.pieces[n]);
         let si = job.index[n];
-        let mut sink = |f: &Frame| -> Result<()> {
-            let packets = enc.encode(f)?;
-            out.feed(&enc, packets)
-        };
-        reencode(
-            job,
-            si,
-            (a, b - a),
-            at,
-            &mut sink,
-            &mut opts.overlay,
-            progress,
-        )?;
+        let on_gpu = resident.on
+            && job.sources[si].route == Route::Gpu
+            && resident.piece(
+                job,
+                si,
+                (a, b - a),
+                at,
+                &mut enc,
+                &mut out,
+                &mut opts.overlay,
+                progress,
+            )?;
+        if !on_gpu {
+            let mut sink = |f: &Frame| -> Result<()> {
+                let packets = enc.encode(f)?;
+                out.feed(&enc, packets)
+            };
+            reencode(
+                job,
+                si,
+                (a, b - a),
+                at,
+                &mut sink,
+                &mut opts.overlay,
+                progress,
+            )?;
+        }
         at += b - a;
     }
     let packets = enc.flush()?;
     out.feed(&enc, packets)?;
-    Ok((0, at as u64, out.done()?))
+    Ok((0, at as u64, out.done()?, resident.reasons))
 }
 
 struct Gop<'a> {

@@ -10,6 +10,7 @@ mod mux;
 mod native;
 mod picture;
 mod probe;
+mod resident;
 mod route;
 mod sound;
 mod still;

@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use super::ffi::{self, VAPictureH264, VAPictureHEVC};
 use super::headers::{self, Packed};
@@ -6,7 +7,7 @@ use super::va::{EncodeSession, EncodeSetup, GpuSurface};
 use crate::gpu::nal;
 use crate::gpu::{EncoderConfig, Profile};
 use crate::media::{Bitstream, Rate};
-use crate::media::{Codec, Error, Frame, Packet, Result, TimeBase};
+use crate::media::{Codec, Error, Frame, Packet, Result, Rgba, TimeBase};
 
 const DEPTH: usize = 4;
 const REFERENCES: usize = 4;
@@ -415,6 +416,22 @@ impl VaEncoder {
                     .and_then(|f| session.upload(input, &f))
                     .map_err(|e| format!("{blit}; then {e}"))
             })
+        })
+    }
+
+    pub fn composes(&self) -> bool {
+        self.session.composes()
+    }
+
+    pub fn encode_surface_over(
+        &mut self,
+        src: &GpuSurface,
+        time_base: TimeBase,
+        layer: &Arc<Rgba>,
+    ) -> Result<Vec<Packet>> {
+        let size = (self.config.width, self.config.height);
+        self.push(src.pts, time_base, |session, input| {
+            session.blit_over(input, src, size, layer)
         })
     }
 

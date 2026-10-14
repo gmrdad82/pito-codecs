@@ -1144,3 +1144,109 @@ fn speed() {
     eprintln!("{report}");
     std::fs::write(dir().join("speed.txt"), report).unwrap();
 }
+
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    feature = "h264",
+    feature = "hevc",
+    feature = "aac",
+    feature = "mp4",
+    feature = "filter",
+    feature = "mkv",
+    feature = "vp9"
+))]
+fn an_overlay_drawn_on_the_gpu_matches_the_cpu_blend() {
+    use crate::media::Rgba;
+    use std::sync::Arc;
+    if !ffmpeg() || !has(Codec::H264, Direction::Decode) || !has(Codec::H264, Direction::Encode) {
+        return;
+    }
+    let src = generate_sized(
+        "h264-high-640",
+        Codec::H264,
+        &[
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "high",
+            "-bf",
+            "3",
+            "-refs",
+            "4",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+        (640, 360),
+    );
+    let config = EncoderConfig {
+        width: 640,
+        height: 360,
+        fps: (25, 1),
+        profile: Profile::High,
+        rate: Rate::Crf(1),
+        gop: 25,
+        b_frames: 0,
+        bitstream: Bitstream::LengthPrefixed,
+    };
+    let mut drawn = HwEncoder::new(Codec::H264, &config).unwrap();
+    if !drawn.composes() {
+        eprintln!("skipped: this GPU encoder doesn't draw overlays");
+        return;
+    }
+    let mut plain = HwEncoder::new(Codec::H264, &config).unwrap();
+    let mut clear = HwEncoder::new(Codec::H264, &config).unwrap();
+    let mut mark = Rgba::new(640, 360);
+    for y in 250..330usize {
+        for x in 380..620usize {
+            let o = (y * 640 + x) * 4;
+            let a = ((x - 380) * 255 / 239) as u8;
+            let stripe = if (x / 5 + y / 7) % 2 == 0 { 250 } else { 30 };
+            mark.data[o..o + 4].copy_from_slice(&[stripe, 200, 255 - stripe, a]);
+        }
+    }
+    let mark = Arc::new(mark);
+    let empty = Arc::new(Rgba::new(640, 360));
+    let data = std::fs::read(&src).unwrap();
+    let mut dec = HwDecoder::new(Codec::H264, &[]).unwrap();
+    let mut blended = Vec::new();
+    let (mut a, mut b, mut c) = (Vec::new(), Vec::new(), Vec::new());
+    let mut each = |f: super::GpuFrame| {
+        a.extend(drawn.encode_gpu_over(&f, &mark).unwrap());
+        b.extend(plain.encode_gpu(&f).unwrap());
+        c.extend(clear.encode_gpu_over(&f, &empty).unwrap());
+        let mut cpu = f.download().unwrap();
+        crate::media::blend(&mut cpu, &mark);
+        for p in &cpu.planes {
+            for row in p.data.chunks(p.stride).take(p.height) {
+                blended.extend_from_slice(&row[..p.width]);
+            }
+        }
+    };
+    for (i, u) in access_units(Codec::H264, &data).into_iter().enumerate() {
+        let p = Packet {
+            data: u,
+            pts: i as i64,
+            dts: i as i64,
+            keyframe: false,
+        };
+        dec.decode_gpu(&p).unwrap().into_iter().for_each(&mut each);
+    }
+    dec.flush_gpu().unwrap().into_iter().for_each(&mut each);
+    a.extend(drawn.flush().unwrap());
+    b.extend(plain.flush().unwrap());
+    c.extend(clear.flush().unwrap());
+    assert_eq!(a.len(), 50);
+    let bytes = |v: &[Packet]| v.iter().map(|p| p.data.clone()).collect::<Vec<_>>();
+    assert_eq!(bytes(&b), bytes(&c), "a clear overlay changed the frames");
+    let path = dir().join("overlay-gpu.h264");
+    std::fs::write(
+        &path,
+        annexb_stream(Codec::H264, &a, drawn.extradata().unwrap()),
+    )
+    .unwrap();
+    let source = dir().join("overlay-cpu.yuv");
+    std::fs::write(&source, &blended).unwrap();
+    let db = psnr(&path, &source, "yuv420p");
+    assert!(db > 45.0, "GPU overlay against the CPU blend: {db:.2} dB");
+}

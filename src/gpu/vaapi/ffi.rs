@@ -44,6 +44,7 @@ pub const VAEntrypointVLD: VAEntrypoint = 1;
 pub const VAConfigAttribRTFormat: VAConfigAttribType = 0;
 pub const VA_RT_FORMAT_YUV420: c_uint = 0x0000_0001;
 pub const VA_RT_FORMAT_YUV420_10: c_uint = 0x0000_0100;
+pub const VA_RT_FORMAT_RGB32: c_uint = 0x0002_0000;
 
 pub const VA_PROGRESSIVE: c_int = 0x1;
 
@@ -60,6 +61,7 @@ pub const VA_PICTURE_H264_LONG_TERM_REFERENCE: u32 = 0x0000_0010;
 
 pub const VA_FOURCC_NV12: u32 = 0x3231_564E;
 pub const VA_FOURCC_P010: u32 = 0x3031_3050;
+pub const VA_FOURCC_RGBA: u32 = 0x4142_4752;
 
 pub const VA_PICTURE_HEVC_INVALID: u32 = 0x0000_0001;
 pub const VA_PICTURE_HEVC_LONG_TERM_REFERENCE: u32 = 0x0000_0008;
@@ -853,6 +855,7 @@ pub type vaDeriveImage =
 pub const VAProfileNone: VAProfile = -1;
 pub const VAEntrypointVideoProc: VAEntrypoint = 10;
 pub const VAProcPipelineParameterBufferType: VABufferType = 41;
+pub const VAProcColorStandardBT601: c_int = 1;
 pub const VAProcColorStandardBT709: c_int = 2;
 
 #[repr(C)]
@@ -911,8 +914,22 @@ pub struct VAProcPipelineParameterBuffer {
     pub va_reserved: [u32; PROC_RESERVED],
 }
 
+pub const VA_BLEND_PREMULTIPLIED_ALPHA: u32 = 0x0002;
+pub const VA_CHROMA_SITING_VERTICAL_CENTER: u8 = 0x02;
+pub const VA_CHROMA_SITING_HORIZONTAL_CENTER: u8 = 0x08;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VABlendState {
+    pub flags: u32,
+    pub global_alpha: f32,
+    pub min_luma: f32,
+    pub max_luma: f32,
+}
+
 pub const VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2: u32 = 0x4000_0000;
 pub const VA_SURFACE_ATTRIB_SETTABLE: u32 = 0x0000_0002;
+pub const VASurfaceAttribPixelFormat: c_int = 1;
 pub const VASurfaceAttribMemoryType: c_int = 6;
 pub const VASurfaceAttribExternalBufferDescriptor: c_int = 7;
 pub const VAGenericValueTypeInteger: c_int = 1;

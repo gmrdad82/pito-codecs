@@ -238,6 +238,7 @@ The front tries the GPU first and our own CPU code second, for every decode and 
 - **GPU first.** VA-API on Linux decodes and encodes H.264 and H.265.
 - **Then the CPU.** When there is no GPU route (no VA-API device or driver, or no GPU decoder or encoder for that codec), our CPU code takes the job.
 - **H.265 encodes on the GPU only.** Without a GPU HEVC encoder it falls back to H.264 on the GPU, then to H.264 on the CPU.
+- **A re-encoded export on VA-API with Mesa's driver keeps its frames on the GPU:** decoded there, its overlay (a mark or captions) drawn with a VA-API video-processing blend, and encoded, with no copy to system memory. Other GPU encoders draw the overlay on the CPU.
 - **An export whose GPU encoder refuses to start** (a size or format the hardware won't take) encodes H.264 on the CPU instead.
 - **Every fallback says why**, in a plain reason the app can show, such as "no GPU HEVC encoder on this machine; encoding H.264 on the GPU instead".
 

@@ -44,6 +44,7 @@ fn ffi_layouts_match_the_libva_headers() {
         VADRMPRIMESurfaceDescriptor { width, num_objects, objects, num_layers, layers }
         VAGenericValue { value }
         VASurfaceAttrib { flags, value }
+        VABlendState { global_alpha, min_luma, max_luma }
         VAProcPipelineParameterBuffer { surface_region, surface_color_standard, output_region, output_background_color, filters, num_filters, forward_references, rotation_state, blend_state, additional_outputs, input_surface_flag, input_color_properties, output_color_properties, processing_mode, output_hdr_metadata, va_reserved }
     };
     let mut c = String::from(
