@@ -1,0 +1,47 @@
+{
+ "title": "SMART-CUT EXPORT, 3 CUTS",
+ "unit": "TIMES REAL TIME",
+ "better": "higher",
+ "subtitle": "RYZEN 9 9950X, RADEON RX 9060 XT (VA-API), FFMPEG 9.0.1",
+ "date": "2026-10-11",
+ "parties": [
+  {
+   "name": "PITO-CODECS"
+  },
+  {
+   "name": "FFMPEG RE-ENCODE"
+  },
+  {
+   "name": "FFMPEG STREAM COPY"
+  }
+ ],
+ "groups": [
+  {
+   "name": "H.264",
+   "rows": [
+    {
+     "label": "1080P",
+     "values": [
+      11.9,
+      7.2,
+      69.4
+     ],
+     "mark": "†"
+    },
+    {
+     "label": "1440P",
+     "values": [
+      8.7,
+      3.0,
+      52.7
+     ],
+     "mark": "†"
+    }
+   ]
+  }
+ ],
+ "suffix": "×",
+ "notes": [
+  "† OURS AND THE RE-ENCODE ARE FRAME-ACCURATE; A STREAM COPY ENCODES NOTHING AND CUTS ONLY ON KEYFRAMES."
+ ]
+}

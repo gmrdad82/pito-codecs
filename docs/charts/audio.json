@@ -1,0 +1,49 @@
+{
+ "title": "AUDIO, 48 KHZ STEREO",
+ "unit": "TIMES REAL TIME",
+ "better": "higher",
+ "subtitle": "RYZEN 9 9950X, RADEON RX 9060 XT (VA-API), FFMPEG 9.0.1",
+ "date": "2026-10-11",
+ "parties": [
+  {
+   "name": "PITO-CODECS"
+  },
+  {
+   "name": "FFMPEG 9.0.1"
+  }
+ ],
+ "groups": [
+  {
+   "name": "AAC",
+   "rows": [
+    {
+     "label": "DECODE",
+     "values": [
+      1003,
+      1861
+     ]
+    },
+    {
+     "label": "ENCODE 128 KBPS",
+     "values": [
+      228,
+      130
+     ]
+    }
+   ]
+  },
+  {
+   "name": "LOUDNESS",
+   "rows": [
+    {
+     "label": "EBU R128",
+     "values": [
+      3200,
+      559
+     ]
+    }
+   ]
+  }
+ ],
+ "suffix": "×"
+}

@@ -1,0 +1,86 @@
+{
+ "title": "FILMSTRIP, 12 STILLS AT 240 PX",
+ "unit": "STILLS PER SECOND",
+ "better": "higher",
+ "subtitle": "RYZEN 9 9950X, RADEON RX 9060 XT (VA-API), FFMPEG 9.0.1",
+ "date": "2026-10-11",
+ "parties": [
+  {
+   "name": "PITO-CODECS"
+  },
+  {
+   "name": "FFMPEG 9.0.1"
+  }
+ ],
+ "groups": [
+  {
+   "name": "H.264",
+   "rows": [
+    {
+     "label": "1080P CPU",
+     "values": [
+      414,
+      46.4
+     ]
+    },
+    {
+     "label": "1080P GPU FIRST",
+     "values": [
+      407,
+      47.0
+     ]
+    },
+    {
+     "label": "1440P CPU",
+     "values": [
+      268,
+      28.6
+     ]
+    },
+    {
+     "label": "1440P GPU FIRST",
+     "values": [
+      263,
+      33.0
+     ]
+    }
+   ]
+  },
+  {
+   "name": "HEVC",
+   "rows": [
+    {
+     "label": "1080P CPU",
+     "values": [
+      364,
+      44.3
+     ]
+    },
+    {
+     "label": "1080P GPU FIRST",
+     "values": [
+      359,
+      31.5
+     ]
+    },
+    {
+     "label": "1440P CPU",
+     "values": [
+      257,
+      20.7
+     ]
+    },
+    {
+     "label": "1440P GPU FIRST",
+     "values": [
+      167,
+      21.9
+     ]
+    }
+   ]
+  }
+ ],
+ "notes": [
+  "FFMPEG RUNS ONE PROCESS PER STILL, AS A FILMSTRIP WOULD CALL IT."
+ ]
+}

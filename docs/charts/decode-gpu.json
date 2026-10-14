@@ -1,0 +1,84 @@
+{
+ "title": "GPU DECODE (VA-API)",
+ "unit": "FRAMES PER SECOND",
+ "better": "higher",
+ "subtitle": "RYZEN 9 9950X, RADEON RX 9060 XT (VA-API), FFMPEG 9.0.1",
+ "date": "2026-10-11",
+ "parties": [
+  {
+   "name": "PITO-CODECS"
+  },
+  {
+   "name": "FFMPEG 9.0.1"
+  }
+ ],
+ "groups": [
+  {
+   "name": "H.264",
+   "rows": [
+    {
+     "label": "1080P ON THE GPU",
+     "values": [
+      1058,
+      1023
+     ]
+    },
+    {
+     "label": "1080P READ BACK",
+     "values": [
+      814,
+      694
+     ]
+    },
+    {
+     "label": "1440P ON THE GPU",
+     "values": [
+      1053,
+      1011
+     ]
+    },
+    {
+     "label": "1440P READ BACK",
+     "values": [
+      507,
+      465
+     ]
+    }
+   ]
+  },
+  {
+   "name": "HEVC",
+   "rows": [
+    {
+     "label": "1080P ON THE GPU",
+     "values": [
+      1115,
+      1068
+     ]
+    },
+    {
+     "label": "1080P READ BACK",
+     "values": [
+      795,
+      677
+     ]
+    },
+    {
+     "label": "1440P ON THE GPU",
+     "values": [
+      1100,
+      1049
+     ]
+    },
+    {
+     "label": "1440P READ BACK",
+     "values": [
+      471,
+      428
+     ]
+    }
+   ]
+  }
+ ],
+ "suffix": " FPS"
+}

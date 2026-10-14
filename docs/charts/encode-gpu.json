@@ -1,0 +1,70 @@
+{
+ "title": "GPU ENCODE AND TRANSCODE (VA-API)",
+ "unit": "FRAMES PER SECOND",
+ "better": "higher",
+ "subtitle": "RYZEN 9 9950X, RADEON RX 9060 XT (VA-API), FFMPEG 9.0.1",
+ "date": "2026-10-11",
+ "parties": [
+  {
+   "name": "PITO-CODECS"
+  },
+  {
+   "name": "FFMPEG 9.0.1"
+  }
+ ],
+ "groups": [
+  {
+   "name": "ENCODE, QP 23",
+   "rows": [
+    {
+     "label": "H.264 1080P",
+     "values": [
+      645,
+      499
+     ]
+    },
+    {
+     "label": "HEVC 1080P",
+     "values": [
+      839,
+      686
+     ]
+    },
+    {
+     "label": "H.264 1440P",
+     "values": [
+      412,
+      371
+     ]
+    },
+    {
+     "label": "HEVC 1440P",
+     "values": [
+      545,
+      476
+     ]
+    }
+   ]
+  },
+  {
+   "name": "TRANSCODE, FRAMES STAY ON THE GPU",
+   "rows": [
+    {
+     "label": "H.264 1440P",
+     "values": [
+      309,
+      300
+     ]
+    },
+    {
+     "label": "HEVC 1440P",
+     "values": [
+      379,
+      371
+     ]
+    }
+   ]
+  }
+ ],
+ "suffix": " FPS"
+}

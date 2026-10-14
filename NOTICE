@@ -338,7 +338,11 @@ covers it, all under the MIT licence like the code:
 - docs/images/decode.gif: a terminal clip recorded by prec from this
   repository's own shot (render/terminal.toml and render/terminal/), running
   src/bin/pcod.rs over a clip render/terminal/clip.sh makes
-- docs/images/bench-decode.png, bench-encode.png, bench-audio.png,
-  bench-pipeline.png and bench-speedup.png: charts examples/bench.rs draws from
-  its own measurements on public-domain NASA footage ("A Message of Resilience
-  from the International Space Station")
+- docs/images/chart-*.png: charts drawn by pito-compare (MIT) from the data
+  files in docs/charts/, which hold this repository's own measurements on
+  public-domain NASA footage ("A Message of Resilience from the International
+  Space Station" and the NASA solstice interview)
+- docs/images/filmstrip.gif, overlay.gif, animated.gif and animated.webp:
+  pictures examples/readme_shots.rs makes with this repository's own decoders,
+  overlay blend and GIF and WebP encoders from public-domain NASA footage ("A
+  Message of Resilience from the International Space Station", NASA Johnson)

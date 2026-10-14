@@ -1,0 +1,47 @@
+{
+ "title": "CPU H.264 ENCODE",
+ "unit": "FRAMES PER SECOND",
+ "better": "higher",
+ "subtitle": "RYZEN 9 9950X, RADEON RX 9060 XT (VA-API), FFMPEG 9.0.1",
+ "date": "2026-10-11",
+ "parties": [
+  {
+   "name": "PITO-CODECS"
+  },
+  {
+   "name": "LIBX264 MEDIUM"
+  },
+  {
+   "name": "LIBX264 VERYFAST"
+  }
+ ],
+ "groups": [
+  {
+   "name": "CRF 23",
+   "rows": [
+    {
+     "label": "1080P",
+     "values": [
+      191,
+      328,
+      626
+     ],
+     "mark": "*"
+    },
+    {
+     "label": "1440P",
+     "values": [
+      121,
+      181,
+      396
+     ],
+     "mark": "*"
+    }
+   ]
+  }
+ ],
+ "suffix": " FPS",
+ "notes": [
+  "* LIBX264 IS HAND-WRITTEN ASSEMBLY; OUR CPU H.264 ENCODER HAS NO HAND-WRITTEN SIMD."
+ ]
+}
