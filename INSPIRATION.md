@@ -20,6 +20,9 @@ The codecs here are written in Rust. Parts are adapted from permissively license
 | [oxideav-ac3](https://github.com/OxideAV/oxideav-ac3) | MIT (Karpelès Lab Inc.) | 0.0.11, `99228831d2b29a35fe2b2035118a18f8cb0cae59` | The AC-3 and E-AC-3 decoder in `src/ac3/`: frame and BSI parsing, exponents, bit allocation, mantissas, coupling, rematrixing, spectral extension, AHT and the IMDCT structure. |
 | [Mesa](https://gitlab.freedesktop.org/mesa/mesa) VA-API frontend and video compositor | MIT | mesa-26.2.2 | Read for behaviour, no code copied: how its video processor composes several pipeline buffers in one picture, blends premultiplied RGBA onto NV12 and P010, and sites chroma, which `src/gpu/vaapi/va.rs` follows to draw export overlays on the GPU. |
 | [minimp3](https://github.com/lieff/minimp3) | CC0 1.0 (public domain) | `ea99364f61c14656440e8d77e9c233ccf3124633` | The MPEG-1, 2 and 2.5 audio decoder (layers I, II and III) in `src/mp3/`, with its tables and SSE and NEON layout; the container packet front, the channel matching and the granule-0 scfsi mask are new. |
+| [zune-png](https://github.com/etemesi254/zune-image) | MIT OR Apache-2.0 OR Zlib (Caleb Etemesi) | 0.4.10, `aaf40839ed2596fa83091ccfb49629eb5d8efd91` | The scanline de-filters with their SSE2 and SSE4.1 kernels, the chunk checks, bit unpacking, palette and tRNS expansion and Adam7 geometry in `src/png/`; the RGBA row loop is new. |
+| [zune-inflate](https://github.com/etemesi254/zune-image) | MIT OR Apache-2.0 OR Zlib (Caleb Etemesi), a port of [libdeflate](https://github.com/ebiggers/libdeflate) (MIT) | 0.2.54, `69502ce83fdfecdd0beefd677e2abb3781b29d98` | The whole-buffer zlib and deflate decoder in `src/png/inflate.rs`: decode tables, fast and slow loops, match copies. |
+| [adler2](https://github.com/oyvindln/adler2) | 0BSD OR MIT OR Apache-2.0 | 2.0.1, `89a031a0f42eeff31c70dc598b398cbf31f1680f` | The four-lane Adler-32 in `src/png/inflate.rs`. |
 
 ## Specifications
 
@@ -29,6 +32,7 @@ The codecs here are written in Rust. Parts are adapted from permissively license
 - RFC 6716 and RFC 8251 (Opus), RFC 7845 (Ogg Opus), RFC 8794 and RFC 9559 (EBML and Matroska) and the WebM container guidelines.
 - RFC 9649 (WebP: the container, VP8L lossless and ALPH, written from it alone) and RFC 6386 (VP8 lossy) for `src/webp/`.
 - CompuServe's GIF89a specification (1990), the only source for `src/gif/`.
+- RFC 1950 and RFC 1951 (zlib and deflate) and the W3C PNG specification for `src/png/`; Microsoft's RIFF WAVE format notes, the only source for `src/media/wav.rs`.
 - ATSC A/52 and ETSI TS 102 366 (AC-3 and E-AC-3), which oxideav-ac3 follows; the KBD window in `src/ac3/` is computed from the A/52 definition.
 - ITU-R BS.1770-4 and EBU Tech 3341 and 3342 (loudness), and ITU-R BT.601, BT.709 and BT.2020 (colour).
 - The paper "A novel macroblock-tree algorithm for high-performance optimization of dependent video coding in H.264/AVC" (2009), whose published description is the only source for the lookahead QP offsets in `src/h264/enc/mbtree.rs`.
