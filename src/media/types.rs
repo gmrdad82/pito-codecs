@@ -7,6 +7,8 @@ pub enum Codec {
     Aac,
     Vp9,
     Opus,
+    Ac3,
+    Eac3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -30,6 +32,8 @@ impl fmt::Display for Codec {
             Codec::Aac => "AAC",
             Codec::Vp9 => "VP9",
             Codec::Opus => "Opus",
+            Codec::Ac3 => "AC-3",
+            Codec::Eac3 => "E-AC-3",
         })
     }
 }

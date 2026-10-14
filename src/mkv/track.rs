@@ -183,6 +183,8 @@ impl Track {
             "aac" => Some(Codec::Aac),
             "vp9" => Some(Codec::Vp9),
             "opus" => Some(Codec::Opus),
+            "ac3" => Some(Codec::Ac3),
+            "eac3" => Some(Codec::Eac3),
             _ => None,
         }
     }

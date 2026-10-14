@@ -80,7 +80,15 @@ impl AudioTrack {
         } else {
             &["aac", "pcm"]
         };
-        native.iter().any(|c| self.codec.eq_ignore_ascii_case(c))
+        let ac3: &[&str] = if cfg!(feature = "ac3") {
+            &["ac3", "eac3"]
+        } else {
+            &[]
+        };
+        native
+            .iter()
+            .chain(ac3)
+            .any(|c| self.codec.eq_ignore_ascii_case(c))
     }
 }
 

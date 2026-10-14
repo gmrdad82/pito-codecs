@@ -54,6 +54,8 @@ pub fn cpu() -> Vec<(Codec, Direction)> {
         (Codec::Vp9, Direction::Decode),
         (Codec::Aac, Direction::Decode),
         (Codec::Aac, Direction::Encode),
+        (Codec::Ac3, Direction::Decode),
+        (Codec::Eac3, Direction::Decode),
     ]
 }
 

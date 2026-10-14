@@ -88,6 +88,9 @@ pub fn plan(codec: Codec, sets: &[Vec<u8>]) -> Result<Plan> {
         Codec::Aac | Codec::Opus => {
             return Err(unsupported(format!("{codec:?} is not a video codec")));
         }
+        Codec::Ac3 | Codec::Eac3 => {
+            return Err(unsupported(format!("{codec:?} is not a video codec")));
+        }
     };
     let (cx, cy, w, h) = p.crop;
     if w == 0

@@ -147,6 +147,8 @@ impl Pcm {
 
 pub enum Sound {
     Aac(Box<crate::aac::Decoder>),
+    #[cfg(feature = "ac3")]
+    Ac3(Box<crate::ac3::Decoder>),
     #[cfg(feature = "opus")]
     Opus(Box<crate::opus::Decoder>),
     Pcm(Pcm),
@@ -154,7 +156,7 @@ pub enum Sound {
 
 fn unsupported(name: &str) -> Error {
     Error::Unsupported(format!(
-        "our audio decoders read AAC, Opus and PCM, not {}",
+        "our audio decoders read AAC, AC-3, E-AC-3, Opus and PCM, not {}",
         if name.is_empty() {
             "this track's codec"
         } else {
@@ -223,6 +225,13 @@ impl Sound {
                         Ok(Sound::Aac(Box::new(crate::aac::Decoder::new(&asc)?)))
                     }
                     CodecConfig::Pcm(p) => Ok(Sound::Pcm(Pcm::from_mp4(p)?)),
+                    #[cfg(feature = "ac3")]
+                    CodecConfig::Other(f) if &f.0 == b"ac-3" || &f.0 == b"ec-3" => {
+                        Ok(Sound::Ac3(Box::new(crate::ac3::Decoder::new(
+                            t.sample_rate(),
+                            t.channels() as u16,
+                        ))))
+                    }
                     #[cfg(feature = "opus")]
                     CodecConfig::Other(f) if &f.0 == b"Opus" => {
                         let head = dops(e).ok_or_else(|| {
@@ -253,6 +262,11 @@ impl Sound {
                         &t.codec_private,
                     )?))),
                     "pcm" => Ok(Sound::Pcm(mkv_pcm(t)?)),
+                    #[cfg(feature = "ac3")]
+                    "ac3" | "eac3" => Ok(Sound::Ac3(Box::new(crate::ac3::Decoder::new(
+                        t.sample_rate(),
+                        t.channels() as u16,
+                    )))),
                     name => Err(unsupported(name)),
                 }
             }
@@ -262,6 +276,8 @@ impl Sound {
     pub fn rate(&self) -> u32 {
         match self {
             Sound::Aac(d) => d.rate(),
+            #[cfg(feature = "ac3")]
+            Sound::Ac3(d) => d.rate(),
             #[cfg(feature = "opus")]
             Sound::Opus(d) => d.sample_rate(),
             Sound::Pcm(p) => p.rate,
@@ -271,6 +287,8 @@ impl Sound {
     pub fn channels(&self) -> u16 {
         match self {
             Sound::Aac(d) => d.channels(),
+            #[cfg(feature = "ac3")]
+            Sound::Ac3(d) => d.channels(),
             #[cfg(feature = "opus")]
             Sound::Opus(d) => d.channels() as u16,
             Sound::Pcm(p) => p.channels,
@@ -281,6 +299,8 @@ impl Sound {
         match self {
             Sound::Pcm(p) => Some(bytes as u64 / (p.width() * p.channels as usize).max(1) as u64),
             Sound::Aac(_) => None,
+            #[cfg(feature = "ac3")]
+            Sound::Ac3(_) => None,
             #[cfg(feature = "opus")]
             Sound::Opus(_) => None,
         }
@@ -290,6 +310,8 @@ impl Sound {
         match self {
             #[cfg(feature = "opus")]
             Sound::Opus(_) => 0.08,
+            #[cfg(feature = "ac3")]
+            Sound::Ac3(d) => 1536.0 / d.rate().max(1) as f64,
             Sound::Aac(_) | Sound::Pcm(_) => 0.0,
         }
     }
@@ -306,6 +328,11 @@ impl Sound {
                 out.clear();
                 d.decode_into(Some(data), out)?;
                 Ok(d.channels() as u16)
+            }
+            #[cfg(feature = "ac3")]
+            Sound::Ac3(d) => {
+                d.decode_into(data, out)?;
+                Ok(d.channels())
             }
             Sound::Pcm(p) => {
                 p.decode(data, out)?;

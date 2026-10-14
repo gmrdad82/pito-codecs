@@ -8,11 +8,12 @@ license = "MIT"
 repository = "https://github.com/gmrdad82/pito-codecs"
 
 [features]
-default = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter", "opus", "vp9", "webp", "mkv", "gif", "cli"]
+default = ["media", "h264", "hevc", "aac", "ac3", "mp4", "gpu", "filter", "opus", "vp9", "webp", "mkv", "gif", "cli"]
 media = []
 h264 = ["media", "dep:rayon"]
 hevc = ["media", "dep:rayon"]
 aac = ["media"]
+ac3 = ["media"]
 mp4 = ["media"]
 gpu = [
     "media",
@@ -29,7 +30,7 @@ opus = ["media", "dep:rayon"]
 vp9 = ["media", "dep:rayon"]
 webp = ["media", "filter", "dep:rayon"]
 gif = ["filter", "dep:rayon"]
-cli = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter", "mkv", "vp9", "dep:clap"]
+cli = ["media", "h264", "hevc", "aac", "ac3", "mp4", "gpu", "filter", "mkv", "vp9", "dep:clap"]
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 libloading = { version = "0.8", optional = true }

@@ -16,7 +16,10 @@ pub fn avx2() -> bool {
     *AVX2
 }
 
-#[cfg(all(target_arch = "x86_64", any(feature = "opus", feature = "vp9")))]
+#[cfg(all(
+    target_arch = "x86_64",
+    any(feature = "ac3", feature = "opus", feature = "vp9")
+))]
 pub fn avx2_fma() -> bool {
     use std::sync::LazyLock;
     static AVX2: LazyLock<bool> = LazyLock::new(|| {

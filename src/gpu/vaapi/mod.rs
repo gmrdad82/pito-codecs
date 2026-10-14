@@ -309,6 +309,7 @@ fn profiles_for(codec: Codec) -> &'static [ffi::VAProfile] {
         Codec::Hevc => &[ffi::VAProfileHEVCMain, ffi::VAProfileHEVCMain10],
         Codec::Vp9 => &[ffi::VAProfileVP9Profile0, ffi::VAProfileVP9Profile2],
         Codec::Aac | Codec::Opus => &[],
+        Codec::Ac3 | Codec::Eac3 => &[],
     }
 }
 
