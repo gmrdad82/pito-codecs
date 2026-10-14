@@ -82,9 +82,9 @@ Opening a file and showing its first picture takes 4.1 ms for 1440p H.264 on the
 
 ### Filmstrips
 
-`frames_at` takes stills at any times, from the keyframe at or before each one, and reads only what it needs; in MKV and WebM it seeks through the file's Cues, so a still late in a long recording costs the same as one at the start. `frames_at_seek` with `Seek::Exact` decodes on to the exact frame. This strip of 12 stills was made by our own code (`examples/readme_shots.rs`):
+`frames_at` takes stills at any times, from the keyframe at or before each one, and reads only what it needs; in MKV and WebM it seeks through the file's Cues, so a still late in a long recording costs the same as one at the start. `frames_at_seek` with `Seek::Exact` decodes on to the exact frame. This strip of 12 stills was taken by `frames_at` and written by our own GIF encoder (`examples/readme_shots.rs`), in 63 ms for the stills and 27 ms for the GIF:
 
-![Twelve stills across a NASA clip, taken by frames_at](docs/images/filmstrip.png)
+![Twelve stills across a NASA clip, taken by frames_at](docs/images/filmstrip.gif)
 
 ![Filmstrip stills per second, pito-codecs against ffmpeg](docs/images/chart-filmstrip.png)
 
@@ -120,7 +120,9 @@ VP9 sources cut the same way into MP4 (`vp09`): packets are copied as they are, 
 
 An export can draw an RGBA overlay on every frame: a watermark, or karaoke captions that change at every word. On VA-API with Mesa's driver, the overlay is blended on the card by a VA-API video-processing pass straight into the encoder's input surface. Frames go from decode to encode without a copy to system memory, and the overlay is uploaded only when it changes, and only its painted area. The graphics queue is never used. Other GPU encoders draw the overlay on the CPU.
 
-![A NASA frame with a caption and a corner mark, blended by pito-codecs](docs/images/overlay.png)
+This frame's caption and corner mark were drawn as one RGBA layer and blended by `media::Blender` in 1.8 ms at 1280x720 (`examples/readme_shots.rs`):
+
+![A NASA frame with a caption and a corner mark, blended by pito-codecs](docs/images/overlay.gif)
 
 ![Export with an overlay: composed on the card against decoded and blended on the CPU](docs/images/chart-gpu-export.png)
 
@@ -139,7 +141,7 @@ AAC-LC decode and encode, Opus decode and encode (CELT; SILK and hybrid speech e
 
 ### GIF and WebP
 
-GIF (Oklab palettes, ordered or Floyd-Steinberg dither, frame differencing) and WebP (lossless and lossy, alpha, animation, bit-exact with libwebp on decode) read and write stills and animations. This one was encoded by our GIF encoder from a NASA clip:
+GIF (Oklab palettes, ordered or Floyd-Steinberg dither, frame differencing) and WebP (lossless and lossy, alpha, animation, bit-exact with libwebp on decode) read and write stills and animations. These 30 frames at 480x270 were encoded by our GIF encoder in 29 ms (1.9 MB, ordered dither, 128 colours); the same frames as lossy animated WebP take 42 ms and 406 KB ([animated.webp](docs/images/animated.webp)):
 
 ![An animated GIF of a NASA clip, encoded by pito-codecs](docs/images/animated.gif)
 
