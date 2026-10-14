@@ -8,7 +8,7 @@ use super::ffmpeg::{Child, Ffmpeg, pix_fmt};
 use super::mux::{Planner, Premix, Sound, gop_mp4, premixed_m4a};
 use super::picture::Blender;
 use super::probe::keyframes;
-use super::route::{Caps, Picked, Prefs, export_decode, pick_encode};
+use super::route::{Caps, Picked, Prefs, pick_encode};
 use super::video::{Source, frame_at, open, source};
 use crate::media::{AudioBuffer, Codec, Error, Frame, PixelFormat, Result, Rgba, Route};
 
@@ -308,13 +308,9 @@ fn export_to(
     } else {
         PixelFormat::Yuv420p8
     };
-    let mut composes = false;
     let format = match video.route {
         Route::Gpu => match super::mux::gpu_check(video.codec, size, fps, format) {
-            Ok(c) => {
-                composes = c;
-                format
-            }
+            Ok(_) => format,
             Err(e) => {
                 video.reasons.push(format!(
                     "the GPU encoder failed ({e}); encoding H.264 on the CPU instead"
@@ -370,24 +366,6 @@ fn export_to(
         None
     };
     let smart = why.is_none();
-    let resident = composes && !smart;
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-    for s in &mut sources {
-        if let Some(codec) = s.probe.video_codec
-            && let Some(why) = export_decode(
-                codec,
-                s.route,
-                video.route,
-                &opts.prefs,
-                &caps,
-                threads,
-                resident,
-            )
-        {
-            s.route = Route::Cpu;
-            s.reasons.push(why);
-        }
-    }
     let mut reasons: Vec<String> = video.reasons.clone();
     for s in &sources {
         for r in &s.reasons {
