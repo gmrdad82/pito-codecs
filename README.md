@@ -57,7 +57,7 @@ In a Rust project, add the library with the parts you need (all are on by defaul
 
 ```toml
 [dependencies]
-pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v1.2.1", default-features = false, features = ["media", "h264", "hevc", "mp4", "gpu"] }
+pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v1.2.1", default-features = false, features = ["h264", "hevc", "vp9", "aac", "mp4", "mkv", "gpu", "filter", "opus", "ac3", "mp3"] }
 ```
 
 and let it pick the fastest route for each job:
@@ -215,7 +215,8 @@ let rest = decoder.flush()?;
 Encode frames to H.264 at CRF 18:
 
 ```rust
-use pito_codecs::h264::{Encoder, EncoderConfig, Rate};
+use pito_codecs::h264::{Encoder, EncoderConfig};
+use pito_codecs::media::Rate;
 
 let mut encoder = Encoder::new(EncoderConfig { width: 1920, height: 1080, fps: (60, 1), rate: Rate::Crf(18), ..Default::default() })?;
 let avcc = encoder.avcc();
@@ -364,7 +365,7 @@ cargo build --release
 cargo test --release
 ```
 
-The tests use the system ffmpeg as an oracle when it is installed and skip those checks when it is not, and the GPU tests skip cleanly without a device. `bin/gate` runs rustfmt, clippy with warnings as errors and the tests, then a release build (`--fast` skips the build).
+The tests use the system ffmpeg as an oracle when it is installed and skip those checks when it is not, and the GPU tests skip cleanly without a device. `bin/gate` runs rustfmt, clippy with warnings as errors and the tests, then a release build (`--fast` skips the build). `bin/docs-bundle vX.Y.Z [out dir]` builds `docs-vX.Y.Z.tar.gz`, the documentation each Release carries: the guides in `docs/site`, a command reference made from pcod's own help, the API reference from `cargo doc` and the changelog.
 
 [CI](.github/workflows/ci.yml) runs on every push and pull request. One job checks formatting and runs clippy for Linux x64 and arm64, Windows and macOS. Then four runners test in parallel: Linux x64 and Linux arm64 (Debian with its ffmpeg), Windows x64 and macOS on Apple Silicon, each with every test under nextest in the `ci` profile (the release optimisation without LTO, so the test binaries link quickly), the doc tests and a full release build. On a `v` tag it also checks that the tag matches the crate's version. What that covers:
 

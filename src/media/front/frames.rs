@@ -170,7 +170,9 @@ pub fn export_frames(
                     if keep { Ok(()) } else { Err(Error::Cancelled) }
                 };
                 tell(0, &mut progress)?;
-                while let Some(frame) = frames(n, spent.take())? {
+                while canvas.frames.is_none_or(|t| n < t)
+                    && let Some(frame) = frames(n, spent.take())?
+                {
                     let seconds = n as f64 * fps.1 as f64 / fps.0 as f64;
                     let layer = match opts.overlay.as_mut() {
                         Some(o) => o(seconds, size.0, size.1),
