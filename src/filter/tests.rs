@@ -1679,3 +1679,304 @@ fn hostile_input_returns_errors_instead_of_panicking() {
         let _ = c.flush();
     }
 }
+
+mod overlay_reference {
+    use super::super::plane::{Sample, check, samples_mut};
+    use super::*;
+
+    struct Layer {
+        width: usize,
+        height: usize,
+        alpha: Vec<u16>,
+        value: Vec<u32>,
+        spans: Vec<(usize, usize)>,
+    }
+
+    impl Layer {
+        fn new(width: usize, height: usize, alpha: Vec<u16>, value: Vec<u32>) -> Self {
+            let spans = (0..height)
+                .map(|y| {
+                    let row = &alpha[y * width..(y + 1) * width];
+                    match row.iter().position(|&a| a > 0) {
+                        Some(first) => {
+                            let last = row.iter().rposition(|&a| a > 0).unwrap_or(first);
+                            (first, last + 1)
+                        }
+                        None => (0, 0),
+                    }
+                })
+                .collect();
+            Layer {
+                width,
+                height,
+                alpha,
+                value,
+                spans,
+            }
+        }
+
+        fn draw<S: Sample>(
+            &self,
+            dst: &mut [S],
+            stride: usize,
+            dw: usize,
+            dh: usize,
+            x: i64,
+            y: i64,
+        ) {
+            for r in 0..self.height {
+                let ty = y + r as i64;
+                if ty < 0 || ty >= dh as i64 {
+                    continue;
+                }
+                let (a, b) = self.spans[r];
+                let from = (a as i64).max(-x) as usize;
+                let to = (b as i64).min(dw as i64 - x);
+                if to <= from as i64 {
+                    continue;
+                }
+                let to = to as usize;
+                let row = &mut dst[ty as usize * stride..];
+                let base = r * self.width;
+                for c in from..to {
+                    let al = self.alpha[base + c] as u32;
+                    if al == 0 {
+                        continue;
+                    }
+                    let o = &mut row[(x + c as i64) as usize];
+                    let v = (o.get() as u32 * (256 - al) + self.value[base + c] + 128) >> 8;
+                    *o = S::put(v as i32);
+                }
+            }
+        }
+    }
+
+    struct Reference {
+        format: PixelFormat,
+        luma: Layer,
+        u: Layer,
+        v: Layer,
+    }
+
+    impl Reference {
+        fn new(image: &Rgba, spec: ColorSpec, format: PixelFormat) -> Self {
+            let w = image.width as usize;
+            let h = image.height as usize;
+            let l = spec.levels(format.bit_depth());
+            let m = spec.matrix.forward();
+            let top = ((1u32 << format.bit_depth()) - 1) as f64;
+            let mut ya = vec![0u16; w * h];
+            let mut yv = vec![0u32; w * h];
+            let mut planes = vec![[0.0f64; 3]; w * h];
+            for (i, p) in image.data.chunks_exact(4).take(w * h).enumerate() {
+                let c = [
+                    p[0] as f64 / 255.0,
+                    p[1] as f64 / 255.0,
+                    p[2] as f64 / 255.0,
+                ];
+                let dot = |k: usize| m[k][0] * c[0] + m[k][1] * c[1] + m[k][2] * c[2];
+                let a = (p[3] as f64 * 256.0 / 255.0).round();
+                let y = (l.y_off + l.y_range * dot(0)).clamp(0.0, top);
+                ya[i] = a as u16;
+                yv[i] = (y * a).round() as u32;
+                planes[i] = [
+                    a,
+                    a * (l.c_off + l.c_range * dot(1)),
+                    a * (l.c_off + l.c_range * dot(2)),
+                ];
+            }
+            let cw = w.div_ceil(2);
+            let ch = h.div_ceil(2);
+            let mut ca = vec![0u16; cw * ch];
+            let mut cu = vec![0u32; cw * ch];
+            let mut cv = vec![0u32; cw * ch];
+            for cy in 0..ch {
+                for cx in 0..cw {
+                    let mut s = [0.0f64; 3];
+                    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        let (px, py) = ((cx * 2 + dx).min(w - 1), (cy * 2 + dy).min(h - 1));
+                        let q = planes[py * w + px];
+                        s.iter_mut().zip(q).for_each(|(a, b)| *a += b);
+                    }
+                    let i = cy * cw + cx;
+                    ca[i] = (s[0] / 4.0).round() as u16;
+                    cu[i] = (s[1] / 4.0).round().clamp(0.0, top * 256.0) as u32;
+                    cv[i] = (s[2] / 4.0).round().clamp(0.0, top * 256.0) as u32;
+                }
+            }
+            Reference {
+                format,
+                luma: Layer::new(w, h, ya, yv),
+                u: Layer::new(cw, ch, ca.clone(), cu),
+                v: Layer::new(cw, ch, ca, cv),
+            }
+        }
+
+        fn draw(&self, frame: &mut Frame, x: i32, y: i32) {
+            check(frame).unwrap();
+            let (fw, fh) = (frame.width as usize, frame.height as usize);
+            let (cw, ch) = (fw.div_ceil(2), fh.div_ceil(2));
+            let (x, y) = (x as i64, y as i64);
+            let (cx, cy) = (x.div_euclid(2), y.div_euclid(2));
+            let jobs = [
+                (&self.luma, fw, fh, x, y),
+                (&self.u, cw, ch, cx, cy),
+                (&self.v, cw, ch, cx, cy),
+            ];
+            for (plane, (layer, w, h, px, py)) in frame.planes.iter_mut().zip(jobs) {
+                match self.format {
+                    PixelFormat::Yuv420p8 => {
+                        let stride = plane.stride;
+                        layer.draw(samples_mut::<u8>(plane).unwrap(), stride, w, h, px, py);
+                    }
+                    PixelFormat::Yuv420p10 => {
+                        let stride = plane.stride / 2;
+                        layer.draw(samples_mut::<u16>(plane).unwrap(), stride, w, h, px, py);
+                    }
+                }
+            }
+        }
+    }
+
+    struct Noise(u64);
+
+    impl Noise {
+        fn next(&mut self) -> u32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 33) as u32
+        }
+    }
+
+    fn layers(w: u32, h: u32, noise: &mut Noise) -> Vec<Rgba> {
+        let mut out = Vec::new();
+        let mut make = |f: &mut dyn FnMut(u32, u32, &mut [u8])| {
+            let mut img = Rgba::new(w, h);
+            for (i, px) in img.data.chunks_exact_mut(4).enumerate() {
+                f(i as u32 % w, i as u32 / w, px);
+            }
+            out.push(img);
+        };
+        make(&mut |_, _, _| {});
+        make(&mut |x, y, px| {
+            px.copy_from_slice(&[(x * 37) as u8, (y * 91) as u8, (x ^ y) as u8, 255])
+        });
+        make(&mut |_, _, px| {
+            let r = noise.next();
+            px.copy_from_slice(&r.to_le_bytes());
+            if r.is_multiple_of(3) {
+                px[3] = 0;
+            }
+        });
+        make(&mut |_, _, px| {
+            if noise.next().is_multiple_of(23) {
+                px.copy_from_slice(&noise.next().to_le_bytes());
+                px[3] = px[3].max(1);
+            }
+        });
+        let colours = [[255, 255, 255], [255, 220, 0], [0, 0, 0], [30, 140, 255]];
+        make(&mut |x, y, px| {
+            let band = y * 3 >= h && y * 4 < h * 3 + 1 && x * 8 >= w && x * 8 < w * 7;
+            if band {
+                let c = colours[((x / 3 + y) % 4) as usize];
+                let edge = (x * 13 + y * 7) % 9;
+                let a = if edge < 3 {
+                    0
+                } else {
+                    [40, 128, 255, 255, 255, 200][edge as usize - 3]
+                };
+                px.copy_from_slice(&[c[0], c[1], c[2], a]);
+                if edge == 3 {
+                    px[0] = px[0] / 2 + 10;
+                }
+            }
+        });
+        make(&mut |x, y, px| {
+            let c = colours[((x / 4 + y / 4) % 4) as usize];
+            let a = [0, 255, 128, 1][((x / 6 + y / 2) % 4) as usize];
+            px.copy_from_slice(&[c[0], c[1], c[2], a]);
+        });
+        if w > 1 && h > 1 {
+            make(&mut |x, y, px| {
+                if x == w - 1 && y == h - 1 {
+                    px.copy_from_slice(&[200, 30, 90, 1]);
+                }
+            });
+            make(&mut |x, y, px| {
+                if (x == 1 && y == 1) || (x == w / 2 && y == h - 2) {
+                    px.copy_from_slice(&[10, 250, 90, 2]);
+                }
+            });
+        }
+        out
+    }
+
+    fn canvas(format: PixelFormat, w: u32, h: u32, noise: &mut Noise) -> Frame {
+        let mut f = Frame::new(format, w, h, 0, TimeBase::new(1, 30));
+        for plane in &mut f.planes {
+            match format {
+                PixelFormat::Yuv420p8 => {
+                    plane.data.iter_mut().for_each(|s| *s = noise.next() as u8)
+                }
+                PixelFormat::Yuv420p10 => samples_mut::<u16>(plane)
+                    .unwrap()
+                    .iter_mut()
+                    .for_each(|s| *s = (noise.next() % 1024) as u16),
+            }
+        }
+        f
+    }
+
+    #[test]
+    fn a_cropped_overlay_blends_what_the_full_size_one_blended() {
+        let mut noise = Noise(7);
+        let specs = [
+            ColorSpec::BT709,
+            ColorSpec::new(Matrix::Bt601, Range::Full),
+            ColorSpec::new(Matrix::Bt2020, Range::Limited),
+        ];
+        let sizes = [
+            (1, 1),
+            (2, 2),
+            (1, 6),
+            (7, 5),
+            (33, 17),
+            (64, 36),
+            (101, 3),
+            (40, 41),
+        ];
+        for format in [PixelFormat::Yuv420p8, PixelFormat::Yuv420p10] {
+            for (k, &(w, h)) in sizes.iter().enumerate() {
+                let spec = specs[k % specs.len()];
+                for layer in layers(w, h, &mut noise) {
+                    let ours = Overlay::new(&layer, spec, format).unwrap();
+                    let reference = Reference::new(&layer, spec, format);
+                    for (fw, fh) in [(48u32, 30u32), (9, 7)] {
+                        let (lw, lh) = (w as i32, h as i32);
+                        let (fw_, fh_) = (fw as i32, fh as i32);
+                        for (x, y) in [
+                            (0, 0),
+                            (3, 2),
+                            (-3, -2),
+                            (-1, 5),
+                            (5, -1),
+                            (fw_ - 2, fh_ - 1),
+                            (fw_ - lw / 2, fh_ - lh / 2 - 1),
+                            (-lw - 1, 0),
+                            (0, -lh - 2),
+                            (fw_ + 3, fh_ + 3),
+                        ] {
+                            let mut a = canvas(format, fw, fh, &mut noise);
+                            let mut b = a.clone();
+                            ours.draw(&mut a, x, y).unwrap();
+                            reference.draw(&mut b, x, y);
+                            assert_eq!(a, b, "{format:?} {w}x{h} on {fw}x{fh} at {x},{y}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

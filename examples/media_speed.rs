@@ -8,9 +8,11 @@ use std::time::Instant;
 
 use std::sync::Arc;
 
+use pito_codecs::filter::{ColorSpec, Matrix, Overlay, Range};
+
 use pito_codecs::media::{
-    AudioBuffer, Blender, Canvas, Choice, ExportOptions, Frame, Piece, PixelFormat, Prefs, Rgba,
-    TimeBase, VideoFrame, audio_mix_stream, audio_pcm, audio_stream, blend, decode_video,
+    AudioBuffer, Blender, Canvas, Choice, Codec, ExportOptions, Frame, Piece, PixelFormat, Prefs,
+    Rgba, TimeBase, VideoFrame, audio_mix_stream, audio_pcm, audio_stream, blend, decode_video,
     decode_video_gpu, export, export_frames, export_with_audio, first_frame, frame_count,
     frames_at, keyframes, probe, to_rgba, to_rgba_height,
 };
@@ -24,8 +26,11 @@ fn main() -> ExitCode {
 fn run() -> Res<()> {
     let mut args = std::env::args().skip(1);
     let path = PathBuf::from(args.next().ok_or(
-        "usage: media_speed <file> [ffmpeg|auto|cpu|gpu|probe|cuts [n]|scale <check> [arg]|frames [auto|cpu] [n]]",
+        "usage: media_speed <file> [ffmpeg|auto|cpu|gpu|probe|cuts [n]|spans <h264|vp9> <from-to>...|scale <check> [arg]|frames [auto|cpu] [n]] | media_speed captions",
     )?);
+    if path.as_os_str() == "captions" {
+        return captions();
+    }
     let mode = args.next();
     if mode.as_deref() == Some("frames") {
         let cpu = args.next().as_deref() == Some("cpu");
@@ -55,6 +60,22 @@ fn run() -> Res<()> {
         let what = args.next().unwrap_or_else(|| "probe".into());
         let arg = args.next();
         return scale(&path, &what, arg.as_deref());
+    }
+    if mode.as_deref() == Some("spans") {
+        let video = match args.next().as_deref() {
+            Some("vp9") => Codec::Vp9,
+            _ => Codec::H264,
+        };
+        let mut pieces = Vec::new();
+        for span in args.by_ref() {
+            let (from, to) = span.split_once('-').ok_or("a span reads <from>-<to>")?;
+            pieces.push(Piece {
+                path: path.clone(),
+                from: from.parse()?,
+                to: to.parse()?,
+            });
+        }
+        return timed(&pieces, video, "spans");
     }
     if mode.as_deref() == Some("cuts") {
         let n = match args.next() {
@@ -333,14 +354,20 @@ fn cuts(path: &std::path::Path, n: usize) -> Res<()> {
             }
         })
         .collect();
+    timed(&pieces, Codec::H264, &format!("{n} cuts"))
+}
+
+fn timed(pieces: &[Piece], video: Codec, what: &str) -> Res<()> {
+    let prefs = Prefs::default();
     let seconds: f64 = pieces.iter().map(|x| x.to - x.from).sum();
     let out = PathBuf::from("tmp/speed-cuts.mp4");
     let t = Instant::now();
     let mut at = 0usize;
     let done = export_with_audio(
         &out,
-        &pieces,
+        pieces,
         ExportOptions {
+            video,
             prefs,
             ..ExportOptions::default()
         },
@@ -359,8 +386,10 @@ fn cuts(path: &std::path::Path, n: usize) -> Res<()> {
     )?;
     let s = t.elapsed().as_secs_f64();
     say!(
-        "{n} cuts, {seconds:.1} s of video in {s:.2} s ({:.0}x realtime) on {}: {} frames, {} copied, {} encoded, smart {}",
+        "{what}, {seconds:.1} s of video in {s:.2} s ({:.0}x realtime, {:.0} fps) {} on {}: {} frames, {} copied, {} encoded, smart {}",
         seconds / s,
+        done.frames as f64 / s,
+        done.video.codec,
         done.video.route,
         done.frames,
         done.copied,
@@ -520,4 +549,117 @@ fn made_frames(out: &std::path::Path, cpu: bool, count: u64) -> Res<()> {
         done.video.said()
     )?;
     peak()
+}
+
+fn caption_layer(w: u32, h: u32, lit: usize) -> Rgba {
+    let mut img = Rgba::new(w, h);
+    let line = (h as f64 * 0.1).max(4.0);
+    let cell = line * 0.95;
+    let r = line * 0.4;
+    let edge = (line * 0.06).max(1.0);
+    let left = w as f64 * 0.1;
+    let right = w as f64 * 0.9;
+    let tops = [0.0, 1.1, 2.2].map(|k| h as f64 * 0.6 + line * k);
+    for (i, px) in img.data.chunks_exact_mut(4).enumerate() {
+        let (x, y) = ((i as u32 % w) as f64 + 0.5, (i as u32 / w) as f64 + 0.5);
+        if x < left || x >= right {
+            continue;
+        }
+        let Some(row) = tops.iter().position(|&t| y >= t && y < t + line) else {
+            continue;
+        };
+        let k = ((x - left) / cell) as usize;
+        let (gx, gy) = (left + (k as f64 + 0.5) * cell, tops[row] + line * 0.5);
+        let (dx, dy) = (x - gx, y - gy);
+        let d = match k % 3 {
+            0 => (dx * dx + dy * dy).sqrt() - r,
+            1 => ((dx * dx + dy * dy).sqrt() - r * 0.7).abs() - r * 0.3,
+            _ => {
+                let cy = dy.clamp(-r * 0.6, r * 0.6);
+                (dx * dx + (dy - cy) * (dy - cy)).sqrt() - r * 0.4
+            }
+        };
+        let alpha = (0.5 - d).clamp(0.0, 1.0);
+        if alpha <= 0.0 {
+            continue;
+        }
+        let word = row * 64 + k / 4;
+        let fill = if word < lit {
+            [255.0, 220.0, 0.0]
+        } else {
+            [255.0, 255.0, 255.0]
+        };
+        let t = (d + edge + 0.5).clamp(0.0, 1.0);
+        for c in 0..3 {
+            px[c] = (fill[c] * (1.0 - t)).round() as u8;
+        }
+        px[3] = (alpha * 255.0).round() as u8;
+    }
+    img
+}
+
+fn full_layer(w: u32, h: u32, shift: u32) -> Rgba {
+    let mut img = Rgba::new(w, h);
+    for (i, px) in img.data.chunks_exact_mut(4).enumerate() {
+        let (x, y) = (i as u32 % w, i as u32 / w);
+        px.copy_from_slice(&[
+            (x * 7 + shift) as u8,
+            (y * 5 + x / 3) as u8,
+            (x ^ y).wrapping_add(shift) as u8,
+            (64 + (x + y + shift) % 192) as u8,
+        ]);
+    }
+    img
+}
+
+fn captions() -> Res<()> {
+    for (w, h) in [(1920u32, 804u32), (1920, 1080), (3840, 2160)] {
+        for format in [PixelFormat::Yuv420p8, PixelFormat::Yuv420p10] {
+            let mut frame = Frame::new(format, w, h, 0, TimeBase::new(1, 30));
+            for (k, p) in frame.planes.iter_mut().enumerate() {
+                let v: u16 = if k == 0 { 300 } else { 512 };
+                match format {
+                    PixelFormat::Yuv420p8 => p.data.fill((v / 4) as u8),
+                    PixelFormat::Yuv420p10 => p
+                        .data
+                        .chunks_exact_mut(2)
+                        .for_each(|s| s.copy_from_slice(&v.to_le_bytes())),
+                }
+            }
+            for (name, layers) in [
+                (
+                    "caption band",
+                    [caption_layer(w, h, 3), caption_layer(w, h, 4)],
+                ),
+                ("full layer", [full_layer(w, h, 0), full_layer(w, h, 1)]),
+            ] {
+                let painted = layers[0].data.chunks_exact(4).filter(|p| p[3] > 0).count();
+                let layers = layers.map(Arc::new);
+                let mut blender = Blender::new();
+                blender.draw(&mut frame, &layers[1]);
+                let n = if w * h > 4_000_000 { 20 } else { 40 };
+                let t = Instant::now();
+                for i in 0..n {
+                    blender.draw(&mut frame, &layers[i % 2]);
+                }
+                let change = t.elapsed().as_secs_f64() * 1e3 / n as f64;
+                let t = Instant::now();
+                for _ in 0..200 {
+                    blender.draw(&mut frame, &layers[(n - 1) % 2]);
+                }
+                let kept = t.elapsed().as_secs_f64() * 1e3 / 200.0;
+                let spec = ColorSpec::new(Matrix::Bt709, Range::Limited);
+                let t = Instant::now();
+                for i in 0..n {
+                    std::hint::black_box(Overlay::new(&layers[i % 2], spec, format)?);
+                }
+                let new = t.elapsed().as_secs_f64() * 1e3 / n as f64;
+                say!(
+                    "blend {name} {w}x{h} {format:?} ({:.1}% painted): Overlay::new {new:.2} ms, {change:.2} ms a layer change, {kept:.3} ms a kept frame",
+                    painted as f64 * 100.0 / (w * h) as f64
+                )?;
+            }
+        }
+    }
+    Ok(())
 }

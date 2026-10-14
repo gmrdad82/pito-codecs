@@ -42,6 +42,7 @@ pub struct AudioParams {
 pub enum CodecConfig {
     Avc(AvcConfig),
     Hevc(HevcConfig),
+    Vp9(VpcConfig),
     Aac(AacConfig),
     Mp3,
     Pcm(PcmConfig),
@@ -53,6 +54,7 @@ impl CodecConfig {
         match self {
             CodecConfig::Avc(_) => "h264".into(),
             CodecConfig::Hevc(_) => "hevc".into(),
+            CodecConfig::Vp9(_) => "vp9".into(),
             CodecConfig::Aac(_) => "aac".into(),
             CodecConfig::Mp3 => "mp3".into(),
             CodecConfig::Pcm(_) => "pcm".into(),
@@ -66,6 +68,7 @@ impl CodecConfig {
         match self {
             CodecConfig::Avc(c) => Some(c.to_bytes()),
             CodecConfig::Hevc(c) => Some(c.to_bytes()),
+            CodecConfig::Vp9(c) => Some(c.to_bytes()),
             CodecConfig::Aac(c) => Some(c.asc.clone()),
             _ => None,
         }
@@ -300,6 +303,112 @@ impl HevcConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct VpcConfig {
+    pub profile: u8,
+    pub level: u8,
+    pub bit_depth: u8,
+    pub chroma_subsampling: u8,
+    pub full_range: bool,
+    pub colour_primaries: u8,
+    pub transfer_characteristics: u8,
+    pub matrix_coefficients: u8,
+}
+
+const VP9_LEVELS: [(u8, u64, u64, u32); 14] = [
+    (10, 829_440, 36_864, 512),
+    (11, 2_764_800, 73_728, 768),
+    (20, 4_608_000, 122_880, 1_536),
+    (21, 9_216_000, 245_760, 2_816),
+    (30, 20_736_000, 552_960, 6_656),
+    (31, 36_864_000, 983_040, 10_496),
+    (40, 83_558_400, 2_228_224, 16_384),
+    (41, 160_432_128, 2_228_224, 16_384),
+    (50, 311_951_360, 8_912_896, 32_768),
+    (51, 588_251_136, 8_912_896, 32_768),
+    (52, 1_176_502_272, 8_912_896, 32_768),
+    (60, 1_176_502_272, 35_651_584, 65_536),
+    (61, 2_353_004_544, 35_651_584, 65_536),
+    (62, 4_706_009_088, 35_651_584, 65_536),
+];
+
+impl VpcConfig {
+    pub fn new(
+        (profile, bit_depth, chroma_subsampling): (u8, u8, u8),
+        (color_space, full_range): (u8, bool),
+        (width, height): (u32, u32),
+        fps: (u32, u32),
+    ) -> Self {
+        let (colour_primaries, transfer_characteristics, matrix_coefficients) = match color_space {
+            1 => (5, 6, 5),
+            2 => (1, 1, 1),
+            3 => (6, 6, 6),
+            4 => (7, 7, 7),
+            5 => (9, 2, 9),
+            7 => (1, 13, 0),
+            _ => (2, 2, 2),
+        };
+        VpcConfig {
+            profile,
+            level: vp9_level((width, height), fps),
+            bit_depth,
+            chroma_subsampling,
+            full_range,
+            colour_primaries,
+            transfer_characteristics,
+            matrix_coefficients,
+        }
+    }
+
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        let mut c = Cur::new(data, "vpcC");
+        let (version, _) = c.full_header()?;
+        if version != 1 {
+            return Err(Error::Unsupported(format!("vpcC version {version}")));
+        }
+        let profile = c.u8()?;
+        let level = c.u8()?;
+        let packed = c.u8()?;
+        Ok(VpcConfig {
+            profile,
+            level,
+            bit_depth: packed >> 4,
+            chroma_subsampling: (packed >> 1) & 7,
+            full_range: packed & 1 == 1,
+            colour_primaries: c.u8()?,
+            transfer_characteristics: c.u8()?,
+            matrix_coefficients: c.u8()?,
+        })
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        vec![
+            1,
+            0,
+            0,
+            0,
+            self.profile,
+            self.level,
+            (self.bit_depth << 4) | ((self.chroma_subsampling & 7) << 1) | self.full_range as u8,
+            self.colour_primaries,
+            self.transfer_characteristics,
+            self.matrix_coefficients,
+            0,
+            0,
+        ]
+    }
+}
+
+fn vp9_level((width, height): (u32, u32), (num, den): (u32, u32)) -> u8 {
+    let picture = width as u64 * height as u64;
+    let rate = picture * num as u64 / den.max(1) as u64;
+    let breadth = width.max(height);
+    VP9_LEVELS
+        .iter()
+        .find(|l| rate <= l.1 && picture <= l.2 && breadth <= l.3)
+        .map_or(62, |l| l.0)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct AacConfig {
     pub asc: Vec<u8>,
@@ -471,6 +580,7 @@ pub(crate) fn parse_sample_entry(
                 b"hvcC" if matches!(f, b"hvc1" | b"hev1") => {
                     entry.codec = CodecConfig::Hevc(HevcConfig::parse(p)?)
                 }
+                b"vpcC" if f == b"vp09" => entry.codec = CodecConfig::Vp9(VpcConfig::parse(p)?),
                 b"pasp" => {
                     let mut c = Cur::new(p, "pasp");
                     v.pixel_aspect = Some((c.u32()?, c.u32()?));
@@ -780,6 +890,10 @@ impl SampleEntry {
         Self::video(b"hvc1", CodecConfig::Hevc(config), width, height)
     }
 
+    pub fn vp9(config: VpcConfig, width: u16, height: u16) -> Self {
+        Self::video(b"vp09", CodecConfig::Vp9(config), width, height)
+    }
+
     pub fn aac(asc: Vec<u8>, channels: u32, sample_rate: u32, bitrate: u32) -> Self {
         let mut config = AacConfig::from_asc(asc);
         config.avg_bitrate = bitrate;
@@ -831,6 +945,7 @@ impl SampleEntry {
             match &self.codec {
                 CodecConfig::Avc(c) => b.leaf(b"avcC", &c.to_bytes()),
                 CodecConfig::Hevc(c) => b.leaf(b"hvcC", &c.to_bytes()),
+                CodecConfig::Vp9(c) => b.leaf(b"vpcC", &c.to_bytes()),
                 _ => {
                     return Err(Error::Unsupported(format!(
                         "writing {} video",

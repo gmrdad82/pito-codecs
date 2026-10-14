@@ -47,16 +47,23 @@ pub fn gpu() -> (Vec<(Codec, Direction)>, Option<String>) {
 }
 
 pub fn cpu() -> Vec<(Codec, Direction)> {
-    vec![
+    let mut caps = vec![
         (Codec::H264, Direction::Decode),
         (Codec::H264, Direction::Encode),
         (Codec::Hevc, Direction::Decode),
         (Codec::Vp9, Direction::Decode),
+        (Codec::Vp9, Direction::Encode),
         (Codec::Aac, Direction::Decode),
         (Codec::Aac, Direction::Encode),
-        (Codec::Ac3, Direction::Decode),
-        (Codec::Eac3, Direction::Decode),
-    ]
+    ];
+    if cfg!(feature = "mp3") {
+        caps.push((Codec::Mp3, Direction::Decode));
+    }
+    if cfg!(feature = "ac3") {
+        caps.push((Codec::Ac3, Direction::Decode));
+        caps.push((Codec::Eac3, Direction::Decode));
+    }
+    caps
 }
 
 pub(super) type Key = (PathBuf, u64, Option<SystemTime>);
@@ -155,6 +162,7 @@ pub fn probe(path: &Path) -> Result<Probe> {
     let (profile, bit_depth) = match t.config() {
         Some(CodecConfig::Avc(c)) => demux::avc_profile(c.profile),
         Some(CodecConfig::Hevc(c)) => demux::hevc_profile(c),
+        Some(CodecConfig::Vp9(c)) => (format!("Profile {}", c.profile), c.bit_depth.max(8)),
         _ => (String::new(), 8),
     };
     let audio = r

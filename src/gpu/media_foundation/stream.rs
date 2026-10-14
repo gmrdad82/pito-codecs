@@ -85,7 +85,7 @@ pub fn plan(codec: Codec, sets: &[Vec<u8>]) -> Result<Plan> {
             }
         }
         Codec::Vp9 => return Err(unsupported("VP9 on Media Foundation")),
-        Codec::Aac | Codec::Opus => {
+        Codec::Aac | Codec::Opus | Codec::Mp3 => {
             return Err(unsupported(format!("{codec:?} is not a video codec")));
         }
         Codec::Ac3 | Codec::Eac3 => {

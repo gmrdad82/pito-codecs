@@ -72,6 +72,7 @@ impl Track {
         match self.config()? {
             CodecConfig::Avc(_) => Some(Codec::H264),
             CodecConfig::Hevc(_) => Some(Codec::Hevc),
+            CodecConfig::Vp9(_) => Some(Codec::Vp9),
             CodecConfig::Aac(_) => Some(Codec::Aac),
             _ => None,
         }

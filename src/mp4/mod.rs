@@ -8,7 +8,7 @@ mod writer;
 pub use boxes::FourCc;
 pub use entry::{
     AacConfig, AudioParams, AvcConfig, BitRate, CodecConfig, HevcConfig, NalArray, PcmConfig,
-    SampleEntry, VideoParams,
+    SampleEntry, VideoParams, VpcConfig,
 };
 pub use reader::{Edit, Reader, Sample, Track, TrackKind};
 pub use remux::{Cut, Snap, Span, copy_samples, plan, remux};

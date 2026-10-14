@@ -2,12 +2,14 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::{Condvar, Mutex, PoisonError, mpsc};
 
 use crate::gpu::{EncoderConfig as GpuConfig, HwEncoder, Profile as GpuProfile};
 use crate::h264::{Encoder, EncoderConfig, Preset, Profile};
 use crate::media::{Bitstream, Rate};
-use crate::mp4::{AvcConfig, HevcConfig, SampleEntry, TrackConfig, Writer, rotation_matrix};
+use crate::mp4::{
+    AvcConfig, HevcConfig, SampleEntry, TrackConfig, VpcConfig, Writer, rotation_matrix,
+};
 
 use super::audio::ffmpeg_pcm;
 use super::demux::Demux;
@@ -108,6 +110,7 @@ impl Entries {
 pub(super) enum VEnc {
     Cpu(Box<Encoder>),
     Gpu(Box<HwEncoder>),
+    Vp9(Box<crate::vp9::Encoder>, Vec<u8>),
 }
 
 impl VEnc {
@@ -115,6 +118,7 @@ impl VEnc {
         match self {
             VEnc::Cpu(e) => e.encode(f),
             VEnc::Gpu(e) => e.encode(f),
+            VEnc::Vp9(e, _) => e.encode(f),
         }
     }
 
@@ -122,6 +126,7 @@ impl VEnc {
         match self {
             VEnc::Cpu(e) => e.encode(&f.download()?),
             VEnc::Gpu(e) => e.encode_gpu(f),
+            VEnc::Vp9(e, _) => e.encode(&f.download()?),
         }
     }
 
@@ -133,6 +138,7 @@ impl VEnc {
         match self {
             VEnc::Cpu(e) => e.flush(),
             VEnc::Gpu(e) => e.flush(),
+            VEnc::Vp9(e, _) => e.flush(),
         }
     }
 
@@ -140,8 +146,44 @@ impl VEnc {
         match self {
             VEnc::Cpu(e) => Some(e.avcc()),
             VEnc::Gpu(e) => e.extradata().map(<[u8]>::to_vec),
+            VEnc::Vp9(_, vpcc) => Some(vpcc.clone()),
         }
     }
+}
+
+fn vp9_config(color: (u8, bool), size: (u32, u32), fps: (u32, u32)) -> VpcConfig {
+    VpcConfig::new((0, 8, 1), color, size, fps)
+}
+
+fn vp9_encoder(
+    (size, fps): ((u32, u32), (u32, u32)),
+    crf: u8,
+    gop: u32,
+    threads: usize,
+) -> Result<crate::vp9::Encoder> {
+    crate::vp9::Encoder::new(crate::vp9::EncoderConfig {
+        width: size.0,
+        height: size.1,
+        fps,
+        rate: crate::vp9::Rate::Crf((crf as u32 * 7 / 4).min(63) as u8),
+        gop,
+        threads,
+        aq: false,
+    })
+}
+
+fn vp9_keyframe(demux: &Demux) -> Result<crate::vp9::KeyframeInfo> {
+    let track = demux.video()?;
+    let mut buf = Vec::new();
+    for k in 0..demux.samples(track) {
+        if demux.sample(track, k).is_some_and(|s| s.2) {
+            demux.read_into(track, k, &mut buf)?;
+            if let Some(info) = crate::vp9::keyframe_info(&buf) {
+                return Ok(info);
+            }
+        }
+    }
+    Err(Error::Invalid("the VP9 video has no keyframe".to_string()))
 }
 
 fn gpu_config(
@@ -209,6 +251,11 @@ pub(super) fn encoder_for(
         let cfg = gpu_config(video.codec, size, fps, format, crf, gop);
         return Ok(VEnc::Gpu(Box::new(HwEncoder::new(video.codec, &cfg)?)));
     }
+    if video.codec == Codec::Vp9 {
+        let enc = vp9_encoder((size, fps), crf, gop, threads)?;
+        let vpcc = vp9_config(enc.color(), size, fps).to_bytes();
+        return Ok(VEnc::Vp9(Box::new(enc), vpcc));
+    }
     Ok(VEnc::Cpu(Box::new(Encoder::new(EncoderConfig {
         width: size.0,
         height: size.1,
@@ -230,6 +277,7 @@ pub(super) fn encoder_for(
 fn entry_for(codec: Codec, extradata: &[u8], w: u32, h: u32) -> Result<SampleEntry> {
     Ok(match codec {
         Codec::Hevc => SampleEntry::hevc(HevcConfig::parse(extradata)?, w as u16, h as u16),
+        Codec::Vp9 => SampleEntry::vp9(VpcConfig::parse(extradata)?, w as u16, h as u16),
         _ => SampleEntry::h264(AvcConfig::parse(extradata)?, w as u16, h as u16),
     })
 }
@@ -246,7 +294,11 @@ fn encode_edge(
     (si, from, frames): (usize, i64, i64),
     crf: u8,
     threads: usize,
+    budget: &Budget,
 ) -> Result<Edge> {
+    if video.codec == Codec::Vp9 && video.route == Route::Cpu {
+        return vp9_edge(job, (si, from, frames), crf, threads, budget);
+    }
     let mut enc = encoder(job, video, crf, true, frames, threads)?;
     let mut packets = Vec::new();
     let mut quiet = job.quiet();
@@ -271,6 +323,149 @@ fn encode_edge(
         packets,
         avcc,
         entry,
+    })
+}
+
+const CHUNK: i64 = 20;
+const BUFFERED: usize = 128 << 20;
+
+struct Budget {
+    left: Mutex<(usize, bool)>,
+    moved: Condvar,
+}
+
+impl Budget {
+    fn new(job: &Job) -> Budget {
+        let picture = job.size.0 as usize * job.size.1 as usize * 3 / 2;
+        Budget {
+            left: Mutex::new(((BUFFERED / picture.max(1)).max(2), false)),
+            moved: Condvar::new(),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, (usize, bool)> {
+        self.left.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn take(&self) -> Result<()> {
+        let mut g = self.lock();
+        while g.0 == 0 && !g.1 {
+            g = self.moved.wait(g).unwrap_or_else(PoisonError::into_inner);
+        }
+        if g.1 {
+            return Err(Error::Backend("an edge encoder stopped".to_string()));
+        }
+        g.0 -= 1;
+        Ok(())
+    }
+
+    fn give(&self) {
+        self.lock().0 += 1;
+        self.moved.notify_one();
+    }
+
+    fn fail(&self) {
+        self.lock().1 = true;
+        self.moved.notify_all();
+    }
+}
+
+fn vp9_edge(
+    job: &Job,
+    (si, from, frames): (usize, i64, i64),
+    crf: u8,
+    threads: usize,
+    budget: &Budget,
+) -> Result<Edge> {
+    let key = vp9_keyframe(job.sources[si].demux()?)?;
+    let color = (key.color.color_space, key.color.full_range);
+    let frames = frames.max(1);
+    let chunks = ((frames + CHUNK - 1) / CHUNK).clamp(1, threads.max(1) as i64);
+    let len = (frames + chunks - 1) / chunks;
+    let each = (threads / chunks as usize).clamp(1, 2);
+    let crf = crf.saturating_sub(2);
+    let packets = std::thread::scope(|s| -> Result<Vec<Packet>> {
+        let mut senders = Vec::new();
+        let mut workers = Vec::new();
+        for c in 0..chunks {
+            let n = len.min(frames - c * len);
+            let (tx, rx) = mpsc::channel::<Frame>();
+            senders.push(Some(tx));
+            workers.push(s.spawn(move || {
+                let run = || -> Result<Vec<Packet>> {
+                    let Ok(first) = rx.recv() else {
+                        return Ok(Vec::new());
+                    };
+                    let mut enc = vp9_encoder((job.size, job.fps), crf, n.max(1) as u32 + 1, each)?;
+                    enc.set_color(color.0, color.1)?;
+                    let mut out = Vec::new();
+                    for f in std::iter::once(first).chain(rx) {
+                        budget.give();
+                        out.extend(enc.encode(&f)?);
+                    }
+                    out.extend(enc.flush()?);
+                    Ok(out)
+                };
+                let got = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run))
+                    .unwrap_or_else(|_| Err(Error::Backend("an edge encoder failed".to_string())));
+                if got.is_err() {
+                    budget.fail();
+                }
+                got
+            }));
+        }
+        let mut quiet = job.quiet();
+        let mut n = 0i64;
+        let fed = reencode(
+            &mut quiet,
+            si,
+            (from, frames),
+            0,
+            &mut |f: &Frame| {
+                let c = usize::try_from(n / len).unwrap_or(usize::MAX);
+                n += 1;
+                if let Some(done) = c.checked_sub(1).and_then(|p| senders.get_mut(p)) {
+                    done.take();
+                }
+                budget.take()?;
+                senders
+                    .get(c)
+                    .and_then(Option::as_ref)
+                    .ok_or_else(|| Error::Backend("an edge chunk is missing".to_string()))?
+                    .send(f.clone())
+                    .map_err(|_| Error::Backend("an edge encoder stopped".to_string()))
+            },
+            &mut None,
+            &mut |_| true,
+        );
+        drop(senders);
+        if fed.is_err() {
+            budget.fail();
+        }
+        let mut packets = Vec::new();
+        let mut failed = None;
+        for w in workers {
+            match w.join() {
+                Ok(Ok(p)) => packets.extend(p),
+                Ok(Err(e)) => {
+                    failed.get_or_insert(e);
+                }
+                Err(_) => {
+                    failed.get_or_insert(Error::Backend("an edge encoder failed".to_string()));
+                }
+            }
+        }
+        fed?;
+        match failed {
+            Some(e) => Err(e),
+            None => Ok(packets),
+        }
+    })?;
+    let config = vp9_config(color, job.size, job.fps);
+    Ok(Edge {
+        packets,
+        avcc: config.to_bytes(),
+        entry: SampleEntry::vp9(config, job.size.0 as u16, job.size.1 as u16),
     })
 }
 
@@ -797,6 +992,9 @@ impl<'a> Gop<'a> {
 }
 
 fn random_access(codec: Codec, length: usize, data: &[u8]) -> bool {
+    if codec == Codec::Vp9 {
+        return crate::vp9::keyframe_info(data).is_some_and(|k| k.profile == 0);
+    }
     let mut pos = 0usize;
     while length > 0 && pos.saturating_add(length) <= data.len() {
         let n = data[pos..pos + length]
@@ -842,6 +1040,7 @@ fn nal_length(g: &Gop) -> Option<(Codec, usize)> {
     let length = match codec {
         Codec::H264 => st.avc.as_ref()?.length_size,
         Codec::Hevc => HevcConfig::parse(&st.extradata).ok()?.length_size,
+        Codec::Vp9 => return Some((codec, 0)),
         _ => return None,
     };
     Some((codec, length.clamp(1, 4) as usize))
@@ -965,6 +1164,7 @@ const AHEAD: usize = 4;
 struct Writing {
     mux: Option<Mux>,
     ids: HashMap<Vec<u8>, u32>,
+    sources: HashMap<usize, u32>,
     rotation: u16,
     timescale: u32,
     fd: i64,
@@ -994,6 +1194,16 @@ impl Writing {
         Ok(id)
     }
 
+    fn source(&mut self, job: &Job, si: usize, part: &Path) -> Result<u32> {
+        if let Some(&id) = self.sources.get(&si) {
+            return Ok(id);
+        }
+        let (key, entry) = copy_entry(job, si)?;
+        let id = self.entry(key, entry, part)?;
+        self.sources.insert(si, id);
+        Ok(id)
+    }
+
     fn mux(&mut self) -> Result<&mut Mux> {
         self.mux
             .as_mut()
@@ -1018,7 +1228,6 @@ fn smart_video(
         .filter(|&i| matches!(plan[i].1, Part::Encode { .. }))
         .collect();
     let rank: HashMap<usize, usize> = edges.iter().enumerate().map(|(r, &i)| (i, r)).collect();
-    let mut source_entry: HashMap<usize, u32> = HashMap::new();
     let mut last_use: HashMap<usize, usize> = HashMap::new();
     for (n, &i) in order.iter().enumerate() {
         last_use.insert(i, n);
@@ -1028,6 +1237,7 @@ fn smart_video(
     let next = AtomicUsize::new(0);
     let wanted = AtomicUsize::new(0);
     let (tx, rx) = mpsc::channel::<(usize, Result<Edge>)>();
+    let budget = Budget::new(job);
     let total: i64 = order
         .iter()
         .filter_map(|&i| plan.get(i))
@@ -1037,6 +1247,7 @@ fn smart_video(
     let mut out = Writing {
         mux: None,
         ids: HashMap::new(),
+        sources: HashMap::new(),
         rotation: job.sources[job.index[0]].probe.rotation,
         timescale,
         fd,
@@ -1044,7 +1255,7 @@ fn smart_video(
     let written = std::thread::scope(|s| -> Result<(u64, u64)> {
         for _ in 0..workers {
             let tx = tx.clone();
-            let (plan, next, edges, wanted) = (&plan, &next, &edges, &wanted);
+            let (plan, next, edges, wanted, budget) = (&plan, &next, &edges, &wanted, &budget);
             s.spawn(move || {
                 loop {
                     if stop.load(Ordering::Relaxed) {
@@ -1063,7 +1274,10 @@ fn smart_video(
                         continue;
                     };
                     if tx
-                        .send((i, encode_edge(job, video, (si, from, frames), crf, per)))
+                        .send((
+                            i,
+                            encode_edge(job, video, (si, from, frames), crf, per, budget),
+                        ))
                         .is_err()
                     {
                         break;
@@ -1098,15 +1312,7 @@ fn smart_video(
                 let (si, p) = plan[i];
                 match p {
                     Part::Copy { from, frames } => {
-                        let entry = match source_entry.get(&si) {
-                            Some(&id) => id,
-                            None => {
-                                let (key, entry) = copy_entry(job, si)?;
-                                let id = out.entry(key, entry, part)?;
-                                source_entry.insert(si, id);
-                                id
-                            }
-                        };
+                        let entry = out.source(job, si, part)?;
                         let mux = out.mux()?;
                         let g = Gop::at(job, si, from)?;
                         copy_times(&g, frames, &mut times, &mut order_pts)?;
@@ -1149,7 +1355,11 @@ fn smart_video(
                         let e = ready
                             .remove(&i)
                             .ok_or_else(|| Error::Backend("an edge was not encoded".into()))?;
-                        let entry = out.entry(e.avcc.clone(), e.entry.clone(), part)?;
+                        let entry = if video.codec == Codec::Vp9 {
+                            out.source(job, si, part)?
+                        } else {
+                            out.entry(e.avcc.clone(), e.entry.clone(), part)?
+                        };
                         let mux = out.mux()?;
                         for p in &e.packets {
                             mux.push(
@@ -1203,6 +1413,22 @@ fn copy_entry(job: &Job, si: usize) -> Result<(Vec<u8>, SampleEntry)> {
     let codec = st
         .codec
         .ok_or_else(|| Error::Unsupported(format!("copying {} video", st.name)))?;
+    if codec == Codec::Vp9 {
+        let k = vp9_keyframe(demux)?;
+        let chroma = match (k.subsampling_x, k.subsampling_y) {
+            (true, false) => 2,
+            (false, false) => 3,
+            _ => 1,
+        };
+        let config = VpcConfig::new(
+            (k.profile, k.bit_depth as u8, chroma),
+            (k.color.color_space, k.color.full_range),
+            (src.probe.width, src.probe.height),
+            job.fps,
+        );
+        let entry = SampleEntry::vp9(config, src.probe.width as u16, src.probe.height as u16);
+        return Ok((config.to_bytes(), entry));
+    }
     let entry = entry_for(codec, &st.extradata, src.probe.width, src.probe.height)?;
     Ok((st.extradata, entry))
 }

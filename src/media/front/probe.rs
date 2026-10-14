@@ -85,9 +85,15 @@ impl AudioTrack {
         } else {
             &[]
         };
+        let mp3: &[&str] = if cfg!(feature = "mp3") {
+            &["mp3", "mp2", "mp1"]
+        } else {
+            &[]
+        };
         native
             .iter()
             .chain(ac3)
+            .chain(mp3)
             .any(|c| self.codec.eq_ignore_ascii_case(c))
     }
 }
