@@ -166,6 +166,8 @@ pub fn codec_name(codec_id: &str) -> &str {
         "A_AC3" => "ac3",
         "A_EAC3" => "eac3",
         "A_MPEG/L3" => "mp3",
+        "A_MPEG/L2" => "mp2",
+        "A_MPEG/L1" => "mp1",
         "S_TEXT/UTF8" => "subrip",
         "S_TEXT/WEBVTT" => "webvtt",
         "S_TEXT/ASS" => "ass",
@@ -183,6 +185,7 @@ impl Track {
             "aac" => Some(Codec::Aac),
             "vp9" => Some(Codec::Vp9),
             "opus" => Some(Codec::Opus),
+            "mp3" | "mp2" | "mp1" => Some(Codec::Mp3),
             _ => None,
         }
     }

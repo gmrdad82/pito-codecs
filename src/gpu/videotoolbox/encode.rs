@@ -388,7 +388,7 @@ pub fn hardware(codec: Codec) -> bool {
     match codec {
         Codec::H264 => h264,
         Codec::Hevc => hevc,
-        Codec::Aac | Codec::Vp9 | Codec::Opus => false,
+        Codec::Aac | Codec::Vp9 | Codec::Opus | Codec::Mp3 => false,
     }
 }
 

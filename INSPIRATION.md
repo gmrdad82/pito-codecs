@@ -17,6 +17,7 @@ The codecs here are written in Rust. Parts are adapted from permissively license
 | NVIDIA Video Codec SDK header `nvEncodeAPI.h` | MIT (NVIDIA) | API 12.1 | The NVENC declarations in `src/gpu/nvenc/ffi.rs`. |
 | RFC 6386 reference decoder (Section 20) | BSD-3-Clause (Google) | RFC 6386 (November 2011) | VP8 loop filter, intra prediction, token and transform details in `src/webp/vp8/`. |
 | [libwebp](https://chromium.googlesource.com/webm/libwebp) | BSD-3-Clause (Google) | v1.6.0, `4fa21912338357f89e4fd51cf2368325b59e9bd9` | YUV and RGB conversion, the fancy upsampler, the SSE2 loop filter layout, forward transforms and the quality scale in `src/webp/vp8/`. |
+| [minimp3](https://github.com/lieff/minimp3) | CC0 1.0 (public domain) | `ea99364f61c14656440e8d77e9c233ccf3124633` | The MPEG-1, 2 and 2.5 audio decoder (layers I, II and III) in `src/mp3/`, with its tables and SSE and NEON layout; the container packet front, the channel matching and the granule-0 scfsi mask are new. |
 
 ## Specifications
 
