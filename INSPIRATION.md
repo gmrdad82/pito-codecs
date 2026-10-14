@@ -22,6 +22,7 @@ The codecs here are written in Rust. Parts are adapted from permissively license
 
 - The ITU-T H.264 and H.265 Recommendations, and the ISO/IEC 14496 parts for AAC and the MP4 file format.
 - The VP9 Bitstream and Decoding Process Specification (v0.6, WebM project).
+- The VP Codec ISO Media File Format Binding (v1.0, WebM project) for the `vp09` sample entry and its `vpcC` box, and the WebM project's VP9 levels for the level it carries.
 - RFC 6716 and RFC 8251 (Opus), RFC 7845 (Ogg Opus), RFC 8794 and RFC 9559 (EBML and Matroska) and the WebM container guidelines.
 - RFC 9649 (WebP: the container, VP8L lossless and ALPH, written from it alone) and RFC 6386 (VP8 lossy) for `src/webp/`.
 - CompuServe's GIF89a specification (1990), the only source for `src/gif/`.

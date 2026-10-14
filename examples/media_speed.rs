@@ -9,8 +9,8 @@ use std::time::Instant;
 use std::sync::Arc;
 
 use pito_codecs::media::{
-    AudioBuffer, Blender, Canvas, Choice, ExportOptions, Frame, Piece, PixelFormat, Prefs, Rgba,
-    TimeBase, VideoFrame, audio_mix_stream, audio_pcm, audio_stream, blend, decode_video,
+    AudioBuffer, Blender, Canvas, Choice, Codec, ExportOptions, Frame, Piece, PixelFormat, Prefs,
+    Rgba, TimeBase, VideoFrame, audio_mix_stream, audio_pcm, audio_stream, blend, decode_video,
     decode_video_gpu, export, export_frames, export_with_audio, first_frame, frame_count,
     frames_at, keyframes, probe, to_rgba, to_rgba_height,
 };
@@ -24,7 +24,7 @@ fn main() -> ExitCode {
 fn run() -> Res<()> {
     let mut args = std::env::args().skip(1);
     let path = PathBuf::from(args.next().ok_or(
-        "usage: media_speed <file> [ffmpeg|auto|cpu|gpu|probe|cuts [n]|scale <check> [arg]|frames [auto|cpu] [n]]",
+        "usage: media_speed <file> [ffmpeg|auto|cpu|gpu|probe|cuts [n]|spans <h264|vp9> <from-to>...|scale <check> [arg]|frames [auto|cpu] [n]]",
     )?);
     let mode = args.next();
     if mode.as_deref() == Some("frames") {
@@ -55,6 +55,22 @@ fn run() -> Res<()> {
         let what = args.next().unwrap_or_else(|| "probe".into());
         let arg = args.next();
         return scale(&path, &what, arg.as_deref());
+    }
+    if mode.as_deref() == Some("spans") {
+        let video = match args.next().as_deref() {
+            Some("vp9") => Codec::Vp9,
+            _ => Codec::H264,
+        };
+        let mut pieces = Vec::new();
+        for span in args.by_ref() {
+            let (from, to) = span.split_once('-').ok_or("a span reads <from>-<to>")?;
+            pieces.push(Piece {
+                path: path.clone(),
+                from: from.parse()?,
+                to: to.parse()?,
+            });
+        }
+        return timed(&pieces, video, "spans");
     }
     if mode.as_deref() == Some("cuts") {
         let n = match args.next() {
@@ -333,14 +349,20 @@ fn cuts(path: &std::path::Path, n: usize) -> Res<()> {
             }
         })
         .collect();
+    timed(&pieces, Codec::H264, &format!("{n} cuts"))
+}
+
+fn timed(pieces: &[Piece], video: Codec, what: &str) -> Res<()> {
+    let prefs = Prefs::default();
     let seconds: f64 = pieces.iter().map(|x| x.to - x.from).sum();
     let out = PathBuf::from("tmp/speed-cuts.mp4");
     let t = Instant::now();
     let mut at = 0usize;
     let done = export_with_audio(
         &out,
-        &pieces,
+        pieces,
         ExportOptions {
+            video,
             prefs,
             ..ExportOptions::default()
         },
@@ -359,8 +381,10 @@ fn cuts(path: &std::path::Path, n: usize) -> Res<()> {
     )?;
     let s = t.elapsed().as_secs_f64();
     say!(
-        "{n} cuts, {seconds:.1} s of video in {s:.2} s ({:.0}x realtime) on {}: {} frames, {} copied, {} encoded, smart {}",
+        "{what}, {seconds:.1} s of video in {s:.2} s ({:.0}x realtime, {:.0} fps) {} on {}: {} frames, {} copied, {} encoded, smart {}",
         seconds / s,
+        done.frames as f64 / s,
+        done.video.codec,
         done.video.route,
         done.frames,
         done.copied,

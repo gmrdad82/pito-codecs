@@ -31,7 +31,7 @@ Adapted modules (one line per module, filled in by each task):
 - src/h264/: from crates/h264 (the H.264 decoder), crates/h264enc (the encoder) and crates/bitstream (bit reader and writer).
 - src/hevc/: from crates/hevc (the H.265 decoder) and crates/bitstream (bit reader, NAL splitting); adapted to the shared Frame and Packet types, with an hvcC writer added.
 - src/aac/: from crates/aac (the AAC-LC decoder and encoder) and crates/bitstream; src/aac/pcm.rs is new.
-- src/mp4/: from crates/isobmff (the MP4 and MOV reader and writer); remux and the MOV brand are new.
+- src/mp4/: from crates/isobmff (the MP4 and MOV reader and writer); remux, the MOV brand and the vp09 sample entry are new.
 - src/gpu/: decode from crates/platform/src/vaapi (the VA-API front ends, libva FFI and session) and crates/platform/src/biplanar.rs, with the H.264 and HEVC parameter, slice and DPB code of crates/h264 and crates/hevc in src/gpu/syntax; the VA-API encoders, packed headers, VPP and dma-buf export are new.
 - src/gpu/nvenc/: from crates/platform/src/nvenc (ffi, session, device, HEVC).
 - src/gpu/videotoolbox/: from crates/platform/src/videotoolbox.rs and videotoolbox_encode.rs.

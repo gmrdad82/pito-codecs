@@ -78,6 +78,7 @@ pub struct Encoder {
     workers: Vec<Workspace>,
     recon_out: Option<Arc<Picture>>,
     broken: bool,
+    color: (u8, bool),
 }
 
 fn quant(qindex: u8) -> [Quant; 2] {
@@ -141,7 +142,22 @@ impl Encoder {
             workers,
             recon_out: None,
             broken: false,
+            color: (2, false),
         })
+    }
+
+    pub fn set_color(&mut self, color_space: u8, full_range: bool) -> Result<()> {
+        if color_space > 6 {
+            return Err(Error::Unsupported(format!(
+                "vp9 encoder: color space {color_space} in profile 0"
+            )));
+        }
+        self.color = (color_space, full_range);
+        Ok(())
+    }
+
+    pub fn color(&self) -> (u8, bool) {
+        self.color
     }
 
     pub fn encode(&mut self, frame: &Frame) -> Result<Vec<Packet>> {
@@ -437,8 +453,8 @@ impl Encoder {
             key,
             width: src.width as u32,
             height: src.height as u32,
-            color_space: 2,
-            full_range: false,
+            color_space: self.color.0,
+            full_range: self.color.1,
             refresh_frame_flags: if key { 0xff } else { 0x01 },
             ref_frame_idx: [0, 1, 2],
             allow_hp,

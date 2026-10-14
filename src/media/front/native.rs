@@ -52,6 +52,7 @@ pub fn cpu() -> Vec<(Codec, Direction)> {
         (Codec::H264, Direction::Encode),
         (Codec::Hevc, Direction::Decode),
         (Codec::Vp9, Direction::Decode),
+        (Codec::Vp9, Direction::Encode),
         (Codec::Aac, Direction::Decode),
         (Codec::Aac, Direction::Encode),
     ]
@@ -153,6 +154,7 @@ pub fn probe(path: &Path) -> Result<Probe> {
     let (profile, bit_depth) = match t.config() {
         Some(CodecConfig::Avc(c)) => demux::avc_profile(c.profile),
         Some(CodecConfig::Hevc(c)) => demux::hevc_profile(c),
+        Some(CodecConfig::Vp9(c)) => (format!("Profile {}", c.profile), c.bit_depth.max(8)),
         _ => (String::new(), 8),
     };
     let audio = r

@@ -358,6 +358,11 @@ fn export_to(
             ),
             None => "the sources differ in frame rate, size, depth or rotation, so the whole export is re-encoded".to_string(),
         })
+    } else if video.codec == Codec::Vp9 && (first.profile != "Profile 0" || first.bit_depth > 8) {
+        Some(format!(
+            "the source VP9 is {} at {} bits, our VP9 encoder writes profile 0 at 8 bits, so the whole export is re-encoded",
+            first.profile, first.bit_depth
+        ))
     } else if size != (first.width, first.height) {
         Some(format!(
             "the picture's odd size {}x{} is evened, so the whole export is re-encoded",
