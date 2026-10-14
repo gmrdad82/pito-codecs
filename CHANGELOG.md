@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.3.0 — 2026-10-14
+
+### Added
+
+- AC-3 and E-AC-3 sound in MKV and MP4 decodes natively, ported from oxideav-ac3.
+- MP3, MP2 and MP1 sound in MKV, MP4 and MOV decodes natively, ported from minimp3.
+- VP9 sources export to VP9 in MP4 with smart cuts: the middles are copied and only the frames before each piece's first keyframe are encoded.
+- `pcod frames` turns a folder of PNG frames and an optional WAV into an H.264 and AAC MP4 with faststart, tagged BT.709.
+- PNG decode, ported from zune-png, and a WAV reader.
+- On VA-API with Mesa, an export with an overlay stays on the GPU: decoded, overlaid by a video-processing blend and encoded without a copy to system memory.
+- Every Release carries a docs bundle for the PITO MD docs site, with guides and a generated command reference.
+
+### Changed
+
+- The brand now reads PITO MD.
+- A caption or watermark layer costs what its painted area costs: about 1 ms per change at 1080p instead of 12 ms or more, with the same output.
+- Exports decode on the GPU whenever they encode on the GPU, smart-cut edges included.
+- VA-API frame readback waits until a frame is no longer a reference, so it no longer holds up decoding.
+- The README shows a section, a chart and a picture per feature.
+- `Codec` gains `Mp3`, `Ac3` and `Eac3`, and `CodecConfig` gains `Vp9`, so code that matches them exhaustively needs new arms.
+
+### Fixed
+
+- `export_frames` stops after `Canvas.frames` frames instead of running until the frame callback ends.
+
 ## v1.2.1 — 2026-10-12
 
 ### Fixed
