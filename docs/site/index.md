@@ -16,7 +16,7 @@ It comes as a Rust library and as `pcod`, a small command line over it that prob
 - **Frame-accurate smart cuts 1.7× to 2.9× faster** than an ffmpeg re-encode: only the frames around each cut are encoded.
 - **GPU decode and encode on VA-API 1.1× to 1.3× faster** than ffmpeg's, and frames can stay on the card from decode to encode.
 - **Overlays composed on the card:** a marked or captioned export uses 18× to 23× less CPU time than decoding and blending on the CPU.
-- **Small:** a 3.9 MB command line, and a library that pulls in 8 crates on Linux.
+- **Small:** a 5.7 MB command line, and a library that pulls in 8 crates on Linux.
 
 ![pito-codecs against ffmpeg 9.0.1, times faster or slower per job](images/chart-overview.png)
 

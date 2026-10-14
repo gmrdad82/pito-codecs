@@ -11,7 +11,7 @@
 - **Frame-accurate smart cuts 1.7× to 2.9× faster** than an ffmpeg re-encode: only the frames around each cut are encoded.
 - **GPU decode and encode on VA-API 1.1× to 1.3× faster** than ffmpeg's, and frames can stay on the card from decode to encode.
 - **Overlays composed on the card:** a marked or captioned export uses 18× to 23× less CPU time than decoding and blending on the CPU.
-- **Small:** a 3.9 MB command line, and a library that pulls in 8 crates on Linux.
+- **Small:** a 5.7 MB command line, and a library that pulls in 8 crates on Linux.
 
 ![pito-codecs against ffmpeg 9.0.1, times faster or slower per job](docs/images/chart-overview.png)
 
@@ -189,8 +189,8 @@ The CPU codecs run and are tested on every push on Linux x86-64 and arm64, Windo
 ## Small and simple
 
 - **Two direct dependencies** for the library on Linux, rayon and libloading, 8 crates in all; clap only for pcod, behind the `cli` feature. No C or C++ is linked, and libva is loaded at run time, so a binary starts on a machine without it.
-- **pcod is 3.9 MB** (v1.2.1, Linux x86-64, release build, stripped).
-- **About 132,000 lines of Rust** under `src/`, one package with a feature per part.
+- **pcod is 5.7 MB** (v1.3.0, Linux x86-64, release build, stripped).
+- **About 134,000 lines of Rust** under `src/`, one package with a feature per part.
 - **Graceful on bad input:** every parser and decoder is fuzzed on CI, and malformed files return errors instead of panicking.
 
 ## Use the library
