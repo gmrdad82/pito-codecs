@@ -47,8 +47,8 @@ commands=$("$pcod" --help | awk '/^Commands:/ { on = 1; next } on && /^$/ { exit
 mkdir -p "$docs/reference"
 {
     printf -- '---\n'
-    printf 'title: pcod commands\n'
-    printf 'description: Every pcod command and option, from pcod'"'"'s own help.\n'
+    printf 'title: "pcod commands"\n'
+    printf 'description: "Every pcod command and option, from pcod'"'"'s own help."\n'
     printf 'sidebar:\n  order: 1\n'
     printf -- '---\n\n'
     printf 'This page is made from the help of %s, so it matches the binary. The [pcod guide](../../guides/pcod/) shows each command at work.\n\n' "$("$pcod" --version)"
@@ -80,8 +80,8 @@ rm -f "$docs/api/.lock"
 
 {
     printf -- '---\n'
-    printf 'title: Changelog\n'
-    printf 'description: What changed in each pito-codecs release.\n'
+    printf 'title: "Changelog"\n'
+    printf 'description: "What changed in each pito-codecs release."\n'
     printf 'sidebar:\n  order: 100\n'
     printf -- '---\n\n'
     sed '1{/^# /d;}' CHANGELOG.md | sed '/./,$!d'
@@ -176,9 +176,12 @@ while IFS= read -r page; do
         esac
     done
     head -1 "$page" | grep -qx -- '---' || bad "$rel: no frontmatter"
+    front=$(awk 'NR > 1 && /^---$/ { exit } { print }' "$page")
     for key in title description; do
-        awk 'NR > 1 && /^---$/ { exit } { print }' "$page" | grep -q "^$key: ." || bad "$rel: no $key in the frontmatter"
+        printf '%s\n' "$front" | grep -q "^$key: " || bad "$rel: no $key in the frontmatter"
     done
+    printf '%s\n' "$front" | grep -E '^(title|description|  label): ' | grep -vqE '^[a-z ]+: "([^"\\]|\\.)*"$' &&
+        bad "$rel: title, description and sidebar label must be quoted strings with JSON escaping"
     awk 'NR > 1 && /^---$/ { exit } { print }' "$page" | grep -qE '^  order: [0-9]+$' || bad "$rel: no sidebar order in the frontmatter"
 done < <(find "$docs" -name '*.md' -not -path "$docs/api/*" | sort)
 

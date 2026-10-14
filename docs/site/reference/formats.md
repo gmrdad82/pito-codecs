@@ -1,6 +1,6 @@
 ---
-title: Formats
-description: The codecs, containers and picture formats pito-codecs reads and writes, and what pcod prints.
+title: "Formats"
+description: "The codecs, containers and picture formats pito-codecs reads and writes, and what pcod prints."
 sidebar:
   order: 2
 ---

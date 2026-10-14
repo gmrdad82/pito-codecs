@@ -1,6 +1,6 @@
 ---
-title: Low-level codecs
-description: Use the codecs and containers directly, without the front - decode an MP4's H.264 track, encode H.264, and read and write GIF and WebP.
+title: "Low-level codecs"
+description: "Use the codecs and containers directly, without the front - decode an MP4's H.264 track, encode H.264, and read and write GIF and WebP."
 sidebar:
   order: 9
 ---

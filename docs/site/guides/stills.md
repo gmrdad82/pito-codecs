@@ -1,6 +1,6 @@
 ---
-title: First frames and filmstrips
-description: Show a file's first picture at once, take a strip of stills, or decode on to the exact frame at a time.
+title: "First frames and filmstrips"
+description: "Show a file's first picture at once, take a strip of stills, or decode on to the exact frame at a time."
 sidebar:
   order: 3
 ---

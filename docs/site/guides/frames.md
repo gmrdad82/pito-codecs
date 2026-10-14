@@ -1,6 +1,6 @@
 ---
-title: Export frames you render yourself
-description: Encode frames your app makes, at your own size and frame rate, with your own audio, to an MP4.
+title: "Export frames you render yourself"
+description: "Encode frames your app makes, at your own size and frame rate, with your own audio, to an MP4."
 sidebar:
   order: 7
 ---

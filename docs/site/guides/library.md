@@ -1,6 +1,6 @@
 ---
-title: Use the library
-description: The media front picks the GPU first and the CPU second for every job, and says why whenever it falls back.
+title: "Use the library"
+description: "The media front picks the GPU first and the CPU second for every job, and says why whenever it falls back."
 sidebar:
   order: 2
 ---

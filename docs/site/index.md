@@ -1,6 +1,6 @@
 ---
-title: pito-codecs
-description: Video and audio codecs in pure Rust, on the CPU and the GPU, with no ffmpeg inside.
+title: "pito-codecs"
+description: "Video and audio codecs in pure Rust, on the CPU and the GPU, with no ffmpeg inside."
 sidebar:
   order: 1
 ---

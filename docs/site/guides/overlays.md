@@ -1,6 +1,6 @@
 ---
-title: Overlays and captions on an export
-description: Draw a watermark or captions on every frame of an export, composed on the GPU with VA-API and Mesa, on the CPU elsewhere.
+title: "Overlays and captions on an export"
+description: "Draw a watermark or captions on every frame of an export, composed on the GPU with VA-API and Mesa, on the CPU elsewhere."
 sidebar:
   order: 6
 ---

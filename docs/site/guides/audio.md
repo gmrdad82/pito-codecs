@@ -1,6 +1,6 @@
 ---
-title: Audio as PCM
-description: Decode any time range of an audio track to PCM, stream it in one-second blocks, or mix several tracks.
+title: "Audio as PCM"
+description: "Decode any time range of an audio track to PCM, stream it in one-second blocks, or mix several tracks."
 sidebar:
   order: 4
 ---

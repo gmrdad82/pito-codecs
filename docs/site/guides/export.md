@@ -1,6 +1,6 @@
 ---
-title: Export an edit with smart cuts
-description: Write pieces of one or more files to a new MP4, copying the middle of each piece and re-encoding only around each cut.
+title: "Export an edit with smart cuts"
+description: "Write pieces of one or more files to a new MP4, copying the middle of each piece and re-encoding only around each cut."
 sidebar:
   order: 5
 ---

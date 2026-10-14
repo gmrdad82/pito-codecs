@@ -1,6 +1,6 @@
 ---
-title: GPU routes per vendor and system
-description: Which GPU route decodes and encodes what on each system, what has been run on real hardware, and what is built but untested.
+title: "GPU routes per vendor and system"
+description: "Which GPU route decodes and encodes what on each system, what has been run on real hardware, and what is built but untested."
 sidebar:
   order: 8
 ---

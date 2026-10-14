@@ -1,6 +1,6 @@
 ---
-title: Probe, decode and encode with pcod
-description: Look inside an MP4, decode it on the CPU or the GPU, and encode it to H.264 or HEVC from the command line.
+title: "Probe, decode and encode with pcod"
+description: "Look inside an MP4, decode it on the CPU or the GPU, and encode it to H.264 or HEVC from the command line."
 sidebar:
   order: 1
 ---

@@ -1,6 +1,6 @@
 ---
-title: Install
-description: Install pcod on Linux, macOS or Windows, build it from source, or add the library to a Rust project.
+title: "Install"
+description: "Install pcod on Linux, macOS or Windows, build it from source, or add the library to a Rust project."
 sidebar:
   order: 2
 ---
