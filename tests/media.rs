@@ -1102,7 +1102,7 @@ fn pcm_tracks_decode_bit_exact_without_ffmpeg() {
 }
 
 #[test]
-fn an_ac3_track_probes_by_name_and_is_refused_without_ffmpeg() {
+fn an_ac3_track_probes_and_decodes_natively() {
     if !have_ffmpeg() {
         return;
     }
@@ -1145,11 +1145,15 @@ fn an_ac3_track_probes_by_name_and_is_refused_without_ffmpeg() {
         .iter()
         .map(|a| (a.codec.as_str(), a.native()))
         .collect();
-    assert_eq!(names, [("ac3", false), ("aac", true)]);
+    assert_eq!(names, [("ac3", true), ("aac", true)]);
     assert!(p.video_native());
-    assert_eq!(p.unsupported(), ["ac3"]);
-    let e = audio_pcm(&path, 0, 48_000, false, &prefs).unwrap_err();
-    assert!(e.to_string().contains("ac3"), "{e}");
+    assert!(p.unsupported().is_empty());
+    let ac3 = audio_pcm(&path, 0, 48_000, false, &prefs).unwrap();
+    assert!(
+        (ac3.frames() as i64 - 48_000).abs() < 1_600,
+        "{}",
+        ac3.frames()
+    );
     let aac = audio_pcm(&path, 1, 48_000, false, &prefs).unwrap();
     assert!(
         (aac.frames() as i64 - 48_000).abs() < 1_200,
