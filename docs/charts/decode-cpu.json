@@ -1,0 +1,84 @@
+{
+ "title": "CPU DECODE",
+ "unit": "FRAMES PER SECOND",
+ "better": "higher",
+ "subtitle": "RYZEN 9 9950X, RADEON RX 9060 XT (VA-API), FFMPEG 9.0.1",
+ "date": "2026-10-11",
+ "parties": [
+  {
+   "name": "PITO-CODECS"
+  },
+  {
+   "name": "FFMPEG 9.0.1"
+  }
+ ],
+ "groups": [
+  {
+   "name": "H.264",
+   "rows": [
+    {
+     "label": "1080P 1 THREAD",
+     "values": [
+      376,
+      558
+     ]
+    },
+    {
+     "label": "1080P ALL THREADS",
+     "values": [
+      1959,
+      2551
+     ]
+    },
+    {
+     "label": "1440P 1 THREAD",
+     "values": [
+      195,
+      286
+     ]
+    },
+    {
+     "label": "1440P ALL THREADS",
+     "values": [
+      1089,
+      1495
+     ]
+    }
+   ]
+  },
+  {
+   "name": "HEVC",
+   "rows": [
+    {
+     "label": "1080P 1 THREAD",
+     "values": [
+      426,
+      418
+     ]
+    },
+    {
+     "label": "1080P ALL THREADS",
+     "values": [
+      1479,
+      1687
+     ]
+    },
+    {
+     "label": "1440P 1 THREAD",
+     "values": [
+      255,
+      247
+     ]
+    },
+    {
+     "label": "1440P ALL THREADS",
+     "values": [
+      789,
+      1231
+     ]
+    }
+   ]
+  }
+ ],
+ "suffix": " FPS"
+}

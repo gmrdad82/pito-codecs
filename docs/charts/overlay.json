@@ -1,0 +1,92 @@
+{
+ "title": "CAPTION LAYER REBUILD",
+ "unit": "MILLISECONDS PER LAYER CHANGE",
+ "better": "lower",
+ "subtitle": "RYZEN 9 9950X, ONE RUN EACH, BACK TO BACK, MACHINE AT LOAD 42 TO 61",
+ "date": "2026-10-14",
+ "parties": [
+  {
+   "name": "NOW"
+  },
+  {
+   "name": "1.2.1"
+  }
+ ],
+ "groups": [
+  {
+   "name": "CAPTION BAND, 8-BIT",
+   "rows": [
+    {
+     "label": "1920X804",
+     "values": [
+      0.73,
+      32.6
+     ]
+    },
+    {
+     "label": "1080P",
+     "values": [
+      0.6,
+      25.9
+     ]
+    },
+    {
+     "label": "4K",
+     "values": [
+      1.65,
+      135
+     ]
+    }
+   ]
+  },
+  {
+   "name": "CAPTION BAND, 10-BIT",
+   "rows": [
+    {
+     "label": "1920X804",
+     "values": [
+      0.51,
+      22.5
+     ]
+    },
+    {
+     "label": "1080P",
+     "values": [
+      0.9,
+      29.8
+     ]
+    },
+    {
+     "label": "4K",
+     "values": [
+      2.25,
+      125
+     ]
+    }
+   ]
+  },
+  {
+   "name": "FULLY PAINTED, 8-BIT",
+   "rows": [
+    {
+     "label": "1080P",
+     "values": [
+      6.7,
+      46.5
+     ]
+    },
+    {
+     "label": "4K",
+     "values": [
+      20.8,
+      138
+     ]
+    }
+   ]
+  }
+ ],
+ "suffix": " MS",
+ "notes": [
+  "BLENDED FRAMES ARE BIT-EXACT WITH 1.2.1."
+ ]
+}

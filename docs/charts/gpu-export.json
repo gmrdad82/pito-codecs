@@ -1,0 +1,73 @@
+{
+ "title": "EXPORT WITH AN OVERLAY, H.264",
+ "unit": "SECONDS",
+ "better": "lower",
+ "subtitle": "RYZEN 9 9950X, RADEON RX 9060 XT (VA-API), LOAD 90",
+ "date": "2026-10-14",
+ "parties": [
+  {
+   "name": "ON THE CARD"
+  },
+  {
+   "name": "CPU DECODE AND BLEND"
+  }
+ ],
+ "groups": [
+  {
+   "name": "WALL TIME",
+   "rows": [
+    {
+     "label": "1920X804 130 S, MARK",
+     "values": [
+      10.16,
+      12.8
+     ]
+    },
+    {
+     "label": "1920X804 130 S, CAPTIONS",
+     "values": [
+      10.06,
+      12.97
+     ]
+    },
+    {
+     "label": "1080P 30 S, MARK",
+     "values": [
+      2.85,
+      3.08
+     ]
+    }
+   ]
+  },
+  {
+   "name": "CPU TIME",
+   "rows": [
+    {
+     "label": "1920X804 130 S, MARK",
+     "values": [
+      1.9,
+      43.6
+     ]
+    },
+    {
+     "label": "1920X804 130 S, CAPTIONS",
+     "values": [
+      2.4,
+      44.3
+     ]
+    },
+    {
+     "label": "1080P 30 S, MARK",
+     "values": [
+      0.5,
+      10.2
+     ]
+    }
+   ]
+  }
+ ],
+ "suffix": " S",
+ "notes": [
+  "BOTH ENCODE ON THE GPU; ONE RUN EACH. THE CARD'S SINGLE VIDEO ENGINE DECODES AND ENCODES IN TURN, SO WALL TIME GAINS LESS THAN CPU TIME."
+ ]
+}

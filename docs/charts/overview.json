@@ -1,0 +1,128 @@
+{
+ "title": "PITO-CODECS AGAINST FFMPEG",
+ "unit": "TIMES FASTER OR SLOWER",
+ "better": "higher",
+ "subtitle": "RYZEN 9 9950X, RADEON RX 9060 XT (VA-API), FFMPEG 9.0.1",
+ "date": "2026-10-11",
+ "parties": [
+  {
+   "name": "PITO-CODECS"
+  },
+  {
+   "name": "FFMPEG 9.0.1"
+  }
+ ],
+ "groups": [
+  {
+   "name": "DECODE AND EXPORT",
+   "rows": [
+    {
+     "label": "FIRST FRAME H.264 CPU",
+     "values": [
+      245.89,
+      11.44
+     ]
+    },
+    {
+     "label": "FIRST FRAME HEVC GPU",
+     "values": [
+      80.41,
+      9.93
+     ]
+    },
+    {
+     "label": "FILMSTRIP HEVC 1440P",
+     "values": [
+      257,
+      20.7
+     ]
+    },
+    {
+     "label": "FILMSTRIP H.264 1080P",
+     "values": [
+      414,
+      46.4
+     ]
+    },
+    {
+     "label": "SMART CUT 1440P †",
+     "values": [
+      8.7,
+      3.0
+     ]
+    },
+    {
+     "label": "H.264 1080P DECODE GPU",
+     "values": [
+      814,
+      694
+     ]
+    },
+    {
+     "label": "HEVC 1080P DECODE CPU 1T",
+     "values": [
+      426,
+      418
+     ]
+    },
+    {
+     "label": "H.264 1080P DECODE CPU",
+     "values": [
+      1959,
+      2551
+     ]
+    }
+   ]
+  },
+  {
+   "name": "ENCODE, FILTERS, AUDIO",
+   "rows": [
+    {
+     "label": "H.264 1080P ENCODE GPU",
+     "values": [
+      645,
+      499
+     ]
+    },
+    {
+     "label": "HEVC 1080P ENCODE GPU",
+     "values": [
+      839,
+      686
+     ]
+    },
+    {
+     "label": "SCALE 1080P TO 720P",
+     "values": [
+      4351,
+      1695
+     ]
+    },
+    {
+     "label": "EBU R128 LOUDNESS",
+     "values": [
+      3200,
+      559
+     ]
+    },
+    {
+     "label": "AAC ENCODE",
+     "values": [
+      228,
+      130
+     ]
+    },
+    {
+     "label": "AAC DECODE",
+     "values": [
+      1003,
+      1861
+     ]
+    }
+   ]
+  }
+ ],
+ "notes": [
+  "† FRAME-ACCURATE SMART CUT AGAINST FFMPEG RE-ENCODING EVERY FRAME."
+ ]
+}

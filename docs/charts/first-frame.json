@@ -1,0 +1,59 @@
+{
+ "title": "TIME TO FIRST FRAME, 1440P",
+ "unit": "MILLISECONDS",
+ "better": "lower",
+ "subtitle": "RYZEN 9 9950X, RADEON RX 9060 XT (VA-API), FFMPEG 9.0.1",
+ "date": "2026-10-11",
+ "parties": [
+  {
+   "name": "PITO-CODECS"
+  },
+  {
+   "name": "FFMPEG 9.0.1"
+  }
+ ],
+ "groups": [
+  {
+   "name": "CPU",
+   "rows": [
+    {
+     "label": "H.264",
+     "values": [
+      4.1,
+      87.4
+     ]
+    },
+    {
+     "label": "HEVC",
+     "values": [
+      8.1,
+      106
+     ]
+    }
+   ]
+  },
+  {
+   "name": "GPU",
+   "rows": [
+    {
+     "label": "H.264",
+     "values": [
+      11.6,
+      85.7
+     ]
+    },
+    {
+     "label": "HEVC",
+     "values": [
+      12.4,
+      101
+     ]
+    }
+   ]
+  }
+ ],
+ "suffix": " MS",
+ "notes": [
+  "A COLD FILE EACH TIME: OPENED, PARSED, FIRST FRAME DECODED. FFMPEG'S TIME INCLUDES STARTING ITS PROCESS."
+ ]
+}
