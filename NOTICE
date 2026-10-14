@@ -342,3 +342,7 @@ covers it, all under the MIT licence like the code:
   bench-pipeline.png and bench-speedup.png: charts examples/bench.rs draws from
   its own measurements on public-domain NASA footage ("A Message of Resilience
   from the International Space Station")
+- docs/images/filmstrip.gif, overlay.gif, animated.gif and animated.webp:
+  pictures examples/readme_shots.rs makes with this repository's own decoders,
+  overlay blend and GIF and WebP encoders from public-domain NASA footage ("A
+  Message of Resilience from the International Space Station", NASA Johnson)
