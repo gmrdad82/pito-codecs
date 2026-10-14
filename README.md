@@ -384,4 +384,6 @@ Parts are adapted from [FilmCraft](https://github.com/storytold/filmcraft) (MIT 
 
 ## Licence
 
+<img src="assets/marks/pitomd-wordmark.svg" width="320" alt="PITO MD">
+
 The code is MIT licensed ([LICENSE](LICENSE)), © Catalin Ilinca. The PITO MD name and its logos are © Catalin Ilinca, all rights reserved, and are not covered by the MIT licence ([TRADEMARKS.md](TRADEMARKS.md)).

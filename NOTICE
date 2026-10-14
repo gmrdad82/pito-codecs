@@ -412,3 +412,9 @@ The Adler-32 in src/png/inflate.rs follows adler2 2.0.1
 89a031a0f42eeff31c70dc598b398cbf31f1680f) by Jonas Schievink and oyvindln,
 licensed 0BSD OR MIT OR Apache-2.0; it is used under the 0BSD terms, which ask
 for no notice, and is credited here.
+
+The PITO MD wordmark in assets/marks/pitomd-wordmark.svg is copied by bin/marks
+from the PITO MD brand masters at aa3aee8b232a1b848995bf3d9a012a01d4aff8ec
+(exports/pitomd/readme/wordmark.svg). The PITO MD name and its logos are
+© Catalin Ilinca, all rights reserved and not covered by the MIT licence
+(TRADEMARKS.md).
