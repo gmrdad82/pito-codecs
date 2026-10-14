@@ -1,5 +1,6 @@
 #[derive(Debug, Clone, Copy)]
 pub struct Simd {
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     sse41: bool,
 }
 
