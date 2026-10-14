@@ -1,9 +1,11 @@
+use std::any::Any;
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
-use std::sync::{Arc, LazyLock, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError, Weak};
 
 use crate::mkv;
-use crate::mp4::{AvcConfig, CodecConfig, HevcConfig, Reader, Track};
+use crate::mp4::{AvcConfig, CodecConfig, HevcConfig, Reader, Track, TrackKind};
 
 use super::native::{self, Readers, cached, rational, sorted};
 use super::probe::{AudioTrack, Probe};
@@ -76,7 +78,148 @@ fn mkv_video(r: &mkv::Reader) -> Result<(usize, &mkv::Track)> {
     Ok((v, mkv_track(r, v)?))
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct Starts {
+    pub file: f64,
+    pub tracks: Vec<Option<f64>>,
+    shift: Vec<i64>,
+}
+
+impl Starts {
+    pub fn track(&self, i: usize) -> Option<f64> {
+        self.tracks.get(i).copied().flatten()
+    }
+
+    pub fn shift(&self, i: usize) -> i64 {
+        self.shift.get(i).copied().unwrap_or(0)
+    }
+
+    fn new(firsts: Vec<Option<f64>>, ticks: impl Fn(usize, f64) -> i64) -> Starts {
+        let file = firsts
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|s| s.is_finite())
+            .fold(f64::INFINITY, f64::min);
+        let file = if file.is_finite() { file.max(0.0) } else { 0.0 };
+        let shift = (0..firsts.len())
+            .map(|i| if file > 0.0 { ticks(i, file) } else { 0 })
+            .collect();
+        Starts {
+            file,
+            tracks: firsts,
+            shift,
+        }
+    }
+}
+
+const START_BLOCKS: usize = 16;
+const START_SCAN: usize = 4096;
+const START_SPAN: f64 = 5.0;
+
+fn mp4_starts(r: &Reader) -> Starts {
+    let firsts = r
+        .tracks
+        .iter()
+        .map(|t| {
+            matches!(t.kind, TrackKind::Video | TrackKind::Audio)
+                .then(|| t.sample_at(i64::MIN).and_then(|k| t.presentation(k)))
+                .flatten()
+                .map(|p| t.seconds(p))
+        })
+        .collect();
+    Starts::new(firsts, |i, s| r.tracks.get(i).map_or(0, |t| t.ticks(s)))
+}
+
+fn mkv_starts(r: &mkv::Reader) -> Starts {
+    let wanted: Vec<bool> = r
+        .tracks
+        .iter()
+        .map(|t| matches!(t.kind, mkv::TrackKind::Video | mkv::TrackKind::Audio))
+        .collect();
+    let mut first: Vec<Option<i64>> = vec![None; r.tracks.len()];
+    let mut seen = vec![0usize; r.tracks.len()];
+    let mut earliest = f64::INFINITY;
+    let mut stream = r.stream();
+    for _ in 0..START_SCAN {
+        let Ok(Some(b)) = stream.next_block(None) else {
+            break;
+        };
+        let (Some(true), Some(t)) = (wanted.get(b.track).copied(), r.tracks.get(b.track)) else {
+            continue;
+        };
+        let at = t.seconds(b.pts);
+        if at > earliest + START_SPAN {
+            break;
+        }
+        earliest = earliest.min(at);
+        if seen[b.track] < START_BLOCKS {
+            seen[b.track] += 1;
+            first[b.track] = Some(first[b.track].map_or(b.pts, |f| f.min(b.pts)));
+        }
+        if wanted
+            .iter()
+            .zip(&seen)
+            .all(|(w, n)| !*w || *n >= START_BLOCKS)
+        {
+            break;
+        }
+    }
+    let firsts = first
+        .iter()
+        .zip(&r.tracks)
+        .map(|(f, t)| f.map(|p| t.seconds(p)))
+        .collect();
+    Starts::new(firsts, |i, s| r.tracks.get(i).map_or(0, |t| t.ticks(s)))
+}
+
+type Held = (Weak<dyn Any + Send + Sync>, Arc<Starts>);
+
+fn remembered(
+    at: usize,
+    make: impl FnOnce() -> (Weak<dyn Any + Send + Sync>, Starts),
+) -> Arc<Starts> {
+    static STARTS: LazyLock<Mutex<HashMap<usize, Held>>> = LazyLock::new(Default::default);
+    if let Some((w, s)) = STARTS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&at)
+        && w.strong_count() > 0
+    {
+        return s.clone();
+    }
+    let (w, s) = make();
+    let s = Arc::new(s);
+    let mut map = STARTS.lock().unwrap_or_else(PoisonError::into_inner);
+    if map.len() >= 256 {
+        map.retain(|_, (w, _)| w.strong_count() > 0);
+    }
+    map.insert(at, (w, s.clone()));
+    s
+}
+
 impl Demux {
+    pub fn starts(&self) -> Arc<Starts> {
+        match self {
+            Demux::Mp4(r) => remembered(Arc::as_ptr(r) as usize, || {
+                let any: Arc<dyn Any + Send + Sync> = r.clone();
+                (Arc::downgrade(&any), mp4_starts(r))
+            }),
+            Demux::Mkv(r) => remembered(Arc::as_ptr(r) as usize, || {
+                let any: Arc<dyn Any + Send + Sync> = r.clone();
+                (Arc::downgrade(&any), mkv_starts(r))
+            }),
+        }
+    }
+
+    pub fn start(&self) -> f64 {
+        self.starts().file
+    }
+
+    pub fn shift(&self, track: usize) -> i64 {
+        self.starts().shift(track)
+    }
+
     pub fn open(path: &Path) -> Result<Demux> {
         if is_matroska(path) {
             mkv_reader(path).map(Demux::Mkv)
@@ -101,6 +244,12 @@ impl Demux {
     }
 
     pub fn sample(&self, track: usize, i: usize) -> Option<(i64, i64, bool)> {
+        let (pts, dts, key) = self.raw_sample(track, i)?;
+        let shift = self.shift(track);
+        Some((pts.saturating_sub(shift), dts.saturating_sub(shift), key))
+    }
+
+    fn raw_sample(&self, track: usize, i: usize) -> Option<(i64, i64, bool)> {
         match self {
             Demux::Mp4(r) => {
                 let t = r.tracks.get(track)?;
@@ -140,21 +289,25 @@ impl Demux {
     }
 
     pub fn seek(&self, track: usize, from: f64) -> Result<(usize, i64)> {
-        match self {
+        let starts = self.starts();
+        let from = from.max(0.0) + starts.file;
+        let shift = starts.shift(track);
+        let (key, pts) = match self {
             Demux::Mp4(r) => {
                 let t = mp4_track(r, track)?;
-                let at = t.sample_at(t.ticks(from.max(0.0))).unwrap_or(0);
-                Ok((t.keyframe_before(at), t.presentation(at).unwrap_or(0)))
+                let at = t.sample_at(t.ticks(from)).unwrap_or(0);
+                (t.keyframe_before(at), t.presentation(at).unwrap_or(shift))
             }
             Demux::Mkv(r) => {
                 let t = mkv_track(r, track)?;
-                let at = t.sample_at(t.ticks(from.max(0.0))).unwrap_or(0);
-                Ok((
+                let at = t.sample_at(t.ticks(from)).unwrap_or(0);
+                (
                     t.keyframe_before(at),
-                    t.samples.get(at).map_or(0, |s| s.pts),
-                ))
+                    t.samples.get(at).map_or(shift, |s| s.pts),
+                )
             }
-        }
+        };
+        Ok((key, pts.saturating_sub(shift)))
     }
 
     pub fn stream(&self, track: usize) -> Result<Stream> {
@@ -240,7 +393,7 @@ fn video_end(stream: &mut mkv::Stream<'_, std::fs::File>, v: usize) -> Result<Op
     Ok(end)
 }
 
-pub fn probe_head(r: &mkv::Reader) -> Result<Option<Probe>> {
+pub fn probe_head(r: &Arc<mkv::Reader>) -> Result<Option<Probe>> {
     let (v, t) = mkv_video(r)?;
     let Some(ns) = t.default_duration.filter(|d| *d > 0) else {
         return Ok(None);
@@ -290,13 +443,15 @@ pub fn probe_head(r: &mkv::Reader) -> Result<Option<Probe>> {
     let Some(end) = end else {
         return Ok(None);
     };
-    let duration = t.seconds(end.saturating_sub(start)).max(0.0);
-    describe(r, t, (duration, 1e9 / ns as f64, None), first).map(Some)
+    let starts = Demux::Mkv(r.clone()).starts();
+    let duration = (t.seconds(end.saturating_sub(start)) - starts.file).max(0.0);
+    describe(r, t, (duration, 1e9 / ns as f64, None), first, &starts).map(Some)
 }
 
-pub fn probe(r: &mkv::Reader) -> Result<Probe> {
+pub fn probe(r: &Arc<mkv::Reader>) -> Result<Probe> {
     let (v, t) = mkv_video(r)?;
-    let duration = t.duration_seconds();
+    let starts = Demux::Mkv(r.clone()).starts();
+    let duration = (t.duration_seconds() - starts.file).max(0.0);
     let fps = match t.default_duration.filter(|d| *d > 0) {
         Some(ns) => 1e9 / ns as f64,
         None if duration > 0.0 => t.samples.len() as f64 / duration,
@@ -311,7 +466,7 @@ pub fn probe(r: &mkv::Reader) -> Result<Probe> {
         _ => None,
     };
     let frames = Some(t.samples.len() as u64);
-    describe(r, t, (duration, fps, frames), keyframe)
+    describe(r, t, (duration, fps, frames), keyframe, &starts)
 }
 
 fn describe(
@@ -319,6 +474,7 @@ fn describe(
     t: &mkv::Track,
     (duration, fps, frames): (f64, f64, Option<u64>),
     keyframe: Option<Vec<u8>>,
+    starts: &Starts,
 ) -> Result<Probe> {
     let (width, height) = t
         .video
@@ -357,11 +513,14 @@ fn describe(
                 rate: a.sample_rate(),
                 bitrate: None,
                 default: a.default,
+                start: starts.track(i),
             })
         })
         .collect();
     Ok(Probe {
         duration,
+        start: starts.file,
+        video_start: r.video().and_then(|v| starts.track(v)),
         fps: rational(fps),
         width,
         height,
@@ -397,14 +556,15 @@ pub fn frame_count(path: &Path) -> Result<u64> {
     }
 }
 
-pub fn keyframes(r: &mkv::Reader) -> Result<Vec<f64>> {
+pub fn keyframes(r: &Arc<mkv::Reader>) -> Result<Vec<f64>> {
     let (v, t) = mkv_video(r)?;
+    let start = Demux::Mkv(r.clone()).start();
     if !r.indexed {
         let mut stream = r.stream();
         let mut keys = Vec::new();
         while let Some(b) = stream.next_block(Some(v))? {
             if b.keyframe {
-                keys.push(t.seconds(b.pts).max(0.0));
+                keys.push((t.seconds(b.pts) - start).max(0.0));
             }
         }
         return Ok(sorted(keys));
@@ -413,7 +573,7 @@ pub fn keyframes(r: &mkv::Reader) -> Result<Vec<f64>> {
         t.samples
             .iter()
             .filter(|s| s.keyframe)
-            .map(|s| t.seconds(s.pts).max(0.0))
+            .map(|s| (t.seconds(s.pts) - start).max(0.0))
             .collect(),
     ))
 }

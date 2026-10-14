@@ -26,6 +26,8 @@ h264 1920x1080 at 60000/1001 fps, 10.0 s, 1 audio track(s)
 
 `Probe` also carries the profile, bit depth, rotation (`shown_size()` gives the size as displayed), the frame count when the container knows it, and an `AudioTrack` per audio track with its codec, channels, rate, language and title. `unsupported()` names any codec in the file that pito-codecs can't decode.
 
+Every time in the media front counts from the file's start, as ffmpeg's input times do: time 0 is the earliest start over the file's streams, `duration` runs from there to the end, and the times you pass to stills, `decode_video`, `decode_video_gpu`, the audio calls and export pieces, and the frame `pts` you get back, are on that clock. A file cut with its original timestamps kept (`-copyts`) therefore reads like any other. `start` gives the absolute time of time 0 in seconds, and `video_start` and each `AudioTrack`'s `start` give that stream's own first time when the reader knows it; an audio track that starts after time 0 reads as silence until its first sample.
+
 ## Routes
 
 Every decode and encode runs on one of three routes, `Route::Gpu`, `Route::Cpu` or `Route::Ffmpeg`. The order is always the GPU first, then our own CPU code; ffmpeg is used only when the app's settings pick it and finds it installed. `Prefs` holds those settings:

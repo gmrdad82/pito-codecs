@@ -10,14 +10,17 @@ use crate::media::{Error, Result};
 
 const LEAD: f64 = 0.5;
 const TAIL: f64 = 10.0;
+const GAP: f64 = 0.001;
 
 pub struct Feed {
     sound: Sound,
     pub rate: u32,
     pub channels: u16,
     from: f64,
+    base: f64,
     start: f64,
     origin: Option<f64>,
+    lead: usize,
     skip: Option<usize>,
     skipped: usize,
     buf: Vec<u8>,
@@ -39,7 +42,10 @@ enum At {
 impl Feed {
     pub fn open(d: &Demux, i: usize, from: f64) -> Result<Feed> {
         let sound = Sound::open(d, i)?;
-        let from_c = from.max(0.0);
+        let starts = d.starts();
+        let base = starts.file;
+        let from = from.max(0.0) + base;
+        let from_c = from;
         let (at, start, origin) = match d {
             Demux::Mp4(r) => {
                 let t = r
@@ -54,12 +60,13 @@ impl Feed {
                     })
                     .saturating_sub(1);
                 let start = t.seconds(t.presentation(first).unwrap_or(0));
+                let lead = starts.track(i).map_or(0.0, |s| (s - base).max(0.0));
                 let at = At::Indexed {
                     d: d.clone(),
                     i,
                     next: first,
                     count: t.samples.len(),
-                    end: t.duration_seconds().max(0.0),
+                    end: (lead + t.duration_seconds()).max(0.0),
                 };
                 (at, start, None)
             }
@@ -75,8 +82,10 @@ impl Feed {
             rate,
             channels,
             from,
+            base,
             start,
             origin,
+            lead: 0,
             skip: None,
             skipped: 0,
             buf: Vec::new(),
@@ -85,8 +94,17 @@ impl Feed {
         };
         if feed.origin.is_none() {
             feed.skip = Some(feed.skip_from(start));
+            feed.lead = feed.lead_to(start);
         }
         Ok(feed)
+    }
+
+    fn lead_to(&self, start: f64) -> usize {
+        if start - self.from >= GAP {
+            ((start - self.from) * self.rate as f64).round() as usize
+        } else {
+            0
+        }
     }
 
     fn skip_from(&self, start: f64) -> usize {
@@ -102,7 +120,10 @@ impl Feed {
     pub fn end(&self) -> f64 {
         match &self.at {
             At::Indexed { end, .. } => *end,
-            At::Mkv(l) => l.end(&self.sound),
+            At::Mkv(l) => match l.end(&self.sound) {
+                e if e > 0.0 => (e - self.base).max(0.0),
+                _ => 0.0,
+            },
         }
     }
 
@@ -110,7 +131,7 @@ impl Feed {
         let end = self.end();
         let to = if end > 0.0 { to.min(end) } else { to };
         to.is_finite().then(|| {
-            ((to - self.from.max(0.0)) * self.rate as f64)
+            ((to + self.base - self.from) * self.rate as f64)
                 .round()
                 .max(0.0) as usize
         })
@@ -150,9 +171,14 @@ impl Feed {
                 };
                 let s = self.skip_from(start);
                 self.skip = Some(s);
+                self.lead = self.lead_to(start);
                 s
             }
         };
+        if self.lead > 0 && got == self.channels {
+            out.resize(out.len() + self.lead * ch, 0.0);
+            self.lead = 0;
+        }
         let drop = skip.saturating_sub(self.skipped).min(frames);
         self.skipped += drop;
         if got == self.channels {

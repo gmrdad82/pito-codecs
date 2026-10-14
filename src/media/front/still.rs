@@ -235,11 +235,13 @@ fn mkv_stills(
         .ok_or_else(|| Error::Invalid("no video track".to_string()))?;
     let rotation = t.rotation();
     let color = tagged(&d, v);
+    let start = d.start();
+    let shift = d.shift(v);
     let mut keys: Vec<f64> = r
         .cues
         .iter()
         .filter(|c| c.track == t.number)
-        .map(|c| t.seconds(c.time as i64).max(0.0))
+        .map(|c| (t.seconds(c.time as i64) - start).max(0.0))
         .collect();
     keys.sort_by(f64::total_cmp);
     keys.dedup();
@@ -302,9 +304,14 @@ fn mkv_stills(
             match seek {
                 Seek::Keyframe => Ok(vec![native::still_mkv(r, cur, dec, first, height)?]),
                 Seek::Exact => {
-                    cur.seek(r, v, first)?;
+                    cur.seek(r, v, first + start)?;
                     let targets: Vec<i64> = batch.iter().map(|at| t.ticks(*at)).collect();
-                    let mut src = native::Packets::Mkv { r, cur, track: v };
+                    let mut src = native::Packets::Mkv {
+                        r,
+                        cur,
+                        track: v,
+                        shift,
+                    };
                     native::exact(&mut src, dec, &targets, rotation, height, color)
                 }
             }
