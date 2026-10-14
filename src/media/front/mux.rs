@@ -233,8 +233,8 @@ pub(super) fn gpu_check(
     size: (u32, u32),
     fps: (u32, u32),
     format: PixelFormat,
-) -> Result<bool> {
-    HwEncoder::new(codec, &gpu_config(codec, size, fps, format, 20, 60)).map(|e| e.composes())
+) -> Result<()> {
+    HwEncoder::new(codec, &gpu_config(codec, size, fps, format, 20, 60)).map(|_| ())
 }
 
 fn encoder(
@@ -304,6 +304,7 @@ struct Edge {
     packets: Vec<Packet>,
     avcc: Vec<u8>,
     entry: SampleEntry,
+    reasons: Vec<String>,
 }
 
 fn encode_edge(
@@ -320,18 +321,36 @@ fn encode_edge(
     let mut enc = encoder(job, video, crf, true, frames, threads)?;
     let mut packets = Vec::new();
     let mut quiet = job.quiet();
-    reencode(
-        &mut quiet,
-        si,
-        (from, frames),
-        0,
-        &mut |f: &Frame| {
-            packets.extend(enc.encode(f)?);
-            Ok(())
-        },
-        &mut None,
-        &mut |_| true,
-    )?;
+    let mut resident = Resident::new(&enc);
+    let on_gpu = resident.on
+        && job.sources[si].route == Route::Gpu
+        && resident.piece(
+            &mut quiet,
+            si,
+            (from, frames),
+            0,
+            &mut enc,
+            &mut |_, p| {
+                packets.extend(p);
+                Ok(())
+            },
+            &mut None,
+            &mut |_| true,
+        )?;
+    if !on_gpu {
+        reencode(
+            &mut quiet,
+            si,
+            (from, frames),
+            0,
+            &mut |f: &Frame| {
+                packets.extend(enc.encode(f)?);
+                Ok(())
+            },
+            &mut None,
+            &mut |_| true,
+        )?;
+    }
     packets.extend(enc.flush()?);
     let avcc = enc
         .extradata()
@@ -341,6 +360,7 @@ fn encode_edge(
         packets,
         avcc,
         entry,
+        reasons: resident.reasons,
     })
 }
 
@@ -484,6 +504,7 @@ fn vp9_edge(
         packets,
         avcc: config.to_bytes(),
         entry: SampleEntry::vp9(config, job.size.0 as u16, job.size.1 as u16),
+        reasons: Vec::new(),
     })
 }
 
@@ -954,7 +975,7 @@ fn whole_video(
                 (a, b - a),
                 at,
                 &mut enc,
-                &mut out,
+                &mut |e, p| out.feed(e, p),
                 &mut opts.overlay,
                 progress,
             )?;
@@ -1256,6 +1277,7 @@ fn smart_video(
     let (plan, order) = job.plan(&Prefs::default(), |si, part, keys| {
         planner.split(job, (si, part), keys, true)
     })?;
+    let mut edge_reasons: Vec<String> = Vec::new();
     let edges: Vec<usize> = (0..plan.len())
         .filter(|&i| matches!(plan[i].1, Part::Encode { .. }))
         .collect();
@@ -1387,6 +1409,11 @@ fn smart_video(
                         let e = ready
                             .remove(&i)
                             .ok_or_else(|| Error::Backend("an edge was not encoded".into()))?;
+                        for r in &e.reasons {
+                            if !edge_reasons.contains(r) {
+                                edge_reasons.push(r.clone());
+                            }
+                        }
                         let entry = if video.codec == Codec::Vp9 {
                             out.source(job, si, part)?
                         } else {
@@ -1427,7 +1454,9 @@ fn smart_video(
     let mux = out
         .mux
         .ok_or_else(|| Error::Invalid("no video to write".to_string()))?;
-    Ok((written.0, written.1, mux, planner.reasons))
+    let mut reasons = planner.reasons;
+    reasons.extend(edge_reasons);
+    Ok((written.0, written.1, mux, reasons))
 }
 
 fn copy_entry(job: &Job, si: usize) -> Result<(Vec<u8>, SampleEntry)> {

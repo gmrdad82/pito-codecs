@@ -310,7 +310,7 @@ fn export_to(
     };
     let format = match video.route {
         Route::Gpu => match super::mux::gpu_check(video.codec, size, fps, format) {
-            Ok(_) => format,
+            Ok(()) => format,
             Err(e) => {
                 video.reasons.push(format!(
                     "the GPU encoder failed ({e}); encoding H.264 on the CPU instead"

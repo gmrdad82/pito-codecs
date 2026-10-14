@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::export::{Job, Overlay, Stage, Tell, convert_depth};
-use super::mux::{Sink, VEnc};
+use super::mux::VEnc;
 use super::native;
 use super::picture::{Blender, resize, scale};
 use super::video::IN_FLIGHT;
@@ -56,7 +56,7 @@ impl Resident {
         (from, frames): (i64, i64),
         at: i64,
         enc: &mut VEnc,
-        out: &mut Sink,
+        out: &mut dyn FnMut(&VEnc, Vec<Packet>) -> Result<()>,
         overlay: &mut Option<Overlay>,
         progress: Tell,
     ) -> Result<bool> {
@@ -98,7 +98,7 @@ impl Resident {
             None
         };
         self.note(
-            "frames stay on the GPU: decoded, overlaid and encoded there through VA-API"
+            "frames stay on the GPU from decode to encode, overlay included, through VA-API"
                 .to_string(),
         );
         let time_base = TimeBase::new(job.fps.1, job.fps.0);
@@ -142,7 +142,7 @@ impl Resident {
                 }
                 Shown::Cpu(f) => self.on_cpu(job, f, pts, layer.as_ref(), enc)?,
             };
-            out.feed(enc, packets)?;
+            out(enc, packets)?;
             n += 1;
             job.done += 1;
             if n % 15 == 0 {
