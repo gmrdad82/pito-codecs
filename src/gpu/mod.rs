@@ -21,7 +21,8 @@ mod videotoolbox;
 #[cfg(target_os = "windows")]
 mod media_foundation;
 
-use crate::media::{self, Codec, Error, Frame, Packet, Result, TimeBase};
+use crate::media::{self, Codec, Error, Frame, Packet, Result, Rgba, TimeBase};
+use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
 pub use vaapi::{DmaBuf, DmaLayer, DmaObject, DmaPlane};
@@ -184,6 +185,14 @@ pub(crate) trait EncoderBackend: Send {
     fn extradata(&self) -> Option<&[u8]>;
     fn encode_gpu(&mut self, frame: &GpuFrame) -> Result<Vec<Packet>> {
         self.encode(&frame.download()?)
+    }
+    fn composes(&self) -> bool {
+        false
+    }
+    fn encode_gpu_over(&mut self, _frame: &GpuFrame, _layer: &Arc<Rgba>) -> Result<Vec<Packet>> {
+        Err(Error::Unsupported(
+            "this GPU encoder can't draw an overlay on the GPU".into(),
+        ))
     }
 }
 
@@ -515,6 +524,14 @@ impl HwEncoder {
 
     pub fn encode_gpu(&mut self, frame: &GpuFrame) -> Result<Vec<Packet>> {
         self.inner.encode_gpu(frame)
+    }
+
+    pub fn composes(&self) -> bool {
+        self.inner.composes()
+    }
+
+    pub fn encode_gpu_over(&mut self, frame: &GpuFrame, layer: &Arc<Rgba>) -> Result<Vec<Packet>> {
+        self.inner.encode_gpu_over(frame, layer)
     }
 
     pub fn flush(&mut self) -> Result<Vec<Packet>> {

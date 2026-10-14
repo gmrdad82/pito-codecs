@@ -16,9 +16,10 @@ use crate::gpu::nal::{self, Framing};
 use crate::gpu::{
     Backend, DecoderBackend, Direction, EncoderBackend, EncoderConfig, GpuFrame, GpuInner,
 };
-use crate::media::{Codec, Error, Frame, Packet, Result};
+use crate::media::{Codec, Error, Frame, Packet, Result, Rgba};
 use crate::syntax::bits::unescape_rbsp;
 use crate::syntax::{h264 as h264_syntax, hevc as hevc_syntax};
+use std::sync::Arc;
 
 impl Picture {
     pub fn into_frame(self) -> Result<Frame> {
@@ -450,6 +451,19 @@ impl EncoderBackend for VaEncoder {
         match &frame.inner {
             GpuInner::VaApi(g) => self.encode_surface(g, frame.time_base()),
             GpuInner::Cpu(f) => VaEncoder::encode(self, f),
+        }
+    }
+
+    fn composes(&self) -> bool {
+        VaEncoder::composes(self)
+    }
+
+    fn encode_gpu_over(&mut self, frame: &GpuFrame, layer: &Arc<Rgba>) -> Result<Vec<Packet>> {
+        match &frame.inner {
+            GpuInner::VaApi(g) => self.encode_surface_over(g, frame.time_base(), layer),
+            GpuInner::Cpu(_) => Err(Error::Unsupported(
+                "the frame is in system memory, not on the GPU".into(),
+            )),
         }
     }
 }

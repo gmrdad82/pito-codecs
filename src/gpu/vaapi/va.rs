@@ -10,7 +10,7 @@ use super::ffi::{self, VAConfigAttrib, VAImage, VAImageFormat, VASurfaceID};
 use super::host::HostBuffer;
 use super::{Accel, LAG, SLACK};
 use crate::gpu::biplanar::{self, Biplanar, Geometry};
-use crate::media::Frame;
+use crate::media::{Frame, Rgba};
 
 struct Api {
     _va: Library,
@@ -311,6 +311,60 @@ impl Display {
         };
         self.check(st, "vaCreateSurfaces (import)")?;
         Ok(surface)
+    }
+
+    fn create_rgba(&self, size: (u32, u32)) -> Result<VASurfaceID, String> {
+        let mut attributes = [ffi::VASurfaceAttrib {
+            type_: ffi::VASurfaceAttribPixelFormat,
+            flags: ffi::VA_SURFACE_ATTRIB_SETTABLE,
+            value: ffi::VAGenericValue {
+                type_: ffi::VAGenericValueTypeInteger,
+                value: ffi::VAGenericValueUnion {
+                    i: ffi::VA_FOURCC_RGBA as c_int,
+                },
+            },
+        }];
+        let mut surface = ffi::VA_INVALID_SURFACE;
+        let st = unsafe {
+            (self.api.create_surfaces)(
+                self.dpy,
+                ffi::VA_RT_FORMAT_RGB32,
+                size.0,
+                size.1,
+                &mut surface,
+                1,
+                attributes.as_mut_ptr().cast(),
+                attributes.len() as c_uint,
+            )
+        };
+        self.check(st, "vaCreateSurfaces (RGBA)")?;
+        Ok(surface)
+    }
+
+    fn create_rgba_image(&self, size: (u32, u32)) -> Result<VAImage, String> {
+        let mut format = VAImageFormat {
+            fourcc: ffi::VA_FOURCC_RGBA,
+            byte_order: 1,
+            bits_per_pixel: 32,
+            depth: 32,
+            red_mask: 0x0000_00ff,
+            green_mask: 0x0000_ff00,
+            blue_mask: 0x00ff_0000,
+            alpha_mask: 0xff00_0000,
+            ..Default::default()
+        };
+        let mut image = VAImage {
+            image_id: ffi::VA_INVALID_ID,
+            buf: ffi::VA_INVALID_ID,
+            ..Default::default()
+        };
+        let (w, h) = (
+            c_int::try_from(size.0).map_err(|_| "picture too wide")?,
+            c_int::try_from(size.1).map_err(|_| "picture too tall")?,
+        );
+        let st = unsafe { (self.api.create_image)(self.dpy, &mut format, w, h, &mut image) };
+        self.check(st, "vaCreateImage (RGBA)")?;
+        Ok(image)
     }
 
     fn create_context(
@@ -1320,59 +1374,294 @@ impl Vpp {
         dst: VASurfaceID,
         size: (u32, u32),
     ) -> Result<(), String> {
-        let (x, y, w, h) = crop;
-        let narrow = |v: u32| u16::try_from(v).map_err(|_| "picture too large".to_string());
-        let wide = |v: u32| i16::try_from(v).map_err(|_| "picture too large".to_string());
-        let from = ffi::VARectangle {
-            x: wide(x)?,
-            y: wide(y)?,
-            width: narrow(w)?,
-            height: narrow(h)?,
-        };
-        let to = ffi::VARectangle {
-            x: 0,
-            y: 0,
-            width: narrow(size.0)?,
-            height: narrow(size.1)?,
-        };
-        let params = ffi::VAProcPipelineParameterBuffer {
-            surface: src,
-            surface_region: &from,
-            surface_color_standard: ffi::VAProcColorStandardBT709,
-            output_region: &to,
-            output_background_color: 0xff00_0000,
-            output_color_standard: ffi::VAProcColorStandardBT709,
-            pipeline_flags: 0,
-            filter_flags: 0,
-            filters: std::ptr::null_mut(),
-            num_filters: 0,
-            forward_references: std::ptr::null_mut(),
-            num_forward_references: 0,
-            backward_references: std::ptr::null_mut(),
-            num_backward_references: 0,
-            rotation_state: 0,
-            blend_state: std::ptr::null(),
-            mirror_state: 0,
-            additional_outputs: std::ptr::null_mut(),
-            num_additional_outputs: 0,
-            input_surface_flag: 0,
-            output_surface_flag: 0,
-            input_color_properties: ffi::VAProcColorProperties::default(),
-            output_color_properties: ffi::VAProcColorProperties::default(),
-            processing_mode: 0,
-            output_hdr_metadata: std::ptr::null_mut(),
-            va_reserved: [0; ffi::PROC_RESERVED],
-        };
+        self.compose(src, crop, dst, size, None)
+    }
+
+    fn compose(
+        &self,
+        src: VASurfaceID,
+        crop: (u32, u32, u32, u32),
+        dst: VASurfaceID,
+        size: (u32, u32),
+        over: Option<Over>,
+    ) -> Result<(), String> {
+        let from = rectangle(crop)?;
+        let to = rectangle((0, 0, size.0, size.1))?;
+        let video = pipeline(
+            src,
+            &from,
+            &to,
+            ffi::VAProcColorStandardBT709,
+            std::ptr::null(),
+        );
         let mut buffers = vec![self.display.value_buffer(
             self.context,
             ffi::VAProcPipelineParameterBufferType,
-            &params,
+            &video,
         )?];
+        let blend = ffi::VABlendState {
+            flags: ffi::VA_BLEND_PREMULTIPLIED_ALPHA,
+            global_alpha: 1.0,
+            ..Default::default()
+        };
+        if let Some(o) = over {
+            let painted = rectangle((0, 0, o.rect.2, o.rect.3))?;
+            let placed = rectangle(o.rect)?;
+            let mut layer = pipeline(
+                o.surface,
+                &painted,
+                &placed,
+                o.standard,
+                (&blend as *const ffi::VABlendState).cast(),
+            );
+            layer.output_color_properties.chroma_sample_location =
+                ffi::VA_CHROMA_SITING_VERTICAL_CENTER | ffi::VA_CHROMA_SITING_HORIZONTAL_CENTER;
+            match self.display.value_buffer(
+                self.context,
+                ffi::VAProcPipelineParameterBufferType,
+                &layer,
+            ) {
+                Ok(id) => buffers.push(id),
+                Err(e) => {
+                    self.display.destroy_buffers(&buffers);
+                    return Err(e);
+                }
+            }
+        }
         let mut groups: Vec<&mut [ffi::VABufferID]> = vec![&mut buffers[..]];
         let done = self.display.picture(self.context, dst, &mut groups);
         self.display.destroy_buffers(&buffers);
         done
     }
+}
+
+fn rectangle((x, y, w, h): (u32, u32, u32, u32)) -> Result<ffi::VARectangle, String> {
+    let narrow = |v: u32| u16::try_from(v).map_err(|_| "picture too large".to_string());
+    let wide = |v: u32| i16::try_from(v).map_err(|_| "picture too large".to_string());
+    Ok(ffi::VARectangle {
+        x: wide(x)?,
+        y: wide(y)?,
+        width: narrow(w)?,
+        height: narrow(h)?,
+    })
+}
+
+fn pipeline(
+    surface: VASurfaceID,
+    from: &ffi::VARectangle,
+    to: &ffi::VARectangle,
+    standard: c_int,
+    blend_state: *const c_void,
+) -> ffi::VAProcPipelineParameterBuffer {
+    ffi::VAProcPipelineParameterBuffer {
+        surface,
+        surface_region: from,
+        surface_color_standard: standard,
+        output_region: to,
+        output_background_color: 0xff00_0000,
+        output_color_standard: standard,
+        pipeline_flags: 0,
+        filter_flags: 0,
+        filters: std::ptr::null_mut(),
+        num_filters: 0,
+        forward_references: std::ptr::null_mut(),
+        num_forward_references: 0,
+        backward_references: std::ptr::null_mut(),
+        num_backward_references: 0,
+        rotation_state: 0,
+        blend_state,
+        mirror_state: 0,
+        additional_outputs: std::ptr::null_mut(),
+        num_additional_outputs: 0,
+        input_surface_flag: 0,
+        output_surface_flag: 0,
+        input_color_properties: ffi::VAProcColorProperties::default(),
+        output_color_properties: ffi::VAProcColorProperties::default(),
+        processing_mode: 0,
+        output_hdr_metadata: std::ptr::null_mut(),
+        va_reserved: [0; ffi::PROC_RESERVED],
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Over {
+    surface: VASurfaceID,
+    rect: (u32, u32, u32, u32),
+    standard: c_int,
+}
+
+const PAINTED: usize = 3;
+
+struct Painted {
+    surface: VASurfaceID,
+    image: VAImage,
+    size: (u32, u32),
+}
+
+struct Shown {
+    layer: Arc<Rgba>,
+    size: (u32, u32),
+    over: Option<Over>,
+}
+
+struct Painter {
+    display: Arc<Display>,
+    ring: Vec<Painted>,
+    next: usize,
+    layer: Option<Shown>,
+}
+
+impl Painter {
+    fn new(display: Arc<Display>) -> Self {
+        Self {
+            display,
+            ring: Vec::new(),
+            next: 0,
+            layer: None,
+        }
+    }
+
+    fn paint(&mut self, layer: &Arc<Rgba>, size: (u32, u32)) -> Result<Option<Over>, String> {
+        if let Some(shown) = &self.layer
+            && Arc::ptr_eq(&shown.layer, layer)
+            && shown.size == size
+        {
+            return Ok(shown.over);
+        }
+        self.layer = None;
+        if (layer.width, layer.height) != size {
+            return Err(format!(
+                "the overlay is {}x{}, the picture {}x{}",
+                layer.width, layer.height, size.0, size.1
+            ));
+        }
+        let over = match painted_box(layer) {
+            Some(rect) => Some(self.upload(layer, rect, size)?),
+            None => None,
+        };
+        self.layer = Some(Shown {
+            layer: layer.clone(),
+            size,
+            over,
+        });
+        Ok(over)
+    }
+
+    fn upload(
+        &mut self,
+        layer: &Rgba,
+        (x, y, w, h): (u32, u32, u32, u32),
+        size: (u32, u32),
+    ) -> Result<Over, String> {
+        let want = (w.next_multiple_of(64), h.next_multiple_of(64));
+        let i = self.next % PAINTED;
+        self.next = self.next.wrapping_add(1);
+        let fits = self
+            .ring
+            .get(i)
+            .is_some_and(|p| p.size.0 >= want.0 && p.size.1 >= want.1);
+        if !fits {
+            let surface = self.display.create_rgba(want)?;
+            let image = match self.display.create_rgba_image(want) {
+                Ok(image) => image,
+                Err(e) => {
+                    self.display.release(
+                        None,
+                        ffi::VA_INVALID_ID,
+                        &mut [surface],
+                        ffi::VA_INVALID_ID,
+                    );
+                    return Err(e);
+                }
+            };
+            let fresh = Painted {
+                surface,
+                image,
+                size: want,
+            };
+            if i < self.ring.len() {
+                let mut old = std::mem::replace(&mut self.ring[i], fresh);
+                self.display.release(
+                    Some(old.image),
+                    ffi::VA_INVALID_ID,
+                    std::slice::from_mut(&mut old.surface),
+                    ffi::VA_INVALID_ID,
+                );
+            } else {
+                self.ring.push(fresh);
+            }
+        }
+        let slot = self.ring.get(i).ok_or("no overlay surface")?;
+        let image = slot.image;
+        let (pitch, offset) = (image.pitches[0] as usize, image.offsets[0] as usize);
+        let width = layer.width as usize;
+        self.display.with_image(&image, |data| {
+            data.fill(0);
+            for r in 0..h as usize {
+                let from = ((y as usize + r) * width + x as usize) * 4;
+                let src = layer
+                    .data
+                    .get(from..from + w as usize * 4)
+                    .ok_or("the overlay is shorter than its size")?;
+                let at = offset + r * pitch;
+                let dst = data
+                    .get_mut(at..at + w as usize * 4)
+                    .ok_or("the overlay image is too small")?;
+                for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                    let a = u32::from(s[3]);
+                    for k in 0..3 {
+                        d[k] = ((u32::from(s[k]) * a + 127) / 255) as u8;
+                    }
+                    d[3] = s[3];
+                }
+            }
+            Ok(())
+        })?;
+        self.display.put_image(slot.surface, &image, slot.size)?;
+        Ok(Over {
+            surface: slot.surface,
+            rect: (x, y, w, h),
+            standard: if size.1 >= 720 {
+                ffi::VAProcColorStandardBT709
+            } else {
+                ffi::VAProcColorStandardBT601
+            },
+        })
+    }
+}
+
+impl Drop for Painter {
+    fn drop(&mut self) {
+        for p in &mut self.ring {
+            self.display.release(
+                Some(p.image),
+                ffi::VA_INVALID_ID,
+                std::slice::from_mut(&mut p.surface),
+                ffi::VA_INVALID_ID,
+            );
+        }
+    }
+}
+
+fn painted_box(layer: &Rgba) -> Option<(u32, u32, u32, u32)> {
+    let (w, h) = (layer.width as usize, layer.height as usize);
+    let rows = layer.data.get(..w * h * 4)?.chunks_exact(w * 4);
+    let mut span: Option<(usize, usize, usize, usize)> = None;
+    for (y, row) in rows.enumerate() {
+        let alpha = || row.iter().skip(3).step_by(4);
+        let Some(first) = alpha().position(|&a| a != 0) else {
+            continue;
+        };
+        let last = w - 1 - alpha().rev().position(|&a| a != 0).unwrap_or(0);
+        span = Some(match span {
+            Some((x0, y0, x1, _)) => (x0.min(first), y0, x1.max(last), y),
+            None => (first, y, last, y),
+        });
+    }
+    let (x0, y0, x1, y1) = span?;
+    let (x0, y0) = (x0 & !1, y0 & !1);
+    let (x1, y1) = (((x1 + 2) & !1).min(w), ((y1 + 2) & !1).min(h));
+    Some((x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32))
 }
 
 pub struct Scaler {
@@ -1470,6 +1759,7 @@ pub struct EncodeSession {
     inputs: usize,
     derive: bool,
     vpp: Option<Vpp>,
+    painter: Option<Painter>,
 }
 
 pub struct EncodeSetup {
@@ -1529,6 +1819,7 @@ impl EncodeSession {
             inputs: setup.inputs,
             derive: std::env::var_os("PITO_VA_NO_DERIVE").is_none(),
             vpp: None,
+            painter: None,
         };
         s.surfaces =
             s.display
@@ -1577,6 +1868,39 @@ impl EncodeSession {
         }
         match &self.vpp {
             Some(vpp) => vpp.blit(src, surface, size),
+            None => Err("no VA-API video processor".into()),
+        }
+    }
+
+    pub fn composes(&self) -> bool {
+        self.display.vendor().starts_with("Mesa")
+    }
+
+    pub fn blit_over(
+        &mut self,
+        surface: VASurfaceID,
+        src: &GpuSurface,
+        size: (u32, u32),
+        layer: &Arc<Rgba>,
+    ) -> Result<(), String> {
+        if !self.composes() {
+            return Err(format!(
+                "drawing an overlay on the GPU is tested only on Mesa's VA-API, not {}",
+                self.display.vendor()
+            ));
+        }
+        if !Arc::ptr_eq(&src.pool.display, &self.display) {
+            return Err("the GPU frame is on another VA display".into());
+        }
+        if self.vpp.is_none() {
+            self.vpp = Some(Vpp::new(self.display.clone())?);
+        }
+        let painter = self
+            .painter
+            .get_or_insert_with(|| Painter::new(self.display.clone()));
+        let over = painter.paint(layer, size)?;
+        match &self.vpp {
+            Some(vpp) => vpp.compose(src.id()?, src.geometry.crop, surface, size, over),
             None => Err("no VA-API video processor".into()),
         }
     }
@@ -1661,6 +1985,8 @@ impl EncodeSession {
 
 impl Drop for EncodeSession {
     fn drop(&mut self) {
+        self.painter = None;
+        self.vpp = None;
         self.display.destroy_buffers(&self.coded);
         self.display.release(
             self.image.take(),
@@ -1668,5 +1994,23 @@ impl Drop for EncodeSession {
             &mut self.surfaces,
             self.config,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::painted_box;
+    use crate::media::Rgba;
+
+    #[test]
+    fn the_painted_box_covers_every_visible_pixel_on_even_bounds() {
+        let mut layer = Rgba::new(16, 10);
+        assert_eq!(painted_box(&layer), None);
+        for (x, y) in [(3, 3), (10, 6)] {
+            layer.data[(y * 16 + x) * 4 + 3] = 1;
+        }
+        assert_eq!(painted_box(&layer), Some((2, 2, 10, 6)));
+        layer.data[(9 * 16 + 15) * 4 + 3] = 255;
+        assert_eq!(painted_box(&layer), Some((2, 2, 14, 8)));
     }
 }

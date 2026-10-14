@@ -308,9 +308,13 @@ fn export_to(
     } else {
         PixelFormat::Yuv420p8
     };
+    let mut composes = false;
     let format = match video.route {
         Route::Gpu => match super::mux::gpu_check(video.codec, size, fps, format) {
-            Ok(()) => format,
+            Ok(c) => {
+                composes = c;
+                format
+            }
             Err(e) => {
                 video.reasons.push(format!(
                     "the GPU encoder failed ({e}); encoding H.264 on the CPU instead"
@@ -323,24 +327,6 @@ fn export_to(
         Route::Cpu => PixelFormat::Yuv420p8,
         Route::Ffmpeg => format,
     };
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-    for s in &mut sources {
-        if let Some(codec) = s.probe.video_codec
-            && let Some(why) =
-                export_decode(codec, s.route, video.route, &opts.prefs, &caps, threads)
-        {
-            s.route = Route::Cpu;
-            s.reasons.push(why);
-        }
-    }
-    let mut reasons: Vec<String> = video.reasons.clone();
-    for s in &sources {
-        for r in &s.reasons {
-            if !reasons.contains(r) {
-                reasons.push(r.clone());
-            }
-        }
-    }
     let same = sources.iter().all(|s| {
         s.probe.video_codec == Some(video.codec)
             && s.probe.fps == fps
@@ -384,6 +370,32 @@ fn export_to(
         None
     };
     let smart = why.is_none();
+    let resident = composes && !smart;
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    for s in &mut sources {
+        if let Some(codec) = s.probe.video_codec
+            && let Some(why) = export_decode(
+                codec,
+                s.route,
+                video.route,
+                &opts.prefs,
+                &caps,
+                threads,
+                resident,
+            )
+        {
+            s.route = Route::Cpu;
+            s.reasons.push(why);
+        }
+    }
+    let mut reasons: Vec<String> = video.reasons.clone();
+    for s in &sources {
+        for r in &s.reasons {
+            if !reasons.contains(r) {
+                reasons.push(r.clone());
+            }
+        }
+    }
     reasons.extend(why);
     let work = std::path::absolute(out.with_extension("parts"))?;
     if work.exists() {
@@ -795,7 +807,7 @@ pub(super) fn reencode(
     Ok(())
 }
 
-fn convert_depth(frame: &Frame, format: PixelFormat) -> Frame {
+pub(super) fn convert_depth(frame: &Frame, format: PixelFormat) -> Frame {
     let mut out = Frame::new(
         format,
         frame.width,
