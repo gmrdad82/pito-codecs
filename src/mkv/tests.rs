@@ -329,3 +329,71 @@ fn remux_cuts_keyframe_to_keyframe() {
         }
     }
 }
+
+struct Counted {
+    file: std::fs::File,
+    read: std::sync::atomic::AtomicU64,
+}
+
+impl ByteSource for Counted {
+    fn len(&self) -> u64 {
+        self.file.len()
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        self.read
+            .fetch_add(buf.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        self.file.read_at(offset, buf)
+    }
+}
+
+#[test]
+fn cues_open_and_seek_late_without_a_walk() {
+    if !tools() {
+        return;
+    }
+    let path = dir().join("long.mkv");
+    if !path.exists() {
+        let tmp = dir().join(format!(".{}-long.mkv", std::process::id()));
+        let st = Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("testsrc2=size=320x240:rate=30:duration=120")
+            .args(H264)
+            .args(["-an", "-b:v", "800k"])
+            .arg(&tmp)
+            .status()
+            .unwrap();
+        assert!(st.success());
+        std::fs::rename(&tmp, &path).unwrap();
+    }
+    let full = Reader::open(&path).unwrap();
+    let v = full.video().unwrap();
+    let file = std::fs::File::open(&path).unwrap();
+    let len = file.metadata().unwrap().len();
+    let lazy = Reader::with_options(
+        Counted {
+            file,
+            read: 0.into(),
+        },
+        ReadOptions { index: false },
+    )
+    .unwrap();
+    assert!(!lazy.cues.is_empty());
+    let mut s = lazy.stream();
+    let mut data = Vec::new();
+    s.seek(v, 110.0).unwrap();
+    let b = s.next_into(&mut data).unwrap().unwrap();
+    let t = &full.tracks[v];
+    let want = t.samples[t.keyframe_at(t.ticks(110.0)).unwrap()];
+    assert_eq!((b.pts, b.keyframe), (want.pts, true));
+    assert_eq!(
+        data,
+        full.read(v, t.samples.iter().position(|x| x.pts == want.pts).unwrap())
+            .unwrap()
+    );
+    let read = lazy
+        .source()
+        .read
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert!(read < len / 4, "read {read} of {len}");
+}

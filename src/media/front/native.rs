@@ -73,7 +73,7 @@ pub(super) fn key(path: &Path) -> Result<Key> {
     Ok((path.to_path_buf(), meta.len(), meta.modified().ok()))
 }
 
-pub(super) type Readers<R> = LazyLock<Mutex<HashMap<Key, Arc<R>>>>;
+pub(super) type Readers<R> = LazyLock<Mutex<HashMap<Key, Arc<OnceLock<Option<Arc<R>>>>>>>;
 
 pub(super) fn cached<R>(
     readers: &Readers<R>,
@@ -81,20 +81,36 @@ pub(super) fn cached<R>(
     open: impl FnOnce(&Path) -> Result<R>,
 ) -> Result<Arc<R>> {
     let key = key(path)?;
-    if let Some(r) = readers
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&key)
-    {
+    let slot = {
+        let mut map = readers.lock().unwrap_or_else(PoisonError::into_inner);
+        if map.len() >= 64 && !map.contains_key(&key) {
+            map.clear();
+        }
+        map.entry(key.clone()).or_default().clone()
+    };
+    let mut failed = None;
+    let got = slot.get_or_init(|| match open(path) {
+        Ok(r) => Some(Arc::new(r)),
+        Err(e) => {
+            failed = Some(e);
+            None
+        }
+    });
+    if let Some(r) = got {
         return Ok(r.clone());
     }
-    let r = Arc::new(open(path)?);
     let mut map = readers.lock().unwrap_or_else(PoisonError::into_inner);
-    if map.len() >= 64 {
-        map.clear();
+    if map.get(&key).is_some_and(|s| Arc::ptr_eq(s, &slot)) {
+        map.remove(&key);
     }
-    map.insert(key, r.clone());
-    Ok(r)
+    drop(map);
+    match failed {
+        Some(e) => Err(e),
+        None => Err(Error::Invalid(format!(
+            "{} could not be opened",
+            path.display()
+        ))),
+    }
 }
 
 pub fn reader(path: &Path) -> Result<Arc<Reader>> {
@@ -406,13 +422,58 @@ pub struct Frames {
     gpu: VecDeque<GpuFrame>,
     flushed: bool,
     buf: Vec<u8>,
+    cur: Option<(Box<crate::mkv::Cursor>, i64)>,
+}
+
+const REORDER: usize = 16;
+
+fn mkv_start(r: &crate::mkv::Reader, track: usize, from: f64) -> Result<(crate::mkv::Cursor, i64)> {
+    let t = r
+        .tracks
+        .get(track)
+        .ok_or_else(|| Error::Invalid(format!("no track {track}")))?;
+    let target = t.ticks(from.max(0.0));
+    let mut cur = crate::mkv::Cursor::new(r);
+    cur.seek(r, track, from.max(0.0))?;
+    let mut scan = cur.clone();
+    let (mut best, mut low) = (None::<i64>, None::<i64>);
+    let mut after = None::<usize>;
+    let mut first = true;
+    while let Some(b) = scan.next_block(r, Some(track))? {
+        if b.pts <= target {
+            best = best.max(Some(b.pts));
+        }
+        low = Some(low.map_or(b.pts, |l| l.min(b.pts)));
+        if !first && b.keyframe && b.pts > target && after.is_none() {
+            after = Some(0);
+        }
+        if let Some(n) = after.as_mut() {
+            *n += 1;
+            if *n > REORDER {
+                break;
+            }
+        }
+        first = false;
+    }
+    Ok((cur, best.or(low).unwrap_or(0)))
 }
 
 impl Frames {
     pub fn open(demux: Demux, from: f64, route: Route) -> Result<Frames> {
         let track = demux.video()?;
         let (dec, reason) = Decoder::for_route(&demux.stream(track)?, threads(), route)?;
-        let (next, start) = demux.seek(track, from)?;
+        let (next, start, cur) = match &demux {
+            Demux::Mkv(r) => {
+                let starts = demux.starts();
+                let shift = starts.shift(track);
+                let (cur, start) = mkv_start(r, track, from.max(0.0) + starts.file)?;
+                (0, start.saturating_sub(shift), Some((Box::new(cur), shift)))
+            }
+            Demux::Mp4(_) => {
+                let (next, start) = demux.seek(track, from)?;
+                (next, start, None)
+            }
+        };
         Ok(Frames {
             reason,
             demux,
@@ -424,6 +485,7 @@ impl Frames {
             gpu: VecDeque::new(),
             flushed: false,
             buf: Vec::new(),
+            cur,
         })
     }
 
@@ -477,9 +539,22 @@ impl Frames {
         None
     }
 
+    fn packet(&mut self) -> Result<Option<(i64, i64, bool)>> {
+        if let (Some((cur, shift)), Demux::Mkv(r)) = (self.cur.as_mut(), &self.demux) {
+            return Ok(cur.next_of(r, Some(self.track), &mut self.buf)?.map(|b| {
+                let pts = b.pts.saturating_sub(*shift);
+                (pts, pts, b.keyframe)
+            }));
+        }
+        let Some(s) = self.demux.sample(self.track, self.next) else {
+            return Ok(None);
+        };
+        self.demux.read_into(self.track, self.next, &mut self.buf)?;
+        Ok(Some(s))
+    }
+
     fn pump(&mut self, gpu: bool) -> Result<bool> {
-        if let Some((pts, dts, keyframe)) = self.demux.sample(self.track, self.next) {
-            self.demux.read_into(self.track, self.next, &mut self.buf)?;
+        if let Some((pts, dts, keyframe)) = self.packet()? {
             let packet = Packet {
                 data: std::mem::take(&mut self.buf),
                 pts,

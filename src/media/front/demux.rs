@@ -26,29 +26,19 @@ pub struct Stream {
     pub color: Option<(u8, bool)>,
 }
 
-static MKV_READERS: Readers<mkv::Reader> = LazyLock::new(Default::default);
 static MKV_HEADS: Readers<mkv::Reader> = LazyLock::new(Default::default);
 
 fn mkv_reader(path: &Path) -> Result<Arc<mkv::Reader>> {
-    cached(&MKV_READERS, path, |p| mkv::Reader::open_video_index(p))
+    cached(&MKV_HEADS, path, |p| {
+        mkv::Reader::open_with(p, mkv::ReadOptions { index: false })
+    })
 }
 
 pub fn mkv_head(path: &Path) -> Result<Option<Arc<mkv::Reader>>> {
     if !is_matroska(path) {
         return Ok(None);
     }
-    let key = native::key(path)?;
-    if let Some(r) = MKV_READERS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&key)
-    {
-        return Ok(Some(r.clone()));
-    }
-    cached(&MKV_HEADS, path, |p| {
-        mkv::Reader::open_with(p, mkv::ReadOptions { index: false })
-    })
-    .map(Some)
+    mkv_reader(path).map(Some)
 }
 
 fn is_matroska(path: &Path) -> bool {
@@ -261,7 +251,7 @@ impl Demux {
                 ))
             }
             Demux::Mkv(r) => {
-                let s = r.tracks.get(track)?.samples.get(i)?;
+                let s = r.full().ok()?.tracks.get(track)?.samples.get(i)?;
                 Some((s.pts, s.pts, s.keyframe))
             }
         }
@@ -270,14 +260,18 @@ impl Demux {
     pub fn samples(&self, track: usize) -> usize {
         match self {
             Demux::Mp4(r) => r.tracks.get(track).map_or(0, |t| t.samples.len()),
-            Demux::Mkv(r) => r.tracks.get(track).map_or(0, |t| t.samples.len()),
+            Demux::Mkv(r) => r
+                .full()
+                .ok()
+                .and_then(|r| r.tracks.get(track))
+                .map_or(0, |t| t.samples.len()),
         }
     }
 
     pub fn read_into(&self, track: usize, i: usize, buf: &mut Vec<u8>) -> Result<()> {
         match self {
             Demux::Mp4(r) => r.read_into(track, i, buf),
-            Demux::Mkv(r) => r.read_into(track, i, buf),
+            Demux::Mkv(r) => r.full()?.read_into(track, i, buf),
         }
     }
 
@@ -299,7 +293,7 @@ impl Demux {
                 (t.keyframe_before(at), t.presentation(at).unwrap_or(shift))
             }
             Demux::Mkv(r) => {
-                let t = mkv_track(r, track)?;
+                let t = mkv_track(r.full()?, track)?;
                 let at = t.sample_at(t.ticks(from)).unwrap_or(0);
                 (
                     t.keyframe_before(at),
@@ -448,9 +442,10 @@ pub fn probe_head(r: &Arc<mkv::Reader>) -> Result<Option<Probe>> {
     describe(r, t, (duration, 1e9 / ns as f64, None), first, &starts).map(Some)
 }
 
-pub fn probe(r: &Arc<mkv::Reader>) -> Result<Probe> {
+pub fn probe(head: &Arc<mkv::Reader>) -> Result<Probe> {
+    let starts = Demux::Mkv(head.clone()).starts();
+    let r = head.full()?;
     let (v, t) = mkv_video(r)?;
-    let starts = Demux::Mkv(r.clone()).starts();
     let duration = (t.duration_seconds() - starts.file).max(0.0);
     let fps = match t.default_duration.filter(|d| *d > 0) {
         Some(ns) => 1e9 / ns as f64,
@@ -536,39 +531,20 @@ fn describe(
 
 pub fn frame_count(path: &Path) -> Result<u64> {
     if let Some(r) = mkv_head(path)? {
-        let (v, t) = mkv_video(&r)?;
-        if r.indexed {
-            return Ok(t.samples.len() as u64);
-        }
-        let mut stream = r.stream();
-        let mut n = 0u64;
-        while stream.next_block(Some(v))?.is_some() {
-            n += 1;
-        }
-        return Ok(n);
+        return Ok(mkv_video(r.full()?)?.1.samples.len() as u64);
     }
     match Demux::open(path)? {
         Demux::Mp4(r) => Ok(r
             .video()
             .and_then(|v| r.tracks.get(v))
             .map_or(0, |t| t.samples.len()) as u64),
-        Demux::Mkv(r) => Ok(mkv_video(&r)?.1.samples.len() as u64),
+        Demux::Mkv(r) => Ok(mkv_video(r.full()?)?.1.samples.len() as u64),
     }
 }
 
 pub fn keyframes(r: &Arc<mkv::Reader>) -> Result<Vec<f64>> {
-    let (v, t) = mkv_video(r)?;
     let start = Demux::Mkv(r.clone()).start();
-    if !r.indexed {
-        let mut stream = r.stream();
-        let mut keys = Vec::new();
-        while let Some(b) = stream.next_block(Some(v))? {
-            if b.keyframe {
-                keys.push((t.seconds(b.pts) - start).max(0.0));
-            }
-        }
-        return Ok(sorted(keys));
-    }
+    let (_, t) = mkv_video(r.full()?)?;
     Ok(sorted(
         t.samples
             .iter()

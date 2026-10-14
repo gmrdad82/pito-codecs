@@ -71,6 +71,7 @@ struct InCluster {
     end: Option<u64>,
 }
 
+#[derive(Clone)]
 pub(crate) struct Cursor {
     cache: Cache,
     pos: u64,
