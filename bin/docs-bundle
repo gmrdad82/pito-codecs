@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+usage() {
+    echo "usage: bin/docs-bundle <vX.Y.Z> [out dir]" >&2
+    exit 2
+}
+
+fail() {
+    echo "docs-bundle: $*" >&2
+    exit 1
+}
+
+version=${1:-}
+case "$version" in
+    v[0-9]*) ;;
+    *) usage ;;
+esac
+[ "$#" -le 2 ] || usage
+out=${2:-tmp/docs-bundle}
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+
+stage="$out/stage"
+docs="$stage/docs"
+rm -rf "$stage"
+mkdir -p "$docs"
+
+cp -R docs/site/. "$docs/"
+find "$docs" -name '*.md' -exec sed -i.bak "s/@VERSION@/$version/g" {} +
+find "$docs" -name '*.md.bak' -exec rm -f {} +
+
+if [ -n "${PCOD:-}" ]; then
+    pcod=$PCOD
+else
+    cargo build --locked --bin pcod
+    pcod=target/debug/pcod
+    if [ -f "$pcod.exe" ]; then
+        pcod="$pcod.exe"
+    fi
+fi
+[ -x "$pcod" ] || fail "no pcod at $pcod"
+
+commands=$("$pcod" --help | awk '/^Commands:/ { on = 1; next } on && /^$/ { exit } on { print $1 }' | grep -v '^help$' || true)
+[ -n "$commands" ] || fail "pcod --help lists no commands"
+mkdir -p "$docs/reference"
+{
+    printf -- '---\n'
+    printf 'title: pcod commands\n'
+    printf 'description: Every pcod command and option, from pcod'"'"'s own help.\n'
+    printf 'sidebar:\n  order: 1\n'
+    printf -- '---\n\n'
+    printf 'This page is made from the help of %s, so it matches the binary. The [pcod guide](../../guides/pcod/) shows each command at work.\n\n' "$("$pcod" --version)"
+    printf '## pcod\n\n```text\n'
+    "$pcod" --help
+    printf '```\n'
+    for c in $commands; do
+        printf '\n## pcod %s\n\n```text\n' "$c"
+        "$pcod" help "$c"
+        printf '```\n'
+    done
+    cat <<'END'
+
+## Exit codes
+
+- **0**: the command did its job.
+- **1**: it failed after the command line was read, such as a missing file or a stream it can't decode. One line on stderr says what failed and why: `pcod: <reason>`.
+- **2**: the command line could not be parsed, or no command was given. stderr carries clap's error, a usage line and a pointer to `--help`.
+
+pcod prints plain text, not JSON; see [Formats](../formats/#what-pcod-prints).
+END
+} > "$docs/reference/cli.md"
+
+cargo doc --locked --no-deps --lib
+[ -f target/doc/pito_codecs/index.html ] || fail "cargo doc wrote no pito_codecs/index.html"
+mkdir -p "$docs/api"
+cp -R target/doc/. "$docs/api/"
+rm -f "$docs/api/.lock"
+
+{
+    printf -- '---\n'
+    printf 'title: Changelog\n'
+    printf 'description: What changed in each pito-codecs release.\n'
+    printf 'sidebar:\n  order: 100\n'
+    printf -- '---\n\n'
+    sed '1{/^# /d;}' CHANGELOG.md | sed '/./,$!d'
+} > "$docs/changelog.md"
+
+prose() {
+    awk '/^```/ { code = !code; next } !code { print }' "$1"
+}
+
+route_dir() {
+    case "$1" in
+        index.md) printf '' ;;
+        */index.md) printf '%s/' "${1%/index.md}" ;;
+        *) printf '%s/' "${1%.md}" ;;
+    esac
+}
+
+normal() {
+    local n
+    n=$(realpath -m "/root/$1")
+    printf '%s' "${n#/root}" | sed 's#^/##'
+}
+
+errors=0
+bad() {
+    echo "docs-bundle: $*" >&2
+    errors=$((errors + 1))
+}
+
+mkdir -p "$docs/images"
+while IFS= read -r page; do
+    rel=${page#"$docs"/}
+    dir=$(dirname "$rel")
+    [ "$dir" = "." ] && dir=""
+    text=$(prose "$page")
+    if printf '%s\n' "$text" | grep -nE -e '/home/|/Users/' -e '[A-Za-z]:[\]Users' > /dev/null; then
+        bad "$rel: names a local home path"
+    fi
+    if [ "$rel" != changelog.md ] && [ "${rel#api/}" = "$rel" ] &&
+        printf '%s\n' "$text" | grep -niwE 'roadmap|planned|coming soon|not yet' > /dev/null; then
+        bad "$rel: promises something to come"
+    fi
+    images=$(printf '%s\n' "$text" | grep -oE '!\[[^]]*\]\([^) ]+' | sed 's/.*](//' || true)
+    images="$images
+$(printf '%s\n' "$text" | grep -oE '<img [^>]*src="[^"]+"' | sed 's/.*src="//; s/"$//' || true)"
+    for target in $images; do
+        case "$target" in
+            http://* | https://*) bad "$rel: image $target is not a local file"; continue ;;
+            /* | file:* | ~*) bad "$rel: image $target is not relative"; continue ;;
+        esac
+        path=$(normal "$dir/$target")
+        case "$path" in
+            images/*) ;;
+            *) bad "$rel: image $target is not in images/"; continue ;;
+        esac
+        name=${path#images/}
+        if [ -f "docs/images/$name" ]; then
+            cp "docs/images/$name" "$docs/images/$name"
+        else
+            bad "$rel: image $target is missing from docs/images"
+        fi
+    done
+done < <(find "$docs" -name '*.md' -not -path "$docs/api/*" | sort)
+
+while IFS= read -r page; do
+    rel=${page#"$docs"/}
+    base=$(route_dir "$rel")
+    links=$(prose "$page" | grep -oE '(^|[^!])\[[^]]*\]\([^) ]+' | sed 's/.*](//' || true)
+    for target in $links; do
+        case "$target" in
+            https://docs.pitomd.com/* | https://pitomd.com* | mailto:*) continue ;;
+            https://github.com/gmrdad82/pito-codecs | https://github.com/gmrdad82/pito-codecs/*) continue ;;
+            https://github.com/gmrdad82/*) bad "$rel: $target: link another PITO MD repo as https://docs.pitomd.com/<repo>/"; continue ;;
+            http://* | https://*) continue ;;
+            \#*) continue ;;
+            /* | file:* | ~*) bad "$rel: link $target is not relative"; continue ;;
+        esac
+        plain=${target%%#*}
+        case "$plain" in
+            *.html | *.png | *.gif | *.webp | *.txt)
+                path=$(normal "$base$plain")
+                [ -f "$docs/$path" ] || bad "$rel: link $target finds no file"
+                ;;
+            *)
+                path=$(normal "$base$plain")
+                if [ -z "$path" ]; then
+                    [ -f "$docs/index.md" ] || bad "$rel: link $target finds no page"
+                elif [ ! -f "$docs/$path.md" ] && [ ! -f "$docs/$path/index.md" ]; then
+                    bad "$rel: link $target finds no page"
+                fi
+                ;;
+        esac
+    done
+    head -1 "$page" | grep -qx -- '---' || bad "$rel: no frontmatter"
+    for key in title description; do
+        awk 'NR > 1 && /^---$/ { exit } { print }' "$page" | grep -q "^$key: ." || bad "$rel: no $key in the frontmatter"
+    done
+    awk 'NR > 1 && /^---$/ { exit } { print }' "$page" | grep -qE '^  order: [0-9]+$' || bad "$rel: no sidebar order in the frontmatter"
+done < <(find "$docs" -name '*.md' -not -path "$docs/api/*" | sort)
+
+[ "$errors" -eq 0 ] || fail "$errors problem(s) in the pages"
+
+tarball="$out/docs-$version.tar.gz"
+tar -czf "$tarball" -C "$stage" docs
+echo "docs-bundle: wrote $tarball"
