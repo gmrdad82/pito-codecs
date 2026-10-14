@@ -1,5 +1,4 @@
 use super::{backend, unsupported};
-use std::collections::VecDeque;
 use std::sync::Arc;
 
 use super::Picture;
@@ -16,6 +15,7 @@ use super::ffi::{
     self, VAIQMatrixBufferHEVC, VAPictureHEVC, VAPictureParameterBufferHEVC,
     VASliceParameterBufferHEVC, hevc_pic_bits, hevc_slice_bits, hevc_slice_parsing_bits,
 };
+use super::ready::Ready;
 use crate::gpu::nal::Framing;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,7 +53,7 @@ pub struct Front<A: Accel> {
     poc_state: PocState,
     active_sps: Option<Arc<Sps>>,
     pending: Option<Pending>,
-    ready: VecDeque<(usize, i64)>,
+    ready: Ready,
     first_picture: bool,
     skip_rasl: bool,
     after_eos: bool,
@@ -78,7 +78,7 @@ impl<A: Accel> Front<A> {
             poc_state: PocState::default(),
             active_sps: None,
             pending: None,
-            ready: VecDeque::new(),
+            ready: Ready::default(),
             first_picture: true,
             skip_rasl: false,
             after_eos: false,
@@ -128,26 +128,24 @@ impl<A: Accel> Front<A> {
 
     fn read_out(&mut self, outs: Vec<Output<Surface>>, frames: &mut Vec<Picture>) -> Result<()> {
         for o in outs {
-            self.accel.prefetch(o.frame.index);
-            self.ready.push_back((o.frame.index, o.meta.pts));
+            self.ready.push(o.frame.index, o.meta.pts);
         }
         self.drain(super::LAG, frames)
     }
 
     fn drain(&mut self, keep: usize, frames: &mut Vec<Picture>) -> Result<()> {
-        while self.ready.len() > keep {
-            let Some((index, pts)) = self.ready.pop_front() else {
-                break;
-            };
-            let picture = self.accel.read(index).map_err(backend)?;
-            frames.push(picture.at(pts));
-        }
-        Ok(())
+        let entries = &self.dpb.entries;
+        self.ready.drain(
+            &mut self.accel,
+            |i| entries.iter().any(|e| e.frame.index == i),
+            keep,
+            frames,
+        )
     }
 
     fn busy(&self, i: usize) -> bool {
         self.dpb.entries.iter().any(|e| e.frame.index == i)
-            || self.ready.iter().any(|r| r.0 == i)
+            || self.ready.holds(i)
             || self.accel.held(i)
     }
 
@@ -425,6 +423,7 @@ impl<A: Accel> Front<A> {
         self.accel
             .decode_hevc(p.target, &p.pic, iq.as_ref(), &p.slices)
             .map_err(backend)?;
+        self.ready.submitted();
         self.poc_state.update(&p.first, p.poc);
         let mut outs = Vec::new();
         self.dpb.insert(

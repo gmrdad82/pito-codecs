@@ -8,7 +8,7 @@ use super::ffmpeg::{Child, Ffmpeg, pix_fmt};
 use super::mux::{Planner, Premix, Sound, gop_mp4, premixed_m4a};
 use super::picture::Blender;
 use super::probe::keyframes;
-use super::route::{Caps, Picked, Prefs, pick_encode};
+use super::route::{Caps, Picked, Prefs, export_decode, pick_encode};
 use super::video::{Source, frame_at, open, source};
 use crate::media::{AudioBuffer, Codec, Error, Frame, PixelFormat, Result, Rgba, Route};
 
@@ -288,7 +288,7 @@ fn export_to(
     }
     let caps = Caps::detect(&opts.prefs);
     let mut video = pick_encode(opts.video, &opts.prefs, &caps)?;
-    let first = &sources[index[0]].probe;
+    let first = sources[index[0]].probe.clone();
     let fps = first.fps;
     if fps.0 == 0 || fps.1 == 0 || fps.0 / fps.1 > MAX_FPS {
         return Err(Error::Invalid(format!(
@@ -323,6 +323,16 @@ fn export_to(
         Route::Cpu => PixelFormat::Yuv420p8,
         Route::Ffmpeg => format,
     };
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    for s in &mut sources {
+        if let Some(codec) = s.probe.video_codec
+            && let Some(why) =
+                export_decode(codec, s.route, video.route, &opts.prefs, &caps, threads)
+        {
+            s.route = Route::Cpu;
+            s.reasons.push(why);
+        }
+    }
     let mut reasons: Vec<String> = video.reasons.clone();
     for s in &sources {
         for r in &s.reasons {

@@ -8,7 +8,7 @@ use libloading::Library;
 
 use super::ffi::{self, VAConfigAttrib, VAImage, VAImageFormat, VASurfaceID};
 use super::host::HostBuffer;
-use super::{Accel, LAG};
+use super::{Accel, LAG, SLACK};
 use crate::gpu::biplanar::{self, Biplanar, Geometry};
 use crate::media::Frame;
 
@@ -830,6 +830,7 @@ struct Staging {
     size: (u32, u32),
     bits: u32,
     order: u64,
+    most: usize,
 }
 
 impl Staging {
@@ -837,15 +838,8 @@ impl Staging {
         display: Arc<Display>,
         geometry: Geometry,
         surface: (u32, u32),
-        count: usize,
+        (count, most): (usize, usize),
     ) -> Result<Self, String> {
-        let (rt_format, _, _) = formats(geometry.bits)?;
-        let drm_format = if geometry.bits > 8 {
-            ffi::DRM_FORMAT_P010
-        } else {
-            ffi::DRM_FORMAT_NV12
-        };
-        let bps = if geometry.bits > 8 { 2 } else { 1 };
         let (w, h) = (
             geometry.crop.2.next_multiple_of(2),
             geometry.crop.3.next_multiple_of(2),
@@ -855,56 +849,68 @@ impl Staging {
         {
             return Err("the picture has no even-sized area to copy".into());
         }
+        let bps = if geometry.bits > 8 { 2 } else { 1 };
         let pitch = (w as usize * bps).next_multiple_of(256);
         let chroma = pitch * h as usize;
-        let len = chroma + pitch * (h as usize / 2);
         let vpp = Vpp::new(display.clone())?;
         let mut staging = Self {
             vpp,
-            slots: Vec::with_capacity(count),
+            slots: Vec::with_capacity(most),
             pitch,
             chroma,
             size: (w, h),
             bits: geometry.bits,
             order: 0,
+            most,
         };
-        for _ in 0..count {
-            let buffer = HostBuffer::new(len)?;
-            let pitch = u32::try_from(pitch).map_err(|_| "picture too wide")?;
-            let mut layer = ffi::VADRMPRIMELayer {
-                drm_format,
-                num_planes: 2,
-                ..Default::default()
-            };
-            layer.offset[1] = u32::try_from(chroma).map_err(|_| "picture too large")?;
-            layer.pitch = [pitch, pitch, 0, 0];
-            let mut descriptor = ffi::VADRMPRIMESurfaceDescriptor {
-                fourcc: if geometry.bits > 8 {
-                    ffi::VA_FOURCC_P010
-                } else {
-                    ffi::VA_FOURCC_NV12
-                },
-                width: w,
-                height: h,
-                num_objects: 1,
-                num_layers: 1,
-                ..Default::default()
-            };
-            descriptor.objects[0] = ffi::VADRMPRIMEObject {
-                fd: buffer.fd(),
-                size: u32::try_from(buffer.len()).map_err(|_| "picture too large")?,
-                drm_format_modifier: ffi::DRM_FORMAT_MOD_LINEAR,
-            };
-            descriptor.layers[0] = layer;
-            let surface = display.import(rt_format, (w, h), &mut descriptor)?;
-            staging.slots.push(Staged {
-                surface,
-                buffer,
-                holds: None,
-                order: 0,
-            });
+        for _ in 0..count.min(most) {
+            let slot = staging.slot()?;
+            staging.slots.push(slot);
         }
         Ok(staging)
+    }
+
+    fn slot(&self) -> Result<Staged, String> {
+        let ten = self.bits > 8;
+        let (rt_format, fourcc, _) = formats(self.bits)?;
+        let (w, h) = self.size;
+        let buffer = HostBuffer::new(self.chroma + self.pitch * (h as usize / 2))?;
+        let pitch = u32::try_from(self.pitch).map_err(|_| "picture too wide")?;
+        let mut layer = ffi::VADRMPRIMELayer {
+            drm_format: if ten {
+                ffi::DRM_FORMAT_P010
+            } else {
+                ffi::DRM_FORMAT_NV12
+            },
+            num_planes: 2,
+            ..Default::default()
+        };
+        layer.offset[1] = u32::try_from(self.chroma).map_err(|_| "picture too large")?;
+        layer.pitch = [pitch, pitch, 0, 0];
+        let mut descriptor = ffi::VADRMPRIMESurfaceDescriptor {
+            fourcc,
+            width: w,
+            height: h,
+            num_objects: 1,
+            num_layers: 1,
+            ..Default::default()
+        };
+        descriptor.objects[0] = ffi::VADRMPRIMEObject {
+            fd: buffer.fd(),
+            size: u32::try_from(buffer.len()).map_err(|_| "picture too large")?,
+            drm_format_modifier: ffi::DRM_FORMAT_MOD_LINEAR,
+        };
+        descriptor.layers[0] = layer;
+        let surface = self
+            .vpp
+            .display
+            .import(rt_format, (w, h), &mut descriptor)?;
+        Ok(Staged {
+            surface,
+            buffer,
+            holds: None,
+            order: 0,
+        })
     }
 
     fn copy(
@@ -917,6 +923,12 @@ impl Staging {
             if slot.holds == Some(index) {
                 slot.holds = None;
             }
+        }
+        if self.slots.iter().all(|s| s.holds.is_some())
+            && self.slots.len() < self.most
+            && let Ok(slot) = self.slot()
+        {
+            self.slots.push(slot);
         }
         let Some(slot) = self
             .slots
@@ -1194,6 +1206,10 @@ impl Accel for Session {
         self.decode_picture(target, pic, iq, slices)
     }
 
+    fn copies(&self) -> bool {
+        !self.gpu && self.staged
+    }
+
     fn prefetch(&mut self, index: usize) {
         if self.gpu || !self.staged {
             return;
@@ -1202,7 +1218,12 @@ impl Accel for Session {
             return;
         };
         if self.staging.is_none() {
-            match Staging::new(self.display.clone(), self.geometry, self.size, LAG + 2) {
+            match Staging::new(
+                self.display.clone(),
+                self.geometry,
+                self.size,
+                (LAG + 2, LAG + SLACK + 2),
+            ) {
                 Ok(s) => self.staging = Some(s),
                 Err(_) => {
                     self.staged = false;

@@ -35,6 +35,25 @@ fn run() -> Res<()> {
         };
         return made_frames(&path, cpu, count);
     }
+    if mode.as_deref() == Some("readback") {
+        let choice = match args.next().as_deref() {
+            Some("gpu") => Choice::Gpu,
+            Some("auto") => Choice::Auto,
+            _ => Choice::Cpu,
+        };
+        return readback(&path, choice);
+    }
+    if mode.as_deref() == Some("xport") {
+        let pick = |a: Option<String>| match a.as_deref() {
+            Some("gpu") => Choice::Gpu,
+            Some("cpu") => Choice::Cpu,
+            _ => Choice::Auto,
+        };
+        let decode = pick(args.next());
+        let encode = pick(args.next());
+        let overlay = args.next();
+        return xport(&path, decode, encode, overlay.as_deref());
+    }
     if mode.as_deref() == Some("gpu") {
         return gpu_playback(&path);
     }
@@ -520,4 +539,153 @@ fn made_frames(out: &std::path::Path, cpu: bool, count: u64) -> Res<()> {
         done.video.said()
     )?;
     peak()
+}
+
+fn engines() -> Vec<(String, u64)> {
+    let mut out: Vec<(String, u64)> = Vec::new();
+    let Ok(dir) = std::fs::read_dir("/proc/self/fdinfo") else {
+        return out;
+    };
+    let mut seen = std::collections::HashSet::new();
+    for e in dir.flatten() {
+        let Ok(text) = std::fs::read_to_string(e.path()) else {
+            continue;
+        };
+        let id = text
+            .lines()
+            .find(|l| l.starts_with("drm-client-id:"))
+            .map(str::to_string);
+        let Some(id) = id else { continue };
+        if !seen.insert(id) {
+            continue;
+        }
+        for l in text.lines() {
+            if let Some(rest) = l.strip_prefix("drm-engine-")
+                && let Some((name, v)) = rest.split_once(':')
+                && let Some(ns) = v
+                    .trim()
+                    .strip_suffix(" ns")
+                    .and_then(|n| n.parse::<u64>().ok())
+            {
+                match out.iter_mut().find(|(n, _)| n == name) {
+                    Some(slot) => slot.1 += ns,
+                    None => out.push((name.to_string(), ns)),
+                }
+            }
+        }
+    }
+    out
+}
+
+fn readback(path: &std::path::Path, choice: Choice) -> Res<()> {
+    let prefs = Prefs {
+        decode: choice,
+        ..Prefs::default()
+    };
+    let t = Instant::now();
+    let mut video = decode_video(path, 0.0, None, &prefs)?;
+    let opened = t.elapsed().as_secs_f64();
+    let before = engines();
+    let mut n = 0u64;
+    let mut last = None;
+    let hash = std::env::var_os("HASH").is_some();
+    let mut sum = 0xcbf2_9ce4_8422_2325u64;
+    while let Some(fr) = video.next() {
+        let fr = fr?;
+        if hash {
+            for pl in &fr.planes {
+                let bpp = if fr.format == PixelFormat::Yuv420p10 {
+                    2
+                } else {
+                    1
+                };
+                for row in pl.data.chunks(pl.stride.max(1)).take(pl.height) {
+                    for &b in &row[..(pl.width * bpp).min(row.len())] {
+                        sum = (sum ^ u64::from(b)).wrapping_mul(0x100_0000_01b3);
+                    }
+                }
+            }
+        }
+        if let Some(old) = last.replace(fr) {
+            video.recycle(old);
+        }
+        n += 1;
+    }
+    let s = t.elapsed().as_secs_f64();
+    let after = engines();
+    if hash {
+        say!("  hash {sum:016x}")?;
+    }
+    say!(
+        "{:?} {} {n} frames in {s:.2} s (open {:.0} ms): {:.1} fps",
+        video.route,
+        path.display(),
+        opened * 1e3,
+        n as f64 / s
+    )?;
+    let busy: Vec<String> = after
+        .iter()
+        .map(|(name, v)| {
+            let b = before.iter().find(|(m, _)| m == name).map_or(0, |x| x.1);
+            format!("{name} {:.1} ms", (v - b) as f64 / 1e6)
+        })
+        .collect();
+    say!("  engines: {}", busy.join(", "))?;
+    Ok(())
+}
+
+fn xport(path: &std::path::Path, decode: Choice, encode: Choice, overlay: Option<&str>) -> Res<()> {
+    let prefs = Prefs {
+        decode,
+        encode,
+        ..Prefs::default()
+    };
+    let p = probe(path, &prefs)?;
+    let out = PathBuf::from("tmp/rb/xport.mp4");
+    let layer = std::sync::Arc::new(Rgba::new(p.width, p.height));
+    let overlay: Option<pito_codecs::media::Overlay> = match overlay {
+        Some("full") => Some(Box::new(move |_, _, _| Some(layer.clone()))),
+        Some("empty") => Some(Box::new(|_, _, _| None)),
+        _ => None,
+    };
+    let before = engines();
+    let t = Instant::now();
+    let mut route = String::new();
+    let done = export(
+        &out,
+        &[Piece {
+            path: path.to_path_buf(),
+            from: 0.0,
+            to: p.duration,
+        }],
+        ExportOptions {
+            prefs,
+            overlay,
+            ..ExportOptions::default()
+        },
+        |pr| {
+            if route.is_empty() {
+                route = format!("{:?}", pr.encoder);
+            }
+            true
+        },
+    )?;
+    let s = t.elapsed().as_secs_f64();
+    let after = engines();
+    say!(
+        "export {} enc {route}: {} frames ({} encoded) in {s:.2} s: {:.1} fps",
+        path.display(),
+        done.frames,
+        done.encoded,
+        done.frames as f64 / s
+    )?;
+    let busy: Vec<String> = after
+        .iter()
+        .map(|(name, v)| {
+            let b = before.iter().find(|(m, _)| m == name).map_or(0, |x| x.1);
+            format!("{name} {:.1} ms", (v - b) as f64 / 1e6)
+        })
+        .collect();
+    say!("  engines: {}", busy.join(", "))?;
+    Ok(())
 }

@@ -4,6 +4,7 @@ mod h264;
 mod headers;
 mod hevc;
 mod host;
+mod ready;
 mod va;
 #[cfg(feature = "vp9")]
 mod vp9;
@@ -39,6 +40,8 @@ pub const LAG: usize = 3;
 
 pub const HELD: usize = 12;
 
+pub const SLACK: usize = 8;
+
 const HEADER_BYTES: usize = 512;
 
 pub fn header_rbsp(payload: &[u8], full: bool) -> Option<Vec<u8>> {
@@ -66,6 +69,9 @@ pub trait Accel: Send {
     ) -> std::result::Result<(), String>;
     fn read(&mut self, index: usize) -> std::result::Result<Picture, String>;
     fn prefetch(&mut self, _index: usize) {}
+    fn copies(&self) -> bool {
+        false
+    }
     fn held(&self, index: usize) -> bool;
     fn fill(&mut self, index: usize, from: Option<usize>) -> std::result::Result<(), String>;
 }

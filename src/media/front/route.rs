@@ -161,6 +161,26 @@ pub fn pick_encode(codec: Codec, prefs: &Prefs, caps: &Caps) -> Result<Picked> {
     pick(codec, Direction::Encode, tries, ffmpeg_codec, caps)
 }
 
+const EXPORT_CPU_THREADS: usize = 16;
+
+pub(super) fn export_decode(
+    codec: Codec,
+    decode: Route,
+    encode: Route,
+    prefs: &Prefs,
+    caps: &Caps,
+    threads: usize,
+) -> Option<String> {
+    let switch = prefs.decode == Choice::Auto
+        && decode == Route::Gpu
+        && encode == Route::Gpu
+        && threads >= EXPORT_CPU_THREADS
+        && caps.has(Route::Cpu, codec, Direction::Decode);
+    switch.then(|| {
+        format!("the GPU video engine is busy encoding, so {codec} decodes on the CPU's {threads} threads")
+    })
+}
+
 fn pick(
     codec: Codec,
     dir: Direction,
@@ -291,6 +311,25 @@ mod tests {
             ..Prefs::default()
         };
         assert!(pick_encode(Codec::Hevc, &no_fallback, &cpu264).is_err());
+    }
+
+    #[test]
+    fn exports_decode_on_the_cpu_while_the_gpu_encodes() {
+        let both = caps(&[(Codec::H264, D)], &[(Codec::H264, D)]);
+        let auto = Prefs::default();
+        let switch = |decode, encode, prefs: &Prefs, caps: &Caps, threads| {
+            export_decode(Codec::H264, decode, encode, prefs, caps, threads).is_some()
+        };
+        assert!(switch(Route::Gpu, Route::Gpu, &auto, &both, 32));
+        assert!(!switch(Route::Gpu, Route::Cpu, &auto, &both, 32));
+        assert!(!switch(Route::Gpu, Route::Gpu, &auto, &both, 8));
+        let gpu = Prefs {
+            decode: Choice::Gpu,
+            ..Prefs::default()
+        };
+        assert!(!switch(Route::Gpu, Route::Gpu, &gpu, &both, 32));
+        let gpu_only = caps(&[(Codec::H264, D)], &[]);
+        assert!(!switch(Route::Gpu, Route::Gpu, &auto, &gpu_only, 32));
     }
 
     #[test]
