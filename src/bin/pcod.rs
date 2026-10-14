@@ -18,6 +18,9 @@ use pito_codecs::{h264, hevc};
 
 type Fail = Box<dyn Error>;
 
+#[path = "pcod/frames.rs"]
+mod frames;
+
 #[derive(Parser)]
 #[command(
     name = "pcod",
@@ -54,6 +57,73 @@ enum Command {
         #[arg(long)]
         threads: Option<usize>,
     },
+    #[command(
+        about = "Encode a folder of PNG frames and an optional WAV into an MP4",
+        long_about = "Encode a folder of PNG frames and an optional WAV into an MP4\n\nThe frames are the folder's .png files in name order (000000.png, 000001.png, ...), all of one even size. The video is 8-bit 4:2:0 BT.709, the audio AAC at 48 kHz stereo, and the file is written with its index first (faststart). The audio is cut or padded with silence to the length of the video; without --audio the MP4 carries a silent stereo track."
+    )]
+    Frames {
+        #[arg(help = "The folder of PNG frames")]
+        dir: PathBuf,
+        #[arg(help = "The MP4 to write")]
+        output: PathBuf,
+        #[arg(long, value_parser = rate_of, help = "Frame rate: an integer, a ratio such as 30000/1001, or a decimal")]
+        fps: (u32, u32),
+        #[arg(long, help = "A PCM WAV to encode as the audio track")]
+        audio: Option<PathBuf>,
+        #[arg(
+            long,
+            value_enum,
+            default_value = "h264",
+            help = "The video codec; HEVC falls back to H.264 without a GPU HEVC encoder"
+        )]
+        codec: Kind,
+        #[arg(
+            long,
+            value_enum,
+            default_value = "gpu",
+            help = "Encode on the GPU, falling back to the CPU, or on the CPU only"
+        )]
+        route: Where,
+        #[arg(long, default_value_t = 18, help = "Quality, 0 to 51, lower is better")]
+        crf: u8,
+        #[arg(long, help = "PNG decode threads [default: one per core, at most 16]")]
+        threads: Option<usize>,
+    },
+}
+
+fn rate_of(text: &str) -> Result<(u32, u32), String> {
+    let bad = || format!("'{text}' is not a frame rate such as 60, 30000/1001 or 29.97");
+    let (num, den) = if let Some((n, d)) = text.split_once('/') {
+        (
+            n.trim().parse::<u32>().map_err(|_| bad())?,
+            d.trim().parse::<u32>().map_err(|_| bad())?,
+        )
+    } else if let Some((whole, frac)) = text.split_once('.') {
+        if frac.is_empty() || frac.len() > 3 || !frac.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(bad());
+        }
+        let den = 10u32.pow(frac.len() as u32);
+        let whole = whole.parse::<u32>().map_err(|_| bad())?;
+        let frac = frac.parse::<u32>().map_err(|_| bad())?;
+        (
+            whole
+                .checked_mul(den)
+                .and_then(|w| w.checked_add(frac))
+                .ok_or_else(bad)?,
+            den,
+        )
+    } else {
+        (text.trim().parse::<u32>().map_err(|_| bad())?, 1)
+    };
+    if num == 0 || den == 0 || num / den > 1000 {
+        return Err(bad());
+    }
+    let g = gcd(num, den);
+    Ok((num / g, den / g))
+}
+
+fn gcd(a: u32, b: u32) -> u32 {
+    if b == 0 { a.max(1) } else { gcd(b, a % b) }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -143,6 +213,28 @@ fn run(cli: Cli) -> Result<(), Fail> {
             crf,
             threads,
         } => encode(&mut out, &input, &output, codec, route, crf, threads),
+        Command::Frames {
+            dir,
+            output,
+            fps,
+            audio,
+            codec,
+            route,
+            crf,
+            threads,
+        } => frames::run(
+            &mut out,
+            &frames::Job {
+                dir,
+                output,
+                fps,
+                audio,
+                codec: codec.codec(),
+                prefs: route.prefs(),
+                crf,
+                threads: threads_of(threads),
+            },
+        ),
     };
     result?;
     out.flush()?;

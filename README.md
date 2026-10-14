@@ -42,12 +42,13 @@ $v="v1.2.1"; Invoke-WebRequest "https://github.com/gmrdad82/pito-codecs/releases
 Expand-Archive pcod.zip "$env:LOCALAPPDATA\pcod" -Force; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";$env:LOCALAPPDATA\pcod", "User")
 ```
 
-Then, on any MP4:
+Then, on any MP4, or on a folder of PNG frames:
 
 ```sh
 pcod probe clip.mp4
 pcod decode clip.mp4 --route gpu
 pcod encode clip.mp4 out.mp4 --codec hevc --route gpu
+pcod frames frames/ trailer.mp4 --fps 60 --audio trailer.wav
 ```
 
 `SHA256SUMS` in each Release lists every archive's checksum. To build pcod from source anywhere, Linux arm64 included, with Rust 1.97 or newer: `cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag v1.2.1 pito-codecs --bin pcod`.
@@ -166,6 +167,8 @@ Scaling (bilinear, bicubic, Lanczos) runs 1.7× to 2.6× faster than ffmpeg's sw
 | MKV and WebM | Tracks, lacing, Cues, seeking. | H.264, HEVC, VP9, Opus and AAC; WebM's codec rules enforced; remux. |
 | GIF | GIF87a and 89a, interlace, disposal, transparency, loops. | Oklab palettes, ordered or Floyd-Steinberg dither, frame differencing. |
 | WebP | Lossless VP8L and lossy VP8, alpha, animation; bit-exact with libwebp. | Lossless VP8L and lossy VP8, alpha, animation. |
+| PNG | Grey, grey and alpha, RGB, RGBA and palette with tRNS, 1 to 16-bit, Adam7, all five filters; to 8-bit RGBA, equal to ffmpeg's decode. | — |
+| WAV | PCM 8, 16, 24 and 32-bit, float 32 and 64-bit, any rate and channel count. | — |
 
 Not covered: DTS, FLAC, Vorbis, ALAC, AV1, ProRes, DNxHD, MPEG-2 and VP8 video, and subtitle tracks.
 
@@ -270,7 +273,7 @@ let mut blender = Blender::new();
 blender.draw(&mut frame, &watermark);
 ```
 
-`pcod` (`src/bin/pcod.rs`) is a small command line over the library, and it is what the GIF at the top shows: `pcod decode clip.mp4 --route gpu`, or from a checkout `cargo run --release --bin pcod -- decode clip.mp4 --route gpu`. It is behind the `cli` feature, on by default, so a library user with `default-features = false` never builds clap.
+`pcod` (`src/bin/pcod.rs`) is a small command line over the library, and it is what the GIF at the top shows: `pcod decode clip.mp4 --route gpu`, or from a checkout `cargo run --release --bin pcod -- decode clip.mp4 --route gpu`. `pcod frames <dir> <out.mp4> --fps 60 --audio sound.wav` encodes a folder of PNG frames in name order and a WAV into an H.264 (or HEVC) and AAC MP4, BT.709 and faststart, decoding the PNGs on every core ahead of the encoder. It is behind the `cli` feature, on by default, so a library user with `default-features = false` never builds clap.
 
 
 ## How it was measured

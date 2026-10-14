@@ -1,5 +1,6 @@
 mod nal;
 mod types;
+pub mod wav;
 
 pub use nal::length_prefixed_to_annexb;
 pub use types::*;
