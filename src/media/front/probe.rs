@@ -10,6 +10,8 @@ use crate::media::{Codec, Error, Result};
 #[derive(Debug, Clone, PartialEq)]
 pub struct Probe {
     pub duration: f64,
+    pub start: f64,
+    pub video_start: Option<f64>,
     pub fps: (u32, u32),
     pub width: u32,
     pub height: u32,
@@ -60,7 +62,7 @@ impl Probe {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AudioTrack {
     pub index: usize,
     pub stream: usize,
@@ -71,6 +73,7 @@ pub struct AudioTrack {
     pub rate: u32,
     pub bitrate: Option<u32>,
     pub default: bool,
+    pub start: Option<f64>,
 }
 
 impl AudioTrack {
@@ -178,6 +181,7 @@ pub fn frame_count(path: &Path, prefs: &Prefs) -> Result<u64> {
 }
 
 fn keyframes_of(path: &Path, prefs: &Prefs) -> Result<Vec<f64>> {
+    let start = probe(path, prefs).map_or(0.0, |p| p.start);
     let f = container_ffmpeg(prefs)?;
     let listing = f.probe_csv(
         &[
@@ -194,7 +198,10 @@ fn keyframes_of(path: &Path, prefs: &Prefs) -> Result<Vec<f64>> {
             .filter_map(|l| {
                 let (t, flags) = l.trim().split_once(',')?;
                 flags.contains('K').then_some(())?;
-                t.parse::<f64>().ok().filter(|t| *t >= 0.0)
+                t.parse::<f64>()
+                    .ok()
+                    .map(|t| t - start)
+                    .filter(|t| *t >= 0.0)
             })
             .collect(),
     ))
@@ -275,10 +282,19 @@ fn from_flat(m: &BTreeMap<String, String>) -> Result<Probe> {
             rate: num(s, "sample_rate").unwrap_or(0.0) as u32,
             bitrate: num(s, "bit_rate").map(|b| b as u32),
             default: get(s, "disposition.default").map(String::as_str) == Some("1"),
+            start: num(s, "start_time").filter(|t| t.is_finite()),
         })
         .collect();
+    let start = m
+        .get("format.start_time")
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|t| t.is_finite())
+        .unwrap_or(0.0)
+        .max(0.0);
     Ok(Probe {
         duration,
+        start,
+        video_start: num(video, "start_time").filter(|t| t.is_finite()),
         fps,
         width: num(video, "width").unwrap_or(0.0) as u32,
         height: num(video, "height").unwrap_or(0.0) as u32,

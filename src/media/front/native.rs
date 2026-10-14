@@ -169,7 +169,8 @@ pub fn probe(path: &Path) -> Result<Probe> {
         Demux::Mp4(r) => r,
         Demux::Mkv(r) => return demux::probe(&r),
     };
-    let (_, t) = video_track(&r)?;
+    let (v, t) = video_track(&r)?;
+    let starts = Demux::Mp4(r.clone()).starts();
     let (width, height) = t
         .entry()
         .and_then(|e| e.video)
@@ -201,11 +202,15 @@ pub fn probe(path: &Path) -> Result<Probe> {
                 rate: a.sample_rate(),
                 bitrate: Some(a.bitrate()).filter(|b| *b > 0),
                 default: a.enabled,
+                start: starts.track(i),
             }
         })
         .collect();
+    let lead = starts.track(v).map_or(0.0, |s| (s - starts.file).max(0.0));
     Ok(Probe {
-        duration: t.duration_seconds(),
+        duration: lead + t.duration_seconds(),
+        start: starts.file,
+        video_start: starts.track(v),
         fps: rational(t.fps()),
         width,
         height,
@@ -227,12 +232,13 @@ pub fn keyframes(path: &Path) -> Result<Vec<f64>> {
         Demux::Mp4(r) => r,
         Demux::Mkv(r) => return demux::keyframes(&r),
     };
+    let start = Demux::Mp4(r.clone()).start();
     let (_, t) = video_track(&r)?;
     Ok(sorted(
         t.keyframes()
             .iter()
             .filter_map(|&k| t.presentation(k as usize))
-            .map(|p| t.seconds(p).max(0.0))
+            .map(|p| (t.seconds(p) - start).max(0.0))
             .collect(),
     ))
 }
@@ -416,7 +422,7 @@ pub struct Frames {
     gpu: VecDeque<GpuFrame>,
     flushed: bool,
     buf: Vec<u8>,
-    cur: Option<Box<crate::mkv::Cursor>>,
+    cur: Option<(Box<crate::mkv::Cursor>, i64)>,
 }
 
 const REORDER: usize = 16;
@@ -458,8 +464,10 @@ impl Frames {
         let (dec, reason) = Decoder::for_route(&demux.stream(track)?, threads(), route)?;
         let (next, start, cur) = match &demux {
             Demux::Mkv(r) => {
-                let (cur, start) = mkv_start(r, track, from)?;
-                (0, start, Some(Box::new(cur)))
+                let starts = demux.starts();
+                let shift = starts.shift(track);
+                let (cur, start) = mkv_start(r, track, from.max(0.0) + starts.file)?;
+                (0, start.saturating_sub(shift), Some((Box::new(cur), shift)))
             }
             Demux::Mp4(_) => {
                 let (next, start) = demux.seek(track, from)?;
@@ -532,10 +540,11 @@ impl Frames {
     }
 
     fn packet(&mut self) -> Result<Option<(i64, i64, bool)>> {
-        if let (Some(cur), Demux::Mkv(r)) = (self.cur.as_mut(), &self.demux) {
-            return Ok(cur
-                .next_of(r, Some(self.track), &mut self.buf)?
-                .map(|b| (b.pts, b.pts, b.keyframe)));
+        if let (Some((cur, shift)), Demux::Mkv(r)) = (self.cur.as_mut(), &self.demux) {
+            return Ok(cur.next_of(r, Some(self.track), &mut self.buf)?.map(|b| {
+                let pts = b.pts.saturating_sub(*shift);
+                (pts, pts, b.keyframe)
+            }));
         }
         let Some(s) = self.demux.sample(self.track, self.next) else {
             return Ok(None);
@@ -572,14 +581,15 @@ impl Frames {
     }
 }
 
-pub fn still(reader: &Reader, dec: &mut Decoder, at: f64, height: u32) -> Result<Rgba> {
+pub fn still(reader: &Arc<Reader>, dec: &mut Decoder, at: f64, height: u32) -> Result<Rgba> {
+    let start = Demux::Mp4(reader.clone()).start();
     let (track, t) = video_track(reader)?;
-    let packet = reader.packet(track, gop_start(t, at.max(0.0)))?;
+    let packet = reader.packet(track, gop_start(t, at.max(0.0) + start))?;
     picture(dec, &packet, t.rotation(), at, height)
 }
 
 pub fn still_mkv(
-    r: &crate::mkv::Reader,
+    r: &Arc<crate::mkv::Reader>,
     cur: &mut crate::mkv::Cursor,
     dec: &mut Decoder,
     at: f64,
@@ -589,7 +599,7 @@ pub fn still_mkv(
         .video()
         .ok_or_else(|| Error::Invalid("no video track".to_string()))?;
     let rotation = r.tracks.get(v).map_or(0, |t| t.rotation());
-    cur.seek(r, v, at.max(0.0))?;
+    cur.seek(r, v, at.max(0.0) + Demux::Mkv(r.clone()).start())?;
     let mut data = Vec::new();
     let b = cur
         .next_of(r, Some(v), &mut data)?
@@ -644,6 +654,7 @@ pub enum Packets<'a> {
         r: &'a crate::mkv::Reader,
         cur: &'a mut crate::mkv::Cursor,
         track: usize,
+        shift: i64,
     },
 }
 
@@ -658,9 +669,15 @@ impl Packets<'_> {
                 *next += 1;
                 Ok(Some(s))
             }
-            Packets::Mkv { r, cur, track } => Ok(cur
-                .next_of(r, Some(*track), buf)?
-                .map(|b| (b.pts, b.pts, b.keyframe))),
+            Packets::Mkv {
+                r,
+                cur,
+                track,
+                shift,
+            } => Ok(cur.next_of(r, Some(*track), buf)?.map(|b| {
+                let pts = b.pts.saturating_sub(*shift);
+                (pts, pts, b.keyframe)
+            })),
         }
     }
 }
@@ -783,15 +800,22 @@ fn pcm_span(t: &crate::mkv::Track, sound: &Sound) -> Option<(f64, u64)> {
 }
 
 fn audio_length(d: &Demux, i: usize, sound: &Sound) -> Result<f64> {
+    let starts = d.starts();
+    let base = starts.file;
     Ok(match d {
-        Demux::Mp4(r) => r.tracks.get(i).map_or(0.0, Track::duration_seconds),
+        Demux::Mp4(r) => r.tracks.get(i).map_or(0.0, |t| {
+            starts.track(i).map_or(0.0, |s| (s - base).max(0.0)) + t.duration_seconds()
+        }),
         Demux::Mkv(r) => match r.tracks.get(i) {
-            Some(t) if t.samples.is_empty() => super::feed::mkv_end(r, i)?,
+            Some(t) if t.samples.is_empty() => match super::feed::mkv_end(r, i)? {
+                e if e > 0.0 => (e - base).max(0.0),
+                _ => 0.0,
+            },
             Some(t) => match pcm_span(t, sound) {
                 Some((start, frames)) => {
-                    (start + frames as f64 / sound.rate().max(1) as f64).max(0.0)
+                    (start + frames as f64 / sound.rate().max(1) as f64 - base).max(0.0)
                 }
-                None => t.seconds(t.end()).max(0.0),
+                None => (t.seconds(t.end()) - base).max(0.0),
             },
             None => 0.0,
         },

@@ -256,6 +256,9 @@ fn show(out: &mut impl Write, file: &Path) -> Result<(), Fail> {
     let (w, h) = p.shown_size();
     writeln!(out, "container  MP4")?;
     writeln!(out, "duration   {:.1} s", p.duration)?;
+    if p.start > 0.0 {
+        writeln!(out, "start      {:.3} s", p.start)?;
+    }
     writeln!(
         out,
         "video      {} {} {w}x{h} {:.2} fps",
