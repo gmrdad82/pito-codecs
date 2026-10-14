@@ -56,7 +56,7 @@ In a Rust project, add the library with the parts you need (all are on by defaul
 
 ```toml
 [dependencies]
-pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v1.2.1", default-features = false, features = ["media", "h264", "hevc", "mp4", "gpu"] }
+pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v1.2.1", default-features = false, features = ["h264", "hevc", "vp9", "aac", "mp4", "mkv", "gpu", "filter", "opus", "ac3", "mp3"] }
 ```
 
 and let it pick the fastest route for each job:
@@ -212,7 +212,8 @@ let rest = decoder.flush()?;
 Encode frames to H.264 at CRF 18:
 
 ```rust
-use pito_codecs::h264::{Encoder, EncoderConfig, Rate};
+use pito_codecs::h264::{Encoder, EncoderConfig};
+use pito_codecs::media::Rate;
 
 let mut encoder = Encoder::new(EncoderConfig { width: 1920, height: 1080, fps: (60, 1), rate: Rate::Crf(18), ..Default::default() })?;
 let avcc = encoder.avcc();

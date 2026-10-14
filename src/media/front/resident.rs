@@ -97,10 +97,12 @@ impl Resident {
         } else {
             None
         };
-        self.note(
+        self.note(if overlay.is_some() {
             "frames stay on the GPU from decode to encode, overlay included, through VA-API"
-                .to_string(),
-        );
+                .to_string()
+        } else {
+            "frames stay on the GPU from decode to encode through VA-API".to_string()
+        });
         let time_base = TimeBase::new(job.fps.1, job.fps.0);
         let mut last: Option<Shown> = None;
         let mut n = 0i64;
