@@ -95,10 +95,11 @@ impl Track {
     pub fn channels(&self) -> u32 {
         match self.config() {
             Some(CodecConfig::Aac(a)) if a.channels() > 0 => a.channels(),
-            _ => self
-                .entry()
-                .and_then(|e| e.audio.as_ref())
-                .map_or(0, |a| a.channels),
+            _ => self.entry().map_or(0, |e| {
+                e.ac3_channels()
+                    .or(e.audio.as_ref().map(|a| a.channels))
+                    .unwrap_or(0)
+            }),
         }
     }
 

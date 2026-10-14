@@ -137,6 +137,8 @@ impl Ffmpeg {
             Codec::Aac => &["aac", "libfdk_aac"],
             Codec::Vp9 => &["libvpx-vp9", "vp9_vaapi"],
             Codec::Opus => &["libopus", "opus"],
+            Codec::Ac3 => &["ac3"],
+            Codec::Eac3 => &["eac3"],
             Codec::Mp3 => &["libmp3lame"],
         };
         order
@@ -284,6 +286,8 @@ pub fn codec_name(codec: Codec) -> &'static str {
         Codec::Aac => "aac",
         Codec::Vp9 => "vp9",
         Codec::Opus => "opus",
+        Codec::Ac3 => "ac3",
+        Codec::Eac3 => "eac3",
         Codec::Mp3 => "mp3",
     }
 }
@@ -295,6 +299,8 @@ pub fn codec_of(name: &str) -> Option<Codec> {
         Codec::Aac,
         Codec::Vp9,
         Codec::Opus,
+        Codec::Ac3,
+        Codec::Eac3,
         Codec::Mp3,
     ]
     .into_iter()

@@ -10,6 +10,8 @@ pub mod hevc;
 #[cfg(feature = "aac")]
 pub mod aac;
 
+#[cfg(feature = "ac3")]
+pub mod ac3;
 #[cfg(feature = "mp3")]
 pub mod mp3;
 

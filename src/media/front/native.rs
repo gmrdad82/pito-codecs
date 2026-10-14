@@ -59,6 +59,10 @@ pub fn cpu() -> Vec<(Codec, Direction)> {
     if cfg!(feature = "mp3") {
         caps.push((Codec::Mp3, Direction::Decode));
     }
+    if cfg!(feature = "ac3") {
+        caps.push((Codec::Ac3, Direction::Decode));
+        caps.push((Codec::Eac3, Direction::Decode));
+    }
     caps
 }
 

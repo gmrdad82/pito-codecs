@@ -389,6 +389,7 @@ pub fn hardware(codec: Codec) -> bool {
         Codec::H264 => h264,
         Codec::Hevc => hevc,
         Codec::Aac | Codec::Vp9 | Codec::Opus | Codec::Mp3 => false,
+        Codec::Ac3 | Codec::Eac3 => false,
     }
 }
 

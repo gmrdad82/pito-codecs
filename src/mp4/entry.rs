@@ -58,6 +58,8 @@ impl CodecConfig {
             CodecConfig::Aac(_) => "aac".into(),
             CodecConfig::Mp3 => "mp3".into(),
             CodecConfig::Pcm(_) => "pcm".into(),
+            CodecConfig::Other(f) if &f.0 == b"ac-3" => "ac3".into(),
+            CodecConfig::Other(f) if &f.0 == b"ec-3" => "eac3".into(),
             CodecConfig::Other(f) => f.to_string_lossy().trim().to_string(),
         }
     }
@@ -833,6 +835,38 @@ fn esds_payload(asc: &[u8], max_bitrate: u32, avg_bitrate: u32, buffer_size: u32
 }
 
 impl SampleEntry {
+    pub fn ac3_channels(&self) -> Option<u32> {
+        let extra = match self.audio.as_ref()?.qt_version {
+            1 => 16,
+            2 => 36,
+            _ => 0,
+        };
+        let mut rest = self.raw.get(28 + extra..)?;
+        while rest.len() >= 8 {
+            let size = u32::from_be_bytes(rest.get(..4)?.try_into().ok()?) as usize;
+            if size < 8 || size > rest.len() {
+                return None;
+            }
+            let body = rest.get(8..size)?;
+            let nfchans = |acmod: u64| [2, 1, 2, 3, 3, 4, 4, 5][acmod as usize & 7];
+            match rest.get(4..8)? {
+                b"dac3" => {
+                    let b = body.get(..3)?;
+                    let v = u64::from_be_bytes([0, 0, 0, 0, 0, b[0], b[1], b[2]]);
+                    return Some(nfchans(v >> 11) + ((v >> 10) & 1) as u32);
+                }
+                b"dec3" => {
+                    let b = body.get(..5)?;
+                    let v = u64::from_be_bytes([0, 0, 0, b[0], b[1], b[2], b[3], b[4]]);
+                    let deps = if (v >> 1) & 15 > 0 { 2 } else { 0 };
+                    return Some(nfchans(v >> 9) + ((v >> 8) & 1) as u32 + deps);
+                }
+                _ => rest = rest.get(size..)?,
+            }
+        }
+        None
+    }
+
     fn video(format: &[u8; 4], codec: CodecConfig, width: u16, height: u16) -> Self {
         SampleEntry {
             format: FourCc(*format),

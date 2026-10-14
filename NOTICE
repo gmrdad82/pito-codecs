@@ -171,6 +171,38 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+The AC-3 and E-AC-3 decoder in src/ac3/ is adapted from oxideav-ac3
+(https://github.com/OxideAV/oxideav-ac3, version 0.0.11, commit
+99228831d2b29a35fe2b2035118a18f8cb0cae59), which is written from ATSC A/52
+and ETSI TS 102 366: its syncframe and bit stream information parsing,
+exponent decoding, parametric bit allocation, mantissa dequantisation,
+coupling, rematrixing, spectral extension, adaptive hybrid transform (with its
+vector quantisation tables) and IMDCT structure. The batched SIMD IMDCT, the
+computed KBD window, the cached bit allocation, the channel layout and the
+container wiring are new. It carries this notice:
+
+MIT License
+
+Copyright (c) 2026 Karpelès Lab Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 The MPEG audio decoder in src/mp3/ (layers I, II and III: frame sync, side
 information, scale factors, Huffman decoding, stereo processing, the IMDCT and
 the polyphase synthesis with its SSE and NEON layout, and their tables) is

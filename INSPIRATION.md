@@ -17,6 +17,7 @@ The codecs here are written in Rust. Parts are adapted from permissively license
 | NVIDIA Video Codec SDK header `nvEncodeAPI.h` | MIT (NVIDIA) | API 12.1 | The NVENC declarations in `src/gpu/nvenc/ffi.rs`. |
 | RFC 6386 reference decoder (Section 20) | BSD-3-Clause (Google) | RFC 6386 (November 2011) | VP8 loop filter, intra prediction, token and transform details in `src/webp/vp8/`. |
 | [libwebp](https://chromium.googlesource.com/webm/libwebp) | BSD-3-Clause (Google) | v1.6.0, `4fa21912338357f89e4fd51cf2368325b59e9bd9` | YUV and RGB conversion, the fancy upsampler, the SSE2 loop filter layout, forward transforms and the quality scale in `src/webp/vp8/`. |
+| [oxideav-ac3](https://github.com/OxideAV/oxideav-ac3) | MIT (Karpelès Lab Inc.) | 0.0.11, `99228831d2b29a35fe2b2035118a18f8cb0cae59` | The AC-3 and E-AC-3 decoder in `src/ac3/`: frame and BSI parsing, exponents, bit allocation, mantissas, coupling, rematrixing, spectral extension, AHT and the IMDCT structure. |
 | [minimp3](https://github.com/lieff/minimp3) | CC0 1.0 (public domain) | `ea99364f61c14656440e8d77e9c233ccf3124633` | The MPEG-1, 2 and 2.5 audio decoder (layers I, II and III) in `src/mp3/`, with its tables and SSE and NEON layout; the container packet front, the channel matching and the granule-0 scfsi mask are new. |
 
 ## Specifications
@@ -27,6 +28,7 @@ The codecs here are written in Rust. Parts are adapted from permissively license
 - RFC 6716 and RFC 8251 (Opus), RFC 7845 (Ogg Opus), RFC 8794 and RFC 9559 (EBML and Matroska) and the WebM container guidelines.
 - RFC 9649 (WebP: the container, VP8L lossless and ALPH, written from it alone) and RFC 6386 (VP8 lossy) for `src/webp/`.
 - CompuServe's GIF89a specification (1990), the only source for `src/gif/`.
+- ATSC A/52 and ETSI TS 102 366 (AC-3 and E-AC-3), which oxideav-ac3 follows; the KBD window in `src/ac3/` is computed from the A/52 definition.
 - ITU-R BS.1770-4 and EBU Tech 3341 and 3342 (loudness), and ITU-R BT.601, BT.709 and BT.2020 (colour).
 - The paper "A novel macroblock-tree algorithm for high-performance optimization of dependent video coding in H.264/AVC" (2009), whose published description is the only source for the lookahead QP offsets in `src/h264/enc/mbtree.rs`.
 

@@ -29,6 +29,7 @@ fn codec_type(codec: Codec) -> Result<CMVideoCodecType> {
         Codec::Aac | Codec::Vp9 | Codec::Opus | Codec::Mp3 => {
             Err(Error::Unsupported(format!("{codec:?} on VideoToolbox")))
         }
+        Codec::Ac3 | Codec::Eac3 => Err(Error::Unsupported(format!("{codec:?} on VideoToolbox"))),
     }
 }
 
