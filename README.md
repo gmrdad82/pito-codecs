@@ -82,7 +82,7 @@ Opening a file and showing its first picture takes 4.1 ms for 1440p H.264 on the
 
 ### Filmstrips
 
-`frames_at` takes stills at any times, from the keyframe at or before each one, and reads only what it needs; in MKV and WebM it seeks through the file's Cues, so a still late in a long recording costs the same as one at the start. `frames_at_seek` with `Seek::Exact` decodes on to the exact frame. This strip of 12 stills was taken by `frames_at` and written by our own GIF encoder (`examples/readme_shots.rs`), in 63 ms for the stills and 27 ms for the GIF:
+`frames_at` takes stills at any times, from the keyframe at or before each one, and reads only what it needs; in MKV and WebM it seeks through the file's Cues, so a still late in a long recording costs the same as one at the start. `frames_at_seek` with `Seek::Exact` decodes on to the exact frame. This strip of 12 stills was taken by `frames_at` and written by our own GIF encoder (`examples/readme_shots.rs`), in 63 to 272 ms for the stills across runs on a shared machine and 27 ms for the GIF:
 
 ![Twelve stills across a NASA clip, taken by frames_at](docs/images/filmstrip.gif)
 
