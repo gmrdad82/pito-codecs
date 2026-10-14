@@ -170,7 +170,8 @@ fn pick(
 ) -> Result<Picked> {
     let mut reasons = Vec::new();
     for (route, c) in tries {
-        if c == Codec::Aac && route == Route::Gpu {
+        if route == Route::Gpu && (c == Codec::Aac || (c == Codec::Vp9 && dir == Direction::Encode))
+        {
             continue;
         }
         if caps.has(route, c, dir) {

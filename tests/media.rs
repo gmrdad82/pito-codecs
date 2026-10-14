@@ -1876,3 +1876,159 @@ fn every_audio_range_and_stream_start_cuts_the_whole_decode() {
         }
     }
 }
+
+fn vp9_clip() -> &'static Path {
+    static CLIP: OnceLock<PathBuf> = OnceLock::new();
+    CLIP.get_or_init(|| {
+        let out = dir().join("vp9-g30.webm");
+        if out.exists() {
+            return out;
+        }
+        let part = dir().join(format!("vp9-g30.{}.part.webm", std::process::id()));
+        let ok = Command::new("ffmpeg")
+            .args(["-v", "error", "-y"])
+            .args(["-f", "lavfi", "-i", "testsrc2=s=640x360:r=30:d=8"])
+            .args(["-c:v", "libvpx-vp9", "-deadline", "good", "-cpu-used", "4"])
+            .args(["-auto-alt-ref", "1", "-lag-in-frames", "16", "-b:v", "1M"])
+            .args(["-g", "30", "-keyint_min", "30", "-pix_fmt", "yuv420p"])
+            .arg(&part)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        if let Err(e) = std::fs::rename(&part, &out) {
+            assert!(out.exists(), "{e}");
+            let _ = std::fs::remove_file(&part);
+        }
+        out
+    })
+}
+
+fn frame_md5s(path: &Path) -> Vec<String> {
+    let out = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-map", "0:v:0", "-f", "framemd5", "-"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .map(|l| l.rsplit(',').next().unwrap().trim().to_string())
+        .collect()
+}
+
+fn luma(path: &Path) -> Vec<Vec<u8>> {
+    let out = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-map", "0:v:0", "-f", "rawvideo", "-pix_fmt", "gray", "-"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    out.stdout.chunks(640 * 360).map(<[u8]>::to_vec).collect()
+}
+
+fn luma_psnr(a: &[u8], b: &[u8]) -> f64 {
+    let se: f64 = a
+        .iter()
+        .zip(b)
+        .map(|(&x, &y)| (x as f64 - y as f64).powi(2))
+        .sum();
+    10.0 * (255.0f64.powi(2) * a.len() as f64 / se.max(1e-9)).log10()
+}
+
+#[test]
+fn a_vp9_cut_copies_its_middles_bit_exact_into_vp09_and_encodes_only_its_heads() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let src = vp9_clip();
+    let out = dir().join("vp9-cut.mp4");
+    let pieces = [(1.1, 3.4), (5.5, 6.2), (0.2, 1.5)].map(|(from, to)| Piece {
+        path: src.to_path_buf(),
+        from,
+        to,
+    });
+    let silent = |_: usize, frames: usize| {
+        let mut buf = AudioBuffer::new(48_000, 2);
+        buf.samples = vec![0.0; frames * 2];
+        Ok(buf)
+    };
+    let opts = || ExportOptions {
+        video: Codec::Vp9,
+        ..ExportOptions::default()
+    };
+    let done = export_with_audio(&out, &pieces, opts(), silent, |_| true).unwrap();
+    assert!(done.smart, "{:?}", done.reasons);
+    assert_eq!(done.video.codec, Codec::Vp9);
+    assert!(done.video.reasons.is_empty(), "{:?}", done.video.reasons);
+    assert_eq!((done.frames, done.copied, done.encoded), (129, 63, 66));
+    assert_eq!(
+        ffprobe(
+            &out,
+            &[
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name,codec_tag_string",
+                "-of",
+                "csv=p=0",
+            ],
+        ),
+        "vp9,vp09"
+    );
+    let warnings = Command::new("ffmpeg")
+        .args(["-v", "warning", "-i"])
+        .arg(&out)
+        .args(["-f", "null", "-"])
+        .output()
+        .unwrap();
+    assert!(warnings.status.success());
+    assert_eq!(String::from_utf8_lossy(&warnings.stderr), "");
+    let times = ffprobe(
+        &out,
+        &[
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "frame=pts_time",
+            "-of",
+            "csv=p=0",
+        ],
+    );
+    let times: Vec<f64> = times.lines().map(|t| t.parse().unwrap()).collect();
+    assert_eq!(times.len(), 129);
+    for (k, t) in times.iter().enumerate() {
+        assert!((t - k as f64 / 30.0).abs() < 1e-3, "frame {k} at {t}");
+    }
+    let (ours, theirs) = (frame_md5s(&out), frame_md5s(src));
+    for (at, from, n) in [(27, 60, 42), (84, 180, 6), (114, 30, 15)] {
+        assert_eq!(
+            ours[at..at + n],
+            theirs[from..from + n],
+            "copied from {from}"
+        );
+    }
+    let (ours, theirs) = (luma(&out), luma(src));
+    for (at, from, n) in [(0, 33, 27), (69, 165, 15), (90, 6, 24)] {
+        for k in 0..n {
+            let psnr = luma_psnr(&ours[at + k], &theirs[from + k]);
+            assert!(psnr > 35.0, "edge frame {} at {psnr}", at + k);
+        }
+    }
+    assert_eq!(
+        probe(&out, &Prefs::default()).unwrap().video_codec,
+        Some(Codec::Vp9)
+    );
+    let again = dir().join("vp9-recut.mp4");
+    let piece = [Piece {
+        path: out.clone(),
+        from: 0.0,
+        to: 2.3,
+    }];
+    let done = export_with_audio(&again, &piece, opts(), silent, |_| true).unwrap();
+    assert!(done.smart && done.copied == 69, "{:?}", done.reasons);
+    assert!(decodes_clean(&again));
+}

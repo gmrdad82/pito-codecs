@@ -75,7 +75,7 @@ Not covered: AC3 and E-AC3, DTS, MP3, FLAC, Vorbis, ALAC, AV1, ProRes, DNxHD, MP
 - **Containers:** MP4, MOV, MKV and WebM read, write and remux; Ogg Opus.
 - **Images:** GIF and WebP, still and animated.
 - **Filters** between decode and encode (`filter`): scaling, colour, geometry, frame rate, overlays, resampling and loudness.
-- **A front for apps** (`media`), which picks the fastest working route for each call. It can probe a file, give the first frame or stills for a filmstrip, play a file, pull its audio as PCM over any time range, as a stream of one-second blocks from any point, or as a stereo mix of its tracks with a gain each, and export with smart cuts, which copy the middle of each piece and re-encode only the edges.
+- **A front for apps** (`media`), which picks the fastest working route for each call. It can probe a file, give the first frame or stills for a filmstrip, play a file, pull its audio as PCM over any time range, as a stream of one-second blocks from any point, or as a stereo mix of its tracks with a gain each, and export with smart cuts, which copy the middle of each piece and re-encode only the edges. A VP9 source exports to VP9 in MP4 (`vp09`) the same way: whole frames are copied as they are, superframes included, and only the frames before each piece's first keyframe are encoded, in parallel keyframe-led chunks.
 
 ## Install
 
