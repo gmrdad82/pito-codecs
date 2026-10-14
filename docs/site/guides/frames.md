@@ -16,7 +16,7 @@ pub struct Canvas {
 }
 ```
 
-The width and height must be even. `frames` is the expected count, used only for progress; the export ends when the frame callback returns `None`.
+The width and height must be even. `frames` is the frame count: the export ends after that many frames or when the frame callback returns `None`, whichever comes first, and with `None` it ends only on the callback's `None`.
 
 ## Three seconds of vertical video
 
