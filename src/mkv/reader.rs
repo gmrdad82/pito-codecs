@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::fs::File;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use super::ebml::{self, Children, Lacing, Size, parse_lacing, read_id, read_size};
 use super::ids::*;
@@ -550,6 +551,7 @@ pub struct Reader<S: ByteSource = File> {
     pub(crate) segment_start: u64,
     pub(crate) segment_end: u64,
     pub(crate) first_cluster: Option<u64>,
+    full: OnceLock<std::result::Result<Box<Reader<S>>, Error>>,
 }
 
 struct Head {
@@ -571,25 +573,6 @@ impl Reader<File> {
         File::open(path)
             .map_err(Error::from)
             .and_then(Self::new)
-            .map_err(|e| e.in_file(path))
-    }
-
-    #[cfg_attr(
-        not(all(
-            feature = "h264",
-            feature = "hevc",
-            feature = "aac",
-            feature = "gpu",
-            feature = "filter",
-            feature = "vp9"
-        )),
-        allow(dead_code)
-    )]
-    pub(crate) fn open_video_index(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
-        File::open(path)
-            .map_err(Error::from)
-            .and_then(|f| Self::open_inner(f, Options::default(), true))
             .map_err(|e| e.in_file(path))
     }
 
@@ -701,6 +684,7 @@ impl<S: ByteSource> Reader<S> {
             segment_start: head.segment_start,
             segment_end: head.segment_end,
             first_cluster: head.first_cluster,
+            full: OnceLock::new(),
         })
     }
 
@@ -777,6 +761,46 @@ impl<S: ByteSource> Reader<S> {
 
     pub(crate) fn len(&self) -> u64 {
         self.len
+    }
+}
+
+impl Reader<File> {
+    #[cfg_attr(
+        not(all(
+            feature = "h264",
+            feature = "hevc",
+            feature = "aac",
+            feature = "gpu",
+            feature = "filter",
+            feature = "vp9"
+        )),
+        allow(dead_code)
+    )]
+    pub(crate) fn full(&self) -> Result<&Reader<File>> {
+        if self.indexed {
+            return Ok(self);
+        }
+        let built = self.full.get_or_init(|| {
+            self.source
+                .try_clone()
+                .map_err(Error::from)
+                .and_then(|f| Self::open_inner(f, Options::default(), true))
+                .map(Box::new)
+        });
+        match built {
+            Ok(r) => Ok(r),
+            Err(e) => Err(again(e)),
+        }
+    }
+}
+
+fn again(e: &Error) -> Error {
+    match e {
+        Error::Unsupported(s) => Error::Unsupported(s.clone()),
+        Error::Invalid(s) => Error::Invalid(s.clone()),
+        Error::Backend(s) => Error::Backend(s.clone()),
+        Error::Io(e) => Error::Io(std::io::Error::new(e.kind(), e.to_string())),
+        Error::Cancelled => Error::Cancelled,
     }
 }
 

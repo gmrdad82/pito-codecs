@@ -32,6 +32,46 @@ fn run() -> Res<()> {
         return captions();
     }
     let mode = args.next();
+    if mode.as_deref() == Some("open") {
+        let prefs = Prefs {
+            decode: Choice::Cpu,
+            encode: Choice::Cpu,
+            ..Prefs::default()
+        };
+        let io = || -> (u64, u64) {
+            let text = std::fs::read_to_string("/proc/self/io").unwrap_or_default();
+            let field = |k: &str| {
+                text.lines()
+                    .find_map(|l| l.strip_prefix(k))
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0)
+            };
+            (field("rchar:"), field("syscr:"))
+        };
+        for at in args.by_ref() {
+            let from: f64 = at.parse()?;
+            let before = io();
+            let t = Instant::now();
+            let mut video = decode_video(&path, from, None, &prefs)?;
+            let opened = t.elapsed().as_secs_f64();
+            let f = video.next().ok_or("no frame")??;
+            let sum = f.planes[0]
+                .data
+                .iter()
+                .fold(0u64, |a, &b| a.wrapping_mul(31).wrapping_add(b as u64));
+            let total = t.elapsed().as_secs_f64();
+            let after = io();
+            say!(
+                "open at {from} s: open {:.1} ms, first frame {:.1} ms, read {:.2} MB in {} calls, pts {} sum {sum:x}",
+                opened * 1e3,
+                total * 1e3,
+                after.0.saturating_sub(before.0) as f64 / 1e6,
+                after.1.saturating_sub(before.1),
+                f.pts
+            )?;
+        }
+        return Ok(());
+    }
     if mode.as_deref() == Some("frames") {
         let cpu = args.next().as_deref() == Some("cpu");
         let count = match args.next() {
