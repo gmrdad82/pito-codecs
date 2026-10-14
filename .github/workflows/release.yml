@@ -75,8 +75,27 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  docs:
+    runs-on: ubuntu-24.04
+    env:
+      ASSET: docs-${{ github.ref_name }}.tar.gz
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: 1.97.1
+      - run: bin/docs-bundle "$GITHUB_REF_NAME" dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ env.ASSET }}
+          path: dist/${{ env.ASSET }}
+          if-no-files-found: error
+          retention-days: 1
+
   publish:
-    needs: build
+    needs: [build, docs]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -90,8 +109,11 @@ jobs:
           merge-multiple: true
       - run: |
           cd dist
-          set -- *
+          set -- pcod-*
           [ "$#" -eq 3 ] || { echo "expected three archives, found $*"; exit 1; }
+          [ -f "docs-$GITHUB_REF_NAME.tar.gz" ] || { echo "no docs bundle"; exit 1; }
+          set -- *
+          [ "$#" -eq 4 ] || { echo "expected three archives and the docs bundle, found $*"; exit 1; }
           sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
       - run: |
