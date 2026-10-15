@@ -1,6 +1,6 @@
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 #[cfg_attr(target_os = "windows", allow(dead_code))]
-mod biplanar;
+pub(crate) mod biplanar;
 mod nal;
 
 #[cfg(test)]

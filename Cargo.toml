@@ -18,6 +18,7 @@ mp3 = ["media"]
 mp4 = ["media"]
 gpu = [
     "media",
+    "dep:rayon",
     "dep:libloading",
     "dep:windows",
     "dep:objc2-core-foundation",
