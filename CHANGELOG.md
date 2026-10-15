@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.4.1 — 2026-10-15
+
+### Changed
+
+- Listing an MKV's keyframes reads its Cues instead of the whole file, with the same list: a 4.2 GB file on a network share answers in about half a second instead of 35 s. Files without complete Cues are still read in full.
+
 ## v1.4.0 — 2026-10-15
 
 ### Added
