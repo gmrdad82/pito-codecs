@@ -126,12 +126,15 @@ impl Stills {
     }
 
     fn take(&self, key: Key, make: impl FnOnce() -> Result<native::Decoder>) -> Worker {
-        let kept = {
+        let mut kept = {
             let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
             kept.iter()
                 .position(|w| w.key == key)
                 .map(|i| kept.swap_remove(i))
         };
+        if let Some(Worker { dec: Ok(d), .. }) = &mut kept {
+            d.reset();
+        }
         kept.unwrap_or_else(|| Worker {
             key,
             dec: make(),
@@ -282,6 +285,7 @@ impl Stills {
                     track: v,
                     shift,
                 };
+                dec.reset();
                 native::exact(&mut src, dec, &targets, rotation, height, color, skip)
             },
             &wanted,
@@ -350,6 +354,7 @@ impl Stills {
                     track: v,
                     next: key,
                 };
+                dec.reset();
                 native::exact(&mut packets, dec, &targets, rotation, height, color, skip)
             },
             &wanted,

@@ -308,6 +308,12 @@ impl Decoder {
         }
     }
 
+    pub fn reset(&mut self) {
+        if let Decoder::Gpu(d) = self {
+            d.reset();
+        }
+    }
+
     pub fn new(st: &Stream, threads: usize) -> Result<Decoder> {
         let tb = st.time_base;
         match (st.codec, &st.avc) {
