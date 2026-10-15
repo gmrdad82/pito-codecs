@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
-use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use pito_codecs::gpu::{self, Backend, HwDecoder, HwEncoder};
 use pito_codecs::media::{
     self, Caps, Choice, Codec, Fallback, Packet, Prefs, Route, TimeBase, VideoFrame as Picture,
@@ -20,6 +20,8 @@ type Fail = Box<dyn Error>;
 
 #[path = "pcod/frames.rs"]
 mod frames;
+#[path = "pcod/stills.rs"]
+mod stills;
 
 #[derive(Parser)]
 #[command(
@@ -89,6 +91,85 @@ enum Command {
         #[arg(long, help = "PNG decode threads [default: one per core, at most 16]")]
         threads: Option<usize>,
     },
+    #[command(
+        about = "Write stills of a video as PNGs and/or one contact sheet",
+        long_about = "Write stills of a video as PNGs and/or one contact sheet\n\nThe stills are N evenly spaced over the video (--count, 12 by default, or rows x cols when both are given for a sheet) or at the given times (--at). Each is scaled to --height keeping its shape. --out writes still-001.png, still-002.png, ... into a folder; --sheet writes one PNG of rows x cols stills on black with --pad pixels between and around them. --json prints each still's time, size and path.",
+        group(ArgGroup::new("written").args(["out", "sheet"]).required(true).multiple(true))
+    )]
+    Stills {
+        #[arg(help = "The video: MP4, MOV, MKV or WebM")]
+        file: PathBuf,
+        #[arg(
+            long,
+            short = 'n',
+            conflicts_with = "at",
+            help = "How many evenly spaced stills [default: 12]"
+        )]
+        count: Option<usize>,
+        #[arg(
+            long,
+            value_delimiter = ',',
+            value_parser = time_of,
+            help = "Times to take, comma separated: seconds, m:ss or h:mm:ss"
+        )]
+        at: Vec<f64>,
+        #[arg(long, default_value_t = 360, help = "Height of each still in pixels")]
+        height: u32,
+        #[arg(long, help = "A folder to write one PNG per still into")]
+        out: Option<PathBuf>,
+        #[arg(long, help = "A PNG to write the contact sheet to")]
+        sheet: Option<PathBuf>,
+        #[arg(long, help = "Rows of the contact sheet [default: to fit]")]
+        rows: Option<usize>,
+        #[arg(long, help = "Columns of the contact sheet [default: about square]")]
+        cols: Option<usize>,
+        #[arg(
+            long,
+            default_value_t = 8,
+            help = "Pixels between and around the sheet's stills"
+        )]
+        pad: u32,
+        #[arg(
+            long,
+            value_enum,
+            default_value = "exact",
+            help = "The exact frame at each time, or the keyframe at or before it (faster)"
+        )]
+        seek: SeekKind,
+        #[arg(
+            long,
+            value_enum,
+            default_value = "gpu",
+            help = "Decode on the GPU, falling back to the CPU, or on the CPU only"
+        )]
+        route: Where,
+        #[arg(long, help = "Print each still's time, size and path as JSON")]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SeekKind {
+    Exact,
+    Keyframe,
+}
+
+fn time_of(text: &str) -> Result<f64, String> {
+    let bad = || format!("'{text}' is not a time such as 90, 1:30 or 1:02:03.5");
+    let parts: Vec<&str> = text.trim().split(':').collect();
+    if parts.len() > 3 {
+        return Err(bad());
+    }
+    let mut total = 0.0f64;
+    for (i, part) in parts.iter().enumerate() {
+        let v: f64 = part.parse().map_err(|_| bad())?;
+        let last = i + 1 == parts.len();
+        if !v.is_finite() || v < 0.0 || (!last && v.fract() != 0.0) || (i > 0 && v >= 60.0) {
+            return Err(bad());
+        }
+        total = total * 60.0 + v;
+    }
+    Ok(total)
 }
 
 fn rate_of(text: &str) -> Result<(u32, u32), String> {
@@ -233,6 +314,39 @@ fn run(cli: Cli) -> Result<(), Fail> {
                 prefs: route.prefs(),
                 crf,
                 threads: threads_of(threads),
+            },
+        ),
+        Command::Stills {
+            file,
+            count,
+            at,
+            height,
+            out: dir,
+            sheet,
+            rows,
+            cols,
+            pad,
+            seek,
+            route,
+            json,
+        } => stills::run(
+            &mut out,
+            &stills::Job {
+                file,
+                count,
+                at,
+                height,
+                out: dir,
+                sheet,
+                rows,
+                cols,
+                pad,
+                seek: match seek {
+                    SeekKind::Exact => media::Seek::Exact,
+                    SeekKind::Keyframe => media::Seek::Keyframe,
+                },
+                prefs: route.prefs(),
+                json,
             },
         ),
     };

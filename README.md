@@ -49,6 +49,7 @@ pcod probe clip.mp4
 pcod decode clip.mp4 --route gpu
 pcod encode clip.mp4 out.mp4 --codec hevc --route gpu
 pcod frames frames/ trailer.mp4 --fps 60 --audio trailer.wav
+pcod stills clip.mp4 --count 24 --cols 6 --sheet sheet.png --out stills/
 ```
 
 `SHA256SUMS` in each Release lists every archive's checksum. To build pcod from source anywhere, Linux arm64 included, with Rust 1.97 or newer: `cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag v1.4.0 pito-codecs --bin pcod`.
@@ -96,6 +97,8 @@ An MKV or WebM file opens for video from its headers and Cues alone, then seeks 
 ![Filmstrip stills per second, pito-codecs against ffmpeg](docs/images/chart-filmstrip.png)
 
 An app that asks for stills again and again keeps a `Stills` handle: `Stills::open(path, height, prefs)` opens the file once, and `stills.frames(times, seek, |index, still| …)` reuses its decoders across calls and hands each still over as soon as it is decoded, in any order. Exact stills skip the pictures before each target that nothing refers to and that can't be the one shown. On a 120 s 1080p H.264 file with B-frames and 8 s GOPs, a 24-still filmstrip at 90 px takes 10.8 ms instead of 22.5 ms through separate calls (16.8 ms instead of 30.3 ms from MKV), 27 rail stills at 160 px 12.1 ms instead of 18.0 ms, and 6 exact stills at 480 px 309 ms instead of 520 ms, every still byte-identical to 1.6.1's. A handle runs and keeps up to 16 decoders; `stills.keep(n)` caps both, and `stills.trim()` drops the kept ones when the app goes idle. With three handles open on that file (filmstrip, rail and exact stills), keeping 4 decoders each brings the process's peak from 916 MB to 442 MB, and 27 rail stills then take 22 ms instead of 11 ms; keeping 2, 188 MB and 36 ms.
+
+`pcod stills` does the same from the command line: N evenly spaced stills (`--count`) or stills at given times (`--at 90,1:30,1:02:03.5`), at a height (`--height`, 360 by default), written as PNGs into a folder (`--out`) and/or as one contact sheet of rows by columns with padding (`--sheet`, `--rows`, `--cols`, `--pad`); `--seek keyframe` takes the keyframe at or before each time instead of the exact frame, and `--json` lists each still's time, size and path. The PNGs come from our own encoder, a port of fdeflate's PNG-tuned deflate. A 24-still sheet of a 10-minute 1080p H.264 file took 0.54 to 0.62 s on the GPU route, where ffmpeg's `fps,scale,tile` filter chain took 5.2 to 6.6 s, run in turn three times each at load 30 on a 32-thread machine; on a 60 s file, 0.41 to 0.45 s against 0.82 to 0.85 s.
 
 ### Decode on the CPU and the GPU
 
@@ -294,7 +297,7 @@ let mut blender = Blender::new();
 blender.draw(&mut frame, &watermark);
 ```
 
-`pcod` (`src/bin/pcod.rs`) is a small command line over the library, and it is what the GIF at the top shows: `pcod decode clip.mp4 --route gpu`, or from a checkout `cargo run --release --bin pcod -- decode clip.mp4 --route gpu`. `pcod frames <dir> <out.mp4> --fps 60 --audio sound.wav` encodes a folder of PNG frames in name order and a WAV into an H.264 (or HEVC) and AAC MP4, BT.709 and faststart, decoding the PNGs on every core ahead of the encoder. It is behind the `cli` feature, on by default, so a library user with `default-features = false` never builds clap.
+`pcod` (`src/bin/pcod.rs`) is a small command line over the library, and it is what the GIF at the top shows: `pcod decode clip.mp4 --route gpu`, or from a checkout `cargo run --release --bin pcod -- decode clip.mp4 --route gpu`. `pcod frames <dir> <out.mp4> --fps 60 --audio sound.wav` encodes a folder of PNG frames in name order and a WAV into an H.264 (or HEVC) and AAC MP4, BT.709 and faststart, decoding the PNGs on every core ahead of the encoder. `pcod stills clip.mp4 --sheet sheet.png` writes a contact sheet; see Filmstrips. It is behind the `cli` feature, on by default, so a library user with `default-features = false` never builds clap.
 
 
 ## How it was measured
