@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.5.0 — 2026-10-15
+
+### Added
+
+- `gpu::EncoderConfig` has `sar` and `color`, and there is a public `gpu::Color`: struct literals that don't end in `..Default::default()` need the two new fields.
+
+### Changed
+
+- The first frame on the card comes out as soon as it is decoded: 1440p first frame on the GPU 3.5 ms for H.264 and 3.2 ms for HEVC, 1080p GPU playback's first frame about twice as fast.
+- A GPU export runs on its own VA-API display, so it no longer shares a driver lock with playback in the same app.
+- A GPU smart cut builds one encoder and one decoder per worker for the whole export instead of new ones for every cut.
+- Frames read back from the card are reused instead of allocated anew, and their copy runs on the shared thread pool.
+- README speed numbers come from the 2026-10-15 run.
+
+### Fixed
+
+- Frames re-encoded on the card around a cut carry the source's aspect ratio and colour tags, so they match the copied frames.
+- A stuck GPU job returns an error after 5 seconds instead of hanging the app.
+- Malformed H.264 and HEVC parameter sets and slice headers are refused instead of overflowing.
+- A crafted MKV or fragmented MP4 can no longer make the readers load the whole file or allocate many times its size.
+
 ## v1.4.2 — 2026-10-15
 
 ### Fixed
