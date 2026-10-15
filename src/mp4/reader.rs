@@ -11,6 +11,7 @@ use std::path::Path;
 const MAX_SAMPLES: usize = 1 << 26;
 const MAX_EMPTY_SAMPLES: u64 = 1 << 16;
 const MAX_HEADER_BOX: u64 = 1 << 30;
+const MIN_SAMPLE_BYTES: u64 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Sample {
@@ -359,75 +360,52 @@ fn parse_name(udta: &[u8]) -> Option<String> {
     None
 }
 
-fn open<S: ByteSource>(src: S) -> Result<Reader<S>> {
-    let len = src.len();
-    let mut offset = 0u64;
-    let mut ftyp: Option<Vec<u8>> = None;
-    let mut moov: Option<(u64, Vec<u8>)> = None;
-    let mut moofs: Vec<(u64, Vec<u8>)> = Vec::new();
-    while len.saturating_sub(offset) >= 8 {
-        let n = (len - offset).min(32) as usize;
-        let mut hb = [0u8; 32];
-        src.read_at(offset, &mut hb[..n])?;
-        let h = parse_box_header(&hb[..n])?;
-        let size = h.size.unwrap_or(len - offset);
-        let end = offset.saturating_add(size).min(len);
-        let body_len = end.saturating_sub(offset + h.header_len);
-        let body = |max: u64| -> Result<Vec<u8>> {
-            if body_len > max {
-                return Err(too_large("header box"));
-            }
-            let mut data = Vec::new();
-            read_range(&src, len, offset + h.header_len, body_len, &mut data)?;
-            Ok(data)
-        };
-        match &h.kind.0 {
-            b"ftyp" if ftyp.is_none() => ftyp = Some(body(1 << 16)?),
-            b"moov" if moov.is_none() => moov = Some((offset, body(MAX_HEADER_BOX)?)),
-            b"moof" => moofs.push((offset, body(MAX_HEADER_BOX)?)),
-            _ => {}
-        }
-        if h.size.is_none() {
-            break;
-        }
-        offset = offset.saturating_add(size);
-    }
-    let (_, moov) = moov.ok_or_else(|| Error::Invalid("no moov box".into()))?;
-    let mut file = Reader {
-        source: src,
-        len,
+struct Movie {
+    brand: FourCc,
+    quicktime: bool,
+    timescale: u32,
+    duration: u64,
+    tracks: Vec<Track>,
+    fragmented: bool,
+    trex: HashMap<u32, Trex>,
+    next_dts: Vec<i64>,
+}
+
+fn movie(ftyp: Option<&[u8]>, moov: &[u8], len: u64) -> Result<Movie> {
+    let mut m = Movie {
         brand: FourCc::default(),
         quicktime: true,
         timescale: 0,
         duration: 0,
         tracks: Vec::new(),
         fragmented: false,
+        trex: HashMap::new(),
+        next_dts: Vec::new(),
     };
-    if let Some(f) = &ftyp {
+    if let Some(f) = ftyp {
         let mut c = Cur::new(f, "ftyp");
-        file.brand = c.fourcc()?;
-        file.quicktime = file.brand == b"qt  ";
+        m.brand = c.fourcc()?;
+        m.quicktime = m.brand == b"qt  ";
     }
-    let mut trex: HashMap<u32, Trex> = HashMap::new();
     let mut trak_payloads = Vec::new();
-    for b in boxes(&moov) {
+    for b in boxes(moov) {
         let b = b?;
         match &b.kind.0 {
             b"cmov" => return Err(Error::Unsupported("compressed movie header (cmov)".into())),
             b"mvhd" => {
                 let mut c = Cur::new(b.payload, "mvhd");
                 let (v, _) = c.full_header()?;
-                (file.timescale, file.duration) = times(&mut c, v)?;
+                (m.timescale, m.duration) = times(&mut c, v)?;
             }
             b"trak" => trak_payloads.push(b.payload),
             b"mvex" => {
-                file.fragmented = true;
-                for m in boxes(b.payload).map_while(|b| b.ok()) {
-                    if m.kind == b"trex" {
-                        let mut c = Cur::new(m.payload, "trex");
+                m.fragmented = true;
+                for x in boxes(b.payload).map_while(|b| b.ok()) {
+                    if x.kind == b"trex" {
+                        let mut c = Cur::new(x.payload, "trex");
                         c.full_header()?;
                         let id = c.u32()?;
-                        trex.insert(
+                        m.trex.insert(
                             id,
                             Trex {
                                 description_index: c.u32()?,
@@ -444,10 +422,10 @@ fn open<S: ByteSource>(src: S) -> Result<Reader<S>> {
     }
     let mut room = len;
     for p in trak_payloads {
-        let t = parse_trak(p, file.timescale, file.quicktime, len, &mut room)?;
-        file.tracks.push(t);
+        let t = parse_trak(p, m.timescale, m.quicktime, len, &mut room)?;
+        m.tracks.push(t);
     }
-    let mut next_dts: Vec<i64> = file
+    m.next_dts = m
         .tracks
         .iter()
         .map(|t| {
@@ -457,11 +435,94 @@ fn open<S: ByteSource>(src: S) -> Result<Reader<S>> {
                 .unwrap_or(0)
         })
         .collect();
-    for (moof_off, moof) in &moofs {
-        parse_moof(*moof_off, moof, &mut file.tracks, &trex, &mut next_dts, len)?;
+    Ok(m)
+}
+
+fn open<S: ByteSource>(src: S) -> Result<Reader<S>> {
+    let len = src.len();
+    let mut offset = 0u64;
+    let mut ftyp: Option<Vec<u8>> = None;
+    let mut moov: Option<Vec<u8>> = None;
+    let mut built: Option<Movie> = None;
+    let mut later: Vec<(u64, u64, u64)> = Vec::new();
+    let mut any_moof = false;
+    while len.saturating_sub(offset) >= 8 {
+        let n = (len - offset).min(32) as usize;
+        let mut hb = [0u8; 32];
+        src.read_at(offset, &mut hb[..n])?;
+        let h = parse_box_header(&hb[..n])?;
+        let size = h.size.unwrap_or(len - offset);
+        let end = offset.saturating_add(size).min(len);
+        let at = offset + h.header_len;
+        let body_len = end.saturating_sub(at);
+        let body = |max: u64| -> Result<Vec<u8>> {
+            if body_len > max {
+                return Err(too_large("header box"));
+            }
+            let mut data = Vec::new();
+            read_range(&src, len, at, body_len, &mut data)?;
+            Ok(data)
+        };
+        match &h.kind.0 {
+            b"ftyp" if ftyp.is_none() => ftyp = Some(body(1 << 16)?),
+            b"moov" if moov.is_none() && built.is_none() => moov = Some(body(MAX_HEADER_BOX)?),
+            b"moof" => {
+                if body_len > MAX_HEADER_BOX {
+                    return Err(too_large("header box"));
+                }
+                any_moof = true;
+                if built.is_none()
+                    && later.is_empty()
+                    && let Some(m) = moov.take()
+                {
+                    built = Some(movie(ftyp.as_deref(), &m, len)?);
+                }
+                match &mut built {
+                    Some(m) if later.is_empty() => {
+                        let moof = body(MAX_HEADER_BOX)?;
+                        parse_moof(offset, &moof, &mut m.tracks, &m.trex, &mut m.next_dts, len)?;
+                    }
+                    _ => later.push((offset, at, body_len)),
+                }
+            }
+            _ => {}
+        }
+        if h.size.is_none() {
+            break;
+        }
+        offset = offset.saturating_add(size);
     }
+    let mut m = match built {
+        Some(m) => m,
+        None => {
+            let moov = moov.ok_or_else(|| Error::Invalid("no moov box".into()))?;
+            movie(ftyp.as_deref(), &moov, len)?
+        }
+    };
+    let mut moof = Vec::new();
+    for (moof_off, at, body_len) in later {
+        read_range(&src, len, at, body_len, &mut moof)?;
+        parse_moof(
+            moof_off,
+            &moof,
+            &mut m.tracks,
+            &m.trex,
+            &mut m.next_dts,
+            len,
+        )?;
+    }
+    let mut file = Reader {
+        source: src,
+        len,
+        brand: m.brand,
+        quicktime: m.quicktime,
+        timescale: m.timescale,
+        duration: m.duration,
+        tracks: m.tracks,
+        fragmented: m.fragmented,
+    };
     for t in &mut file.tracks {
-        if file.fragmented && !moofs.is_empty() {
+        if file.fragmented && any_moof {
             let d: u64 = t.samples.iter().map(|s| s.duration as u64).sum();
             t.duration = t.duration.max(d);
             if t.timescale > 0 && file.timescale > 0 {
@@ -829,6 +890,9 @@ fn parse_stbl(
         if chunks.len() > MAX_SAMPLES {
             return Err(too_large("chunk count"));
         }
+        let fit = usize::try_from(*room / MIN_SAMPLE_BYTES).unwrap_or(usize::MAX);
+        let chunks = chunks.get(..chunks.len().min(fit)).unwrap_or(&[]);
+        *room = room.saturating_sub((chunks.len() as u64).saturating_mul(MIN_SAMPLE_BYTES));
         samples.reserve(chunks.len());
         for (ci, &off) in chunks.iter().enumerate() {
             while stsc_i + 1 < stsc.len() && stsc[stsc_i + 1].0 as usize <= ci + 1 {
@@ -858,11 +922,10 @@ fn parse_stbl(
     } else {
         let capacity = chunk_capacity(&stsc, chunks.len());
         let mut sample_count = sample_count.min(usize::try_from(capacity).unwrap_or(usize::MAX));
-        if let Some(size) = NonZeroU64::new(const_size as u64) {
-            let fit = usize::try_from(*room / size).unwrap_or(usize::MAX);
-            sample_count = sample_count.min(fit);
-            *room = room.saturating_sub((sample_count as u64).saturating_mul(size.get()));
-        }
+        let cost = (const_size as u64).max(MIN_SAMPLE_BYTES);
+        let fit = usize::try_from(*room / cost).unwrap_or(usize::MAX);
+        sample_count = sample_count.min(fit);
+        *room = room.saturating_sub((sample_count as u64).saturating_mul(cost));
         if sample_count > MAX_SAMPLES {
             return Err(too_large("sample count"));
         }
@@ -985,7 +1048,10 @@ fn parse_moof(
                 if total > (file_len / 64).max(MAX_EMPTY_SAMPLES) {
                     return Err(too_large("trun sample count"));
                 }
-            } else if total.saturating_mul(def_size as u64) > file_len {
+            } else if total.saturating_mul((def_size as u64).max(MIN_SAMPLE_BYTES)) > file_len {
+                return Err(too_large("trun sample count"));
+            }
+            if per > 0 && total.saturating_mul(MIN_SAMPLE_BYTES) > file_len {
                 return Err(too_large("trun sample count"));
             }
             if tracks[ti].samples.len() + n > MAX_SAMPLES {
