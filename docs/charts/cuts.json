@@ -1,0 +1,59 @@
+{
+ "title": "40 SMART CUTS, 1080P30 TO H.264",
+ "unit": "SECONDS",
+ "better": "lower",
+ "subtitle": "RYZEN 9 9950X, RX 9060 XT (VA-API), MEDIAN OF 5 A/B RUNS, LOAD 6 TO 23",
+ "date": "2026-10-15",
+ "parties": [
+  {
+   "name": "1.6.0"
+  },
+  {
+   "name": "1.4.2"
+  }
+ ],
+ "groups": [
+  {
+   "name": "H.264 SOURCE",
+   "rows": [
+    {
+     "label": "ON THE CARD",
+     "values": [
+      4.62,
+      5.88
+     ]
+    },
+    {
+     "label": "ON THE PROCESSOR",
+     "values": [
+      5.17,
+      5.69
+     ]
+    }
+   ]
+  },
+  {
+   "name": "HEVC SOURCE",
+   "rows": [
+    {
+     "label": "ON THE CARD",
+     "values": [
+      4.79,
+      6.9
+     ]
+    },
+    {
+     "label": "ON THE PROCESSOR",
+     "values": [
+      7.54,
+      8.68
+     ]
+    }
+   ]
+  }
+ ],
+ "suffix": " S",
+ "notes": [
+  "40 CUTS OF ABOUT 1 S FROM A 120 S FILE WITH B-FRAMES AND 8 S GOPS; EVERY FRAME IS IDENTICAL BETWEEN THE TWO VERSIONS."
+ ]
+}

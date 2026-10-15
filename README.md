@@ -8,7 +8,7 @@
 
 - **First frame 12× to 28× faster than ffmpeg:** 4.2 ms against 85.2 ms for a 1440p H.264 file on the CPU.
 - **Filmstrips 9× to 11× faster:** 12 stills at 240 px in 24 to 36 ms.
-- **Frame-accurate smart cuts 1.7× to 2.0× faster** than an ffmpeg re-encode: only the frames around each cut are encoded.
+- **Frame-accurate smart cuts 1.7× to 2.0× faster** than an ffmpeg re-encode: only the frames around each cut are encoded, and 40 short cuts run 1.3× to 1.4× faster on the card than in 1.4.2.
 - **GPU decode and encode on VA-API 1.1× to 1.2× faster** than ffmpeg's, and frames can stay on the card from decode to encode.
 - **Overlays composed on the card:** a marked or captioned export uses 18× to 23× less CPU time than decoding and blending on the CPU.
 - **Small:** a 5.7 MB command line, and a library that pulls in 8 crates on Linux.
@@ -81,6 +81,10 @@ Opening a file and showing its first picture takes 4.2 ms for 1440p H.264 on the
 
 ![Time to first frame at 1440p, pito-codecs against ffmpeg](docs/images/chart-first-frame.png)
 
+A seek decodes from the keyframe before the target, and the pictures on the way that nothing refers to (non-reference B-frames) are skipped, on the card and on the processor, with every shown frame unchanged. Opening a file 10.5 s in and showing that frame takes 30 to 40 ms on the card and 34 to 63 ms on the processor, 1.1× to 1.6× sooner than 1.4.2:
+
+![Open and first frame 10.5 s into a file, 1.6.0 against 1.4.2](docs/images/chart-seek.png)
+
 An MKV or WebM file opens for video from its headers and Cues alone, then seeks through the Cues, so its size doesn't matter, and every caller that opens the same file at once shares one read. On a gigabit network share, a 4.4 GB, 71-minute 720p H.264 MKV showed its first frame in 110 ms at the start and 193 ms at 35 minutes, reading 6.3 MB each time, where reading every cluster first took 32.8 s on a 3.9 GB file on the same share.
 
 ### Filmstrips
@@ -116,6 +120,10 @@ The CPU H.264 encoder (CABAC, B-frames, CRF, QP, CBR and VBR) has no hand-writte
 `export` and `export_with_audio` write an edit from pieces of one or more files. They copy the middle of each piece as it is and re-encode only the frames around each cut, so the result is frame-accurate and 1.7× to 2.0× faster than ffmpeg re-encoding every frame. ffmpeg's stream copy is faster still, but it encodes nothing and can only cut on keyframes.
 
 ![Smart-cut export in times real time](docs/images/chart-export.png)
+
+Before each cut, the frames from the keyframe to the cut point are decoded but not shown, and the pictures among them that nothing refers to are skipped. With many short cuts, where almost every frame is re-encoded, 40 cuts of about 1 s each from a 1080p30 file with B-frames take 4.6 s on the card for an H.264 source and 4.8 s for HEVC, 1.3× and 1.4× faster than 1.4.2, and 1.1× to 1.2× faster on the processor, with every frame identical. Against ffmpeg re-encoding the same 40 pieces in the same run, that is 1.2× (H.264 source) and 1.8× (HEVC) faster on the card, and 1.5× and 1.1× on the processor.
+
+![40 smart cuts, 1.6.0 against 1.4.2](docs/images/chart-cuts.png)
 
 VP9 sources cut the same way into MP4 (`vp09`): packets are copied as they are, superframes included, and only the frames before each piece's first keyframe are encoded, in parallel keyframe-led chunks. A 3-piece, frame-accurate cut of a 720p60 VP9 file ran at 1365 to 3285 frames a second with the machine at load 20, against about 500 for re-encoding it to H.264 on the GPU.
 
@@ -293,6 +301,8 @@ blender.draw(&mut frame, &watermark);
 - MKV open on a network share: `media_speed <file> open 0 2100`, one run on a cold file over gigabit SMB, against the earlier full-cluster read timed on a 3.9 GB file on the same share.
 - VP9 smart cut: `media_speed <file> spans vp9 …`, a 3600-frame 720p60 VP9 file at 3 Mb/s, 3 pieces, 2967 frames, keyframes every 120 or 240 frames, load about 20.
 - AC-3: 10 minutes of 5.1 at 448 kbps against `ffmpeg -threads 1 -benchmark` and `ffmpeg -ac 2`, load 20 to 50. MP3: 10 minutes of stereo at 192 kbps against ffmpeg's mp3float, load 33.
+
+**1.6.0 against 1.4.2** (the seek and 40-cut charts): both tags built in release, then run alternately, A B A B, five runs each after one warm-up, each in a fresh process, and each side's median taken; the card's runs went through `pgpu run --class bench`. The seek rows time `decode_video` (processor) and `decode_video_gpu` (card, the frame synced) from the call to the first frame at 10.5 s into the bench's 20 s 1080p and 1440p clips, load about 7. The cut rows are `ROUTE=gpu media_speed <file> cuts 40` and `ROUTE=cpu …` on a 120 s 1080p30 testsrc2 file encoded by libx264 veryfast (B-pyramid, keyint 250) and by libx265 ultrafast (4 B-frames), exported to H.264; load about 6 on the card's rows and 19 to 23 on the processor's, which load the machine themselves. The comparison with ffmpeg ran right after, three rounds of 1.6.0 on the card, 1.6.0 on the processor and ffmpeg cutting the same 40 pieces (`ffmpeg -ss <from> -i <file> -t <length> -c:v libx264 -preset veryfast -crf 18 -c:a aac -b:a 192k` per piece, then the concat demuxer with `-c copy`), medians taken, at load 9 to 16 with other builds running, so its ratios are directional. Exports with the mark, which this release doesn't touch, measured the same in both: 2.46 s at 1080p and 7.6 s at 4K on the card.
 
 The charts are drawn by [pito-compare](https://github.com/gmrdad82/pito-compare) from the data files in [docs/charts](docs/charts): `pcmp docs/charts/<name>.json`.
 
