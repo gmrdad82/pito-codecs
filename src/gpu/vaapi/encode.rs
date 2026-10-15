@@ -694,8 +694,6 @@ impl VaEncoder {
             crop_bottom: (self.size.1 - c.height) / 2,
             max_refs: if c.b_frames > 0 { 2 } else { 1 },
             reorder: u32::from(c.b_frames > 0),
-            fps_num: c.fps_num,
-            fps_den: c.fps_den,
             cabac: c.profile != Profile::Baseline,
             transform_8x8: c.profile == Profile::High,
         }
