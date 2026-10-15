@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.7.0 — 2026-10-15
+
+### Added
+
+- `Stills`: open a file once with `Stills::open(path, height, prefs)`, then ask for stills again and again with `frames(times, seek, each)`; it keeps its decoders between calls and hands each still over as soon as it is decoded. A 24-still filmstrip of a 1080p file takes 11 ms instead of 23 ms through separate calls (17 ms instead of 30 ms from MKV), with every still identical.
+
+### Changed
+
+- Exact stills skip the pictures before each target that nothing refers to and that can't be shown: 6 exact stills of a 1080p file take 310 ms instead of 520 ms.
+
+### Fixed
+
+- An MKV audio track stored minutes away from its video, as some remuxes leave it, now seeks by its own timestamps: reading 2 s of such a track an hour in takes 4 to 6 ms instead of up to 1.9 s.
+
 ## v1.6.1 — 2026-10-15
 
 ### Changed
