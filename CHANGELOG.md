@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.4.2 — 2026-10-15
+
+### Fixed
+
+- H.264 encodes on AMD and other Mesa graphics cards no longer hang at 59.94 fps and similar rates (4K among the sizes hit): the stream's header leaves the frame rate to the container, which Mesa's header reader handles.
+
 ## v1.4.1 — 2026-10-15
 
 ### Changed
