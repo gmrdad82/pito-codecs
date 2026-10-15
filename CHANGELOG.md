@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.9.0 — 2026-10-15
+
+### Added
+
+- `Stills::keep(n)` caps how many decoders a stills handle runs and keeps, and `Stills::trim()` drops the kept ones, so an app can trade a little speed for much less memory: keeping 4 decoders halves the peak memory of a 1080p file's stills, and 27 stills then take 22 ms instead of 11 ms.
+
 ## v1.8.0 — 2026-10-15
 
 ### Changed
