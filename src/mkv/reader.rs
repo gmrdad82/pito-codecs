@@ -15,6 +15,7 @@ const MAX_WIN: usize = 4 << 20;
 const MAX_META: u64 = 256 << 20;
 const MAX_SAMPLES: usize = 1 << 26;
 const MAX_WARNINGS: usize = 256;
+const CUE_SPAN: u64 = 64 << 20;
 
 fn warn(warnings: &mut Vec<String>, line: impl FnOnce() -> String) {
     match warnings.len().cmp(&MAX_WARNINGS) {
@@ -552,6 +553,7 @@ pub struct Reader<S: ByteSource = File> {
     pub(crate) segment_end: u64,
     pub(crate) first_cluster: Option<u64>,
     full: OnceLock<std::result::Result<Box<Reader<S>>, Error>>,
+    cue_keys: OnceLock<Option<Vec<i64>>>,
 }
 
 struct Head {
@@ -685,6 +687,7 @@ impl<S: ByteSource> Reader<S> {
             segment_end: head.segment_end,
             first_cluster: head.first_cluster,
             full: OnceLock::new(),
+            cue_keys: OnceLock::new(),
         })
     }
 
@@ -761,6 +764,116 @@ impl<S: ByteSource> Reader<S> {
 
     pub(crate) fn len(&self) -> u64 {
         self.len
+    }
+
+    pub(crate) fn cue_keys(&self) -> Option<&[i64]> {
+        self.cue_keys
+            .get_or_init(|| self.keys_from_cues())
+            .as_deref()
+    }
+
+    fn keys_from_cues(&self) -> Option<Vec<i64>> {
+        let v = self.video()?;
+        let t = self.tracks.get(v)?;
+        let mut cues = self
+            .cues
+            .iter()
+            .filter(|c| c.track == t.number)
+            .map(|c| {
+                Some((
+                    self.segment_start.checked_add(c.cluster)?,
+                    i64::try_from(c.time).ok()?,
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        cues.sort_unstable();
+        cues.dedup();
+        let mut at: Vec<u64> = cues.iter().map(|c| c.0).collect();
+        at.dedup();
+        let last = at.len().checked_sub(1)?;
+        let first = self.first_cluster?;
+        let mut picks = vec![0, last / 2, last];
+        picks.dedup();
+        let mut cache = Cache::default();
+        let mut io = Io::with_len(&self.source, self.len, &mut cache);
+        for i in picks {
+            let from = if i == 0 { first.min(at[0]) } else { at[i] };
+            let (seen, mut found) = self.keys_in(&mut io, v, from, at.get(i + 1).copied())?;
+            let mut want: Vec<i64> = cues
+                .iter()
+                .filter(|c| seen.contains(&c.0))
+                .map(|c| c.1)
+                .collect();
+            want.sort_unstable();
+            want.dedup();
+            found.sort_unstable();
+            found.dedup();
+            if found != want {
+                return None;
+            }
+        }
+        let scale = self.info.timestamp_scale.max(1) as u128;
+        let delay = ((t.codec_delay as u128 + scale / 2) / scale).min(i64::MAX as u128) as i64;
+        let mut keys: Vec<i64> = cues.iter().map(|c| c.1.saturating_sub(delay)).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        Some(keys)
+    }
+
+    fn keys_in(
+        &self,
+        io: &mut Io<'_, S>,
+        track: usize,
+        from: u64,
+        through: Option<u64>,
+    ) -> Option<(Vec<u64>, Vec<i64>)> {
+        let end = self.segment_end;
+        let (mut seen, mut keys) = (Vec::new(), Vec::new());
+        let (mut warnings, mut frames) = (Vec::new(), Vec::new());
+        let mut pos = from;
+        while pos < end {
+            if pos - from > CUE_SPAN {
+                return None;
+            }
+            let h = io.header(pos, end).ok()??;
+            if h.id != CLUSTER {
+                if through.is_some() || h.size == Size::Unknown || h.end(end) <= pos {
+                    return None;
+                }
+                pos = h.end(end);
+                continue;
+            }
+            let mut laced = false;
+            let ci = scan_cluster(
+                io,
+                &h,
+                end,
+                &self.tracks,
+                &mut warnings,
+                &mut frames,
+                |b, f| {
+                    if b.track == track && b.keyframe {
+                        laced |= f.len() != 1;
+                        keys.push(b.ts);
+                    }
+                },
+            )
+            .ok()?;
+            if laced || !warnings.is_empty() {
+                return None;
+            }
+            seen.push(h.pos);
+            match through {
+                Some(t) if h.pos == t => return Some((seen, keys)),
+                Some(t) if h.pos > t => return None,
+                _ => {}
+            }
+            if ci.end <= h.pos {
+                return None;
+            }
+            pos = ci.end;
+        }
+        through.is_none().then_some((seen, keys))
     }
 }
 
