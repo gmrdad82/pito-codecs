@@ -382,7 +382,7 @@ impl SliceHeader {
                 sh.max_num_merge_cand = 5 - five_minus;
             }
             sh.qp_delta = r.read_se()?;
-            let qp = pps.init_qp + sh.qp_delta;
+            let qp = pps.init_qp.saturating_add(sh.qp_delta);
             let qp_bd = 6 * (sps.bit_depth_luma as i32 - 8);
             ensure!((-qp_bd..=51).contains(&qp), "SliceQpY {qp} out of range");
             if pps.slice_chroma_qp_offsets_present {

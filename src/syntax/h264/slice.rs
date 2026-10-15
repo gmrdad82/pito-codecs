@@ -339,7 +339,7 @@ impl SliceHeader {
             ensure!(cabac_init_idc <= 2, "cabac_init_idc out of range");
         }
         let slice_qp_delta = r.read_se()?;
-        let qp = pps.pic_init_qp + slice_qp_delta;
+        let qp = pps.pic_init_qp.saturating_add(slice_qp_delta);
         ensure!((0..=51).contains(&qp), "slice QP {qp} out of range");
         if matches!(slice_type, SliceType::Sp | SliceType::Si) {
             if slice_type == SliceType::Sp {

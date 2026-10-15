@@ -684,8 +684,19 @@ impl Pps {
         );
         let weighted_pred = r.read_flag()?;
         let weighted_bipred_idc = r.read_bits(2)?;
-        let pic_init_qp = 26 + r.read_se()?;
-        let pic_init_qs = 26 + r.read_se()?;
+        let qp_bd = 6 * (sps.bit_depth_luma as i32 - 8);
+        let pic_init_qp_minus26 = r.read_se()?;
+        ensure!(
+            (-(26 + qp_bd)..=25).contains(&pic_init_qp_minus26),
+            "pic_init_qp_minus26 out of range"
+        );
+        let pic_init_qs_minus26 = r.read_se()?;
+        ensure!(
+            (-26..=25).contains(&pic_init_qs_minus26),
+            "pic_init_qs_minus26 out of range"
+        );
+        let pic_init_qp = 26 + pic_init_qp_minus26;
+        let pic_init_qs = 26 + pic_init_qs_minus26;
         let chroma_qp_index_offset = r.read_se()?;
         ensure!(
             (-12..=12).contains(&chroma_qp_index_offset),
@@ -736,5 +747,64 @@ impl Pps {
             second_chroma_qp_index_offset,
             scaling,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::syntax::bits::BitWriter;
+
+    fn sps() -> Sps {
+        let mut w = BitWriter::new();
+        w.write_bits(66, 8);
+        w.write_bits(0, 8);
+        w.write_bits(30, 8);
+        for v in [0, 0, 2, 1] {
+            w.write_ue(v);
+        }
+        w.write_bit(false);
+        w.write_ue(21);
+        w.write_ue(14);
+        for b in [true, true, false, false] {
+            w.write_bit(b);
+        }
+        w.rbsp_trailing();
+        Sps::parse(&w.finish()).unwrap()
+    }
+
+    fn pps(qp: i32, qs: i32) -> Vec<u8> {
+        let mut w = BitWriter::new();
+        w.write_ue(0);
+        w.write_ue(0);
+        w.write_bit(false);
+        w.write_bit(false);
+        w.write_ue(0);
+        w.write_ue(0);
+        w.write_ue(0);
+        w.write_bit(false);
+        w.write_bits(0, 2);
+        w.write_se(qp);
+        w.write_se(qs);
+        w.write_se(0);
+        w.write_bits(0, 3);
+        w.rbsp_trailing();
+        w.finish()
+    }
+
+    #[test]
+    fn pic_init_qp_out_of_range_is_an_error() {
+        let spss = [Some(sps())];
+        assert!(Pps::parse(&pps(0, 0), &spss).is_ok());
+        for (qp, qs) in [
+            (i32::MAX, 0),
+            (i32::MIN + 1, 0),
+            (26, 0),
+            (-27, 0),
+            (0, i32::MAX),
+            (0, -27),
+        ] {
+            assert!(Pps::parse(&pps(qp, qs), &spss).is_err(), "{qp} {qs}");
+        }
     }
 }
