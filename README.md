@@ -95,6 +95,8 @@ An MKV or WebM file opens for video from its headers and Cues alone, then seeks 
 
 ![Filmstrip stills per second, pito-codecs against ffmpeg](docs/images/chart-filmstrip.png)
 
+An app that asks for stills again and again keeps a `Stills` handle: `Stills::open(path, height, prefs)` opens the file once, and `stills.frames(times, seek, |index, still| …)` reuses its decoders across calls and hands each still over as soon as it is decoded, in any order. Exact stills skip the pictures before each target that nothing refers to and that can't be the one shown. On a 120 s 1080p H.264 file with B-frames and 8 s GOPs, a 24-still filmstrip at 90 px takes 10.8 ms instead of 22.5 ms through separate calls (16.8 ms instead of 30.3 ms from MKV), 27 rail stills at 160 px 12.1 ms instead of 18.0 ms, and 6 exact stills at 480 px 309 ms instead of 520 ms, every still byte-identical to 1.6.1's.
+
 ### Decode on the CPU and the GPU
 
 H.264 (Baseline, Main and High), H.265 (Main and Main 10, tiles and WPP) and VP9 (profiles 0 to 3) decode bit-exact with ffmpeg on the CPU, with threads across rows and frames and SIMD picked at run time. On the GPU, VA-API on Linux and VideoToolbox on macOS decode the same streams bit-exact. A frame read back from VA-API is copied only once no later picture refers to it, so the copies don't hold up decoding.
@@ -146,6 +148,8 @@ On the CPU, a caption change costs what its painted area costs: building the lay
 ### Audio
 
 AAC-LC decode and encode, Opus decode and encode (CELT; SILK and hybrid speech encode are experimental), and AC-3, E-AC-3, MP3, MP2, MP1 and PCM decode, from MP4, MOV, MKV and WebM. `audio_pcm_range` returns any time range as PCM, sample-exact; `audio_stream` hands it over in one-second blocks; `audio_mix_stream` mixes several tracks with a gain each. Loudness (EBU R128) and a true-peak limiter come with it.
+
+An MKV seek lands on each audio track by that track's own timestamps, even when a remux stored the track minutes away from the video it plays with: on a 2-hour recording whose second PCM track sat 400 to 770 s behind the video in the file, 2 s of that track at 2000 s and 4000 s now read in 4 to 6 ms, where 1.6.1 took 0.4 to 1.9 s.
 
 ![Audio in times real time, pito-codecs against ffmpeg](docs/images/chart-audio.png)
 
@@ -303,6 +307,8 @@ blender.draw(&mut frame, &watermark);
 - AC-3: 10 minutes of 5.1 at 448 kbps against `ffmpeg -threads 1 -benchmark` and `ffmpeg -ac 2`, load 20 to 50. MP3: 10 minutes of stereo at 192 kbps against ffmpeg's mp3float, load 33.
 
 **1.6.0 against 1.4.2** (the seek and 40-cut charts): both tags built in release, then run alternately, A B A B, five runs each after one warm-up, each in a fresh process, and each side's median taken; the card's runs went through `pgpu run --class bench`. The seek rows time `decode_video` (processor) and `decode_video_gpu` (card, the frame synced) from the call to the first frame at 10.5 s into the bench's 20 s 1080p and 1440p clips, load about 7. The cut rows are `ROUTE=gpu media_speed <file> cuts 40` and `ROUTE=cpu …` on a 120 s 1080p30 testsrc2 file encoded by libx264 veryfast (B-pyramid, keyint 250) and by libx265 ultrafast (4 B-frames), exported to H.264; load about 6 on the card's rows and 19 to 23 on the processor's, which load the machine themselves. The comparison with ffmpeg ran right after, three rounds of 1.6.0 on the card, 1.6.0 on the processor and ffmpeg cutting the same 40 pieces (`ffmpeg -ss <from> -i <file> -t <length> -c:v libx264 -preset veryfast -crf 18 -c:a aac -b:a 192k` per piece, then the concat demuxer with `-c copy`), medians taken, at load 9 to 16 with other builds running, so its ratios are directional. Exports with the mark, which this release doesn't touch, measured the same in both: 2.46 s at 1080p and 7.6 s at 4K on the card.
+
+**1.7.0 against 1.6.1** (the `Stills` and MKV audio numbers): run alternately, A B A B, five runs each after one warm-up, medians taken, the card's runs through `pgpu run --class bench`. Stills: each run opens the 120 s 1080p30 file (libx264 veryfast, B-pyramid, keyint 250, as MP4 and remuxed to MKV) and asks five rounds of a 24-still filmstrip at 90 px (1.6.1: two `frames_at_seek` calls of 3 and 21, as an app does today; 1.7.0: one call on a kept handle), 27 keyframe stills at 160 px and 6 exact stills at 480 px; the median of rounds two to five, at load 12 to 16. On MKV the first of 24 stills arrives in 11 ms against 8 ms for a separate 3-still call, since 16 decoders start at once. MKV audio: `audio_pcm_range` for 2 s at 2000 s and 4000 s of each PCM track of a private 2-hour OBS recording remuxed with its audio twice, read in place, at load 13 to 16.
 
 The charts are drawn by [pito-compare](https://github.com/gmrdad82/pito-compare) from the data files in [docs/charts](docs/charts): `pcmp docs/charts/<name>.json`.
 

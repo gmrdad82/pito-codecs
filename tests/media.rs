@@ -16,7 +16,7 @@ use std::sync::{Arc, OnceLock};
 
 use pito_codecs::media::{
     AudioBuffer, Canvas, Choice, Codec, ExportOptions, Frame, IN_FLIGHT, Piece, PixelFormat, Prefs,
-    Progress, Rgba, Seek, TimeBase, VideoFrame, audio_mix, audio_mix_stream, audio_pcm,
+    Progress, Rgba, Seek, Stills, TimeBase, VideoFrame, audio_mix, audio_mix_stream, audio_pcm,
     audio_pcm_range, audio_stream, decode_video, decode_video_gpu, export, export_frames,
     export_with_audio, first_frame, frame_count, frames_at, frames_at_seek, keyframes, probe,
 };
@@ -2366,6 +2366,32 @@ fn a_start_inside_a_gop_skips_unused_pictures_and_stays_bit_exact() {
                 assert_eq!(g.pts, f.pts, "{}", path.display());
                 let diff = luma_diff(&g, f);
                 assert!(diff < 1.0, "{}: {diff}", path.display());
+            }
+        }
+    }
+}
+
+#[test]
+fn a_stills_handle_hands_each_index_once_and_matches_single_calls() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let prefs = Prefs::default();
+    let hevc = pyramid_hevc();
+    let times = [0.5, 2.2, 0.5, 1.37, 0.0];
+    for path in [clip(), hevc.as_path()] {
+        let stills = Stills::open(path, 120, &prefs).unwrap();
+        for seek in [Seek::Keyframe, Seek::Exact] {
+            let want = frames_at_seek(path, &times, 120, seek, &prefs).unwrap();
+            for _ in 0..2 {
+                let mut got: Vec<Vec<Rgba>> = vec![Vec::new(); times.len()];
+                stills
+                    .frames(&times, seek, |i, r| got[i].push(r.unwrap()))
+                    .unwrap();
+                for (i, g) in got.iter().enumerate() {
+                    assert_eq!(g.len(), 1, "{} {seek:?} {i}", path.display());
+                    assert!(g[0] == want[i], "{} {seek:?} {i}", path.display());
+                }
             }
         }
     }

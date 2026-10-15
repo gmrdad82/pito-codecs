@@ -308,6 +308,12 @@ impl Decoder {
         }
     }
 
+    pub fn reset(&mut self) {
+        if let Decoder::Gpu(d) = self {
+            d.reset();
+        }
+    }
+
     pub fn new(st: &Stream, threads: usize) -> Result<Decoder> {
         let tb = st.time_base;
         match (st.codec, &st.avc) {
@@ -431,6 +437,7 @@ pub struct Frames {
 }
 
 const REORDER: usize = 16;
+const SEEN: usize = 64;
 
 fn mkv_start(r: &crate::mkv::Reader, track: usize, from: f64) -> Result<(crate::mkv::Cursor, i64)> {
     let t = r
@@ -516,7 +523,7 @@ fn top_layer(config: &crate::mp4::HevcConfig) -> Option<u8> {
     top
 }
 
-fn skipper(st: &Stream) -> Option<(Codec, usize, Option<u8>)> {
+pub(super) fn skipper(st: &Stream) -> Option<(Codec, usize, Option<u8>)> {
     match st.codec? {
         Codec::H264 => Some((
             Codec::H264,
@@ -824,14 +831,30 @@ pub fn exact(
     rotation: u16,
     height: u32,
     tagged: Color,
+    skip: Option<(Codec, usize, Option<u8>)>,
 ) -> Result<Vec<Rgba>> {
     let mut out: Vec<Rgba> = Vec::with_capacity(targets.len());
     let mut held: Option<GpuFrame> = None;
     let mut buf = Vec::new();
     let mut flushed = false;
+    let mut seen: VecDeque<i64> = VecDeque::with_capacity(SEEN);
     while out.len() < targets.len() && !flushed {
         let frames = match src.next(&mut buf)? {
             Some((pts, dts, keyframe)) => {
+                let hidden = !keyframe
+                    && targets
+                        .iter()
+                        .copied()
+                        .find(|&t| t >= pts)
+                        .is_some_and(|t| seen.iter().any(|&q| q > pts && q <= t))
+                    && skip.is_some_and(|(c, l, top)| disposable(c, l, top, &buf));
+                if seen.len() == SEEN {
+                    seen.pop_front();
+                }
+                seen.push_back(pts);
+                if hidden {
+                    continue;
+                }
                 let p = Packet {
                     data: std::mem::take(&mut buf),
                     pts,
