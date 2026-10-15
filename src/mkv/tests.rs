@@ -396,4 +396,19 @@ fn cues_open_and_seek_late_without_a_walk() {
         .read
         .load(std::sync::atomic::Ordering::Relaxed);
     assert!(read < len / 4, "read {read} of {len}");
+    let walked: Vec<i64> = t
+        .samples
+        .iter()
+        .filter(|s| s.keyframe)
+        .map(|s| s.pts)
+        .collect();
+    assert!(walked.len() > 2);
+    assert_eq!(lazy.cue_keys(), Some(&walked[..]));
+    let mut sparse = Reader::open_with(&path, ReadOptions { index: false }).unwrap();
+    let mut n = 0;
+    sparse.cues.retain(|_| {
+        n += 1;
+        n % 2 == 1
+    });
+    assert_eq!(sparse.cue_keys(), None);
 }

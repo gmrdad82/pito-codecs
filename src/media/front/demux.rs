@@ -544,6 +544,14 @@ pub fn frame_count(path: &Path) -> Result<u64> {
 
 pub fn keyframes(r: &Arc<mkv::Reader>) -> Result<Vec<f64>> {
     let start = Demux::Mkv(r.clone()).start();
+    if let Some(keys) = r.cue_keys() {
+        let (_, t) = mkv_video(r)?;
+        return Ok(sorted(
+            keys.iter()
+                .map(|&k| (t.seconds(k) - start).max(0.0))
+                .collect(),
+        ));
+    }
     let (_, t) = mkv_video(r.full()?)?;
     Ok(sorted(
         t.samples

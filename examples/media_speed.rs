@@ -32,6 +32,47 @@ fn run() -> Res<()> {
         return captions();
     }
     let mode = args.next();
+    if mode.as_deref() == Some("keys") {
+        let callers: usize = args.next().map_or(Ok(1), |n| n.parse())?;
+        let rchar = || -> u64 {
+            std::fs::read_to_string("/proc/self/io")
+                .unwrap_or_default()
+                .lines()
+                .find_map(|l| l.strip_prefix("rchar:"))
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0)
+        };
+        let before = rchar();
+        let t = Instant::now();
+        let lists = std::thread::scope(|s| {
+            let jobs: Vec<_> = (0..callers)
+                .map(|_| s.spawn(|| keyframes(&path, &Prefs::default())))
+                .collect();
+            jobs.into_iter()
+                .map(|j| {
+                    j.join()
+                        .map_err(|_| "a keyframes caller failed".to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })?;
+        let took = t.elapsed().as_secs_f64();
+        let read = rchar().saturating_sub(before);
+        for k in lists {
+            let k = k?;
+            let sum = k
+                .iter()
+                .fold(0u64, |a, t| a.wrapping_mul(31).wrapping_add(t.to_bits()));
+            say!(
+                "keys: {} in {:.1} ms, read {:.2} MB, first {:?} last {:?} sum {sum:x}",
+                k.len(),
+                took * 1e3,
+                read as f64 / 1e6,
+                k.first(),
+                k.last()
+            )?;
+        }
+        return Ok(());
+    }
     if mode.as_deref() == Some("open") {
         let prefs = Prefs {
             decode: Choice::Cpu,
