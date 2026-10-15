@@ -11,7 +11,6 @@ use std::path::Path;
 const MAX_SAMPLES: usize = 1 << 26;
 const MAX_EMPTY_SAMPLES: u64 = 1 << 16;
 const MAX_HEADER_BOX: u64 = 1 << 30;
-const MIN_SAMPLE_BYTES: u64 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Sample {
@@ -369,6 +368,7 @@ struct Movie {
     fragmented: bool,
     trex: HashMap<u32, Trex>,
     next_dts: Vec<i64>,
+    room: u64,
 }
 
 fn movie(ftyp: Option<&[u8]>, moov: &[u8], len: u64) -> Result<Movie> {
@@ -381,6 +381,7 @@ fn movie(ftyp: Option<&[u8]>, moov: &[u8], len: u64) -> Result<Movie> {
         fragmented: false,
         trex: HashMap::new(),
         next_dts: Vec::new(),
+        room: len.saturating_mul(2),
     };
     if let Some(f) = ftyp {
         let mut c = Cur::new(f, "ftyp");
@@ -420,9 +421,8 @@ fn movie(ftyp: Option<&[u8]>, moov: &[u8], len: u64) -> Result<Movie> {
             _ => {}
         }
     }
-    let mut room = len;
     for p in trak_payloads {
-        let t = parse_trak(p, m.timescale, m.quicktime, len, &mut room)?;
+        let t = parse_trak(p, m.timescale, m.quicktime, len, &mut m.room)?;
         m.tracks.push(t);
     }
     m.next_dts = m
@@ -480,7 +480,14 @@ fn open<S: ByteSource>(src: S) -> Result<Reader<S>> {
                 match &mut built {
                     Some(m) if later.is_empty() => {
                         let moof = body(MAX_HEADER_BOX)?;
-                        parse_moof(offset, &moof, &mut m.tracks, &m.trex, &mut m.next_dts, len)?;
+                        parse_moof(
+                            offset,
+                            &moof,
+                            &mut m.tracks,
+                            &m.trex,
+                            &mut m.next_dts,
+                            (len, &mut m.room),
+                        )?;
                     }
                     _ => later.push((offset, at, body_len)),
                 }
@@ -508,7 +515,7 @@ fn open<S: ByteSource>(src: S) -> Result<Reader<S>> {
             &mut m.tracks,
             &m.trex,
             &mut m.next_dts,
-            len,
+            (len, &mut m.room),
         )?;
     }
     let mut file = Reader {
@@ -755,6 +762,8 @@ fn parse_stbl(
     let mut sample_count = 0usize;
     let mut sizes: Vec<u32> = Vec::new();
     let mut chunks: Vec<u64> = Vec::new();
+    let mut entry_half = 8u64;
+    let mut chunk_half = 8u64;
     for b in boxes(stbl) {
         let b = b?;
         let mut c = Cur::new(b.payload, "stbl child");
@@ -817,7 +826,10 @@ fn parse_stbl(
                 let field = c.u32()? & 0xFF;
                 let n = c.u32()? as usize;
                 let bits = match field {
-                    4 | 8 | 16 => field as usize,
+                    4 | 8 | 16 => {
+                        entry_half = field as u64 / 4;
+                        field as usize
+                    }
                     _ => return Err(Error::Invalid(format!("stz2 field size {field}"))),
                 };
                 if n.checked_mul(bits)
@@ -845,6 +857,7 @@ fn parse_stbl(
             b"co64" => {
                 c.full_header()?;
                 let n = c.count(8)?;
+                chunk_half = 16;
                 chunks = (0..n).map(|_| c.u64()).collect::<Result<_>>()?;
             }
             _ => {}
@@ -890,9 +903,9 @@ fn parse_stbl(
         if chunks.len() > MAX_SAMPLES {
             return Err(too_large("chunk count"));
         }
-        let fit = usize::try_from(*room / MIN_SAMPLE_BYTES).unwrap_or(usize::MAX);
+        let fit = usize::try_from(*room / chunk_half).unwrap_or(usize::MAX);
         let chunks = chunks.get(..chunks.len().min(fit)).unwrap_or(&[]);
-        *room = room.saturating_sub((chunks.len() as u64).saturating_mul(MIN_SAMPLE_BYTES));
+        *room = room.saturating_sub((chunks.len() as u64).saturating_mul(chunk_half));
         samples.reserve(chunks.len());
         for (ci, &off) in chunks.iter().enumerate() {
             while stsc_i + 1 < stsc.len() && stsc[stsc_i + 1].0 as usize <= ci + 1 {
@@ -922,10 +935,23 @@ fn parse_stbl(
     } else {
         let capacity = chunk_capacity(&stsc, chunks.len());
         let mut sample_count = sample_count.min(usize::try_from(capacity).unwrap_or(usize::MAX));
-        let cost = (const_size as u64).max(MIN_SAMPLE_BYTES);
-        let fit = usize::try_from(*room / cost).unwrap_or(usize::MAX);
-        sample_count = sample_count.min(fit);
-        *room = room.saturating_sub((sample_count as u64).saturating_mul(cost));
+        if const_size != 0 {
+            let cost = const_size as u64 * 2;
+            let fit = usize::try_from(*room / cost).unwrap_or(usize::MAX);
+            sample_count = sample_count.min(fit);
+            *room = room.saturating_sub((sample_count as u64).saturating_mul(cost));
+        } else {
+            let mut fit = 0usize;
+            for &size in sizes.iter().take(sample_count) {
+                let cost = size as u64 * 2 + entry_half;
+                if cost > *room {
+                    break;
+                }
+                *room -= cost;
+                fit += 1;
+            }
+            sample_count = fit;
+        }
         if sample_count > MAX_SAMPLES {
             return Err(too_large("sample count"));
         }
@@ -982,7 +1008,7 @@ fn parse_moof(
     tracks: &mut [Track],
     trex: &HashMap<u32, Trex>,
     next_dts: &mut [i64],
-    file_len: u64,
+    (file_len, room): (u64, &mut u64),
 ) -> Result<()> {
     let mut prev_end: Option<u64> = None;
     for b in boxes(moof) {
@@ -1044,16 +1070,17 @@ fn parse_moof(
             let total = (tracks[ti].samples.len() as u64).saturating_add(n as u64);
             if per > 0 {
                 c.check_count(n, per)?;
-            } else if def_size == 0 {
-                if total > (file_len / 64).max(MAX_EMPTY_SAMPLES) {
-                    return Err(too_large("trun sample count"));
-                }
-            } else if total.saturating_mul((def_size as u64).max(MIN_SAMPLE_BYTES)) > file_len {
+            } else if def_size == 0 && total > (file_len / 64).max(MAX_EMPTY_SAMPLES) {
                 return Err(too_large("trun sample count"));
             }
-            if per > 0 && total.saturating_mul(MIN_SAMPLE_BYTES) > file_len {
+            let data = if tf & 0x200 == 0 { def_size as u64 } else { 0 };
+            let cost = (per as u64 + data)
+                .saturating_mul(2)
+                .saturating_mul(n as u64);
+            if cost > *room {
                 return Err(too_large("trun sample count"));
             }
+            *room -= cost;
             if tracks[ti].samples.len() + n > MAX_SAMPLES {
                 return Err(too_large("sample count"));
             }

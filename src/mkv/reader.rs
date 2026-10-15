@@ -680,7 +680,7 @@ impl<S: ByteSource> Reader<S> {
             video_only,
             parsed: HashSet::new(),
             frames: Vec::new(),
-            room: len / 8,
+            room: len,
         };
         w.walk(&mut io, &mut head)?;
         for t in &mut head.tracks {
@@ -1062,11 +1062,13 @@ impl Walker {
                                 let Some(list) = samples.get_mut(f.track) else {
                                     return;
                                 };
-                                if *room == 0 || list.len() >= MAX_SAMPLES {
+                                let cost = if f.size == 0 { 8 } else { f.size as u64 }
+                                    + if f.lace == 0 { 6 } else { 0 };
+                                if cost > *room || list.len() >= MAX_SAMPLES {
                                     full = true;
                                     return;
                                 }
-                                *room -= 1;
+                                *room -= cost;
                                 list.push(Sample {
                                     offset: f.offset,
                                     size: f.size,

@@ -373,3 +373,37 @@ fn remux_cuts_play_in_ffmpeg() {
         assert_eq!(decodes_clean(&out), 600);
     }
 }
+
+#[cfg(feature = "aac")]
+#[test]
+fn ten_minutes_of_silent_aac_in_a_small_file_read_every_sample() {
+    use crate::media::Packet;
+    let asc = [0x11, 0x90];
+    let frame = vec![0x21, 0x10, 0x04, 0x60, 0x8c, 0x1c];
+    let mut dec = crate::aac::Decoder::new(&asc).unwrap();
+    let n = 28_125usize;
+    let packet = |i: i64| Packet {
+        data: frame.clone(),
+        pts: i * 1024,
+        dts: i * 1024,
+        keyframe: true,
+    };
+    let pcm = dec.decode(&packet(0)).unwrap();
+    assert!(pcm.samples.len() == 2048 && pcm.samples.iter().all(|&s| s == 0.0));
+    let mut w = Writer::new(std::io::Cursor::new(Vec::new()), Options::default()).unwrap();
+    let t = w
+        .add_track(TrackConfig::new(
+            SampleEntry::aac(asc.to_vec(), 2, 48_000, 128_000),
+            48_000,
+        ))
+        .unwrap();
+    for i in 0..n as i64 {
+        w.push(t, &packet(i)).unwrap();
+    }
+    let bytes = w.finish().unwrap().into_inner();
+    assert!(bytes.len() < n * 8, "{}", bytes.len());
+    let r = Reader::new(bytes).unwrap();
+    let s = &r.tracks[0].samples;
+    assert_eq!(s.len(), n);
+    assert!(s.iter().all(|s| s.size as usize == frame.len()));
+}

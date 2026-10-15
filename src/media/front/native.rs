@@ -427,6 +427,7 @@ pub struct Frames {
     flushed: bool,
     buf: Vec<u8>,
     cur: Option<(Box<crate::mkv::Cursor>, i64)>,
+    skip: Option<(Codec, usize, Option<u8>)>,
 }
 
 const REORDER: usize = 16;
@@ -462,6 +463,78 @@ fn mkv_start(r: &crate::mkv::Reader, track: usize, from: f64) -> Result<(crate::
     Ok((cur, best.or(low).unwrap_or(0)))
 }
 
+fn disposable(codec: Codec, length: usize, top: Option<u8>, data: &[u8]) -> bool {
+    let mut pos = 0usize;
+    let mut slices = false;
+    while length > 0 && pos.saturating_add(length) <= data.len() {
+        let n = data[pos..pos + length]
+            .iter()
+            .fold(0usize, |a, &b| (a << 8) | b as usize);
+        pos += length;
+        let Some(nal) = data.get(pos..pos.saturating_add(n)) else {
+            return false;
+        };
+        let Some(&head) = nal.first() else {
+            return false;
+        };
+        match codec {
+            Codec::H264 => match head & 0x1f {
+                1 if head & 0x60 == 0 => slices = true,
+                6 | 9 | 12 => {}
+                _ => return false,
+            },
+            Codec::Hevc => {
+                let (Some(top), Some(&low)) = (top, nal.get(1)) else {
+                    return false;
+                };
+                let kind = (head >> 1) & 0x3f;
+                let layer = ((head & 1) << 5) | (low >> 3);
+                match kind {
+                    0 | 2 | 4 | 6 | 8 if layer == 0 && (low & 7) == top + 1 => slices = true,
+                    35 | 38..=40 => {}
+                    _ => return false,
+                }
+            }
+            _ => return false,
+        }
+        pos += n;
+    }
+    slices && pos == data.len()
+}
+
+fn top_layer(config: &crate::mp4::HevcConfig) -> Option<u8> {
+    let mut top = None;
+    for sps in config
+        .arrays
+        .iter()
+        .filter(|a| a.nal_type == 33)
+        .flat_map(|a| &a.nalus)
+    {
+        let t = (sps.get(2)? >> 1) & 7;
+        top = Some(top.map_or(t, |m: u8| m.max(t)));
+    }
+    top
+}
+
+fn skipper(st: &Stream) -> Option<(Codec, usize, Option<u8>)> {
+    match st.codec? {
+        Codec::H264 => Some((
+            Codec::H264,
+            st.avc.as_ref()?.length_size.clamp(1, 4) as usize,
+            None,
+        )),
+        Codec::Hevc => {
+            let config = crate::mp4::HevcConfig::parse(&st.extradata).ok()?;
+            Some((
+                Codec::Hevc,
+                config.length_size.clamp(1, 4) as usize,
+                top_layer(&config),
+            ))
+        }
+        _ => None,
+    }
+}
+
 impl Frames {
     pub fn open(demux: Demux, from: f64, route: Route) -> Result<Frames> {
         let track = demux.video()?;
@@ -484,6 +557,7 @@ impl Frames {
         from: f64,
         (dec, reason): (Decoder, Option<String>),
     ) -> Result<Frames> {
+        let skip = skipper(&demux.stream(track)?);
         let (next, start, cur) = match &demux {
             Demux::Mkv(r) => {
                 let starts = demux.starts();
@@ -509,6 +583,7 @@ impl Frames {
             flushed: false,
             buf: Vec::new(),
             cur,
+            skip,
         })
     }
 
@@ -580,6 +655,15 @@ impl Frames {
 
     fn pump(&mut self, gpu: bool) -> Result<bool> {
         if let Some((pts, dts, keyframe)) = self.packet()? {
+            if pts < self.start
+                && !keyframe
+                && self
+                    .skip
+                    .is_some_and(|(codec, length, top)| disposable(codec, length, top, &self.buf))
+            {
+                self.next += 1;
+                return Ok(true);
+            }
             let packet = Packet {
                 data: std::mem::take(&mut self.buf),
                 pts,

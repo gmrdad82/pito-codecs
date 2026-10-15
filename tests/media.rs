@@ -2269,3 +2269,104 @@ fn a_file_that_starts_late_counts_every_time_from_its_start() {
         );
     }
 }
+
+fn packed(f: &Frame) -> Vec<u8> {
+    let mut out = Vec::new();
+    for p in &f.planes {
+        for y in 0..p.height {
+            out.extend_from_slice(&p.data[y * p.stride..y * p.stride + p.width]);
+        }
+    }
+    out
+}
+
+fn pyramid_hevc() -> PathBuf {
+    let out = dir().join("pyramid-hevc.mp4");
+    if !out.exists() {
+        ffmpeg_make(
+            &out,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=s=352x240:r=30:d=3",
+                "-c:v",
+                "libx265",
+                "-preset",
+                "ultrafast",
+                "-x265-params",
+                "log-level=error:keyint=60:min-keyint=60:scenecut=0:bframes=4:b-pyramid=1",
+                "-pix_fmt",
+                "yuv420p",
+                "-tag:v",
+                "hvc1",
+            ],
+        );
+    }
+    out
+}
+
+#[test]
+fn a_start_inside_a_gop_skips_unused_pictures_and_stays_bit_exact() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let cpu = Prefs {
+        decode: Choice::Cpu,
+        ..Prefs::default()
+    };
+    let hevc = pyramid_hevc();
+    for (path, k) in [
+        (clip(), 47),
+        (clip(), 22),
+        (hevc.as_path(), 53),
+        (hevc.as_path(), 29),
+    ] {
+        let p = probe(path, &cpu).unwrap();
+        let fps = p.fps.0 as f64 / p.fps.1 as f64;
+        let at = k as f64 / fps;
+        let size = p.width as usize * p.height as usize * 3 / 2;
+        let theirs = ffmpeg_raw(
+            path,
+            0.0,
+            &[
+                "-map",
+                "0:v:0",
+                "-frames:v",
+                &(k + 8).to_string(),
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "yuv420p",
+            ],
+        );
+        let ours: Vec<Frame> = decode_video(path, at, None, &cpu)
+            .unwrap()
+            .take(6)
+            .map(Result::unwrap)
+            .collect();
+        let first = usize::try_from(ours[0].pts).unwrap();
+        assert!(first.abs_diff(k) <= 1, "{k}: {first}");
+        for (n, f) in ours.iter().enumerate() {
+            let want = &theirs[(first + n) * size..(first + n + 1) * size];
+            assert!(
+                packed(f) == want,
+                "{}: frame {} differs",
+                path.display(),
+                first + n
+            );
+        }
+        let mut on_gpu = decode_video_gpu(path, at, None, &Prefs::default()).unwrap();
+        if on_gpu.on_gpu() {
+            for f in &ours {
+                let g = match on_gpu.next().unwrap().unwrap() {
+                    VideoFrame::Gpu(g) => g.download().unwrap(),
+                    VideoFrame::Cpu(f) => f,
+                };
+                assert_eq!(g.pts, f.pts, "{}", path.display());
+                let diff = luma_diff(&g, f);
+                assert!(diff < 1.0, "{}: {diff}", path.display());
+            }
+        }
+    }
+}
