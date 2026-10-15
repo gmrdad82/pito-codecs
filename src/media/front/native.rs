@@ -386,8 +386,11 @@ impl Decoder {
     }
 
     pub fn recycle(&mut self, frame: Frame) {
-        if let Decoder::H264 { dec, .. } = self {
-            dec.recycle(frame);
+        match self {
+            Decoder::H264 { dec, .. } => dec.recycle(frame),
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            Decoder::Gpu(_) => crate::gpu::biplanar::recycle(frame),
+            _ => {}
         }
     }
 
@@ -420,6 +423,7 @@ pub struct Frames {
     start: i64,
     queue: VecDeque<Frame>,
     gpu: VecDeque<GpuFrame>,
+    shown: usize,
     flushed: bool,
     buf: Vec<u8>,
     cur: Option<(Box<crate::mkv::Cursor>, i64)>,
@@ -483,6 +487,7 @@ impl Frames {
             start,
             queue: VecDeque::new(),
             gpu: VecDeque::new(),
+            shown: 0,
             flushed: false,
             buf: Vec::new(),
             cur,
@@ -514,9 +519,11 @@ impl Frames {
 
     pub fn next_gpu(&mut self) -> Result<Option<GpuFrame>> {
         loop {
-            while self.gpu.len() > BEHIND || (self.flushed && !self.gpu.is_empty()) {
+            while self.gpu.len() > self.shown.min(BEHIND) || (self.flushed && !self.gpu.is_empty())
+            {
                 let Some(f) = self.gpu.pop_front() else { break };
                 if f.pts() >= self.start {
+                    self.shown = self.shown.saturating_add(1);
                     return Ok(Some(f));
                 }
             }

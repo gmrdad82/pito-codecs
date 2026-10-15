@@ -1,3 +1,7 @@
+use std::sync::Mutex;
+
+use rayon::prelude::*;
+
 use crate::media::{Frame, PixelFormat, TimeBase};
 
 pub struct Biplanar<'a> {
@@ -23,10 +27,73 @@ fn row(plane: &[u8], stride: usize, y: usize, x: usize, len: usize) -> Result<&[
         .ok_or_else(|| "plane row out of range".to_string())
 }
 
-pub fn bands(rows: usize) -> usize {
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-    threads.min(8).min(rows.div_ceil(64)).max(1)
+const POOL_FRAMES: usize = 4;
+const POOL_BYTES: usize = 64 << 20;
+
+static POOL: Mutex<Vec<Frame>> = Mutex::new(Vec::new());
+
+fn exact(f: &Frame, format: PixelFormat, w: u32, h: u32) -> bool {
+    let bps = format.bytes_per_sample();
+    let (w, h) = (w as usize, h as usize);
+    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+    f.format == format
+        && f.width as usize == w
+        && f.height as usize == h
+        && f.planes
+            .iter()
+            .zip([(w, h), (cw, ch), (cw, ch)])
+            .all(|(p, (pw, ph))| {
+                p.width == pw
+                    && p.height == ph
+                    && p.stride == pw * bps
+                    && p.data.len() == pw * bps * ph
+            })
 }
+
+fn bytes(f: &Frame) -> usize {
+    f.planes.iter().map(|p| p.data.len()).sum()
+}
+
+fn take(format: PixelFormat, w: u32, h: u32) -> Frame {
+    let found = POOL.lock().ok().and_then(|mut pool| {
+        let i = pool.iter().position(|f| exact(f, format, w, h))?;
+        Some(pool.swap_remove(i))
+    });
+    match found {
+        Some(mut f) => {
+            f.pts = 0;
+            f.time_base = TimeBase::new(1, 90000);
+            f
+        }
+        None => Frame::new(format, w, h, 0, TimeBase::new(1, 90000)),
+    }
+}
+
+pub(crate) fn recycle(frame: Frame) {
+    if !exact(&frame, frame.format, frame.width, frame.height) || bytes(&frame) > POOL_BYTES {
+        return;
+    }
+    let mut stale = Vec::new();
+    if let Ok(mut pool) = POOL.lock() {
+        pool.push(frame);
+        let mut total: usize = pool.iter().map(bytes).sum();
+        while pool.len() > POOL_FRAMES || total > POOL_BYTES {
+            let old = pool.remove(0);
+            total -= bytes(&old);
+            stale.push(old);
+        }
+    }
+    drop(stale);
+}
+
+fn bands(rows: usize) -> usize {
+    rayon::current_num_threads()
+        .min(8)
+        .min(rows.div_ceil(64))
+        .max(1)
+}
+
+type Band<'a> = (usize, ((&'a mut [u8], &'a mut [u8]), &'a mut [u8]));
 
 pub fn to_frame(src: &Biplanar, g: &Geometry) -> Result<Frame, String> {
     let (cx, cy, w, h) = g.crop;
@@ -53,7 +120,7 @@ pub fn to_frame(src: &Biplanar, g: &Geometry) -> Result<Frame, String> {
     } else {
         PixelFormat::Yuv420p10
     };
-    let mut frame = Frame::new(format, w as u32, h as u32, 0, TimeBase::new(1, 90000));
+    let mut frame = take(format, w as u32, h as u32);
     let [yp, up, vp] = &mut frame.planes;
     let shift = 16 - g.bits;
     let bands = bands(ch);
@@ -61,71 +128,69 @@ pub fn to_frame(src: &Biplanar, g: &Geometry) -> Result<Frame, String> {
     let luma_rows = rows_per * 2;
     let lw = w * bps;
     let cwb = cw * bps;
-    let results: Vec<Result<(), String>> = std::thread::scope(|scope| {
-        let mut handles = Vec::new();
-        let ys = yp.data.chunks_mut(luma_rows * lw);
-        let us = up.data.chunks_mut(rows_per * cwb);
-        let vs = vp.data.chunks_mut(rows_per * cwb);
-        for (band, ((ydst, udst), vdst)) in ys.zip(us).zip(vs).enumerate() {
-            let src = &src;
-            handles.push(scope.spawn(move || -> Result<(), String> {
-                let y0 = band * luma_rows;
-                for (r, dst) in ydst.chunks_exact_mut(lw).enumerate() {
-                    let line = row(src.luma, src.stride, oy + y0 + r, ox * bps, lw)?;
-                    if bps == 1 {
-                        dst.copy_from_slice(line);
-                    } else {
-                        for (d, s) in dst.chunks_exact_mut(2).zip(line.chunks_exact(2)) {
-                            let v = u16::from_le_bytes([s[0], s[1]]) >> shift;
-                            d.copy_from_slice(&v.to_le_bytes());
-                        }
-                    }
+    let work = |(band, ((ydst, udst), vdst)): Band| -> Result<(), String> {
+        let y0 = band * luma_rows;
+        for (r, dst) in ydst.chunks_exact_mut(lw).enumerate() {
+            let line = row(src.luma, src.stride, oy + y0 + r, ox * bps, lw)?;
+            if bps == 1 {
+                dst.copy_from_slice(line);
+            } else {
+                for (d, s) in dst.chunks_exact_mut(2).zip(line.chunks_exact(2)) {
+                    let v = u16::from_le_bytes([s[0], s[1]]) >> shift;
+                    d.copy_from_slice(&v.to_le_bytes());
                 }
-                let c0 = band * rows_per;
-                for (r, (u, v)) in udst
-                    .chunks_exact_mut(cwb)
-                    .zip(vdst.chunks_exact_mut(cwb))
-                    .enumerate()
-                {
-                    let line = row(
-                        src.chroma,
-                        src.stride,
-                        coy + c0 + r,
-                        cox * 2 * bps,
-                        cw * 2 * bps,
-                    )?;
-                    if bps == 1 {
-                        for ((p, u), v) in line.chunks_exact(2).zip(u.iter_mut()).zip(v.iter_mut())
-                        {
-                            *u = p[0];
-                            *v = p[1];
-                        }
-                    } else {
-                        for ((q, u), v) in line
-                            .chunks_exact(4)
-                            .zip(u.chunks_exact_mut(2))
-                            .zip(v.chunks_exact_mut(2))
-                        {
-                            let a = u16::from_le_bytes([q[0], q[1]]) >> shift;
-                            let b = u16::from_le_bytes([q[2], q[3]]) >> shift;
-                            u.copy_from_slice(&a.to_le_bytes());
-                            v.copy_from_slice(&b.to_le_bytes());
-                        }
-                    }
-                }
-                Ok(())
-            }));
+            }
         }
-        handles
-            .into_iter()
-            .map(|h| {
-                h.join()
-                    .unwrap_or_else(|_| Err("conversion thread panicked".into()))
-            })
-            .collect()
-    });
-    results.into_iter().collect::<Result<(), String>>()?;
-    Ok(frame)
+        let c0 = band * rows_per;
+        for (r, (u, v)) in udst
+            .chunks_exact_mut(cwb)
+            .zip(vdst.chunks_exact_mut(cwb))
+            .enumerate()
+        {
+            let line = row(
+                src.chroma,
+                src.stride,
+                coy + c0 + r,
+                cox * 2 * bps,
+                cw * 2 * bps,
+            )?;
+            if bps == 1 {
+                for ((p, u), v) in line.chunks_exact(2).zip(u.iter_mut()).zip(v.iter_mut()) {
+                    *u = p[0];
+                    *v = p[1];
+                }
+            } else {
+                for ((q, u), v) in line
+                    .chunks_exact(4)
+                    .zip(u.chunks_exact_mut(2))
+                    .zip(v.chunks_exact_mut(2))
+                {
+                    let a = u16::from_le_bytes([q[0], q[1]]) >> shift;
+                    let b = u16::from_le_bytes([q[2], q[3]]) >> shift;
+                    u.copy_from_slice(&a.to_le_bytes());
+                    v.copy_from_slice(&b.to_le_bytes());
+                }
+            }
+        }
+        Ok(())
+    };
+    let done = if bands == 1 {
+        work((0, ((&mut yp.data, &mut up.data), &mut vp.data)))
+    } else {
+        yp.data
+            .par_chunks_mut(luma_rows * lw)
+            .zip(up.data.par_chunks_mut(rows_per * cwb))
+            .zip(vp.data.par_chunks_mut(rows_per * cwb))
+            .enumerate()
+            .try_for_each(work)
+    };
+    match done {
+        Ok(()) => Ok(frame),
+        Err(e) => {
+            recycle(frame);
+            Err(e)
+        }
+    }
 }
 
 pub fn from_frame(
@@ -146,11 +211,19 @@ pub fn from_frame(
     if yp.stride < w * bps || up.stride < cw * bps || vp.stride < cw * bps {
         return Err("frame planes are narrower than the frame".into());
     }
+    if yp.data.len() < (h - 1) * yp.stride + w * bps
+        || up.data.len() < (ch - 1) * up.stride + cw * bps
+        || vp.data.len() < (ch - 1) * vp.stride + cw * bps
+    {
+        return Err("frame planes are shorter than the frame".into());
+    }
     if luma.0 > chroma.0 || luma.1 < sw * bps || chroma.1 < sw.div_ceil(2) * 2 * bps {
         return Err("unexpected NV12 layout".into());
     }
     let (scw, sch) = (sw.div_ceil(2), sh.div_ceil(2));
-    let (head, chroma_plane) = data.split_at_mut(chroma.0);
+    let (head, chroma_plane) = data
+        .split_at_mut_checked(chroma.0)
+        .ok_or("chroma offset out of range")?;
     let luma_plane = head.get_mut(luma.0..).ok_or("luma offset out of range")?;
     if luma_plane.len() < sh * luma.1 || chroma_plane.len() < (sch - 1) * chroma.1 + scw * 2 * bps {
         return Err("NV12 image smaller than the surface".into());
@@ -162,66 +235,69 @@ pub fn from_frame(
     };
     let bands = bands(sch);
     let rows_per = sch.div_ceil(bands).max(1);
-    std::thread::scope(|scope| {
-        let lumas = luma_plane.chunks_mut(rows_per * 2 * luma.1);
-        let chromas = chroma_plane.chunks_mut(rows_per * chroma.1);
-        for (band, (ldst, cdst)) in lumas.zip(chromas).enumerate() {
-            scope.spawn(move || {
-                let y0 = band * rows_per * 2;
-                for (r, dst) in ldst.chunks_mut(luma.1).enumerate() {
-                    let y = y0 + r;
-                    if y >= sh {
-                        break;
-                    }
-                    let sy = y.min(h - 1);
-                    let src = &yp.data[sy * yp.stride..sy * yp.stride + w * bps];
-                    let dst = &mut dst[..sw * bps];
-                    if bps == 1 {
-                        dst[..w].copy_from_slice(src);
-                        let last = src[w - 1];
-                        dst[w..].fill(last);
-                    } else {
-                        for (d, s) in dst.chunks_exact_mut(2).zip(src.chunks_exact(2)) {
-                            let v = u16::from_le_bytes([s[0], s[1]]) << shift;
-                            d.copy_from_slice(&v.to_le_bytes());
-                        }
-                        let last = [dst[w * 2 - 2], dst[w * 2 - 1]];
-                        for d in dst[w * 2..].chunks_exact_mut(2) {
-                            d.copy_from_slice(&last);
-                        }
-                    }
+    let work = |(band, (ldst, cdst)): (usize, (&mut [u8], &mut [u8]))| {
+        let y0 = band * rows_per * 2;
+        for (r, dst) in ldst.chunks_mut(luma.1).enumerate() {
+            let y = y0 + r;
+            if y >= sh {
+                break;
+            }
+            let sy = y.min(h - 1);
+            let src = &yp.data[sy * yp.stride..sy * yp.stride + w * bps];
+            let dst = &mut dst[..sw * bps];
+            if bps == 1 {
+                dst[..w].copy_from_slice(src);
+                let last = src[w - 1];
+                dst[w..].fill(last);
+            } else {
+                for (d, s) in dst.chunks_exact_mut(2).zip(src.chunks_exact(2)) {
+                    let v = u16::from_le_bytes([s[0], s[1]]) << shift;
+                    d.copy_from_slice(&v.to_le_bytes());
                 }
-                let c0 = band * rows_per;
-                for (r, dst) in cdst.chunks_mut(chroma.1).enumerate() {
-                    let y = c0 + r;
-                    if y >= sch {
-                        break;
-                    }
-                    let sy = y.min(ch - 1);
-                    let u = &up.data[sy * up.stride..sy * up.stride + cw * bps];
-                    let v = &vp.data[sy * vp.stride..sy * vp.stride + cw * bps];
-                    let dst = &mut dst[..scw * 2 * bps];
-                    if bps == 1 {
-                        for ((d, &u), &v) in dst.chunks_exact_mut(2).zip(u).zip(v) {
-                            d[0] = u;
-                            d[1] = v;
-                        }
-                        for x in cw..scw {
-                            dst[x * 2] = u[cw - 1];
-                            dst[x * 2 + 1] = v[cw - 1];
-                        }
-                    } else {
-                        for x in 0..scw {
-                            let sx = x.min(cw - 1);
-                            let uu = u16::from_le_bytes([u[sx * 2], u[sx * 2 + 1]]) << shift;
-                            let vv = u16::from_le_bytes([v[sx * 2], v[sx * 2 + 1]]) << shift;
-                            dst[x * 4..x * 4 + 2].copy_from_slice(&uu.to_le_bytes());
-                            dst[x * 4 + 2..x * 4 + 4].copy_from_slice(&vv.to_le_bytes());
-                        }
-                    }
+                let last = [dst[w * 2 - 2], dst[w * 2 - 1]];
+                for d in dst[w * 2..].chunks_exact_mut(2) {
+                    d.copy_from_slice(&last);
                 }
-            });
+            }
         }
-    });
+        let c0 = band * rows_per;
+        for (r, dst) in cdst.chunks_mut(chroma.1).enumerate() {
+            let y = c0 + r;
+            if y >= sch {
+                break;
+            }
+            let sy = y.min(ch - 1);
+            let u = &up.data[sy * up.stride..sy * up.stride + cw * bps];
+            let v = &vp.data[sy * vp.stride..sy * vp.stride + cw * bps];
+            let dst = &mut dst[..scw * 2 * bps];
+            if bps == 1 {
+                for ((d, &u), &v) in dst.chunks_exact_mut(2).zip(u).zip(v) {
+                    d[0] = u;
+                    d[1] = v;
+                }
+                for x in cw..scw {
+                    dst[x * 2] = u[cw - 1];
+                    dst[x * 2 + 1] = v[cw - 1];
+                }
+            } else {
+                for x in 0..scw {
+                    let sx = x.min(cw - 1);
+                    let uu = u16::from_le_bytes([u[sx * 2], u[sx * 2 + 1]]) << shift;
+                    let vv = u16::from_le_bytes([v[sx * 2], v[sx * 2 + 1]]) << shift;
+                    dst[x * 4..x * 4 + 2].copy_from_slice(&uu.to_le_bytes());
+                    dst[x * 4 + 2..x * 4 + 4].copy_from_slice(&vv.to_le_bytes());
+                }
+            }
+        }
+    };
+    if bands == 1 {
+        work((0, (luma_plane, chroma_plane)));
+    } else {
+        luma_plane
+            .par_chunks_mut(rows_per * 2 * luma.1)
+            .zip(chroma_plane.par_chunks_mut(rows_per * chroma.1))
+            .enumerate()
+            .for_each(work);
+    }
     Ok(())
 }
