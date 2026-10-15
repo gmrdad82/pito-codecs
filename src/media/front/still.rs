@@ -1,7 +1,7 @@
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use crate::mkv;
 
@@ -37,87 +37,411 @@ pub fn frames_at_seek(
     seek: Seek,
     prefs: &Prefs,
 ) -> Result<Vec<Rgba>> {
-    if let Ok(Some(r)) = mkv_head(path)
-        && let Some(route) = mkv_route(&r, prefs)
-    {
-        return mkv_stills(&r, times, height, route, seek);
+    Stills::open(path, height, prefs)?.collect(times, seek)
+}
+
+const KEPT: usize = 18;
+
+pub struct Stills {
+    height: u32,
+    kind: Kind,
+    kept: Mutex<Vec<Worker>>,
+}
+
+enum Kind {
+    Mkv {
+        r: Arc<mkv::Reader>,
+        route: Route,
+    },
+    File {
+        src: Box<Source>,
+        prefs: Prefs,
+        keys: OnceLock<Vec<f64>>,
+    },
+}
+
+type Key = (Route, bool, usize);
+
+struct Worker {
+    key: Key,
+    dec: Result<native::Decoder>,
+    cur: Option<mkv::Cursor>,
+}
+
+type Emit<'a> = &'a (dyn Fn(usize, Result<Rgba>) + Sync);
+
+const _: fn() = || {
+    fn shared<T: Send + Sync>() {}
+    shared::<Stills>();
+};
+
+impl Stills {
+    pub fn open(path: &Path, height: u32, prefs: &Prefs) -> Result<Stills> {
+        let kind = match mkv_head(path) {
+            Ok(Some(r)) => match mkv_route(&r, prefs) {
+                Some(route) => Kind::Mkv { r, route },
+                None => file(path, prefs)?,
+            },
+            _ => file(path, prefs)?,
+        };
+        Ok(Stills {
+            height,
+            kind,
+            kept: Mutex::new(Vec::new()),
+        })
     }
-    match seek {
-        Seek::Keyframe => keyframe_stills(path, times, height, prefs),
-        Seek::Exact => exact_stills(path, times, height, prefs),
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn frames(
+        &self,
+        times: &[f64],
+        seek: Seek,
+        each: impl FnMut(usize, Result<Rgba>) + Send,
+    ) -> Result<()> {
+        let each = Mutex::new(each);
+        let emit = |i: usize, r: Result<Rgba>| {
+            let mut f = each.lock().unwrap_or_else(PoisonError::into_inner);
+            f(i, r);
+        };
+        match &self.kind {
+            Kind::Mkv { r, route } => self.mkv(r, *route, times, seek, &emit),
+            Kind::File { src, .. } => match seek {
+                Seek::Keyframe => self.keyframe(src, times, &emit),
+                Seek::Exact => self.exact(src, times, &emit),
+            },
+        }
+    }
+
+    fn collect(&self, times: &[f64], seek: Seek) -> Result<Vec<Rgba>> {
+        let mut got: Vec<Option<Result<Rgba>>> = (0..times.len()).map(|_| None).collect();
+        self.frames(times, seek, |i, r| {
+            if let Some(slot) = got.get_mut(i) {
+                *slot = Some(r);
+            }
+        })?;
+        got.into_iter().map(|r| r.ok_or_else(failed)?).collect()
+    }
+
+    fn take(&self, key: Key, make: impl FnOnce() -> Result<native::Decoder>) -> Worker {
+        let kept = {
+            let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
+            kept.iter()
+                .position(|w| w.key == key)
+                .map(|i| kept.swap_remove(i))
+        };
+        kept.unwrap_or_else(|| Worker {
+            key,
+            dec: make(),
+            cur: None,
+        })
+    }
+
+    fn put(&self, w: Worker) {
+        if w.dec.is_err() {
+            return;
+        }
+        let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
+        if kept.len() < KEPT {
+            kept.push(w);
+        }
+    }
+
+    fn keys(&self) -> &[f64] {
+        match &self.kind {
+            Kind::File { src, prefs, keys } => {
+                keys.get_or_init(|| keyframes(&src.path, prefs).unwrap_or_else(|_| vec![0.0]))
+            }
+            Kind::Mkv { .. } => &[],
+        }
+    }
+
+    fn keyframe(&self, src: &Source, times: &[f64], emit: Emit) -> Result<()> {
+        let keys: &[f64] = if times.iter().all(|t| *t <= 0.0) {
+            &[0.0]
+        } else {
+            self.keys()
+        };
+        let wanted: Vec<f64> = times.iter().map(|t| snap(keys, *t)).collect();
+        let jobs: Vec<Vec<f64>> = first_seen(&wanted).into_iter().map(|t| vec![t]).collect();
+        let height = self.height;
+        let reader = match src.route {
+            Route::Cpu | Route::Gpu => src.mp4(),
+            Route::Ffmpeg => None,
+        };
+        self.spread(
+            &jobs,
+            src.route,
+            |rt| match reader {
+                Some(r) => self.take((rt, true, 1), || native::still_decoder(r, rt)),
+                None => Worker {
+                    key: (rt, true, 1),
+                    dec: Err(src.native()),
+                    cur: None,
+                },
+            },
+            |w, batch| {
+                let t = batch.first().copied().ok_or_else(failed)?;
+                Ok(vec![match (reader, w.dec.as_mut()) {
+                    (Some(r), Ok(d)) => native::still(r, d, t, height)?,
+                    _ => still(src, t, height)?,
+                }])
+            },
+            &wanted,
+            emit,
+        );
+        Ok(())
+    }
+
+    fn mkv(
+        &self,
+        r: &Arc<mkv::Reader>,
+        route: Route,
+        times: &[f64],
+        seek: Seek,
+        emit: Emit,
+    ) -> Result<()> {
+        let d = Demux::Mkv(r.clone());
+        let v = d.video()?;
+        let t = r
+            .tracks
+            .get(v)
+            .ok_or_else(|| Error::Invalid("no video track".to_string()))?;
+        let rotation = t.rotation();
+        let color = tagged(&d, v);
+        let skip = d.stream(v).ok().and_then(|s| native::skipper(&s));
+        let start = d.start();
+        let shift = d.shift(v);
+        let mut keys: Vec<f64> = r
+            .cues
+            .iter()
+            .filter(|c| c.track == t.number)
+            .map(|c| (t.seconds(c.time as i64) - start).max(0.0))
+            .collect();
+        keys.sort_by(f64::total_cmp);
+        keys.dedup();
+        let snapped = |at: f64| {
+            if keys.is_empty() && at > 0.0 {
+                at
+            } else {
+                snap(&keys, at)
+            }
+        };
+        let (wanted, jobs): (Vec<f64>, Vec<Vec<f64>>) = match seek {
+            Seek::Keyframe => {
+                let wanted: Vec<f64> = times.iter().map(|at| snapped(*at)).collect();
+                let jobs = first_seen(&wanted).into_iter().map(|u| vec![u]).collect();
+                (wanted, jobs)
+            }
+            Seek::Exact => {
+                let wanted: Vec<f64> = times.iter().map(|at| at.max(0.0)).collect();
+                let unique = sorted(times);
+                let jobs = if keys.is_empty() {
+                    unique.iter().map(|u| vec![*u]).collect()
+                } else {
+                    batches(&unique, |at| snapped(at).to_bits())
+                };
+                (wanted, jobs)
+            }
+        };
+        let stills = seek == Seek::Keyframe;
+        let threads = if stills { 1 } else { share(jobs.len()) };
+        let height = self.height;
+        self.spread(
+            &jobs,
+            route,
+            |rt| {
+                let key = (rt, stills, if rt == Route::Gpu { 0 } else { threads });
+                let mut w = self.take(key, || {
+                    native::video_decoder(&d, rt, threads).map(|mut dec| {
+                        if stills {
+                            dec.stills();
+                        }
+                        dec
+                    })
+                });
+                if w.cur.is_none() {
+                    w.cur = Some(mkv::Cursor::new(r));
+                }
+                w
+            },
+            |w, batch| {
+                let dec = w.dec.as_mut().map_err(|e| Error::Backend(e.to_string()))?;
+                let cur = w.cur.get_or_insert_with(|| mkv::Cursor::new(r));
+                let first = batch.first().copied().ok_or_else(failed)?;
+                if stills {
+                    return Ok(vec![native::still_mkv(r, cur, dec, first, height)?]);
+                }
+                cur.seek(r, v, first + start)?;
+                let targets: Vec<i64> = batch.iter().map(|at| t.ticks(*at)).collect();
+                let mut src = native::Packets::Mkv {
+                    r,
+                    cur,
+                    track: v,
+                    shift,
+                };
+                native::exact(&mut src, dec, &targets, rotation, height, color, skip)
+            },
+            &wanted,
+            emit,
+        );
+        Ok(())
+    }
+
+    fn exact(&self, src: &Source, times: &[f64], emit: Emit) -> Result<()> {
+        let wanted: Vec<f64> = times.iter().map(|at| at.max(0.0)).collect();
+        let unique = sorted(times);
+        let height = self.height;
+        let reader = match (src.route, src.mp4()) {
+            (Route::Ffmpeg, _) => {
+                let jobs: Vec<Vec<f64>> = unique.iter().map(|u| vec![*u]).collect();
+                self.spread(
+                    &jobs,
+                    Route::Ffmpeg,
+                    |rt| Worker {
+                        key: (rt, false, 0),
+                        dec: Err(src.native()),
+                        cur: None,
+                    },
+                    |_, batch| {
+                        let at = batch.first().copied().ok_or_else(failed)?;
+                        Ok(vec![ffmpeg_still(src, at, height, true)?])
+                    },
+                    &wanted,
+                    emit,
+                );
+                return Ok(());
+            }
+            (_, Some(r)) => r.clone(),
+            (_, None) => return Err(src.native()),
+        };
+        let d = Demux::Mp4(reader.clone());
+        let v = d.video()?;
+        let rotation = reader.tracks.get(v).map_or(0, |t| t.rotation());
+        let color = tagged(&d, v);
+        let skip = d.stream(v).ok().and_then(|s| native::skipper(&s));
+        let seeks: Vec<(f64, usize, i64)> = unique
+            .iter()
+            .map(|at| d.seek(v, *at).map(|(key, start)| (*at, key, start)))
+            .collect::<Result<_>>()?;
+        let jobs = batches(&unique, |at| {
+            seeks.iter().find(|s| s.0 == at).map_or(0, |s| s.1)
+        });
+        let threads = share(jobs.len());
+        self.spread(
+            &jobs,
+            src.route,
+            |rt| {
+                let key = (rt, false, if rt == Route::Gpu { 0 } else { threads });
+                self.take(key, || native::video_decoder(&d, rt, threads))
+            },
+            |w, batch| {
+                let dec = w.dec.as_mut().map_err(|e| Error::Backend(e.to_string()))?;
+                let plan: Vec<(usize, i64)> = batch
+                    .iter()
+                    .filter_map(|at| seeks.iter().find(|s| s.0 == *at).map(|s| (s.1, s.2)))
+                    .collect();
+                let key = plan.first().map(|p| p.0).ok_or_else(failed)?;
+                let targets: Vec<i64> = plan.iter().map(|p| p.1).collect();
+                let mut packets = native::Packets::Indexed {
+                    d: &d,
+                    track: v,
+                    next: key,
+                };
+                native::exact(&mut packets, dec, &targets, rotation, height, color, skip)
+            },
+            &wanted,
+            emit,
+        );
+        Ok(())
+    }
+
+    fn spread(
+        &self,
+        jobs: &[Vec<f64>],
+        route: Route,
+        make: impl Fn(Route) -> Worker + Sync,
+        run: impl Fn(&mut Worker, &[f64]) -> Result<Vec<Rgba>> + Sync,
+        wanted: &[f64],
+        emit: Emit,
+    ) {
+        let next = AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for w in 0..jobs.len().min(16) {
+                let (next, make, run) = (&next, &make, &run);
+                s.spawn(move || {
+                    let mut state = make(if w == 0 { route } else { Route::Cpu });
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(batch) = jobs.get(i) else { break };
+                        let got =
+                            std::panic::catch_unwind(AssertUnwindSafe(|| run(&mut state, batch)))
+                                .unwrap_or_else(|_| {
+                                    Err(Error::Backend("decoding a still failed".to_string()))
+                                });
+                        if got.is_err() {
+                            state = make(Route::Cpu);
+                        }
+                        deliver(wanted, batch, got, emit);
+                    }
+                    self.put(state);
+                });
+            }
+        });
     }
 }
 
-fn keyframe_stills(path: &Path, times: &[f64], height: u32, prefs: &Prefs) -> Result<Vec<Rgba>> {
-    let src = source(path, prefs)?;
-    let keys = if times.iter().all(|t| *t <= 0.0) {
-        vec![0.0]
-    } else {
-        keyframes(path, prefs)?
-    };
-    let snap = |t: f64| {
-        keys.iter()
-            .copied()
-            .take_while(|k| *k <= t + 1e-6)
-            .last()
-            .unwrap_or(0.0)
-    };
-    let times: Vec<f64> = times.iter().map(|t| snap(*t)).collect();
-    let workers = times.len().min(16);
-    let next = AtomicUsize::new(0);
-    let out: Mutex<Vec<Option<Result<Rgba>>>> =
-        Mutex::new((0..times.len()).map(|_| None).collect());
-    std::thread::scope(|s| {
-        for w in 0..workers {
-            let (src, next, out, times) = (&src, &next, &out, &times);
-            s.spawn(move || {
-                let route = if w == 0 { src.route } else { Route::Cpu };
-                let mut dec = match (src.route, src.mp4()) {
-                    (Route::Cpu | Route::Gpu, Some(r)) => {
-                        native::still_decoder(r, route).ok().map(|d| (r, d))
-                    }
-                    _ => None,
-                };
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(&t) = times.get(i) else { break };
-                    let repeat = times.get(..i).is_some_and(|b| b.contains(&t));
-                    let got =
-                        std::panic::catch_unwind(AssertUnwindSafe(|| match (repeat, &mut dec) {
-                            (true, _) => None,
-                            (false, Some((r, d))) => Some(native::still(r, d, t, height)),
-                            (false, None) => Some(still(src, t, height)),
-                        }));
-                    let got = got.unwrap_or_else(|_| {
-                        dec = None;
-                        Some(Err(Error::Backend(format!(
-                            "decoding the still at {t:.3} s failed"
-                        ))))
-                    });
-                    if let (Some(got), Ok(mut o)) = (got, out.lock()) {
-                        o[i] = Some(got);
-                    }
-                }
-            });
-        }
-    });
-    let done = out
-        .into_inner()
-        .map_err(|_| Error::Backend("a still worker failed".to_string()))?;
-    let mut stills: Vec<Rgba> = Vec::with_capacity(times.len());
-    for (i, r) in done.into_iter().enumerate() {
-        match r {
-            Some(r) => stills.push(r?),
-            None => {
-                let same = times[..i].iter().position(|o| *o == times[i]);
-                match same.and_then(|j| stills.get(j)) {
-                    Some(s) => stills.push(s.clone()),
-                    None => return Err(Error::Backend("a still worker failed".to_string())),
+fn file(path: &Path, prefs: &Prefs) -> Result<Kind> {
+    Ok(Kind::File {
+        src: Box::new(source(path, prefs)?),
+        prefs: prefs.clone(),
+        keys: OnceLock::new(),
+    })
+}
+
+fn deliver(wanted: &[f64], batch: &[f64], got: Result<Vec<Rgba>>, emit: Emit) {
+    match got {
+        Ok(stills) => {
+            for (k, at) in batch.iter().enumerate() {
+                for (i, _) in wanted.iter().enumerate().filter(|(_, w)| *w == at) {
+                    emit(i, stills.get(k).cloned().ok_or_else(failed));
                 }
             }
         }
+        Err(e) => {
+            let why = e.to_string();
+            let mut first = Some(e);
+            for (i, _) in wanted.iter().enumerate().filter(|(_, w)| batch.contains(w)) {
+                emit(
+                    i,
+                    Err(first.take().unwrap_or_else(|| Error::Backend(why.clone()))),
+                );
+            }
+        }
     }
-    Ok(stills)
+}
+
+fn snap(keys: &[f64], at: f64) -> f64 {
+    if at <= 0.0 {
+        return 0.0;
+    }
+    keys.iter()
+        .copied()
+        .take_while(|k| *k <= at + 1e-6)
+        .last()
+        .unwrap_or(0.0)
+}
+
+fn first_seen(wanted: &[f64]) -> Vec<f64> {
+    let mut unique: Vec<f64> = Vec::with_capacity(wanted.len());
+    for at in wanted {
+        if !unique.contains(at) {
+            unique.push(*at);
+        }
+    }
+    unique
 }
 
 fn mkv_route(r: &mkv::Reader, prefs: &Prefs) -> Option<Route> {
@@ -131,61 +455,6 @@ fn mkv_route(r: &mkv::Reader, prefs: &Prefs) -> Option<Route> {
 
 fn failed() -> Error {
     Error::Backend("a still worker failed".to_string())
-}
-
-fn spread<W>(
-    jobs: usize,
-    route: Route,
-    make: impl Fn(Route) -> W + Sync,
-    run: impl Fn(&mut W, usize) -> Result<Vec<Rgba>> + Sync,
-) -> Result<Vec<Rgba>> {
-    let next = AtomicUsize::new(0);
-    let out: Mutex<Vec<Option<Result<Vec<Rgba>>>>> = Mutex::new((0..jobs).map(|_| None).collect());
-    std::thread::scope(|s| {
-        for w in 0..jobs.min(16) {
-            let (next, out, make, run) = (&next, &out, &make, &run);
-            s.spawn(move || {
-                let mut state = make(if w == 0 { route } else { Route::Cpu });
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= jobs {
-                        break;
-                    }
-                    let got = std::panic::catch_unwind(AssertUnwindSafe(|| run(&mut state, i)))
-                        .unwrap_or_else(|_| {
-                            Err(Error::Backend("decoding a still failed".to_string()))
-                        });
-                    if got.is_err() {
-                        state = make(Route::Cpu);
-                    }
-                    if let Ok(mut o) = out.lock()
-                        && let Some(slot) = o.get_mut(i)
-                    {
-                        *slot = Some(got);
-                    }
-                }
-            });
-        }
-    });
-    let done = out.into_inner().map_err(|_| failed())?;
-    let mut stills = Vec::new();
-    for r in done {
-        stills.extend(r.ok_or_else(failed)??);
-    }
-    Ok(stills)
-}
-
-fn gather(wanted: &[f64], unique: &[f64], stills: &[Rgba]) -> Result<Vec<Rgba>> {
-    wanted
-        .iter()
-        .map(|at| {
-            unique
-                .iter()
-                .position(|u| u == at)
-                .and_then(|j| stills.get(j).cloned())
-                .ok_or_else(failed)
-        })
-        .collect()
 }
 
 fn share(jobs: usize) -> usize {
@@ -218,157 +487,6 @@ fn tagged(d: &Demux, track: usize) -> Color {
         .and_then(|s| s.color)
         .unwrap_or((2, false));
     Color { matrix, full_range }
-}
-
-fn mkv_stills(
-    r: &Arc<mkv::Reader>,
-    times: &[f64],
-    height: u32,
-    route: Route,
-    seek: Seek,
-) -> Result<Vec<Rgba>> {
-    let d = Demux::Mkv(r.clone());
-    let v = d.video()?;
-    let t = r
-        .tracks
-        .get(v)
-        .ok_or_else(|| Error::Invalid("no video track".to_string()))?;
-    let rotation = t.rotation();
-    let color = tagged(&d, v);
-    let start = d.start();
-    let shift = d.shift(v);
-    let mut keys: Vec<f64> = r
-        .cues
-        .iter()
-        .filter(|c| c.track == t.number)
-        .map(|c| (t.seconds(c.time as i64) - start).max(0.0))
-        .collect();
-    keys.sort_by(f64::total_cmp);
-    keys.dedup();
-    let snap = |at: f64| {
-        if at <= 0.0 {
-            0.0
-        } else if keys.is_empty() {
-            at
-        } else {
-            keys.iter()
-                .copied()
-                .take_while(|k| *k <= at + 1e-6)
-                .last()
-                .unwrap_or(0.0)
-        }
-    };
-    let (wanted, unique, jobs) = match seek {
-        Seek::Keyframe => {
-            let wanted: Vec<f64> = times.iter().map(|at| snap(*at)).collect();
-            let mut unique: Vec<f64> = Vec::with_capacity(wanted.len());
-            for at in &wanted {
-                if !unique.contains(at) {
-                    unique.push(*at);
-                }
-            }
-            let jobs = unique.iter().map(|u| vec![*u]).collect();
-            (wanted, unique, jobs)
-        }
-        Seek::Exact => {
-            let wanted: Vec<f64> = times.iter().map(|at| at.max(0.0)).collect();
-            let unique = sorted(times);
-            let jobs = if keys.is_empty() {
-                unique.iter().map(|u| vec![*u]).collect()
-            } else {
-                batches(&unique, |at| snap(at).to_bits())
-            };
-            (wanted, unique, jobs)
-        }
-    };
-    let threads = match seek {
-        Seek::Keyframe => 1,
-        Seek::Exact => share(jobs.len()),
-    };
-    let stills = spread(
-        jobs.len(),
-        route,
-        |rt| {
-            let dec = native::video_decoder(&d, rt, threads).map(|mut dec| {
-                if seek == Seek::Keyframe {
-                    dec.stills();
-                }
-                dec
-            });
-            (dec, mkv::Cursor::new(r))
-        },
-        |(dec, cur), j| {
-            let dec = dec.as_mut().map_err(|e| Error::Backend(e.to_string()))?;
-            let batch = jobs.get(j).ok_or_else(failed)?;
-            let first = batch.first().copied().ok_or_else(failed)?;
-            match seek {
-                Seek::Keyframe => Ok(vec![native::still_mkv(r, cur, dec, first, height)?]),
-                Seek::Exact => {
-                    cur.seek(r, v, first + start)?;
-                    let targets: Vec<i64> = batch.iter().map(|at| t.ticks(*at)).collect();
-                    let mut src = native::Packets::Mkv {
-                        r,
-                        cur,
-                        track: v,
-                        shift,
-                    };
-                    native::exact(&mut src, dec, &targets, rotation, height, color)
-                }
-            }
-        },
-    )?;
-    gather(&wanted, &unique, &stills)
-}
-
-fn exact_stills(path: &Path, times: &[f64], height: u32, prefs: &Prefs) -> Result<Vec<Rgba>> {
-    let src = source(path, prefs)?;
-    let wanted: Vec<f64> = times.iter().map(|at| at.max(0.0)).collect();
-    let unique = sorted(times);
-    let reader = match (src.route, src.mp4()) {
-        (Route::Ffmpeg, _) => {
-            let stills = unique
-                .iter()
-                .map(|at| ffmpeg_still(&src, *at, height, true))
-                .collect::<Result<Vec<_>>>()?;
-            return gather(&wanted, &unique, &stills);
-        }
-        (_, Some(r)) => r.clone(),
-        (_, None) => return Err(src.native()),
-    };
-    let d = Demux::Mp4(reader.clone());
-    let v = d.video()?;
-    let rotation = reader.tracks.get(v).map_or(0, |t| t.rotation());
-    let color = tagged(&d, v);
-    let seeks: Vec<(f64, usize, i64)> = unique
-        .iter()
-        .map(|at| d.seek(v, *at).map(|(key, start)| (*at, key, start)))
-        .collect::<Result<_>>()?;
-    let jobs = batches(&unique, |at| {
-        seeks.iter().find(|s| s.0 == at).map_or(0, |s| s.1)
-    });
-    let threads = share(jobs.len());
-    let stills = spread(
-        jobs.len(),
-        src.route,
-        |rt| native::video_decoder(&d, rt, threads),
-        |dec, j| {
-            let dec = dec.as_mut().map_err(|e| Error::Backend(e.to_string()))?;
-            let batch = jobs.get(j).ok_or_else(failed)?;
-            let plan: Vec<(usize, i64)> = batch
-                .iter()
-                .filter_map(|at| seeks.iter().find(|s| s.0 == *at).map(|s| (s.1, s.2)))
-                .collect();
-            let key = plan.first().map(|p| p.0).ok_or_else(failed)?;
-            let targets: Vec<i64> = plan.iter().map(|p| p.1).collect();
-            let mut packets = native::Packets::Indexed {
-                d: &d,
-                track: v,
-                next: key,
-            };
-            native::exact(&mut packets, dec, &targets, rotation, height, color)
-        },
-    )?;
-    gather(&wanted, &unique, &stills)
 }
 
 fn still(src: &Source, key: f64, height: u32) -> Result<Rgba> {

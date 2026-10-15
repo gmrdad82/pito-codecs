@@ -18,6 +18,9 @@ pub struct Block {
 }
 
 const BISECT: u64 = 8 << 20;
+const DRIFT: f64 = 10.0;
+const NARROW: u64 = 256 << 10;
+const LOOK: usize = 16;
 
 fn cluster_ts<S: ByteSource + ?Sized>(io: &mut Io<'_, S>, h: &Hdr, end: u64) -> Result<i64> {
     let mut pos = h.data_start();
@@ -346,9 +349,105 @@ impl Cursor {
         if !near.is_empty()
             && let Some(pts) = self.seek_in(r, track, ticks, &near, true)?
         {
-            return Ok(t.seconds(pts));
+            let off = ticks.saturating_sub(pts) > t.ticks(DRIFT) || pts > ticks;
+            if !off {
+                return Ok(t.seconds(pts));
+            }
+
+            if let Some(better) = self.track_bisect(r, track, ticks)?
+                && better <= ticks
+                && (pts > ticks || better > pts)
+            {
+                return Ok(t.seconds(better));
+            }
+            if self.seek_in(r, track, ticks, &near, true)?.is_some() {
+                return Ok(t.seconds(pts));
+            }
         }
         self.seek_scan(r, track, ticks)
+    }
+
+    fn track_bisect<S: ByteSource>(
+        &mut self,
+        r: &Reader<S>,
+        track: usize,
+        ticks: i64,
+    ) -> Result<Option<i64>> {
+        let mut lo = r.first_cluster.unwrap_or(r.segment_end);
+        let mut hi = r.segment_end;
+        while hi.saturating_sub(lo) > NARROW {
+            let mid = lo + (hi - lo) / 2;
+            match self.track_pts_from(r, track, mid, hi)? {
+                Some((at, _, pts)) if pts <= ticks && at > lo => lo = at,
+                _ => hi = mid,
+            }
+        }
+        let mut best = lo;
+        let mut pos = lo;
+        while let Some((at, end, pts)) = self.track_pts_from(r, track, pos, hi)? {
+            if pts > ticks || end <= pos {
+                break;
+            }
+            best = at;
+            pos = end;
+        }
+        self.seek_in(r, track, ticks, &[best], false)
+    }
+
+    fn track_pts_from<S: ByteSource>(
+        &mut self,
+        r: &Reader<S>,
+        track: usize,
+        from: u64,
+        limit: u64,
+    ) -> Result<Option<(u64, u64, i64)>> {
+        let scale = r.info.timestamp_scale;
+        let t = r
+            .tracks
+            .get(track)
+            .ok_or_else(|| Error::Invalid(format!("no track {track}")))?;
+        let mut io = Io::with_len(r.source(), r.len(), &mut self.cache);
+        let mut pos = from;
+        while pos < limit {
+            let Some((at, ts)) = cluster_from(&mut io, pos, limit)? else {
+                return Ok(None);
+            };
+            let Some(h) = io.header(at, r.segment_end)? else {
+                return Ok(None);
+            };
+            if h.size == Size::Unknown {
+                return Ok(None);
+            }
+            let end = h.end(r.segment_end).max(at + 1);
+            let mut inner = h.data_start();
+            let mut looked = 0;
+            while inner < end && looked < LOOK {
+                looked += 1;
+                let Some(c) = io.header(inner, end)? else {
+                    break;
+                };
+                let ce = c.end(end);
+                if ce <= inner {
+                    break;
+                }
+                if matches!(c.id, SIMPLE_BLOCK | BLOCK_GROUP)
+                    && let Some(b) =
+                        parse_block_elem(&mut io, &c, ce, ts, &r.tracks, &mut self.frames)?
+                    && b.track == track
+                {
+                    let mut first = None;
+                    expand(&b, &self.frames, t, scale, 0, |f| {
+                        first.get_or_insert(f.pts);
+                    });
+                    if let Some(pts) = first {
+                        return Ok(Some((at, end, pts)));
+                    }
+                }
+                inner = ce;
+            }
+            pos = end;
+        }
+        Ok(None)
     }
 
     fn seek_scan<S: ByteSource>(&mut self, r: &Reader<S>, track: usize, ticks: i64) -> Result<f64> {
@@ -356,6 +455,11 @@ impl Cursor {
             .tracks
             .get(track)
             .ok_or_else(|| Error::Invalid(format!("no track {track}")))?;
+        if let Some(pts) = self.track_bisect(r, track, ticks)?
+            && pts <= ticks
+        {
+            return Ok(t.seconds(pts));
+        }
         let first = r.first_cluster.unwrap_or(r.segment_end);
         let near = self.bisect(r, ticks)?;
         if near > first {

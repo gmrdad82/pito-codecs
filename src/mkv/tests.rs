@@ -412,3 +412,62 @@ fn cues_open_and_seek_late_without_a_walk() {
     });
     assert_eq!(sparse.cue_keys(), None);
 }
+
+#[test]
+fn a_track_stored_far_behind_the_video_seeks_by_its_own_times() {
+    use crate::media::{Packet, TimeBase};
+    let path = dir().join("lagging-audio.mkv");
+    let ms = TimeBase::new(1, 1000);
+    let pcm = || TrackConfig {
+        sample_rate: 48_000,
+        channels: 2,
+        ..TrackConfig::new(TrackKind::Audio, "A_PCM/INT/LIT", ms)
+    };
+    let mut w = Writer::create(&path).unwrap();
+    let v = w
+        .add_track(TrackConfig::h264(
+            vec![1, 100, 0, 30, 0xff, 0xe0, 0],
+            352,
+            240,
+            ms,
+        ))
+        .unwrap();
+    let a = w.add_track(pcm()).unwrap();
+    let b = w.add_track(pcm()).unwrap();
+    let packet = |pts: i64, len: usize, keyframe: bool| Packet {
+        data: vec![0; len],
+        pts,
+        dts: pts,
+        keyframe,
+    };
+    let lag = 600;
+    for half in 0..2400i64 {
+        let at = half * 500;
+        if half % 2 == 0 {
+            w.push(v, &packet(at, 2000, half % 20 == 0)).unwrap();
+        }
+        w.push(a, &packet(at, 4096, true)).unwrap();
+        if half >= lag && (half - lag) % 200 == 199 {
+            for k in half - lag - 199..=half - lag {
+                w.push(b, &packet(k * 500, 4096, true)).unwrap();
+            }
+        }
+    }
+    for half in 2400 - lag..2400 {
+        w.push(b, &packet(half * 500, 4096, true)).unwrap();
+    }
+    w.finish().unwrap();
+    let r = Reader::open_with(&path, ReadOptions { index: false }).unwrap();
+    assert!(!r.cues.is_empty());
+    for (track, at) in [(b, 600.0), (b, 1100.0), (a, 600.0)] {
+        let mut cur = Cursor::new(&r);
+        let landed = cur.seek_near(&r, track, at).unwrap();
+        assert!(
+            landed <= at && landed > at - 10.0,
+            "track {track} at {at}: {landed}"
+        );
+        let mut data = Vec::new();
+        let first = cur.next_of(&r, Some(track), &mut data).unwrap().unwrap();
+        assert!((r.tracks[track].seconds(first.pts) - landed).abs() < 1e-6);
+    }
+}
