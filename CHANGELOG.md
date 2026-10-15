@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.6.1 — 2026-10-15
+
+### Changed
+
+- The README shows 1.6.0's faster seeks and smart cuts, re-measured run by run against 1.4.2 on a quieter machine: opening a file 10.5 s in takes 30 to 40 ms on the GPU instead of 44 to 52 ms, and 40 short cuts take 4.6 s instead of 5.9 s on the GPU for an H.264 source and 4.8 s instead of 6.9 s for HEVC (5.2 and 7.5 s on the CPU, from 5.7 and 8.7 s), every frame unchanged.
+
 ## v1.6.0 — 2026-10-15
 
 ### Changed
