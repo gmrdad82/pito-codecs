@@ -463,6 +463,44 @@ fn encode_decode_back(w: u32, h: u32) {
 }
 
 #[test]
+fn a_59_94_encode_returns_from_the_driver() {
+    for (codec, profile) in [(Codec::H264, Profile::High), (Codec::Hevc, Profile::Main)] {
+        if !has(codec, Direction::Encode) {
+            continue;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (w, h) = (960, 720);
+            let config = EncoderConfig {
+                width: w,
+                height: h,
+                fps: (60000, 1001),
+                profile,
+                rate: Rate::Crf(23),
+                gop: 8,
+                b_frames: 0,
+                bitstream: Bitstream::LengthPrefixed,
+            };
+            let frames: Vec<Frame> = (0..8)
+                .map(|i| {
+                    Frame::new(
+                        PixelFormat::Yuv420p8,
+                        w,
+                        h,
+                        i * 1001,
+                        TimeBase::new(1, 60000),
+                    )
+                })
+                .collect();
+            let (packets, _, _) = encode_all(codec, &config, &frames);
+            let _ = tx.send(packets.len());
+        });
+        let n = rx.recv_timeout(std::time::Duration::from_secs(60));
+        assert_eq!(n, Ok(8), "{codec:?} at 960x720 60000/1001 never returned");
+    }
+}
+
+#[test]
 fn bitrate_modes_land_near_their_target() {
     if !ffmpeg() {
         return;

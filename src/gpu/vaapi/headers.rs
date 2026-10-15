@@ -51,8 +51,6 @@ pub struct H264Sequence {
     pub crop_bottom: u32,
     pub max_refs: u32,
     pub reorder: u32,
-    pub fps_num: u32,
-    pub fps_den: u32,
     pub cabac: bool,
     pub transform_8x8: bool,
 }
@@ -92,10 +90,7 @@ pub fn h264_sps(s: &H264Sequence) -> Packed {
     w.write_bit(false);
     colour(&mut w);
     w.write_bit(false);
-    w.write_bit(true);
-    w.write_bits(s.fps_den, 32);
-    w.write_bits(s.fps_num.saturating_mul(2), 32);
-    w.write_bit(true);
+    w.write_bit(false);
     w.write_bit(false);
     w.write_bit(false);
     w.write_bit(false);
