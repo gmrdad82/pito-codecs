@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use super::backend;
 use super::ffi::{self, VAProfile, VASurfaceID};
 use super::va::Session;
-use super::{Accel, LAG, Picture};
+use super::{Accel, HELD, LAG, Picture};
 use crate::gpu::biplanar::Geometry;
 use crate::gpu::{Backend, DecoderBackend, GpuFrame};
 use crate::media::{Error, Frame, Packet, Result};
@@ -109,7 +109,8 @@ impl Vp9Decoder {
             crop: (0, 0, h.width, h.height),
             bits: c.bit_depth as u32,
         };
-        let mut session = Session::new(profiles, size, 8 + 2 + LAG, geometry).map_err(backend)?;
+        let mut session =
+            Session::new(profiles, size, 8 + 2 + LAG + HELD, geometry).map_err(backend)?;
         if self.stills {
             session.direct();
         }

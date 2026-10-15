@@ -417,7 +417,19 @@ fn cuts(path: &std::path::Path, n: usize) -> Res<()> {
 }
 
 fn timed(pieces: &[Piece], video: Codec, what: &str) -> Res<()> {
-    let prefs = Prefs::default();
+    let prefs = match std::env::var("ROUTE").as_deref() {
+        Ok("gpu") => Prefs {
+            decode: Choice::Gpu,
+            encode: Choice::Gpu,
+            ..Prefs::default()
+        },
+        Ok("cpu") => Prefs {
+            decode: Choice::Cpu,
+            encode: Choice::Cpu,
+            ..Prefs::default()
+        },
+        _ => Prefs::default(),
+    };
     let seconds: f64 = pieces.iter().map(|x| x.to - x.from).sum();
     let out = PathBuf::from("tmp/speed-cuts.mp4");
     let t = Instant::now();
