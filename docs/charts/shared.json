@@ -1,0 +1,59 @@
+{
+ "title": "SMART CUTS ON THE CARD, 1080P30 TO H.264",
+ "unit": "SECONDS",
+ "better": "lower",
+ "subtitle": "RYZEN 9 9950X, RX 9060 XT (VA-API), MEDIAN OF 5 A/B RUNS, LOAD 23 TO 29",
+ "date": "2026-10-15",
+ "parties": [
+  {
+   "name": "1.8.0"
+  },
+  {
+   "name": "1.7.0"
+  }
+ ],
+ "groups": [
+  {
+   "name": "H.264 SOURCE",
+   "rows": [
+    {
+     "label": "40 SHORT CUTS",
+     "values": [
+      4.31,
+      6.18
+     ]
+    },
+    {
+     "label": "46 PIECES, GAPS REMOVED",
+     "values": [
+      6.41,
+      9.62
+     ]
+    }
+   ]
+  },
+  {
+   "name": "HEVC SOURCE",
+   "rows": [
+    {
+     "label": "40 SHORT CUTS",
+     "values": [
+      4.55,
+      4.69
+     ]
+    },
+    {
+     "label": "46 PIECES, GAPS REMOVED",
+     "values": [
+      9.0,
+      9.03
+     ]
+    }
+   ]
+  }
+ ],
+ "suffix": " S",
+ "notes": [
+  "TWO CUT EDGES IN ONE GOP SHARE ONE DECODE FROM THE KEYFRAME; EVERY FRAME IS IDENTICAL BETWEEN THE TWO VERSIONS."
+ ]
+}

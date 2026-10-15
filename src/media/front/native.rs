@@ -558,6 +558,20 @@ impl Frames {
         self.dec
     }
 
+    pub(super) fn advance(&mut self, from: f64) -> Result<()> {
+        let start = match &self.demux {
+            Demux::Mkv(r) => {
+                let starts = self.demux.starts();
+                let shift = starts.shift(self.track);
+                let (_, start) = mkv_start(r, self.track, from.max(0.0) + starts.file)?;
+                start.saturating_sub(shift)
+            }
+            Demux::Mp4(_) => self.demux.seek(self.track, from)?.1,
+        };
+        self.start = self.start.max(start);
+        Ok(())
+    }
+
     fn start(
         demux: Demux,
         track: usize,
