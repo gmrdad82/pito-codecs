@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.6.0 — 2026-10-15
+
+### Changed
+
+- Smart cuts and seeks no longer decode the pictures between the keyframe and the cut point that nothing else uses, on the GPU and the CPU: 40 cuts of a 1080p file with B-frames take 6.1 s instead of 7.7 s on the GPU (HEVC source 4.8 s instead of 6.9 s), with every frame unchanged.
+- The GPU HEVC encoder no longer writes frame-rate timing into its stream headers, so no driver can misread it; the frame rate still reaches the driver and the container.
+
+### Fixed
+
+- An MP4 or Matroska file of very small audio frames, such as long stretches of silent AAC, now reads every frame instead of being cut short or refused.
+
 ## v1.5.0 — 2026-10-15
 
 ### Added
