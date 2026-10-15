@@ -785,8 +785,6 @@ impl VaEncoder {
             temporal_mvp: t.temporal_mvp,
             strong_intra: t.strong_intra,
             cu_qp_delta: !constant_qp(c.rate),
-            fps_num: c.fps_num,
-            fps_den: c.fps_den,
             sar: c.sar,
             color: c.color,
         }

@@ -224,8 +224,6 @@ pub struct HevcSequence {
     pub temporal_mvp: bool,
     pub strong_intra: bool,
     pub cu_qp_delta: bool,
-    pub fps_num: u32,
-    pub fps_den: u32,
     pub sar: (u16, u16),
     pub color: Color,
 }
@@ -315,10 +313,6 @@ pub fn hevc_sps(s: &HevcSequence) -> Packed {
     w.write_bit(false);
     w.write_bit(false);
     w.write_bit(false);
-    w.write_bit(false);
-    w.write_bit(true);
-    w.write_bits(s.fps_den, 32);
-    w.write_bits(s.fps_num, 32);
     w.write_bit(false);
     w.write_bit(false);
     w.write_bit(false);
@@ -480,8 +474,6 @@ mod tests {
                 temporal_mvp: true,
                 strong_intra: true,
                 cu_qp_delta: false,
-                fps_num: 60000,
-                fps_den: 1001,
                 sar,
                 color,
             };
@@ -502,7 +494,7 @@ mod tests {
                     color.full_range
                 )
             );
-            assert_eq!(vui.timing, Some((1001, 60000)));
+            assert_eq!(vui.timing, None);
         }
     }
 }
