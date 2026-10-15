@@ -9,7 +9,7 @@ use super::mux::{Planner, Premix, Sound, gop_mp4, premixed_m4a};
 use super::picture::Blender;
 use super::probe::keyframes;
 use super::route::{Caps, Picked, Prefs, pick_encode};
-use super::video::{Source, frame_at, open, source};
+use super::video::{Source, Video, frame_at, open, source};
 use crate::media::{AudioBuffer, Codec, Error, Frame, PixelFormat, Result, Rgba, Route};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -751,15 +751,31 @@ pub(super) fn reencode(
     if frames <= 0 {
         return Ok(());
     }
+    let mut frames_in = reencode_open(job, si, from, frames)?;
+    reencode_run(job, &mut frames_in, frames, at, push, overlay, progress)
+}
+
+pub(super) fn reencode_open(job: &Job, si: usize, from: i64, frames: i64) -> Result<Video> {
     let src = &job.sources[si];
     let size = (src.probe.width, src.probe.height) != job.size;
-    let mut frames_in = open(
+    open(
         src,
         job.seconds(from),
-        Some(frames as u64),
+        Some(frames.max(0) as u64),
         size.then_some(job.size),
         Some(job.fps),
-    )?;
+    )
+}
+
+pub(super) fn reencode_run(
+    job: &mut Job,
+    frames_in: &mut Video,
+    frames: i64,
+    at: i64,
+    push: &mut dyn FnMut(&Frame) -> Result<()>,
+    overlay: &mut Option<Overlay>,
+    progress: Tell,
+) -> Result<()> {
     let mut n = 0i64;
     let mut last: Option<Frame> = None;
     let mut blender = Blender::new();

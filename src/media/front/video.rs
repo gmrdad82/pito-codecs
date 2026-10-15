@@ -204,6 +204,17 @@ pub fn open(
 }
 
 impl Video {
+    pub(super) fn advance(&mut self, from: f64, frames: u64) -> Result<bool> {
+        match &mut self.inner {
+            Inner::Native(decoded, _) => {
+                decoded.advance(from)?;
+                self.left = Some(frames);
+                Ok(true)
+            }
+            Inner::Ffmpeg { .. } => Ok(false),
+        }
+    }
+
     pub fn recycle(&mut self, frame: Frame) {
         if let Inner::Native(frames, _) = &mut self.inner {
             frames.recycle(frame);

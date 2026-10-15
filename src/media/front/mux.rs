@@ -13,12 +13,14 @@ use crate::mp4::{
 
 use super::audio::ffmpeg_pcm;
 use super::demux::Demux;
-use super::export::{ExportOptions, Job, Part, Progress, Stage, Tell, WRITTEN, reencode};
+use super::export::{
+    ExportOptions, Job, Part, Progress, Stage, Tell, WRITTEN, reencode, reencode_open, reencode_run,
+};
 use super::ffmpeg::Ffmpeg;
-use super::native::{threads, video_track};
+use super::native::{self, threads, video_track};
 use super::resident::Resident;
 use super::route::{Picked, Prefs};
-use super::video::frame_at;
+use super::video::{Video, frame_at};
 use crate::media::{AudioBuffer, Codec, Error, Frame, Packet, PixelFormat, Result, Route};
 
 pub(super) const RATE: u32 = 48_000;
@@ -363,6 +365,57 @@ struct Worker {
     resident: Option<Resident>,
 }
 
+struct Feeds {
+    gpu: Option<native::Frames>,
+    cpu: Option<Video>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_group(
+    job: &Job,
+    video: &Picked,
+    si: usize,
+    spans: &[(usize, i64, i64)],
+    crf: u8,
+    threads: usize,
+    budget: &Budget,
+    worker: &mut Worker,
+    longest: i64,
+    done: &mut dyn FnMut(usize, Result<Edge>) -> bool,
+) {
+    if video.codec == Codec::Vp9 && video.route == Route::Cpu {
+        for &(i, from, frames) in spans {
+            if !done(i, vp9_edge(job, (si, from, frames), crf, threads, budget)) {
+                return;
+            }
+        }
+        return;
+    }
+    let mut feeds = Feeds {
+        gpu: None,
+        cpu: None,
+    };
+    for &(i, from, frames) in spans {
+        let edge = encode_edge(
+            job,
+            video,
+            (si, from, frames),
+            crf,
+            threads,
+            worker,
+            longest,
+            &mut feeds,
+        );
+        let failed = edge.is_err();
+        if !done(i, edge) || failed {
+            break;
+        }
+    }
+    if let (Some(f), Some(r)) = (feeds.gpu.take(), worker.resident.as_mut()) {
+        r.close(si, f);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn encode_edge(
     job: &Job,
@@ -370,13 +423,10 @@ fn encode_edge(
     (si, from, frames): (usize, i64, i64),
     crf: u8,
     threads: usize,
-    budget: &Budget,
     worker: &mut Worker,
     longest: i64,
+    feeds: &mut Feeds,
 ) -> Result<Edge> {
-    if video.codec == Codec::Vp9 && video.route == Route::Cpu {
-        return vp9_edge(job, (si, from, frames), crf, threads, budget);
-    }
     let gpu = video.route == Route::Gpu;
     let span = if gpu { longest.max(frames) } else { frames };
     let mut enc = match worker.enc.take() {
@@ -393,26 +443,48 @@ fn encode_edge(
     let mut quiet = job.quiet();
     let resident = worker.resident.get_or_insert_with(|| Resident::new(&enc));
     resident.renew(&enc);
-    let on_gpu = resident.on
-        && job.sources[si].route == Route::Gpu
-        && resident.piece(
-            &mut quiet,
-            si,
-            (from, frames),
-            0,
-            &mut enc,
-            &mut |_, p| {
-                packets.extend(p);
-                Ok(())
-            },
-            &mut None,
-            &mut |_| true,
-        )?;
+    let mut on_gpu = false;
+    if resident.on && job.sources[si].route == Route::Gpu {
+        match feeds.gpu.as_mut() {
+            Some(f) => f.advance(job.seconds(from))?,
+            None => feeds.gpu = resident.open(&quiet, si, from),
+        }
+        if let Some(f) = feeds.gpu.as_mut() {
+            on_gpu = resident.run(
+                &mut quiet,
+                si,
+                f,
+                frames,
+                0,
+                &mut enc,
+                &mut |_, p| {
+                    packets.extend(p);
+                    Ok(())
+                },
+                &mut None,
+                &mut |_| true,
+            )?;
+        }
+        if !on_gpu && let Some(f) = feeds.gpu.take() {
+            resident.close(si, f);
+        }
+    }
     if !on_gpu {
-        reencode(
+        let reused = match feeds.cpu.as_mut() {
+            Some(v) => v.advance(job.seconds(from), frames.max(0) as u64)?,
+            None => false,
+        };
+        if !reused {
+            feeds.cpu = Some(reencode_open(&quiet, si, from, frames)?);
+        }
+        let v = feeds
+            .cpu
+            .as_mut()
+            .ok_or_else(|| Error::Backend("no frames to encode".to_string()))?;
+        reencode_run(
             &mut quiet,
-            si,
-            (from, frames),
+            v,
+            frames,
             0,
             &mut |f: &Frame| {
                 packets.extend(enc.encode(f)?);
@@ -1369,7 +1441,29 @@ fn smart_video(
         })
         .max()
         .unwrap_or(1);
-    let workers = edges.len().clamp(1, 4);
+    let shares = video.codec != Codec::Vp9 || video.route != Route::Cpu;
+    let key = |si: usize, from: i64| Gop::at(job, si, from).ok().map(|g| g.first());
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut tail: Option<(usize, i64)> = None;
+    for (r, &i) in edges.iter().enumerate() {
+        let (si, p) = plan[i];
+        let Part::Encode { from, frames } = p else {
+            continue;
+        };
+        let joins = shares
+            && tail.is_some_and(|(psi, end)| {
+                psi == si
+                    && from >= end
+                    && job.sources[si].demux.is_some()
+                    && key(si, from).is_some_and(|k| k <= end)
+            });
+        match groups.last_mut() {
+            Some(g) if joins => g.push(r),
+            _ => groups.push(vec![r]),
+        }
+        tail = Some((si, from + frames));
+    }
+    let workers = groups.len().clamp(1, 4);
     let per = (threads() * 2 / workers).max(2);
     let next = AtomicUsize::new(0);
     let wanted = AtomicUsize::new(0);
@@ -1392,7 +1486,8 @@ fn smart_video(
     let written = std::thread::scope(|s| -> Result<(u64, u64)> {
         for _ in 0..workers {
             let tx = tx.clone();
-            let (plan, next, edges, wanted, budget) = (&plan, &next, &edges, &wanted, &budget);
+            let (plan, next, edges, groups, wanted, budget) =
+                (&plan, &next, &edges, &groups, &wanted, &budget);
             s.spawn(move || {
                 let mut worker = Worker::default();
                 loop {
@@ -1400,33 +1495,46 @@ fn smart_video(
                         break;
                     }
                     let k = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(&i) = edges.get(k) else { break };
-                    while k >= wanted.load(Ordering::Relaxed) + AHEAD + workers {
+                    let Some(group) = groups.get(k) else { break };
+                    let Some(&first) = group.first() else {
+                        continue;
+                    };
+                    while first >= wanted.load(Ordering::Relaxed) + AHEAD + workers {
                         if stop.load(Ordering::Relaxed) {
                             return;
                         }
                         std::thread::sleep(std::time::Duration::from_millis(1));
                     }
-                    let (si, p) = plan[i];
-                    let Part::Encode { from, frames } = p else {
-                        continue;
-                    };
-                    if tx
-                        .send((
-                            i,
-                            encode_edge(
-                                job,
-                                video,
-                                (si, from, frames),
-                                crf,
-                                per,
-                                budget,
-                                &mut worker,
-                                longest,
-                            ),
-                        ))
-                        .is_err()
-                    {
+                    let mut si = 0;
+                    let spans: Vec<(usize, i64, i64)> = group
+                        .iter()
+                        .filter_map(|&r| {
+                            let i = *edges.get(r)?;
+                            let (s, p) = plan[i];
+                            si = s;
+                            match p {
+                                Part::Encode { from, frames } => Some((i, from, frames)),
+                                Part::Copy { .. } => None,
+                            }
+                        })
+                        .collect();
+                    let mut open = true;
+                    encode_group(
+                        job,
+                        video,
+                        si,
+                        &spans,
+                        crf,
+                        per,
+                        budget,
+                        &mut worker,
+                        longest,
+                        &mut |i, r| {
+                            open = tx.send((i, r)).is_ok();
+                            open
+                        },
+                    );
+                    if !open {
                         break;
                     }
                 }

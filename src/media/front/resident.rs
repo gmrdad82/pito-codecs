@@ -112,6 +112,25 @@ impl Resident {
         if frames <= 0 {
             return Ok(true);
         }
+        let Some(mut frames_in) = self.open(job, si, from) else {
+            return Ok(false);
+        };
+        let done = self.run(
+            job,
+            si,
+            &mut frames_in,
+            frames,
+            at,
+            enc,
+            out,
+            overlay,
+            progress,
+        )?;
+        self.close(si, frames_in);
+        Ok(done)
+    }
+
+    pub(super) fn open(&mut self, job: &Job, si: usize, from: i64) -> Option<native::Frames> {
         let opened = match job.sources[si].demux() {
             Ok(d) => {
                 let d = d.clone();
@@ -119,21 +138,40 @@ impl Resident {
             }
             Err(e) => Err(e),
         };
-        let mut frames_in = match opened {
-            Ok(f) if f.route() == Route::Gpu => f,
+        match opened {
+            Ok(f) if f.route() == Route::Gpu => Some(f),
             Ok(_) => {
                 self.on = false;
                 self.note("the video doesn't decode on the GPU here, so its frames are drawn and encoded from system memory".to_string());
-                return Ok(false);
+                None
             }
             Err(e) => {
                 self.on = false;
                 self.note(format!(
                     "the GPU decoder failed ({e}); frames are drawn and encoded from system memory"
                 ));
-                return Ok(false);
+                None
             }
-        };
+        }
+    }
+
+    pub(super) fn close(&mut self, si: usize, frames_in: native::Frames) {
+        self.decoders.insert(si, frames_in.into_decoder());
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn run(
+        &mut self,
+        job: &mut Job,
+        si: usize,
+        frames_in: &mut native::Frames,
+        frames: i64,
+        at: i64,
+        enc: &mut VEnc,
+        out: &mut dyn FnMut(&VEnc, Vec<Packet>) -> Result<()>,
+        overlay: &mut Option<Overlay>,
+        progress: Tell,
+    ) -> Result<bool> {
         let src = &job.sources[si];
         let scaled = (src.probe.width, src.probe.height) != job.size;
         let ten = src.probe.bit_depth > 8;
@@ -208,7 +246,6 @@ impl Resident {
         if scaler.is_some() {
             self.scaler = scaler;
         }
-        self.decoders.insert(si, frames_in.into_decoder());
         Ok(true)
     }
 
