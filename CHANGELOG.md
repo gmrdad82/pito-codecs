@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.8.0 — 2026-10-15
+
+### Changed
+
+- Smart cuts are faster when two cut points fall in one GOP, as they do when silences are cut out: both share one decode from the keyframe. On the GPU, 40 cuts of a 1080p H.264 file take 4.3 s instead of 6.2 s, and an edit of 46 pieces with the gaps between them removed 6.4 s instead of 9.6 s, every frame unchanged.
+
 ## v1.7.0 — 2026-10-15
 
 ### Added
