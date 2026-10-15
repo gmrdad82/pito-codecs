@@ -3,7 +3,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::OnceLock;
 
-use super::ebml::{self, Children, Lacing, Size, parse_lacing, read_id, read_size};
+use super::ebml::{self, Children, Lacing, Size, parse_lacing_in, read_id, read_size};
 use super::ids::*;
 use super::parse::{self, Cluster, CuePoint, Info, SeekEntry};
 use super::track::{Sample, Track};
@@ -354,14 +354,28 @@ fn parse_block<S: ByteSource + ?Sized>(
     if lacing == Lacing::None {
         frames.push((data_start + hdr, (len - hdr) as u32));
     } else {
-        let body = io.read_vec(data_start + hdr, len - hdr)?;
-        match parse_lacing(lacing, &body) {
-            Ok(f) => frames.extend(
-                f.into_iter()
-                    .map(|(o, l)| (data_start + hdr + o as u64, l as u32)),
-            ),
-            Err(_) => return Ok(None),
-        }
+        let start = data_start + hdr;
+        let Ok(total) = usize::try_from(len - hdr) else {
+            return Ok(None);
+        };
+        let cap = total.min(MAX_WIN);
+        let mut want = total.min(WIN);
+        let mut grown = Vec::new();
+        let f = loop {
+            let head = if want <= WIN {
+                io.peek(start, want)?
+            } else {
+                grown.clear();
+                io.read_into(start, want as u64, &mut grown)?;
+                &grown[..]
+            };
+            match parse_lacing_in(lacing, head, total) {
+                Ok(Some(f)) => break f,
+                Ok(None) if want < cap => want = want.saturating_mul(2).min(cap),
+                _ => return Ok(None),
+            }
+        };
+        frames.extend(f.into_iter().map(|(o, l)| (start + o as u64, l as u32)));
     }
     Ok(Some((track, rel, flags)))
 }
@@ -666,7 +680,7 @@ impl<S: ByteSource> Reader<S> {
             video_only,
             parsed: HashSet::new(),
             frames: Vec::new(),
-            room: len / 2,
+            room: len / 8,
         };
         w.walk(&mut io, &mut head)?;
         for t in &mut head.tracks {

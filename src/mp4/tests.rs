@@ -126,7 +126,21 @@ fn reader_matches_ffprobe_packets() {
             "hvc1",
         ],
     );
-    for path in [mp4, mov] {
+    let frag = generate(
+        "fragmented.mp4",
+        2,
+        &[
+            "-c:v",
+            "libx264",
+            "-bf",
+            "3",
+            "-g",
+            "30",
+            "-movflags",
+            "frag_keyframe+empty_moov",
+        ],
+    );
+    for path in [mp4, mov, frag] {
         let r = Reader::open(&path).unwrap();
         assert_eq!(r.quicktime, path.extension().unwrap() == "mov");
         for (i, t) in r.tracks.iter().enumerate() {

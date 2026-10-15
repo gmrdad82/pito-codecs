@@ -230,3 +230,53 @@ fn packet_out_of_range_is_an_error() {
     assert!(r.packet(0, usize::MAX).is_err());
     assert!(r.packet(usize::MAX, 0).is_err());
 }
+
+struct Huge {
+    data: Vec<u8>,
+    len: u64,
+    most: std::cell::Cell<usize>,
+}
+
+impl ByteSource for Huge {
+    fn len(&self) -> u64 {
+        self.len
+    }
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        self.most.set(self.most.get().max(buf.len()));
+        buf.fill(0);
+        let start = (offset as usize).min(self.data.len());
+        let n = (self.data.len() - start).min(buf.len());
+        buf[..n].copy_from_slice(&self.data[start..start + n]);
+        Ok(())
+    }
+}
+
+#[test]
+fn a_huge_laced_block_reads_only_its_lace_header() {
+    const BIG: u64 = 1 << 30;
+    let mut body = vec![0xE7, 0x81, 0x00, 0xA3];
+    ebml::write_size(&mut body, BIG, 8);
+    let mut d = head_of(true);
+    d.extend_from_slice(&[0x1F, 0x43, 0xB6, 0x75]);
+    ebml::write_size(&mut d, body.len() as u64 + BIG, 8);
+    d.extend_from_slice(&body);
+    let at = d.len() as u64;
+    d.extend_from_slice(&[0x82, 0, 0, 0x80 | 0x02, 1, 10]);
+    let src = Huge {
+        data: d,
+        len: at + BIG,
+        most: std::cell::Cell::new(0),
+    };
+    let r = Reader::new(&src).unwrap();
+    let frames: Vec<(u64, u32)> = r.tracks[1]
+        .samples
+        .iter()
+        .map(|s| (s.offset, s.size))
+        .collect();
+    assert_eq!(frames, [(at + 6, 10), (at + 16, (BIG - 16) as u32)]);
+    assert!(
+        src.most.get() <= 4 << 20,
+        "read {} bytes at once",
+        src.most.get()
+    );
+}

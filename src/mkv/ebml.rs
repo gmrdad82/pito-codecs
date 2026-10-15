@@ -183,24 +183,45 @@ impl Lacing {
     }
 }
 
+#[cfg(test)]
 pub fn parse_lacing(lacing: Lacing, data: &[u8]) -> Result<Vec<(usize, usize)>> {
-    if lacing == Lacing::None {
-        return Ok(vec![(0, data.len())]);
+    match parse_lacing_in(lacing, data, data.len())? {
+        Some(f) => Ok(f),
+        None => invalid("truncated lace header"),
     }
+}
+
+pub fn parse_lacing_in(
+    lacing: Lacing,
+    data: &[u8],
+    total: usize,
+) -> Result<Option<Vec<(usize, usize)>>> {
+    if lacing == Lacing::None {
+        return Ok(Some(vec![(0, total)]));
+    }
+    let data = data.get(..total).unwrap_or(data);
+    let short = data.len() < total;
+    let more = |pos: usize, msg: &str| {
+        if short && data.len().saturating_sub(pos) < 8 {
+            Ok(None)
+        } else {
+            invalid(msg)
+        }
+    };
     let Some(&n1) = data.first() else {
-        return invalid("laced block without frame count");
+        return more(0, "laced block without frame count");
     };
     let count = n1 as usize + 1;
     let mut pos = 1usize;
     let mut sizes = Vec::with_capacity(count);
     match lacing {
-        Lacing::None => return Ok(vec![(0, data.len())]),
+        Lacing::None => return Ok(Some(vec![(0, total)])),
         Lacing::Xiph => {
             for _ in 0..count - 1 {
                 let mut s = 0usize;
                 loop {
                     let Some(&b) = data.get(pos) else {
-                        return invalid("truncated Xiph lace header");
+                        return more(pos, "truncated Xiph lace header");
                     };
                     pos += 1;
                     s += b as usize;
@@ -214,14 +235,14 @@ pub fn parse_lacing(lacing: Lacing, data: &[u8]) -> Result<Vec<(usize, usize)>> 
         Lacing::Ebml => {
             if count > 1 {
                 let Some((first, l, _)) = read_vint(&data[pos..]) else {
-                    return invalid("bad EBML lace size");
+                    return more(pos, "bad EBML lace size");
                 };
                 pos += l;
                 let mut prev = first as i64;
                 sizes.push(first as usize);
                 for _ in 1..count - 1 {
                     let Some((d, l)) = read_svint(&data[pos..]) else {
-                        return invalid("bad EBML lace delta");
+                        return more(pos, "bad EBML lace delta");
                     };
                     pos += l;
                     prev += d;
@@ -233,7 +254,7 @@ pub fn parse_lacing(lacing: Lacing, data: &[u8]) -> Result<Vec<(usize, usize)>> 
             }
         }
         Lacing::FixedSize => {
-            let rest = data.len() - pos;
+            let rest = total - pos;
             if rest < count {
                 return invalid("fixed-size lacing with empty frames");
             }
@@ -247,16 +268,16 @@ pub fn parse_lacing(lacing: Lacing, data: &[u8]) -> Result<Vec<(usize, usize)>> 
         .iter()
         .try_fold(0usize, |a, &s| a.checked_add(s))
         .unwrap_or(usize::MAX);
-    if pos > data.len() || used > data.len() - pos {
+    if pos > total || used > total - pos {
         return invalid("lace sizes exceed block");
     }
-    sizes.push(data.len() - pos - used);
+    sizes.push(total - pos - used);
     let mut out = Vec::with_capacity(count);
     for s in sizes {
         out.push((pos, s));
         pos += s;
     }
-    Ok(out)
+    Ok(Some(out))
 }
 
 #[cfg(test)]
