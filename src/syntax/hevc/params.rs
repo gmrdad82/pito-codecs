@@ -1,7 +1,7 @@
 use super::tables::scan_diag;
 use super::tables::{DEFAULT_SCALING_INTER, DEFAULT_SCALING_INTRA};
 use crate::syntax::bits::BitReader;
-use crate::syntax::error::{Result, ensure, unsupported};
+use crate::syntax::error::{Error, Result, ensure, unsupported};
 
 pub fn profile_idc(r: &mut BitReader, max_sub_layers_minus1: u32) -> Result<u8> {
     r.skip(2 + 1)?;
@@ -71,7 +71,7 @@ pub fn skip_hrd(r: &mut BitReader, common: bool, max_sub_layers_minus1: u32) -> 
         }
         let mut cpb_cnt = 1;
         if !low_delay {
-            cpb_cnt = r.read_ue()? + 1;
+            cpb_cnt = r.read_ue()?.saturating_add(1);
             ensure!(cpb_cnt <= 32, "cpb_cnt_minus1 out of range");
         }
         if nal {
@@ -228,7 +228,7 @@ impl ScalingList {
             while m < 6 {
                 let coef_num = if size == 0 { 16 } else { 64 };
                 if !r.read_flag()? {
-                    let delta = r.read_ue()? as usize * step;
+                    let delta = (r.read_ue()? as usize).saturating_mul(step);
                     ensure!(delta <= m, "scaling_list_pred_matrix_id_delta out of range");
                     if delta == 0 {
                         let d = Self::default_lists();
@@ -301,6 +301,11 @@ impl ScalingList {
     }
 }
 
+fn poc_add(a: i32, b: i32) -> Result<i32> {
+    a.checked_add(b)
+        .ok_or_else(|| Error::Invalid("RPS delta POC out of range".into()))
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StRps {
     pub s0: Vec<(i32, bool)>,
@@ -316,15 +321,16 @@ impl StRps {
         let inter = if idx != 0 { r.read_flag()? } else { false };
         if inter {
             let delta_idx = if idx == num_sets {
-                r.read_ue()? as usize + 1
+                (r.read_ue()? as usize).saturating_add(1)
             } else {
                 1
             };
             ensure!(delta_idx <= idx, "delta_idx_minus1 out of range");
             let rf = &sets[idx - delta_idx];
             let sign = r.read_flag()?;
-            let abs = r.read_ue()? as i32 + 1;
-            ensure!(abs <= 1 << 15, "abs_delta_rps_minus1 out of range");
+            let abs = r.read_ue()?;
+            ensure!(abs < 1 << 15, "abs_delta_rps_minus1 out of range");
+            let abs = abs as i32 + 1;
             let delta_rps = if sign { -abs } else { abs };
             let n = rf.num_delta_pocs();
             let mut used = vec![false; n + 1];
@@ -338,7 +344,7 @@ impl StRps {
             let nneg = rf.s0.len();
             let mut out = StRps::default();
             for j in (0..rf.s1.len()).rev() {
-                let d = rf.s1[j].0 + delta_rps;
+                let d = poc_add(rf.s1[j].0, delta_rps)?;
                 if d < 0 && use_delta[nneg + j] {
                     out.s0.push((d, used[nneg + j]));
                 }
@@ -347,13 +353,13 @@ impl StRps {
                 out.s0.push((delta_rps, used[n]));
             }
             for j in 0..nneg {
-                let d = rf.s0[j].0 + delta_rps;
+                let d = poc_add(rf.s0[j].0, delta_rps)?;
                 if d < 0 && use_delta[j] {
                     out.s0.push((d, used[j]));
                 }
             }
             for j in (0..nneg).rev() {
-                let d = rf.s0[j].0 + delta_rps;
+                let d = poc_add(rf.s0[j].0, delta_rps)?;
                 if d > 0 && use_delta[j] {
                     out.s1.push((d, used[j]));
                 }
@@ -362,7 +368,7 @@ impl StRps {
                 out.s1.push((delta_rps, used[n]));
             }
             for j in 0..rf.s1.len() {
-                let d = rf.s1[j].0 + delta_rps;
+                let d = poc_add(rf.s1[j].0, delta_rps)?;
                 if d > 0 && use_delta[nneg + j] {
                     out.s1.push((d, used[nneg + j]));
                 }
@@ -379,16 +385,16 @@ impl StRps {
             let mut out = StRps::default();
             let mut poc = 0i32;
             for _ in 0..nneg {
-                let d = r.read_ue()? as i32 + 1;
-                ensure!(d <= 1 << 15, "delta_poc_s0_minus1 out of range");
-                poc -= d;
+                let d = r.read_ue()?;
+                ensure!(d < 1 << 15, "delta_poc_s0_minus1 out of range");
+                poc = poc_add(poc, -(d as i32 + 1))?;
                 out.s0.push((poc, r.read_flag()?));
             }
             poc = 0;
             for _ in 0..npos {
-                let d = r.read_ue()? as i32 + 1;
-                ensure!(d <= 1 << 15, "delta_poc_s1_minus1 out of range");
-                poc += d;
+                let d = r.read_ue()?;
+                ensure!(d < 1 << 15, "delta_poc_s1_minus1 out of range");
+                poc = poc_add(poc, d as i32 + 1)?;
                 out.s1.push((poc, r.read_flag()?));
             }
             Ok(out)
@@ -474,13 +480,13 @@ impl Sps {
         if r.read_flag()? {
             conf_win = (r.read_ue()?, r.read_ue()?, r.read_ue()?, r.read_ue()?);
         }
-        let bit_depth_luma = r.read_ue()? + 8;
-        let bit_depth_chroma = r.read_ue()? + 8;
+        let bit_depth_luma = r.read_ue()?.saturating_add(8);
+        let bit_depth_chroma = r.read_ue()?.saturating_add(8);
         ensure!(
             bit_depth_luma <= 16 && bit_depth_chroma <= 16,
             "bit depth out of range"
         );
-        let log2_max_poc_lsb = r.read_ue()? + 4;
+        let log2_max_poc_lsb = r.read_ue()?.saturating_add(4);
         ensure!(
             log2_max_poc_lsb <= 16,
             "log2_max_pic_order_cnt_lsb_minus4 out of range"
@@ -493,7 +499,7 @@ impl Sps {
             max_sub_layers_minus1
         };
         for _ in start..=max_sub_layers_minus1 {
-            dpb = r.read_ue()? + 1;
+            dpb = r.read_ue()?.saturating_add(1);
             reorder = r.read_ue()?;
             latency = r.read_ue()?;
         }
@@ -501,10 +507,10 @@ impl Sps {
             dpb <= 16 && reorder <= 16,
             "sps_max_dec_pic_buffering out of range"
         );
-        let log2_min_cb = r.read_ue()? + 3;
-        let log2_ctb = log2_min_cb + r.read_ue()?;
-        let log2_min_tb = r.read_ue()? + 2;
-        let log2_max_tb = log2_min_tb + r.read_ue()?;
+        let log2_min_cb = r.read_ue()?.saturating_add(3);
+        let log2_ctb = log2_min_cb.saturating_add(r.read_ue()?);
+        let log2_min_tb = r.read_ue()?.saturating_add(2);
+        let log2_max_tb = log2_min_tb.saturating_add(r.read_ue()?);
         ensure!(
             (4..=6).contains(&log2_ctb) && log2_min_cb <= log2_ctb,
             "CTB size out of range"
@@ -546,8 +552,8 @@ impl Sps {
         if pcm {
             pcm_bit_depth_luma = r.read_bits(4)? + 1;
             pcm_bit_depth_chroma = r.read_bits(4)? + 1;
-            log2_min_pcm = r.read_ue()? + 3;
-            log2_max_pcm = log2_min_pcm + r.read_ue()?;
+            log2_min_pcm = r.read_ue()?.saturating_add(3);
+            log2_max_pcm = log2_min_pcm.saturating_add(r.read_ue()?);
             pcm_loop_filter_disabled = r.read_flag()?;
             ensure!(
                 pcm_bit_depth_luma <= bit_depth_luma && pcm_bit_depth_chroma <= bit_depth_chroma,
@@ -764,13 +770,18 @@ impl Pps {
         let num_extra_slice_header_bits = r.read_bits(3)?;
         let sign_data_hiding = r.read_flag()?;
         let cabac_init_present = r.read_flag()?;
-        let num_ref_idx_l0_default = r.read_ue()? + 1;
-        let num_ref_idx_l1_default = r.read_ue()? + 1;
+        let num_ref_idx_l0_default = r.read_ue()?.saturating_add(1);
+        let num_ref_idx_l1_default = r.read_ue()?.saturating_add(1);
         ensure!(
             num_ref_idx_l0_default <= 15 && num_ref_idx_l1_default <= 15,
             "num_ref_idx_default_active out of range"
         );
-        let init_qp = 26 + r.read_se()?;
+        let init_qp_minus26 = r.read_se()?;
+        ensure!(
+            (-(26 + 6 * 8)..=25).contains(&init_qp_minus26),
+            "init_qp_minus26 out of range"
+        );
+        let init_qp = 26 + init_qp_minus26;
         let constrained_intra_pred = r.read_flag()?;
         let transform_skip = r.read_flag()?;
         let cu_qp_delta_enabled = r.read_flag()?;
@@ -795,8 +806,8 @@ impl Pps {
         let (mut column_widths, mut row_heights) = (Vec::new(), Vec::new());
         let mut loop_filter_across_tiles = true;
         if tiles_enabled {
-            num_tile_columns = r.read_ue()? + 1;
-            num_tile_rows = r.read_ue()? + 1;
+            num_tile_columns = r.read_ue()?.saturating_add(1);
+            num_tile_rows = r.read_ue()?.saturating_add(1);
             ensure!(
                 num_tile_columns <= 64 && num_tile_rows <= 64,
                 "too many tiles"
@@ -838,7 +849,7 @@ impl Pps {
             None
         };
         let lists_modification_present = r.read_flag()?;
-        let log2_parallel_merge_level = r.read_ue()? + 2;
+        let log2_parallel_merge_level = r.read_ue()?.saturating_add(2);
         ensure!(
             log2_parallel_merge_level <= 6,
             "log2_parallel_merge_level out of range"
@@ -924,6 +935,13 @@ impl Layout {
         let (w, h) = (sps.pic_width_in_ctbs(), sps.pic_height_in_ctbs());
         let (nc, nr) = (pps.num_tile_columns, pps.num_tile_rows);
         ensure!(nc <= w && nr <= h, "more tiles than CTBs");
+        let qp_bd = 6 * (sps.bit_depth_luma as i32 - 8);
+        ensure!(
+            pps.init_qp >= -qp_bd,
+            "init_qp_minus26 {} out of range for bit depth {}",
+            pps.init_qp - 26,
+            sps.bit_depth_luma
+        );
         let mut colw = Vec::new();
         let mut rowh = Vec::new();
         if pps.uniform_spacing {
@@ -1014,5 +1032,88 @@ impl Layout {
     #[inline]
     pub fn tile_of_rs(&self, rs: u32) -> u32 {
         self.tile_id[self.rs_to_ts[rs as usize] as usize]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::syntax::bits::BitWriter;
+
+    fn sps(bit_depth_minus8: u32) -> Vec<u8> {
+        let mut w = BitWriter::new();
+        w.write_bits(0, 4);
+        w.write_bits(0, 3);
+        w.write_bit(true);
+        w.write_bits(1 << 5 | 1, 8);
+        for _ in 0..11 {
+            w.write_bits(0, 8);
+        }
+        for v in [0, 1, 64, 64] {
+            w.write_ue(v);
+        }
+        w.write_bit(false);
+        w.write_ue(bit_depth_minus8);
+        w.write_ue(0);
+        w.write_ue(4);
+        w.write_bit(true);
+        for v in [0, 0, 0, 0, 1, 0, 2, 0, 0] {
+            w.write_ue(v);
+        }
+        w.write_bits(0, 4);
+        w.write_ue(0);
+        w.write_bits(0, 5);
+        w.rbsp_trailing();
+        w.finish()
+    }
+
+    fn pps(init_qp_minus26: i32) -> Vec<u8> {
+        let mut w = BitWriter::new();
+        w.write_ue(0);
+        w.write_ue(0);
+        w.write_bits(0, 7);
+        w.write_ue(0);
+        w.write_ue(0);
+        w.write_se(init_qp_minus26);
+        w.write_bits(0, 3);
+        w.write_se(0);
+        w.write_se(0);
+        w.write_bits(0, 10);
+        w.write_ue(0);
+        w.write_bits(0, 2);
+        w.rbsp_trailing();
+        w.finish()
+    }
+
+    fn inter_rps(abs_minus1: u32) -> Result<StRps> {
+        let mut w = BitWriter::new();
+        w.write_bit(true);
+        w.write_bit(true);
+        w.write_ue(abs_minus1);
+        w.write_bits(0b11, 2);
+        w.rbsp_trailing();
+        let data = w.finish();
+        let base = StRps {
+            s0: vec![(-1, true)],
+            s1: Vec::new(),
+        };
+        StRps::parse(&mut BitReader::new(&data), 1, &[base], 2)
+    }
+
+    #[test]
+    fn wrapping_exp_golomb_values_are_errors() {
+        assert!(Sps::parse(&sps(0)).is_ok());
+        assert!(Sps::parse(&sps(u32::MAX)).is_err());
+        assert!(Sps::parse(&sps(u32::MAX - 7)).is_err());
+        assert!(Pps::parse(&pps(0)).is_ok());
+        for qp in [i32::MAX, i32::MIN + 1, 26, -75] {
+            assert!(Pps::parse(&pps(qp)).is_err(), "{qp}");
+        }
+        let sps = Sps::parse(&sps(0)).unwrap();
+        assert!(Layout::tile_bounds(&sps, &Pps::parse(&pps(-26)).unwrap()).is_ok());
+        assert!(Layout::tile_bounds(&sps, &Pps::parse(&pps(-27)).unwrap()).is_err());
+        assert!(inter_rps(0).is_ok());
+        assert!(inter_rps(1 << 31).is_err());
+        assert!(inter_rps(u32::MAX).is_err());
     }
 }
