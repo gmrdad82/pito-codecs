@@ -725,3 +725,36 @@ fn vaapi_matches_ffmpeg() {
         );
     }
 }
+
+#[cfg(all(feature = "gpu", target_os = "linux"))]
+#[test]
+fn vaapi_decodes_while_the_caller_holds_frames_on_the_gpu() {
+    use crate::gpu::{Backend, Direction, HwDecoder, available};
+    use crate::media::Codec;
+    if !available().contains(&(Codec::Vp9, Direction::Decode, Backend::VaApi)) {
+        eprintln!("SKIPPED: no VA-API VP9 decoder");
+        return;
+    }
+    let Some(f) = CONFORMANCE.iter().find(|f| is_420(f)) else {
+        return;
+    };
+    let Some((ivf, _)) = ensure(f) else { return };
+    let data = std::fs::read(ivf).unwrap();
+    let mut dec = HwDecoder::new(Codec::Vp9, &[]).unwrap();
+    let mut held = std::collections::VecDeque::new();
+    let mut n = 0;
+    for (i, c) in ivf_frames(&data).iter().enumerate() {
+        for g in dec
+            .decode_gpu(&packet(c, i))
+            .unwrap_or_else(|e| panic!("{}: chunk {i}: {e}", f.name))
+        {
+            n += 1;
+            held.push_back(g);
+            if held.len() > 12 {
+                held.pop_front();
+            }
+        }
+    }
+    n += dec.flush_gpu().unwrap().len();
+    assert!(n > 12, "{}: {n} frames", f.name);
+}

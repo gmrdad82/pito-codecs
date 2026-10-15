@@ -17,7 +17,8 @@ pub fn threads() -> usize {
     feature = "vp9",
     feature = "gif",
     feature = "webp",
-    feature = "opus"
+    feature = "opus",
+    feature = "ac3"
 ))]
 pub(crate) mod isa;
 

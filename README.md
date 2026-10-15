@@ -81,6 +81,8 @@ Opening a file and showing its first picture takes 4.1 ms for 1440p H.264 on the
 
 ![Time to first frame at 1440p, pito-codecs against ffmpeg](docs/images/chart-first-frame.png)
 
+An MKV or WebM file opens for video from its headers and Cues alone, then seeks through the Cues, so its size doesn't matter, and every caller that opens the same file at once shares one read. On a gigabit network share, a 4.4 GB, 71-minute 720p H.264 MKV showed its first frame in 110 ms at the start and 193 ms at 35 minutes, reading 6.3 MB each time, where reading every cluster first took 32.8 s on a 3.9 GB file on the same share.
+
 ### Filmstrips
 
 `frames_at` takes stills at any times, from the keyframe at or before each one, and reads only what it needs; in MKV and WebM it seeks through the file's Cues, so a still late in a long recording costs the same as one at the start. `frames_at_seek` with `Seek::Exact` decodes on to the exact frame. This strip of 12 stills was taken by `frames_at` and written by our own GIF encoder (`examples/readme_shots.rs`), in 63 to 272 ms for the stills across runs on a shared machine and 27 ms for the GIF:
@@ -120,6 +122,8 @@ VP9 sources cut the same way into MP4 (`vp09`): packets are copied as they are, 
 ### Overlays composed on the card
 
 An export can draw an RGBA overlay on every frame: a watermark, or karaoke captions that change at every word. On VA-API with Mesa's driver, the overlay is blended on the card by a VA-API video-processing pass straight into the encoder's input surface. Frames go from decode to encode without a copy to system memory, and the overlay is uploaded only when it changes, and only its painted area. The graphics queue is never used. Other GPU encoders draw the overlay on the CPU.
+
+H.264, H.265 and VP9 sources export this way. A 120 s, 1920x804 VP9 file (24 fps, libvpx profile 0) exported to H.264 with a corner mark in 6.4 s on the card against 24.1 s decoded, blended and encoded on the CPU; with captions, 6.4 s against 33.9 s.
 
 This frame's caption and corner mark were drawn as one RGBA layer and blended by `media::Blender` in 1.8 ms at 1280x720 (`examples/readme_shots.rs`):
 
@@ -285,6 +289,8 @@ blender.draw(&mut frame, &watermark);
 
 - Overlay layer rebuild: `cargo run --release --example media_speed -- captions`, `filter::Overlay::new` on a caption band about 10% painted, against v1.2.1's implementation, load 42 to 61.
 - Export with an overlay: `media_speed <file> xport`, a 130 s 1920x804 and a 30 s 1080p H.264 export with a corner mark or captions, GPU-resident against CPU decode and blend with GPU encode, load about 90.
+- Export of a VP9 source with an overlay: `media_speed <file> xport gpu gpu mark` against `xport cpu cpu mark` (and `captions`), 2880 frames of 1920x804 at 24 fps, 5 Mb/s, load 17 to 22.
+- MKV open on a network share: `media_speed <file> open 0 2100`, one run on a cold file over gigabit SMB, against the earlier full-cluster read timed on a 3.9 GB file on the same share.
 - VP9 smart cut: `media_speed <file> spans vp9 …`, a 3600-frame 720p60 VP9 file at 3 Mb/s, 3 pieces, 2967 frames, keyframes every 120 or 240 frames, load about 20.
 - AC-3: 10 minutes of 5.1 at 448 kbps against `ffmpeg -threads 1 -benchmark` and `ffmpeg -ac 2`, load 20 to 50. MP3: 10 minutes of stereo at 192 kbps against ffmpeg's mp3float, load 33.
 
