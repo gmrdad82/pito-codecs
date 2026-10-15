@@ -27,7 +27,9 @@ pub const VA_STATUS_ERROR_UNSUPPORTED_PROFILE: VAStatus = 0x0c;
 pub const VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT: VAStatus = 0x0d;
 pub const VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT: VAStatus = 0x0e;
 pub const VA_STATUS_ERROR_RESOLUTION_NOT_SUPPORTED: VAStatus = 0x13;
+pub const VA_STATUS_ERROR_UNIMPLEMENTED: VAStatus = 0x14;
 pub const VA_STATUS_ERROR_DECODING_ERROR: VAStatus = 0x17;
+pub const VA_STATUS_ERROR_TIMEDOUT: VAStatus = 0x26;
 
 pub const VA_INVALID_ID: VAGenericID = 0xffff_ffff;
 pub const VA_INVALID_SURFACE: VASurfaceID = VA_INVALID_ID;
@@ -471,6 +473,8 @@ pub type vaRenderPicture = unsafe extern "C" fn(
 pub type vaEndPicture = unsafe extern "C" fn(dpy: VADisplay, context: VAContextID) -> VAStatus;
 pub type vaSyncSurface =
     unsafe extern "C" fn(dpy: VADisplay, render_target: VASurfaceID) -> VAStatus;
+pub type vaSyncSurface2 =
+    unsafe extern "C" fn(dpy: VADisplay, surface: VASurfaceID, timeout_ns: u64) -> VAStatus;
 pub type vaCreateImage = unsafe extern "C" fn(
     dpy: VADisplay,
     format: *mut VAImageFormat,
@@ -579,6 +583,7 @@ pub mod enc_seq_bits {
 }
 
 pub mod enc_vui_bits {
+    pub const ASPECT_RATIO_INFO_PRESENT: u32 = 0;
     pub const TIMING_INFO_PRESENT: u32 = 1;
     pub const BITSTREAM_RESTRICTION: u32 = 2;
     pub const LOG2_MAX_MV_LENGTH_HORIZONTAL: u32 = 3;
@@ -702,6 +707,7 @@ pub mod enc_hevc_seq_bits {
 }
 
 pub mod enc_hevc_vui_bits {
+    pub const ASPECT_RATIO_INFO_PRESENT: u32 = 0;
     pub const TIMING_INFO_PRESENT: u32 = 3;
     pub const BITSTREAM_RESTRICTION: u32 = 4;
     pub const MOTION_VECTORS_OVER_PIC_BOUNDARIES: u32 = 6;

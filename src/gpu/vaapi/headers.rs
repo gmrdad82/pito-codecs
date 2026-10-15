@@ -1,3 +1,4 @@
+use crate::gpu::Color;
 use crate::syntax::bits::{BitWriter, escape_rbsp};
 
 pub const LOG2_MAX_FRAME_NUM: u32 = 16;
@@ -31,14 +32,28 @@ pub fn join(parts: Vec<Packed>) -> Packed {
     Packed { bytes, bits }
 }
 
-fn colour(w: &mut BitWriter) {
-    w.write_bit(true);
-    w.write_bits(5, 3);
+fn look(w: &mut BitWriter, sar: (u16, u16), color: Color) {
+    let aspect = sar.0 != 0 && sar.1 != 0 && sar.0 != sar.1;
+    w.write_bit(aspect);
+    if aspect {
+        w.write_bits(255, 8);
+        w.write_bits(u32::from(sar.0), 16);
+        w.write_bits(u32::from(sar.1), 16);
+    }
     w.write_bit(false);
-    w.write_bit(true);
-    w.write_bits(1, 8);
-    w.write_bits(1, 8);
-    w.write_bits(1, 8);
+    let described = color.described();
+    let signalled = described || color.full_range;
+    w.write_bit(signalled);
+    if signalled {
+        w.write_bits(5, 3);
+        w.write_bit(color.full_range);
+        w.write_bit(described);
+        if described {
+            w.write_bits(u32::from(color.primaries), 8);
+            w.write_bits(u32::from(color.transfer), 8);
+            w.write_bits(u32::from(color.matrix), 8);
+        }
+    }
 }
 
 pub struct H264Sequence {
@@ -53,6 +68,8 @@ pub struct H264Sequence {
     pub reorder: u32,
     pub cabac: bool,
     pub transform_8x8: bool,
+    pub sar: (u16, u16),
+    pub color: Color,
 }
 
 pub fn h264_sps(s: &H264Sequence) -> Packed {
@@ -86,9 +103,7 @@ pub fn h264_sps(s: &H264Sequence) -> Packed {
         w.write_ue(s.crop_bottom);
     }
     w.write_bit(true);
-    w.write_bit(false);
-    w.write_bit(false);
-    colour(&mut w);
+    look(&mut w, s.sar, s.color);
     w.write_bit(false);
     w.write_bit(false);
     w.write_bit(false);
@@ -211,6 +226,8 @@ pub struct HevcSequence {
     pub cu_qp_delta: bool,
     pub fps_num: u32,
     pub fps_den: u32,
+    pub sar: (u16, u16),
+    pub color: Color,
 }
 
 fn profile_tier_level(w: &mut BitWriter, s: &HevcSequence) {
@@ -293,9 +310,7 @@ pub fn hevc_sps(s: &HevcSequence) -> Packed {
     w.write_bit(s.temporal_mvp);
     w.write_bit(s.strong_intra);
     w.write_bit(true);
-    w.write_bit(false);
-    w.write_bit(false);
-    colour(&mut w);
+    look(&mut w, s.sar, s.color);
     w.write_bit(false);
     w.write_bit(false);
     w.write_bit(false);
@@ -394,4 +409,100 @@ pub fn hevc_slice(s: &HevcSlice) -> Packed {
     w.align_zero();
     let kind: u8 = if s.idr { 19 } else { 1 };
     nal(&[kind << 1, 1], w)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::syntax::bits::unescape_rbsp;
+
+    fn rbsp(p: &Packed, header: usize) -> Vec<u8> {
+        unescape_rbsp(&p.bytes[4 + header..])
+    }
+
+    #[test]
+    fn the_sps_carries_the_sources_aspect_and_colour() {
+        let color = Color {
+            primaries: 6,
+            transfer: 6,
+            matrix: 6,
+            full_range: true,
+        };
+        for (sar, color) in [((4, 3), color), ((1, 1), Color::UNKNOWN)] {
+            let h264 = H264Sequence {
+                profile_idc: 100,
+                constraints: 0,
+                level_idc: 40,
+                width_mbs: 120,
+                height_mbs: 68,
+                crop_right: 0,
+                crop_bottom: 4,
+                max_refs: 1,
+                reorder: 0,
+                cabac: true,
+                transform_8x8: true,
+                sar,
+                color,
+            };
+            let sps = crate::syntax::h264::params::Sps::parse(&rbsp(&h264_sps(&h264), 1)).unwrap();
+            let vui = sps.vui.unwrap();
+            assert_eq!(vui.sar, if sar == (1, 1) { (0, 0) } else { sar });
+            assert_eq!(
+                (
+                    vui.colour_primaries,
+                    vui.transfer_characteristics,
+                    vui.matrix_coefficients,
+                    vui.full_range
+                ),
+                (
+                    color.primaries,
+                    color.transfer,
+                    color.matrix,
+                    color.full_range
+                )
+            );
+            let hevc = HevcSequence {
+                profile_idc: 1,
+                level_idc: 120,
+                width: 1920,
+                height: 1088,
+                crop_right: 0,
+                crop_bottom: 4,
+                bit_depth: 8,
+                log2_min_cb: 3,
+                log2_ctb: 5,
+                log2_min_tb: 2,
+                log2_max_tb: 5,
+                depth_inter: 2,
+                depth_intra: 2,
+                amp: true,
+                sao: true,
+                temporal_mvp: true,
+                strong_intra: true,
+                cu_qp_delta: false,
+                fps_num: 60000,
+                fps_den: 1001,
+                sar,
+                color,
+            };
+            let sps = crate::syntax::hevc::params::Sps::parse(&rbsp(&hevc_sps(&hevc), 2)).unwrap();
+            let vui = sps.vui.unwrap();
+            assert_eq!(vui.sar, if sar == (1, 1) { (0, 0) } else { sar });
+            assert_eq!(
+                (
+                    vui.colour_primaries,
+                    vui.transfer_characteristics,
+                    vui.matrix_coefficients,
+                    vui.full_range
+                ),
+                (
+                    color.primaries,
+                    color.transfer,
+                    color.matrix,
+                    color.full_range
+                )
+            );
+            assert_eq!(vui.timing, Some((1001, 60000)));
+        }
+    }
 }

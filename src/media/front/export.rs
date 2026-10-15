@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 use super::ffmpeg::{Child, Ffmpeg, pix_fmt};
 use super::mux::{Planner, Premix, Sound, gop_mp4, premixed_m4a};
@@ -138,6 +138,9 @@ pub(super) struct Job<'a> {
     pub(super) done: u64,
     pub(super) work: PathBuf,
     pub(super) route: Route,
+    pub(super) device: Option<crate::gpu::Device>,
+    pub(super) look: super::mux::Look,
+    pub(super) spare: Arc<Mutex<Option<crate::gpu::HwEncoder>>>,
 }
 
 pub(super) type Tell<'a> = &'a mut dyn FnMut(&Progress) -> bool;
@@ -308,18 +311,30 @@ fn export_to(
     } else {
         PixelFormat::Yuv420p8
     };
+    let look = sources[index[0]]
+        .demux
+        .as_ref()
+        .and_then(|d| d.stream(d.video().ok()?).ok()?.look)
+        .unwrap_or(((1, 1), crate::gpu::Color::UNKNOWN));
+    let mut device = None;
+    let mut spare = None;
     let format = match video.route {
-        Route::Gpu => match super::mux::gpu_check(video.codec, size, fps, format) {
-            Ok(()) => format,
-            Err(e) => {
-                video.reasons.push(format!(
-                    "the GPU encoder failed ({e}); encoding H.264 on the CPU instead"
-                ));
-                video.route = Route::Cpu;
-                video.codec = Codec::H264;
-                PixelFormat::Yuv420p8
+        Route::Gpu => {
+            match super::mux::gpu_check(&mut device, video.codec, size, fps, format, look) {
+                Ok(e) => {
+                    spare = Some(e);
+                    format
+                }
+                Err(e) => {
+                    video.reasons.push(format!(
+                        "the GPU encoder failed ({e}); encoding H.264 on the CPU instead"
+                    ));
+                    video.route = Route::Cpu;
+                    video.codec = Codec::H264;
+                    PixelFormat::Yuv420p8
+                }
             }
-        },
+        }
         Route::Cpu => PixelFormat::Yuv420p8,
         Route::Ffmpeg => format,
     };
@@ -391,6 +406,9 @@ fn export_to(
         done: 0,
         work: work.clone(),
         route: video.route,
+        device,
+        look,
+        spare: Arc::new(Mutex::new(spare)),
     };
     job.total = pieces
         .iter()

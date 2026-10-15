@@ -5,7 +5,7 @@ use super::ffi::{self, VAPictureH264, VAPictureHEVC};
 use super::headers::{self, Packed};
 use super::va::{EncodeSession, EncodeSetup, GpuSurface};
 use crate::gpu::nal;
-use crate::gpu::{EncoderConfig, Profile};
+use crate::gpu::{Color, EncoderConfig, Profile};
 use crate::media::{Bitstream, Rate};
 use crate::media::{Codec, Error, Frame, Packet, Result, Rgba, TimeBase};
 
@@ -71,6 +71,7 @@ pub struct VaEncoder {
     extradata: Option<Vec<u8>>,
     sets: [Vec<Vec<u8>>; 3],
     name: String,
+    asked: EncoderConfig,
 }
 
 #[derive(Clone)]
@@ -84,6 +85,16 @@ struct Settings {
     gop: u32,
     b_frames: u32,
     bitstream: Bitstream,
+    sar: (u16, u16),
+    color: Color,
+}
+
+fn default_gop(fps_num: u32, fps_den: u32) -> u32 {
+    (fps_num / fps_den.max(1)).max(1).saturating_mul(2)
+}
+
+fn shows_sar(sar: (u16, u16)) -> bool {
+    sar.0 != 0 && sar.1 != 0 && sar.0 != sar.1
 }
 
 fn rate_control(rate: Rate) -> u32 {
@@ -181,6 +192,15 @@ fn qp_for(rate: Rate, kind: Kind) -> i32 {
 
 impl VaEncoder {
     pub fn new(codec: Codec, config: &EncoderConfig) -> Result<Self> {
+        Self::on(None, codec, config)
+    }
+
+    pub fn on(
+        device: Option<&super::Device>,
+        codec: Codec,
+        config: &EncoderConfig,
+    ) -> Result<Self> {
+        let asked = config.clone();
         let config = Settings {
             width: config.width,
             height: config.height,
@@ -191,6 +211,8 @@ impl VaEncoder {
             gop: config.gop,
             b_frames: u32::from(config.b_frames),
             bitstream: config.bitstream,
+            sar: config.sar,
+            color: config.color,
         };
         if config.width == 0 || config.height == 0 || config.fps_num == 0 || config.fps_den == 0 {
             return Err(Error::Invalid(
@@ -207,7 +229,10 @@ impl VaEncoder {
                 return Err(Error::Unsupported(format!("{c:?} {p:?} on the GPU")));
             }
         };
-        let display = super::va::probe().map_err(Error::Backend)?;
+        let display = match device {
+            Some(d) => d.clone(),
+            None => super::va::probe().map_err(Error::Backend)?,
+        };
         let entry = [ffi::VAEntrypointEncSlice, ffi::VAEntrypointEncSliceLP]
             .into_iter()
             .find_map(|e| {
@@ -270,9 +295,7 @@ impl VaEncoder {
         }
         config.b_frames = config.b_frames.min(3);
         if config.gop == 0 {
-            config.gop = (config.fps_num / config.fps_den.max(1))
-                .max(1)
-                .saturating_mul(2);
+            config.gop = default_gop(config.fps_num, config.fps_den);
         }
         let blocks = if supported(entry[6]) && codec == Codec::Hevc {
             let v = entry[6];
@@ -322,15 +345,18 @@ impl VaEncoder {
         );
         let inputs = DEPTH + config.b_frames as usize + 1;
         let coded_size = (size.0 as usize * size.1 as usize * 3 / 2).max(1 << 20);
-        let session = EncodeSession::new(&EncodeSetup {
-            profile,
-            rate_control: rc,
-            size,
-            bits,
-            inputs,
-            references: REFERENCES,
-            coded_size,
-        })
+        let session = EncodeSession::new(
+            device,
+            &EncodeSetup {
+                profile,
+                rate_control: rc,
+                size,
+                bits,
+                inputs,
+                references: REFERENCES,
+                coded_size,
+            },
+        )
         .map_err(Error::Backend)?;
         let fps = f64::from(config.fps_num) / f64::from(config.fps_den);
         let level = match codec {
@@ -361,7 +387,42 @@ impl VaEncoder {
             extradata: None,
             sets: [Vec::new(), Vec::new(), Vec::new()],
             name,
+            asked,
         })
+    }
+
+    pub fn restart(&mut self, config: &EncoderConfig) -> Result<()> {
+        let a = &self.asked;
+        let same = EncoderConfig {
+            rate: a.rate,
+            gop: a.gop,
+            ..config.clone()
+        } == *a
+            && rate_control(config.rate) == rate_control(a.rate);
+        if !same {
+            return Err(Error::Unsupported(
+                "a restart changes only the rate and the GOP, within the same rate control".into(),
+            ));
+        }
+        if !self.waiting.is_empty() || !self.in_flight.is_empty() {
+            return Err(Error::Invalid(
+                "the encoder restarts only after a flush".into(),
+            ));
+        }
+        self.asked.rate = config.rate;
+        self.asked.gop = config.gop;
+        self.config.rate = config.rate;
+        self.config.gop = if config.gop == 0 {
+            default_gop(self.config.fps_num, self.config.fps_den)
+        } else {
+            config.gop
+        };
+        self.gop_start = self.received;
+        self.anchors = [None, None];
+        self.refs_since_idr = 0;
+        self.display_pts.clear();
+        self.duration = 0;
+        Ok(())
     }
 
     pub fn name(&self) -> &str {
@@ -696,6 +757,8 @@ impl VaEncoder {
             reorder: u32::from(c.b_frames > 0),
             cabac: c.profile != Profile::Baseline,
             transform_8x8: c.profile == Profile::High,
+            sar: c.sar,
+            color: c.color,
         }
     }
 
@@ -724,6 +787,8 @@ impl VaEncoder {
             cu_qp_delta: !constant_qp(c.rate),
             fps_num: c.fps_num,
             fps_den: c.fps_den,
+            sar: c.sar,
+            color: c.color,
         }
     }
 
@@ -773,10 +838,19 @@ impl VaEncoder {
                     | 1 << v::BITSTREAM_RESTRICTION
                     | 15 << v::LOG2_MAX_MV_LENGTH_HORIZONTAL
                     | 15 << v::LOG2_MAX_MV_LENGTH_VERTICAL
-                    | 1 << v::FIXED_FRAME_RATE,
-                aspect_ratio_idc: 0,
-                sar_width: 0,
-                sar_height: 0,
+                    | 1 << v::FIXED_FRAME_RATE
+                    | flag(shows_sar(c.sar), v::ASPECT_RATIO_INFO_PRESENT),
+                aspect_ratio_idc: if shows_sar(c.sar) { 255 } else { 0 },
+                sar_width: if shows_sar(c.sar) {
+                    u32::from(c.sar.0)
+                } else {
+                    0
+                },
+                sar_height: if shows_sar(c.sar) {
+                    u32::from(c.sar.1)
+                } else {
+                    0
+                },
                 num_units_in_tick: c.fps_den,
                 time_scale: c.fps_num.saturating_mul(2),
                 va_reserved: [0; ffi::VA_PADDING_LOW],
@@ -985,10 +1059,19 @@ impl VaEncoder {
                     | 1 << v::BITSTREAM_RESTRICTION
                     | 1 << v::MOTION_VECTORS_OVER_PIC_BOUNDARIES
                     | 15 << v::LOG2_MAX_MV_LENGTH_HORIZONTAL
-                    | 15 << v::LOG2_MAX_MV_LENGTH_VERTICAL,
-                aspect_ratio_idc: 0,
-                sar_width: 0,
-                sar_height: 0,
+                    | 15 << v::LOG2_MAX_MV_LENGTH_VERTICAL
+                    | flag(shows_sar(c.sar), v::ASPECT_RATIO_INFO_PRESENT),
+                aspect_ratio_idc: if shows_sar(c.sar) { 255 } else { 0 },
+                sar_width: if shows_sar(c.sar) {
+                    u32::from(c.sar.0)
+                } else {
+                    0
+                },
+                sar_height: if shows_sar(c.sar) {
+                    u32::from(c.sar.1)
+                } else {
+                    0
+                },
                 vui_num_units_in_tick: c.fps_den,
                 vui_time_scale: c.fps_num,
                 min_spatial_segmentation_idc: 0,

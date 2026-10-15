@@ -455,6 +455,7 @@ fn encode_gpu(frames: &[Frame], w: u32, h: u32, codec: Codec) -> Res<(f64, Vec<u
             gop: 250,
             b_frames: 0,
             bitstream: pito_codecs::media::Bitstream::AnnexB,
+            ..Default::default()
         },
     )?;
     let name = enc.name().to_string();
@@ -855,6 +856,7 @@ impl Bench {
                             gop: 250,
                             b_frames: 0,
                             bitstream: pito_codecs::media::Bitstream::AnnexB,
+                            ..Default::default()
                         },
                     )?;
                     let mut buf = Vec::new();

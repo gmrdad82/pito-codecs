@@ -34,6 +34,7 @@ struct Api {
     render_picture: ffi::vaRenderPicture,
     end_picture: ffi::vaEndPicture,
     sync_surface: ffi::vaSyncSurface,
+    sync_surface2: Option<ffi::vaSyncSurface2>,
     create_image: ffi::vaCreateImage,
     destroy_image: ffi::vaDestroyImage,
     get_image: ffi::vaGetImage,
@@ -81,6 +82,9 @@ fn load() -> Result<Api, String> {
         render_picture: sym!(va, vaRenderPicture),
         end_picture: sym!(va, vaEndPicture),
         sync_surface: sym!(va, vaSyncSurface),
+        sync_surface2: unsafe { va.get::<ffi::vaSyncSurface2>(b"vaSyncSurface2\0") }
+            .ok()
+            .map(|s| *s),
         create_image: sym!(va, vaCreateImage),
         destroy_image: sym!(va, vaDestroyImage),
         get_image: sym!(va, vaGetImage),
@@ -95,11 +99,15 @@ fn load() -> Result<Api, String> {
     })
 }
 
+const SYNC_TIMEOUT_NS: u64 = 5_000_000_000;
+
 pub struct Display {
     api: &'static Api,
     dpy: ffi::VADisplay,
     vendor: String,
-    _device: File,
+    device: Option<File>,
+    dead: AtomicBool,
+    bounded: AtomicBool,
 }
 
 unsafe impl Send for Display {}
@@ -109,7 +117,9 @@ static SHARED: Mutex<Option<Arc<Display>>> = Mutex::new(None);
 
 fn shared() -> Result<Arc<Display>, String> {
     let mut shared = SHARED.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(d) = shared.as_ref() {
+    if let Some(d) = shared.as_ref()
+        && !d.dead()
+    {
         return Ok(d.clone());
     }
     let d = Arc::new(Display::open()?);
@@ -164,7 +174,9 @@ impl Display {
             api,
             dpy,
             vendor: String::new(),
-            _device: device,
+            device: Some(device),
+            dead: AtomicBool::new(false),
+            bounded: AtomicBool::new(api.sync_surface2.is_some()),
         };
         unsafe {
             (api.set_info_callback)(dpy, None, std::ptr::null_mut());
@@ -184,6 +196,17 @@ impl Display {
 
     pub fn vendor(&self) -> &str {
         &self.vendor
+    }
+
+    pub fn dead(&self) -> bool {
+        self.dead.load(Ordering::Acquire)
+    }
+
+    fn live(&self) -> Result<(), String> {
+        if self.dead() {
+            return Err("the VA-API display stopped answering after a GPU wait timed out".into());
+        }
+        Ok(())
     }
 
     fn check(&self, st: ffi::VAStatus, what: &str) -> Result<(), String> {
@@ -225,6 +248,7 @@ impl Display {
         entrypoint: ffi::VAEntrypoint,
         attrs: &mut [VAConfigAttrib],
     ) -> Result<ffi::VAConfigID, String> {
+        self.live()?;
         let n = c_int::try_from(attrs.len()).map_err(|_| "too many attributes")?;
         let mut id = ffi::VA_INVALID_ID;
         let st = unsafe {
@@ -247,6 +271,7 @@ impl Display {
         size: (u32, u32),
         count: usize,
     ) -> Result<Vec<VASurfaceID>, String> {
+        self.live()?;
         let count_c = c_uint::try_from(count).map_err(|_| "too many surfaces")?;
         let mut surfaces = vec![ffi::VA_INVALID_SURFACE; count];
         let st = unsafe {
@@ -377,6 +402,7 @@ impl Display {
             c_int::try_from(size.0).map_err(|_| "picture too wide")?,
             c_int::try_from(size.1).map_err(|_| "picture too tall")?,
         );
+        self.live()?;
         let n = c_int::try_from(targets.len()).map_err(|_| "too many surfaces")?;
         let mut context = ffi::VA_INVALID_ID;
         let st = unsafe {
@@ -402,6 +428,7 @@ impl Display {
         data: *const c_void,
         len: usize,
     ) -> Result<ffi::VABufferID, String> {
+        self.live()?;
         let size = c_uint::try_from(len).map_err(|_| "buffer too large")?;
         let mut id = ffi::VA_INVALID_ID;
         let st = unsafe {
@@ -426,6 +453,9 @@ impl Display {
     }
 
     fn destroy_buffers(&self, buffers: &[ffi::VABufferID]) {
+        if self.dead() {
+            return;
+        }
         for &id in buffers {
             unsafe { (self.api.destroy_buffer)(self.dpy, id) };
         }
@@ -447,6 +477,7 @@ impl Display {
         surface: VASurfaceID,
         groups: &mut [&mut [ffi::VABufferID]],
     ) -> Result<(), String> {
+        self.live()?;
         let st = unsafe { (self.api.begin_picture)(self.dpy, context, surface) };
         self.check(st, "vaBeginPicture")?;
         let mut rendered = Ok(());
@@ -465,6 +496,23 @@ impl Display {
     }
 
     fn sync(&self, surface: VASurfaceID) -> Result<(), String> {
+        self.live()?;
+        if let Some(sync2) = self.api.sync_surface2
+            && self.bounded.load(Ordering::Relaxed)
+        {
+            let st = unsafe { sync2(self.dpy, surface, SYNC_TIMEOUT_NS) };
+            match st {
+                ffi::VA_STATUS_ERROR_TIMEDOUT => {
+                    self.dead.store(true, Ordering::Release);
+                    return Err(format!(
+                        "vaSyncSurface2: the GPU did not finish within {} s",
+                        SYNC_TIMEOUT_NS / 1_000_000_000
+                    ));
+                }
+                ffi::VA_STATUS_ERROR_UNIMPLEMENTED => self.bounded.store(false, Ordering::Relaxed),
+                st => return self.check(st, "vaSyncSurface2"),
+            }
+        }
         let st = unsafe { (self.api.sync_surface)(self.dpy, surface) };
         self.check(st, "vaSyncSurface")
     }
@@ -496,6 +544,7 @@ impl Display {
         buf: ffi::VABufferID,
         f: impl FnOnce(*mut c_void) -> Result<T, String>,
     ) -> Result<T, String> {
+        self.live()?;
         let mut ptr: *mut c_void = std::ptr::null_mut();
         let st = unsafe { (self.api.map_buffer)(self.dpy, buf, &mut ptr) };
         self.check(st, "vaMapBuffer")?;
@@ -561,6 +610,9 @@ impl Display {
     }
 
     fn destroy_image(&self, image: &VAImage) {
+        if self.dead() {
+            return;
+        }
         unsafe { (self.api.destroy_image)(self.dpy, image.image_id) };
     }
 
@@ -583,6 +635,7 @@ impl Display {
         image: &VAImage,
         size: (u32, u32),
     ) -> Result<(), String> {
+        self.live()?;
         let (w, h) = size;
         let st = unsafe {
             (self.api.put_image)(self.dpy, surface, image.image_id, 0, 0, w, h, 0, 0, w, h)
@@ -597,6 +650,9 @@ impl Display {
         surfaces: &mut [VASurfaceID],
         config: ffi::VAConfigID,
     ) {
+        if self.dead() {
+            return;
+        }
         unsafe {
             if let Some(image) = image {
                 (self.api.destroy_image)(self.dpy, image.image_id);
@@ -617,7 +673,25 @@ impl Display {
 
 impl Drop for Display {
     fn drop(&mut self) {
+        if self.dead() {
+            std::mem::forget(self.device.take());
+            return;
+        }
         unsafe { (self.api.terminate)(self.dpy) };
+    }
+}
+
+pub fn open_display() -> Result<Arc<Display>, String> {
+    Display::open().map(Arc::new)
+}
+
+fn on_display<T>(
+    display: Option<&Arc<Display>>,
+    make: impl Fn(Arc<Display>) -> Result<T, String>,
+) -> Result<T, String> {
+    match display {
+        Some(d) => make(d.clone()),
+        None => with_display(make),
     }
 }
 
@@ -1036,12 +1110,13 @@ impl Drop for Staging {
 
 impl Session {
     pub fn new(
+        display: Option<&Arc<Display>>,
         profiles: &[ffi::VAProfile],
         size: (u32, u32),
         count: usize,
         geometry: Geometry,
     ) -> Result<Self, String> {
-        with_display(|d| Self::on(d, profiles, size, count, geometry))
+        on_display(display, |d| Self::on(d, profiles, size, count, geometry))
     }
 
     fn on(
@@ -1672,8 +1747,16 @@ pub struct Scaler {
 }
 
 impl Scaler {
-    pub fn new(size: (u32, u32), bits: u32, count: usize) -> Result<Self, String> {
-        let display = shared()?;
+    pub fn new(
+        display: Option<&Arc<Display>>,
+        size: (u32, u32),
+        bits: u32,
+        count: usize,
+    ) -> Result<Self, String> {
+        let display = match display {
+            Some(d) => d.clone(),
+            None => shared()?,
+        };
         let (rt_format, _, _) = formats(bits)?;
         let mut vpp = Vpp::new(display.clone())?;
         let pool = Pool::new(display, rt_format, size, count.max(1))?;
@@ -1773,8 +1856,8 @@ pub struct EncodeSetup {
 }
 
 impl EncodeSession {
-    pub fn new(setup: &EncodeSetup) -> Result<Self, String> {
-        with_display(|d| Self::on(d, setup))
+    pub fn new(display: Option<&Arc<Display>>, setup: &EncodeSetup) -> Result<Self, String> {
+        on_display(display, |d| Self::on(d, setup))
     }
 
     fn on(display: Arc<Display>, setup: &EncodeSetup) -> Result<Self, String> {
