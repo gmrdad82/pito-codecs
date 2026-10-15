@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.4.0 — 2026-10-15
+
+### Added
+
+- The README shows the PITO MD wordmark at its Licence section.
+
+### Changed
+
+- An MKV or WebM file opens for video from its headers and Cues instead of reading every cluster: a 4.4 GB file on a network share shows its first frame in about 110 ms, reading 6.3 MB, and callers opening the same file at once share one read.
+- Media times count from the file's start, and `Probe` carries that start, so a stream that starts late lines up with the others.
+
+### Fixed
+
+- VP9 sources export on the GPU through VA-API with or without an overlay; files whose frames keep several references used to fail with "no free VA-API surface for VP9".
+- The `ac3` feature builds without `hevc`, `vp9`, `gif`, `webp` or `opus`.
+
 ## v1.3.0 — 2026-10-14
 
 ### Added
