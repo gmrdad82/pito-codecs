@@ -531,6 +531,7 @@ impl Encoder {
             gop: gop_of(fps),
             b_frames: 0,
             bitstream: media::Bitstream::LengthPrefixed,
+            ..Default::default()
         };
         Ok(Encoder::Gpu(Box::new(HwEncoder::new(codec, &config)?)))
     }

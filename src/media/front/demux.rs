@@ -24,6 +24,31 @@ pub struct Stream {
     pub avc: Option<AvcConfig>,
     pub time_base: TimeBase,
     pub color: Option<(u8, bool)>,
+    pub look: Option<((u16, u16), crate::gpu::Color)>,
+}
+
+fn tagged_look(
+    look: Option<((u16, u16), crate::gpu::Color)>,
+    tags: Option<&mkv::Colour>,
+) -> Option<((u16, u16), crate::gpu::Color)> {
+    let Some(c) = tags else {
+        return look;
+    };
+    let (sar, mut color) = look.unwrap_or(((1, 1), crate::gpu::Color::UNKNOWN));
+    let tag = |v: Option<u64>| v.and_then(|v| u8::try_from(v).ok()).filter(|&v| v != 2);
+    if let Some(m) = tag(c.matrix) {
+        color.matrix = m;
+    }
+    if let Some(p) = tag(c.primaries) {
+        color.primaries = p;
+    }
+    if let Some(t) = tag(c.transfer) {
+        color.transfer = t;
+    }
+    if matches!(c.range, Some(1 | 2)) {
+        color.full_range = c.full_range();
+    }
+    Some((sar, color))
 }
 
 static MKV_HEADS: Readers<mkv::Reader> = LazyLock::new(Default::default);
@@ -311,6 +336,7 @@ impl Demux {
                 let codec = t.codec();
                 let extradata = t.extradata().unwrap_or_default();
                 let color = codec.and_then(|c| crate::gpu::color(c, &extradata));
+                let look = codec.and_then(|c| crate::gpu::look(c, &extradata));
                 Ok(Stream {
                     codec,
                     name: t.config().map(|c| c.name()).unwrap_or_default(),
@@ -321,6 +347,7 @@ impl Demux {
                     extradata,
                     time_base: TimeBase::new(1, t.timescale.max(1)),
                     color,
+                    look,
                 })
             }
             Demux::Mkv(r) => {
@@ -338,6 +365,10 @@ impl Demux {
                     .and_then(|c| Some((u8::try_from(c.matrix?).ok()?, c.full_range())))
                     .filter(|(m, _)| *m != 2);
                 let color = tagged.or_else(|| codec.and_then(|c| crate::gpu::color(c, &extradata)));
+                let look = tagged_look(
+                    codec.and_then(|c| crate::gpu::look(c, &extradata)),
+                    t.video.as_ref().and_then(|v| v.colour.as_ref()),
+                );
                 Ok(Stream {
                     codec,
                     name: t.codec_name().to_string(),
@@ -345,6 +376,7 @@ impl Demux {
                     avc,
                     time_base: t.time_base,
                     color,
+                    look,
                 })
             }
         }

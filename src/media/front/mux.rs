@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, PoisonError, mpsc};
 
-use crate::gpu::{EncoderConfig as GpuConfig, HwEncoder, Profile as GpuProfile};
+use crate::gpu::{Color, Device, EncoderConfig as GpuConfig, HwEncoder, Profile as GpuProfile};
 use crate::h264::{Encoder, EncoderConfig, Preset, Profile};
 use crate::media::{Bitstream, Rate};
 use crate::mp4::{
@@ -152,6 +152,15 @@ impl VEnc {
         }
     }
 
+    fn restart(&mut self, config: &GpuConfig) -> Result<()> {
+        match self {
+            VEnc::Gpu(e) => e.restart(config),
+            _ => Err(Error::Unsupported(
+                "only the GPU encoder restarts".to_string(),
+            )),
+        }
+    }
+
     pub(super) fn flush(&mut self) -> Result<Vec<Packet>> {
         match self {
             VEnc::Cpu(e) => e.flush(),
@@ -204,13 +213,15 @@ fn vp9_keyframe(demux: &Demux) -> Result<crate::vp9::KeyframeInfo> {
     Err(Error::Invalid("the VP9 video has no keyframe".to_string()))
 }
 
+pub(super) type Look = ((u16, u16), Color);
+
 fn gpu_config(
     codec: Codec,
     size: (u32, u32),
     fps: (u32, u32),
     format: PixelFormat,
-    crf: u8,
-    gop: u32,
+    (crf, gop): (u8, u32),
+    (sar, color): Look,
 ) -> GpuConfig {
     GpuConfig {
         width: size.0,
@@ -225,16 +236,41 @@ fn gpu_config(
         gop,
         b_frames: 0,
         bitstream: Bitstream::LengthPrefixed,
+        sar,
+        color,
     }
 }
 
 pub(super) fn gpu_check(
+    device: &mut Option<Device>,
     codec: Codec,
     size: (u32, u32),
     fps: (u32, u32),
     format: PixelFormat,
-) -> Result<()> {
-    HwEncoder::new(codec, &gpu_config(codec, size, fps, format, 20, 60)).map(|_| ())
+    look: Look,
+) -> Result<HwEncoder> {
+    let config = gpu_config(codec, size, fps, format, (20, 60), look);
+    if device.is_none() {
+        *device = Device::open().ok();
+    }
+    match device {
+        Some(d) => HwEncoder::on(d, codec, &config),
+        None => HwEncoder::new(codec, &config),
+    }
+}
+
+fn tuning(fps: (u32, u32), crf: u8, edge: bool, frames: i64) -> (u8, u32) {
+    let gop = if edge {
+        (frames.max(1) as u32).saturating_add(1)
+    } else {
+        (fps.0 / fps.1.max(1)).clamp(1, 120) * 2
+    };
+    (if edge { crf.saturating_sub(2) } else { crf }, gop)
+}
+
+fn job_config(job: &Job, codec: Codec, crf: u8, edge: bool, frames: i64) -> GpuConfig {
+    let tuned = tuning(job.fps, crf, edge, frames);
+    gpu_config(codec, job.size, job.fps, job.format, tuned, job.look)
 }
 
 fn encoder(
@@ -245,6 +281,24 @@ fn encoder(
     frames: i64,
     threads: usize,
 ) -> Result<VEnc> {
+    if video.route == Route::Gpu {
+        let config = job_config(job, video.codec, crf, edge, frames);
+        let spare = job
+            .spare
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(mut e) = spare
+            && e.restart(&config).is_ok()
+        {
+            return Ok(VEnc::Gpu(Box::new(e)));
+        }
+        let e = match &job.device {
+            Some(d) => HwEncoder::on(d, video.codec, &config)?,
+            None => HwEncoder::new(video.codec, &config)?,
+        };
+        return Ok(VEnc::Gpu(Box::new(e)));
+    }
     let shape = (job.size, job.fps, job.format);
     encoder_for(shape, video, crf, edge, frames, threads)
 }
@@ -259,14 +313,10 @@ pub(super) fn encoder_for(
     frames: i64,
     threads: usize,
 ) -> Result<VEnc> {
-    let gop = if edge {
-        (frames.max(1) as u32).saturating_add(1)
-    } else {
-        (fps.0 / fps.1.max(1)).clamp(1, 120) * 2
-    };
-    let crf = if edge { crf.saturating_sub(2) } else { crf };
+    let (crf, gop) = tuning(fps, crf, edge, frames);
     if video.route == Route::Gpu {
-        let cfg = gpu_config(video.codec, size, fps, format, crf, gop);
+        let look = ((1, 1), Color::BT709);
+        let cfg = gpu_config(video.codec, size, fps, format, (crf, gop), look);
         return Ok(VEnc::Gpu(Box::new(HwEncoder::new(video.codec, &cfg)?)));
     }
     if video.codec == Codec::Vp9 {
@@ -307,6 +357,13 @@ struct Edge {
     reasons: Vec<String>,
 }
 
+#[derive(Default)]
+struct Worker {
+    enc: Option<VEnc>,
+    resident: Option<Resident>,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn encode_edge(
     job: &Job,
     video: &Picked,
@@ -314,14 +371,28 @@ fn encode_edge(
     crf: u8,
     threads: usize,
     budget: &Budget,
+    worker: &mut Worker,
+    longest: i64,
 ) -> Result<Edge> {
     if video.codec == Codec::Vp9 && video.route == Route::Cpu {
         return vp9_edge(job, (si, from, frames), crf, threads, budget);
     }
-    let mut enc = encoder(job, video, crf, true, frames, threads)?;
+    let gpu = video.route == Route::Gpu;
+    let span = if gpu { longest.max(frames) } else { frames };
+    let mut enc = match worker.enc.take() {
+        Some(mut e) if gpu => {
+            let config = job_config(job, video.codec, crf, true, span);
+            match e.restart(&config) {
+                Ok(()) => e,
+                Err(_) => encoder(job, video, crf, true, span, threads)?,
+            }
+        }
+        _ => encoder(job, video, crf, true, span, threads)?,
+    };
     let mut packets = Vec::new();
     let mut quiet = job.quiet();
-    let mut resident = Resident::new(&enc);
+    let resident = worker.resident.get_or_insert_with(|| Resident::new(&enc));
+    resident.renew(&enc);
     let on_gpu = resident.on
         && job.sources[si].route == Route::Gpu
         && resident.piece(
@@ -356,11 +427,15 @@ fn encode_edge(
         .extradata()
         .ok_or_else(|| Error::Backend("the encoder gave no parameter sets".to_string()))?;
     let entry = entry_for(video.codec, &avcc, job.size.0, job.size.1)?;
+    let reasons = std::mem::take(&mut resident.reasons);
+    if enc.on_gpu() {
+        worker.enc = Some(enc);
+    }
     Ok(Edge {
         packets,
         avcc,
         entry,
-        reasons: resident.reasons,
+        reasons,
     })
 }
 
@@ -1286,6 +1361,14 @@ fn smart_video(
     for (n, &i) in order.iter().enumerate() {
         last_use.insert(i, n);
     }
+    let longest = edges
+        .iter()
+        .filter_map(|&i| match plan[i].1 {
+            Part::Encode { frames, .. } => Some(frames),
+            Part::Copy { .. } => None,
+        })
+        .max()
+        .unwrap_or(1);
     let workers = edges.len().clamp(1, 4);
     let per = (threads() * 2 / workers).max(2);
     let next = AtomicUsize::new(0);
@@ -1311,6 +1394,7 @@ fn smart_video(
             let tx = tx.clone();
             let (plan, next, edges, wanted, budget) = (&plan, &next, &edges, &wanted, &budget);
             s.spawn(move || {
+                let mut worker = Worker::default();
                 loop {
                     if stop.load(Ordering::Relaxed) {
                         break;
@@ -1330,7 +1414,16 @@ fn smart_video(
                     if tx
                         .send((
                             i,
-                            encode_edge(job, video, (si, from, frames), crf, per, budget),
+                            encode_edge(
+                                job,
+                                video,
+                                (si, from, frames),
+                                crf,
+                                per,
+                                budget,
+                                &mut worker,
+                                longest,
+                            ),
                         ))
                         .is_err()
                     {

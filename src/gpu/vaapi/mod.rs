@@ -33,7 +33,9 @@ impl Picture {
 use crate::gpu::biplanar::Geometry;
 use va::Session;
 
-pub use va::{DmaBuf, DmaLayer, DmaObject, DmaPlane, GpuSurface, Picture, Scaler};
+pub use va::{DmaBuf, DmaLayer, DmaObject, DmaPlane, GpuSurface, Picture, Scaler, open_display};
+
+pub type Device = Arc<va::Display>;
 
 pub use encode::VaEncoder;
 
@@ -110,6 +112,8 @@ pub struct VaDecoder {
     front: Option<Front>,
     name: String,
     stills: bool,
+    display: Option<Device>,
+    held: usize,
 }
 
 fn parameter_set(sets: &[Vec<u8>], header: usize, ty: impl Fn(u8) -> bool) -> Option<Vec<u8>> {
@@ -139,7 +143,12 @@ fn unsupported(what: &str) -> Error {
     Error::Unsupported(format!("the hardware decoder does not take {what}"))
 }
 
-fn open_front(codec: Codec, framing: Framing, sets: &[Vec<u8>]) -> Result<(Front, String)> {
+fn open_front(
+    codec: Codec,
+    framing: Framing,
+    sets: &[Vec<u8>],
+    (display, held): (Option<&Device>, usize),
+) -> Result<(Front, String)> {
     match codec {
         Codec::H264 => {
             let rbsp = parameter_set(sets, 1, |h| h & 0x1f == 7)
@@ -161,14 +170,20 @@ fn open_front(codec: Codec, framing: Framing, sets: &[Vec<u8>]) -> Result<(Front
                 Error::Unsupported(format!("H.264 profile_idc {} on the GPU", sps.profile_idc))
             })?;
             let mbs = (sps.pic_width_in_mbs, sps.frame_height_in_mbs());
-            let count = sps.max_dpb_frames().saturating_add(2 + LAG + HELD).min(32);
+            let count = sps.max_dpb_frames().saturating_add(2 + LAG + held).min(32);
             let geometry = Geometry {
                 crop: sps.crop_rect(),
                 bits: 8,
             };
             large_enough(sps.width(), sps.height())?;
-            let session = Session::new(profiles, (sps.width(), sps.height()), count, geometry)
-                .map_err(Error::Backend)?;
+            let session = Session::new(
+                display,
+                profiles,
+                (sps.width(), sps.height()),
+                count,
+                geometry,
+            )
+            .map_err(Error::Backend)?;
             let name = format!("VA-API H.264 ({})", session.vendor());
             let front = h264::Front::new(session, framing, mbs, sets)?;
             Ok((Front::H264(Box::new(front)), name))
@@ -193,7 +208,7 @@ fn open_front(codec: Codec, framing: Framing, sets: &[Vec<u8>]) -> Result<(Front
                 ))
             })?;
             let count = (sps.max_dec_pic_buffering as usize)
-                .saturating_add(2 + LAG + HELD)
+                .saturating_add(2 + LAG + held)
                 .min(32);
             let size = (sps.width, sps.height);
             let geometry = Geometry {
@@ -201,7 +216,8 @@ fn open_front(codec: Codec, framing: Framing, sets: &[Vec<u8>]) -> Result<(Front
                 bits,
             };
             large_enough(sps.width, sps.height)?;
-            let session = Session::new(profiles, size, count, geometry).map_err(Error::Backend)?;
+            let session =
+                Session::new(display, profiles, size, count, geometry).map_err(Error::Backend)?;
             let name = format!("VA-API HEVC ({})", session.vendor());
             let front = hevc::Front::new(session, framing, size, bits, sets)?;
             Ok((Front::Hevc(Box::new(front)), name))
@@ -211,7 +227,12 @@ fn open_front(codec: Codec, framing: Framing, sets: &[Vec<u8>]) -> Result<(Front
 }
 
 impl VaDecoder {
-    pub fn new(codec: Codec, extradata: &[u8]) -> Result<Self> {
+    pub fn on(
+        display: Option<Device>,
+        held: usize,
+        codec: Codec,
+        extradata: &[u8],
+    ) -> Result<Self> {
         let config = nal::parse_extradata(codec, extradata)?;
         let mut d = Self {
             codec,
@@ -219,10 +240,11 @@ impl VaDecoder {
             front: None,
             name: "VA-API".into(),
             stills: false,
+            display,
+            held,
         };
         if config.parameter_sets.is_empty() {
-            va::probe().map_err(Error::Backend)?;
-            check_profile(codec, Direction::Decode)?;
+            check_profile(d.display.as_ref(), codec, Direction::Decode)?;
         } else {
             d.open(&config.parameter_sets)?;
         }
@@ -230,7 +252,12 @@ impl VaDecoder {
     }
 
     fn open(&mut self, sets: &[Vec<u8>]) -> Result<()> {
-        let (front, name) = open_front(self.codec, self.framing, sets)?;
+        let (front, name) = open_front(
+            self.codec,
+            self.framing,
+            sets,
+            (self.display.as_ref(), self.held),
+        )?;
         self.front = Some(front);
         self.name = name;
         if self.stills {
@@ -335,8 +362,11 @@ fn supports(display: &va::Display, profile: ffi::VAProfile, direction: Direction
     })
 }
 
-fn check_profile(codec: Codec, direction: Direction) -> Result<()> {
-    let display = va::probe().map_err(Error::Backend)?;
+fn check_profile(display: Option<&Device>, codec: Codec, direction: Direction) -> Result<()> {
+    let display = match display {
+        Some(d) => d.clone(),
+        None => va::probe().map_err(Error::Backend)?,
+    };
     if profiles_for(codec)
         .iter()
         .any(|&p| supports(&display, p, direction))
@@ -354,7 +384,7 @@ pub fn available() -> Vec<(Codec, Direction)> {
     let mut out = Vec::new();
     for codec in [Codec::H264, Codec::Hevc, Codec::Vp9] {
         for direction in [Direction::Decode, Direction::Encode] {
-            if check_profile(codec, direction).is_ok() {
+            if check_profile(None, codec, direction).is_ok() {
                 out.push((codec, direction));
             }
         }
@@ -363,15 +393,37 @@ pub fn available() -> Vec<(Codec, Direction)> {
 }
 
 pub fn decoder(codec: Codec, extradata: &[u8]) -> Result<Box<dyn DecoderBackend>> {
+    decoder_on(None, HELD, codec, extradata)
+}
+
+pub fn decoder_on(
+    display: Option<&Device>,
+    held: usize,
+    codec: Codec,
+    extradata: &[u8],
+) -> Result<Box<dyn DecoderBackend>> {
     #[cfg(feature = "vp9")]
     if codec == Codec::Vp9 {
-        return Ok(Box::new(vp9::Vp9Decoder::new()?));
+        return Ok(Box::new(vp9::Vp9Decoder::on(display.cloned(), held)?));
     }
-    Ok(Box::new(VaDecoder::new(codec, extradata)?))
+    Ok(Box::new(VaDecoder::on(
+        display.cloned(),
+        held,
+        codec,
+        extradata,
+    )?))
 }
 
 pub fn encoder(codec: Codec, config: &EncoderConfig) -> Result<Box<dyn EncoderBackend>> {
     Ok(Box::new(VaEncoder::new(codec, config)?))
+}
+
+pub fn encoder_on(
+    display: &Device,
+    codec: Codec,
+    config: &EncoderConfig,
+) -> Result<Box<dyn EncoderBackend>> {
+    Ok(Box::new(VaEncoder::on(Some(display), codec, config)?))
 }
 
 fn frames(pictures: Vec<Picture>) -> Result<Vec<Frame>> {
@@ -447,6 +499,10 @@ impl EncoderBackend for VaEncoder {
         VaEncoder::extradata(self)
     }
 
+    fn restart(&mut self, config: &EncoderConfig) -> Result<()> {
+        VaEncoder::restart(self, config)
+    }
+
     fn encode_gpu(&mut self, frame: &GpuFrame) -> Result<Vec<Packet>> {
         match &frame.inner {
             GpuInner::VaApi(g) => self.encode_surface(g, frame.time_base()),
@@ -487,9 +543,14 @@ mod tests {
         avcc.extend_from_slice(&pps);
         let refused = |e: &crate::media::Error| e.to_string().contains("frame cropping");
         let sets = [sps.clone(), pps.clone()];
-        let front = super::open_front(crate::media::Codec::H264, super::Framing::Length(4), &sets);
+        let front = super::open_front(
+            crate::media::Codec::H264,
+            super::Framing::Length(4),
+            &sets,
+            (None, super::HELD),
+        );
         assert!(front.err().is_some_and(|e| refused(&e)));
-        let decoder = super::VaDecoder::new(crate::media::Codec::H264, &avcc);
+        let decoder = super::VaDecoder::on(None, super::HELD, crate::media::Codec::H264, &avcc);
         assert!(decoder.err().is_some_and(|e| refused(&e)));
     }
 }

@@ -55,6 +55,34 @@ pub type Rate = crate::media::Rate;
 #[deprecated(note = "use pito_codecs::media::Bitstream")]
 pub type Bitstream = crate::media::Bitstream;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Color {
+    pub primaries: u8,
+    pub transfer: u8,
+    pub matrix: u8,
+    pub full_range: bool,
+}
+
+impl Color {
+    pub const BT709: Color = Color {
+        primaries: 1,
+        transfer: 1,
+        matrix: 1,
+        full_range: false,
+    };
+
+    pub const UNKNOWN: Color = Color {
+        primaries: 2,
+        transfer: 2,
+        matrix: 2,
+        full_range: false,
+    };
+
+    pub fn described(&self) -> bool {
+        self.primaries != 2 || self.transfer != 2 || self.matrix != 2
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncoderConfig {
     pub width: u32,
@@ -65,6 +93,8 @@ pub struct EncoderConfig {
     pub gop: u32,
     pub b_frames: u8,
     pub bitstream: media::Bitstream,
+    pub sar: (u16, u16),
+    pub color: Color,
 }
 
 impl Default for EncoderConfig {
@@ -78,6 +108,8 @@ impl Default for EncoderConfig {
             gop: 0,
             b_frames: 0,
             bitstream: media::Bitstream::LengthPrefixed,
+            sar: (1, 1),
+            color: Color::BT709,
         }
     }
 }
@@ -120,6 +152,67 @@ pub fn driver(backend: Backend) -> Result<String> {
         Backend::VaApi => vaapi::driver(),
         b => Err(Error::Unsupported(format!("{b:?} on this system"))),
     }
+}
+
+#[cfg_attr(
+    not(all(
+        feature = "h264",
+        feature = "hevc",
+        feature = "aac",
+        feature = "mp4",
+        feature = "filter",
+        feature = "mkv",
+        feature = "vp9"
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn look(codec: Codec, extradata: &[u8]) -> Option<((u16, u16), Color)> {
+    let sets = nal::parse_extradata(codec, extradata).ok()?.parameter_sets;
+    let (sar, full_range, primaries, transfer, matrix) = match codec {
+        Codec::H264 => {
+            let nal = sets
+                .iter()
+                .find(|n| n.first().is_some_and(|h| h & 0x1f == 7))?;
+            let rbsp = crate::syntax::bits::unescape_rbsp(nal.get(1..)?);
+            let v = crate::syntax::h264::params::Sps::parse(&rbsp).ok()?.vui?;
+            (
+                v.sar,
+                v.full_range,
+                v.colour_primaries,
+                v.transfer_characteristics,
+                v.matrix_coefficients,
+            )
+        }
+        Codec::Hevc => {
+            let nal = sets
+                .iter()
+                .find(|n| n.first().is_some_and(|h| (h >> 1) & 0x3f == 33))?;
+            let rbsp = crate::syntax::bits::unescape_rbsp(nal.get(2..)?);
+            let v = crate::syntax::hevc::params::Sps::parse(&rbsp).ok()?.vui?;
+            (
+                v.sar,
+                v.full_range,
+                v.colour_primaries,
+                v.transfer_characteristics,
+                v.matrix_coefficients,
+            )
+        }
+        _ => return None,
+    };
+    let sar = if sar.0 == 0 || sar.1 == 0 {
+        (1, 1)
+    } else {
+        sar
+    };
+    Some((
+        sar,
+        Color {
+            primaries,
+            transfer,
+            matrix,
+            full_range,
+        },
+    ))
 }
 
 #[cfg_attr(
@@ -183,6 +276,11 @@ pub(crate) trait EncoderBackend: Send {
     fn encode(&mut self, frame: &Frame) -> Result<Vec<Packet>>;
     fn flush(&mut self) -> Result<Vec<Packet>>;
     fn extradata(&self) -> Option<&[u8]>;
+    fn restart(&mut self, _config: &EncoderConfig) -> Result<()> {
+        Err(Error::Unsupported(
+            "this GPU encoder can't restart on a new IDR".into(),
+        ))
+    }
     fn encode_gpu(&mut self, frame: &GpuFrame) -> Result<Vec<Packet>> {
         self.encode(&frame.download()?)
     }
@@ -240,9 +338,95 @@ fn first<T>(makers: Vec<(&'static str, impl Fn() -> Result<T>)>, none: &str) -> 
     Err(Error::Unsupported(why.join("; ")))
 }
 
+#[cfg_attr(
+    not(all(
+        feature = "h264",
+        feature = "hevc",
+        feature = "aac",
+        feature = "mp4",
+        feature = "filter",
+        feature = "mkv",
+        feature = "vp9"
+    )),
+    allow(dead_code)
+)]
+#[derive(Clone)]
+pub(crate) struct Device {
+    #[cfg(target_os = "linux")]
+    va: vaapi::Device,
+}
+
+#[cfg_attr(
+    not(all(
+        feature = "h264",
+        feature = "hevc",
+        feature = "aac",
+        feature = "mp4",
+        feature = "filter",
+        feature = "mkv",
+        feature = "vp9"
+    )),
+    allow(dead_code)
+)]
+impl Device {
+    pub(crate) fn open() -> Result<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            vaapi::open_display()
+                .map(|va| Self { va })
+                .map_err(Error::Backend)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(Error::Unsupported(
+                "no GPU display of its own on this system".into(),
+            ))
+        }
+    }
+}
+
 pub struct HwDecoder {
     inner: Box<dyn DecoderBackend>,
     time_base: TimeBase,
+}
+
+#[cfg_attr(
+    not(all(
+        feature = "h264",
+        feature = "hevc",
+        feature = "aac",
+        feature = "mp4",
+        feature = "filter",
+        feature = "mkv",
+        feature = "vp9"
+    )),
+    allow(dead_code)
+)]
+impl HwDecoder {
+    pub(crate) fn on(
+        device: Option<&Device>,
+        codec: Codec,
+        extradata: &[u8],
+        held: usize,
+    ) -> Result<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            let display = device.map(|d| &d.va);
+            let makers = vec![("VA-API", move || {
+                vaapi::decoder_on(display, held, codec, extradata)
+            })];
+            let inner = first(makers, "no GPU decoder on this system")?;
+            Ok(Self {
+                inner,
+                time_base: TimeBase::new(1, 90000),
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (device, held);
+            Self::new(codec, extradata)
+        }
+    }
 }
 
 impl HwDecoder {
@@ -451,14 +635,25 @@ impl GpuScaler {
     }
 
     pub fn with_frames(width: u32, height: u32, ten_bit: bool, frames: usize) -> Result<Self> {
+        Self::on(None, width, height, ten_bit, frames)
+    }
+
+    pub(crate) fn on(
+        device: Option<&Device>,
+        width: u32,
+        height: u32,
+        ten_bit: bool,
+        frames: usize,
+    ) -> Result<Self> {
         if width == 0 || height == 0 {
             return Err(Error::Invalid("scaler size must be set".into()));
         }
         #[cfg(target_os = "linux")]
         {
             let bits = if ten_bit { 10 } else { 8 };
-            let inner =
-                vaapi::Scaler::new((width, height), bits, frames).map_err(Error::Backend)?;
+            let display = device.map(|d| &d.va);
+            let inner = vaapi::Scaler::new(display, (width, height), bits, frames)
+                .map_err(Error::Backend)?;
             Ok(Self {
                 inner,
                 size: (width, height),
@@ -466,7 +661,7 @@ impl GpuScaler {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (ten_bit, frames);
+            let _ = (device, ten_bit, frames);
             Err(Error::Unsupported("no GPU scaler on this system".into()))
         }
     }
@@ -494,6 +689,34 @@ impl GpuScaler {
 
 pub struct HwEncoder {
     inner: Box<dyn EncoderBackend>,
+}
+
+#[cfg_attr(
+    not(all(
+        feature = "h264",
+        feature = "hevc",
+        feature = "aac",
+        feature = "mp4",
+        feature = "filter",
+        feature = "mkv",
+        feature = "vp9"
+    )),
+    allow(dead_code)
+)]
+impl HwEncoder {
+    pub(crate) fn on(device: &Device, codec: Codec, config: &EncoderConfig) -> Result<Self> {
+        #[cfg(target_os = "linux")]
+        if let Ok(inner) = vaapi::encoder_on(&device.va, codec, config) {
+            return Ok(Self { inner });
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = device;
+        Self::new(codec, config)
+    }
+
+    pub(crate) fn restart(&mut self, config: &EncoderConfig) -> Result<()> {
+        self.inner.restart(config)
+    }
 }
 
 impl HwEncoder {

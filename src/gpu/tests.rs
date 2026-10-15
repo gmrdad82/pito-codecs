@@ -436,6 +436,7 @@ fn encode_decode_back(w: u32, h: u32) {
             gop: 30,
             b_frames,
             bitstream: Bitstream::LengthPrefixed,
+            ..Default::default()
         };
         let (packets, extradata, _) = encode_all(codec, &config, &frames);
         assert_eq!(packets.len(), n, "{codec:?} {profile:?}: packet count");
@@ -480,6 +481,7 @@ fn a_59_94_encode_returns_from_the_driver() {
                 gop: 8,
                 b_frames: 0,
                 bitstream: Bitstream::LengthPrefixed,
+                ..Default::default()
             };
             let frames: Vec<Frame> = (0..8)
                 .map(|i| {
@@ -527,6 +529,7 @@ fn bitrate_modes_land_near_their_target() {
                 gop: 30,
                 b_frames: 0,
                 bitstream: Bitstream::AnnexB,
+                ..Default::default()
             };
             let (packets, _, _) = encode_all(codec, &config, &frames);
             let kbps =
@@ -612,6 +615,7 @@ fn transcodes_on_the_gpu_without_copies() {
             gop: 25,
             b_frames: 0,
             bitstream: Bitstream::LengthPrefixed,
+            ..Default::default()
         };
         let (packets, extradata, _) =
             transcode(Codec::H264, &src, Codec::Hevc, &config, usize::MAX);
@@ -931,6 +935,7 @@ fn per_frame_quality_matches_ffmpeg_vaapi() {
                 gop: 60,
                 b_frames: 0,
                 bitstream: Bitstream::LengthPrefixed,
+                ..Default::default()
             };
             let name = format!("match-{codec:?}-{rate:?}");
             let Some((ours, theirs)) = ours_and_ffmpeg(codec, &config, &frames, &raw, &name) else {
@@ -1021,6 +1026,7 @@ fn quality_against_ffmpeg_vaapi() {
                 gop: 250,
                 b_frames: 0,
                 bitstream: Bitstream::LengthPrefixed,
+                ..Default::default()
             };
             let name = format!("q-{codec:?}-{rate:?}");
             let Some((ours, theirs)) = ours_and_ffmpeg(codec, &config, &frames, &raw, &name) else {
@@ -1145,6 +1151,7 @@ fn speed() {
                 gop: 120,
                 b_frames: 0,
                 bitstream: Bitstream::LengthPrefixed,
+                ..Default::default()
             };
             let (packets, _, fps) = transcode(Codec::H264, &path, dst, &config, 600);
             report.push_str(&format!(
@@ -1172,6 +1179,7 @@ fn speed() {
                 gop: 60,
                 b_frames: b,
                 bitstream: Bitstream::LengthPrefixed,
+                ..Default::default()
             };
             let (_, _, fps) = encode_all(codec, &config, &frames);
             report.push_str(&format!(
@@ -1226,6 +1234,7 @@ fn an_overlay_drawn_on_the_gpu_matches_the_cpu_blend() {
         gop: 25,
         b_frames: 0,
         bitstream: Bitstream::LengthPrefixed,
+        ..Default::default()
     };
     let mut drawn = HwEncoder::new(Codec::H264, &config).unwrap();
     if !drawn.composes() {

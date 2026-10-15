@@ -462,6 +462,24 @@ impl Frames {
     pub fn open(demux: Demux, from: f64, route: Route) -> Result<Frames> {
         let track = demux.video()?;
         let (dec, reason) = Decoder::for_route(&demux.stream(track)?, threads(), route)?;
+        Self::start(demux, track, from, (dec, reason))
+    }
+
+    pub(super) fn with_decoder(demux: Demux, from: f64, dec: Decoder) -> Result<Frames> {
+        let track = demux.video()?;
+        Self::start(demux, track, from, (dec, None))
+    }
+
+    pub(super) fn into_decoder(self) -> Decoder {
+        self.dec
+    }
+
+    fn start(
+        demux: Demux,
+        track: usize,
+        from: f64,
+        (dec, reason): (Decoder, Option<String>),
+    ) -> Result<Frames> {
         let (next, start, cur) = match &demux {
             Demux::Mkv(r) => {
                 let starts = demux.starts();

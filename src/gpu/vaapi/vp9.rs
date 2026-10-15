@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use super::backend;
 use super::ffi::{self, VAProfile, VASurfaceID};
 use super::va::Session;
-use super::{Accel, HELD, LAG, Picture};
+use super::{Accel, LAG, Picture};
 use crate::gpu::biplanar::Geometry;
 use crate::gpu::{Backend, DecoderBackend, GpuFrame};
 use crate::media::{Error, Frame, Packet, Result};
@@ -67,13 +67,25 @@ pub struct Vp9Decoder {
     name: String,
     gpu: bool,
     stills: bool,
+    display: Option<super::Device>,
+    held: usize,
 }
 
 impl Vp9Decoder {
-    pub fn new() -> Result<Self> {
-        let display = super::va::probe().map_err(Error::Backend)?;
-        let name = format!("VA-API VP9 ({})", display.vendor());
-        super::check_profile(crate::media::Codec::Vp9, crate::gpu::Direction::Decode)?;
+    pub fn on(display: Option<super::Device>, held: usize) -> Result<Self> {
+        let vendor = match &display {
+            Some(d) => d.vendor().to_string(),
+            None => super::va::probe()
+                .map_err(Error::Backend)?
+                .vendor()
+                .to_string(),
+        };
+        let name = format!("VA-API VP9 ({vendor})");
+        super::check_profile(
+            display.as_ref(),
+            crate::media::Codec::Vp9,
+            crate::gpu::Direction::Decode,
+        )?;
         Ok(Self {
             session: None,
             size: (0, 0),
@@ -85,6 +97,8 @@ impl Vp9Decoder {
             name,
             gpu: false,
             stills: false,
+            display,
+            held,
         })
     }
 
@@ -109,8 +123,14 @@ impl Vp9Decoder {
             crop: (0, 0, h.width, h.height),
             bits: c.bit_depth as u32,
         };
-        let mut session =
-            Session::new(profiles, size, 8 + 2 + LAG + HELD, geometry).map_err(backend)?;
+        let mut session = Session::new(
+            self.display.as_ref(),
+            profiles,
+            size,
+            8 + 2 + LAG + self.held,
+            geometry,
+        )
+        .map_err(backend)?;
         if self.stills {
             session.direct();
         }
