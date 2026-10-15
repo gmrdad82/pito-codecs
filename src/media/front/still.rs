@@ -46,6 +46,7 @@ pub struct Stills {
     height: u32,
     kind: Kind,
     kept: Mutex<Vec<Worker>>,
+    limit: AtomicUsize,
 }
 
 enum Kind {
@@ -88,11 +89,27 @@ impl Stills {
             height,
             kind,
             kept: Mutex::new(Vec::new()),
+            limit: AtomicUsize::new(KEPT),
         })
     }
 
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    pub fn keep(&self, decoders: usize) {
+        let n = decoders.max(1);
+        self.limit.store(n, Ordering::Relaxed);
+        self.kept
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .truncate(n);
+    }
+
+    pub fn trim(&self) {
+        let dropped =
+            std::mem::take(&mut *self.kept.lock().unwrap_or_else(PoisonError::into_inner));
+        drop(dropped);
     }
 
     pub fn frames(
@@ -147,7 +164,7 @@ impl Stills {
             return;
         }
         let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
-        if kept.len() < KEPT {
+        if kept.len() < self.limit.load(Ordering::Relaxed) {
             kept.push(w);
         }
     }
@@ -374,7 +391,8 @@ impl Stills {
     ) {
         let next = AtomicUsize::new(0);
         std::thread::scope(|s| {
-            for w in 0..jobs.len().min(16) {
+            let workers = jobs.len().min(16).min(self.limit.load(Ordering::Relaxed));
+            for w in 0..workers {
                 let (next, make, run) = (&next, &make, &run);
                 s.spawn(move || {
                     let mut state = make(if w == 0 { route } else { Route::Cpu });

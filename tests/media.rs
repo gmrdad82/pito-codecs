@@ -2383,7 +2383,12 @@ fn a_stills_handle_hands_each_index_once_and_matches_single_calls() {
         let stills = Stills::open(path, 120, &prefs).unwrap();
         for seek in [Seek::Keyframe, Seek::Exact] {
             let want = frames_at_seek(path, &times, 120, seek, &prefs).unwrap();
-            for _ in 0..2 {
+            for round in 0..4 {
+                match round {
+                    2 => stills.keep(1),
+                    3 => stills.trim(),
+                    _ => {}
+                }
                 let mut got: Vec<Vec<Rgba>> = vec![Vec::new(); times.len()];
                 stills
                     .frames(&times, seek, |i, r| got[i].push(r.unwrap()))
