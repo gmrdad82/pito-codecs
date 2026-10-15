@@ -3,7 +3,7 @@
  "unit": "TIMES FASTER OR SLOWER",
  "better": "higher",
  "subtitle": "RYZEN 9 9950X, RADEON RX 9060 XT (VA-API), FFMPEG 9.0.1",
- "date": "2026-10-11",
+ "date": "2026-10-15",
  "parties": [
   {
    "name": "PITO-CODECS"
@@ -19,57 +19,57 @@
     {
      "label": "FIRST FRAME H.264 CPU",
      "values": [
-      245.89,
-      11.44
+      236.73,
+      11.74
      ]
     },
     {
      "label": "FIRST FRAME HEVC GPU",
      "values": [
-      80.41,
-      9.93
+      317.26,
+      11.25
      ]
     },
     {
      "label": "FILMSTRIP HEVC 1440P",
      "values": [
-      257,
-      20.7
+      360,
+      33.1
      ]
     },
     {
      "label": "FILMSTRIP H.264 1080P",
      "values": [
-      414,
-      46.4
+      510,
+      56.9
      ]
     },
     {
      "label": "SMART CUT 1440P †",
      "values": [
-      8.7,
-      3.0
+      11.07,
+      5.67
      ]
     },
     {
      "label": "H.264 1080P DECODE GPU",
      "values": [
-      814,
-      694
+      879,
+      709
      ]
     },
     {
      "label": "HEVC 1080P DECODE CPU 1T",
      "values": [
-      426,
-      418
+      468,
+      450
      ]
     },
     {
      "label": "H.264 1080P DECODE CPU",
      "values": [
-      1959,
-      2551
+      2018,
+      2613
      ]
     }
    ]
@@ -80,43 +80,43 @@
     {
      "label": "H.264 1080P ENCODE GPU",
      "values": [
-      645,
-      499
+      648,
+      560
      ]
     },
     {
      "label": "HEVC 1080P ENCODE GPU",
      "values": [
-      839,
-      686
+      836,
+      702
      ]
     },
     {
      "label": "SCALE 1080P TO 720P",
      "values": [
-      4351,
-      1695
+      5489,
+      2624
      ]
     },
     {
      "label": "EBU R128 LOUDNESS",
      "values": [
-      3200,
-      559
+      3276,
+      544
      ]
     },
     {
      "label": "AAC ENCODE",
      "values": [
-      228,
-      130
+      231,
+      133
      ]
     },
     {
      "label": "AAC DECODE",
      "values": [
-      1003,
-      1861
+      1010,
+      1703
      ]
     }
    ]

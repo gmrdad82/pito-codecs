@@ -3,7 +3,7 @@
  "unit": "MILLISECONDS",
  "better": "lower",
  "subtitle": "RYZEN 9 9950X, RADEON RX 9060 XT (VA-API), FFMPEG 9.0.1",
- "date": "2026-10-11",
+ "date": "2026-10-15",
  "parties": [
   {
    "name": "PITO-CODECS"
@@ -19,15 +19,15 @@
     {
      "label": "H.264",
      "values": [
-      4.1,
-      87.4
+      4.2,
+      85.2
      ]
     },
     {
      "label": "HEVC",
      "values": [
-      8.1,
-      106
+      7.4,
+      88.9
      ]
     }
    ]
@@ -38,15 +38,15 @@
     {
      "label": "H.264",
      "values": [
-      11.6,
-      85.7
+      3.5,
+      87.4
      ]
     },
     {
      "label": "HEVC",
      "values": [
-      12.4,
-      101
+      3.2,
+      88.9
      ]
     }
    ]

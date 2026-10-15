@@ -3,7 +3,7 @@
  "unit": "FRAMES PER SECOND",
  "better": "higher",
  "subtitle": "RYZEN 9 9950X, RADEON RX 9060 XT (VA-API), FFMPEG 9.0.1",
- "date": "2026-10-11",
+ "date": "2026-10-15",
  "parties": [
   {
    "name": "PITO-CODECS"
@@ -19,29 +19,29 @@
     {
      "label": "1080P 1 THREAD",
      "values": [
-      376,
-      558
+      384,
+      586
      ]
     },
     {
      "label": "1080P ALL THREADS",
      "values": [
-      1959,
-      2551
+      2018,
+      2613
      ]
     },
     {
      "label": "1440P 1 THREAD",
      "values": [
-      195,
-      286
+      221,
+      332
      ]
     },
     {
      "label": "1440P ALL THREADS",
      "values": [
-      1089,
-      1495
+      1230,
+      1667
      ]
     }
    ]
@@ -52,29 +52,29 @@
     {
      "label": "1080P 1 THREAD",
      "values": [
-      426,
-      418
+      468,
+      450
      ]
     },
     {
      "label": "1080P ALL THREADS",
      "values": [
-      1479,
-      1687
+      1653,
+      1803
      ]
     },
     {
      "label": "1440P 1 THREAD",
      "values": [
-      255,
-      247
+      269,
+      252
      ]
     },
     {
      "label": "1440P ALL THREADS",
      "values": [
-      789,
-      1231
+      832,
+      1294
      ]
     }
    ]
