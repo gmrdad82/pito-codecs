@@ -97,10 +97,10 @@ Against pconv 1.0.1 (ffmpeg 9.0.1 with x264, libvpx and libwebp) on 30 s of 1080
 | MP4, balanced | 7.33 s | **5.71 s** | 27.1 / 15.8 MB | 49.9 dB / 0.994 | 47.9 dB / 0.992 |
 | MP4, best | 12.30 s | **8.62 s** | 26.9 / 20.0 MB | 50.4 dB / 0.995 | 49.2 dB / 0.994 |
 | WebM, balanced | **19.9 s** | 22.2 s | 5.5 / 6.3 MB | 43.4 dB / 0.983 | 43.8 dB / 0.986 |
-| GIF, 800 px at 12 fps | **1.65 s** | 11.0 s | 45.2 / 22.4 MB | 38.7 dB / 0.978 | 37.4 dB / 0.962 |
-| WebP, 800 px at 12 fps | **2.54 s** | 7.44 s | 13.7 / 7.8 MB | 38.0 dB / 0.971 | 36.3 dB / 0.956 |
+| GIF, 800 px at 12 fps | **4.88 s** | 17.4 s | 22.3 / 22.4 MB | 37.6 dB / 0.965 | 37.4 dB / 0.962 |
+| WebP, 800 px at 12 fps | **6.30 s** | 8.18 s | 8.7 / 7.8 MB | 37.6 dB / 0.965 | 36.3 dB / 0.956 |
 
-On the CPU, our H.264 encoder runs slower than x264 and spends more bytes for more quality on this clip; the GIF and WebP are 3× to 7× faster and larger.
+On the CPU, our H.264 encoder runs slower than x264 and spends more bytes for more quality on this clip; the GPU route, the WebM and the WebP are faster, and the GIF is 3.6× faster at the same size.
 
 ### Instant first frame
 
