@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.13.0 — 2026-10-16
+
+### Added
+
+- `pcod <video> <out.wav>` writes a video's audio (AAC, Opus, MP3, AC-3, E-AC-3 or PCM) as a 16-bit PCM WAV: `--from` and `--to` cut a range (seconds or m:ss), `--mono` writes one channel, `--rate 44100|48000` resamples, and `--loudness` levels the range like the other outputs.
+- The library can measure and level a range of a track at any rate and channel count (`AudioSpan`, `decode_audio_span`, `plan_level_span`).
+
 ## v1.12.1 — 2026-10-16
 
 ### Fixed
