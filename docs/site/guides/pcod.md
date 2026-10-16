@@ -21,6 +21,7 @@ pcod clip.mp4 readme.gif --size 640 --fps 12       # a looping README GIF
 pcod clip.mp4 readme.webp                          # an animated WebP
 pcod frames/ trailer.webm --fps 60                 # PNG frames to a transparent WebM
 pcod join intro.mp4 scene.mp4 outro.mp4 film.mp4   # one file, copied when the clips match
+pcod talk.mp4 upload.mp4 --loudness youtube        # -14 LUFS, the video copied
 ```
 
 - **Containers.** `mp4`, `mov` and `mkv` get H.264 and AAC, `webm` gets VP9 and Opus, `gif` and `webp` are animated and loop forever, with no audio. Every video output is limited-range BT.709 and tagged so: BT.601, full-range and untagged sources are converted (untagged is read as BT.709), rotation and non-square pixels are applied.
@@ -28,6 +29,7 @@ pcod join intro.mp4 scene.mp4 outro.mp4 film.mp4   # one file, copied when the c
 - **Size and rate.** `--size` takes a width (the height follows the aspect), `WxH` within 1% of the aspect, or `720p`, `1080p`, `1440p` or `2160p`; pcod never stretches a picture. Resizing is a Lanczos filter in linear light, with premultiplied alpha. `--fps` sets the frame rate. GIFs and WebPs are 800 px wide at 12 fps by default, or the source's width and rate where smaller.
 - **Alpha.** A folder of RGBA PNG frames, or a WebM with alpha, keeps its alpha in `.webm` (VP9 alpha, read by browsers and ffmpeg), `.gif` and `.webp`; in H.264 it is laid onto black. A folder needs `--fps`.
 - **Audio.** AAC-LC 320k stereo at 48 kHz in `mp4`, `mov` and `mkv` (an AAC source is copied when nothing changes its audio), Opus 128k in `webm` (an Opus source is copied). `--audio-bitrate` sets the rate, 32 to 512, and with no video option the video is copied untouched.
+- **Loudness.** `--loudness youtube` levels the audio to -14 LUFS under a -2 dBTP true-peak ceiling in two EBU R128 passes; any target from -70 to -5 LUFS works too, with `--true-peak` for the ceiling (-1 dBTP by default). With no video option the video is copied untouched. pcod prints the loudness before and after, and `--json` carries both.
 - **Join.** `pcod join` stitches clips in order. When every clip matches the first (codec, size, rate, colour, headers and audio) it is a stream copy; otherwise, or with any video option, it re-encodes them to the first clip's size and rate, letterboxing a clip of another shape. It says which, and why.
 - **Existing outputs** are refused unless `--force` is given. pcod writes a hidden partial file beside the output and renames it into place at the end, so a failed or stopped run leaves nothing behind.
 

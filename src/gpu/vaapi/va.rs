@@ -438,6 +438,31 @@ impl Display {
         Ok(id)
     }
 
+    fn array_buffer<T>(
+        &self,
+        context: ffi::VAContextID,
+        ty: ffi::VABufferType,
+        values: &[T],
+    ) -> Result<ffi::VABufferID, String> {
+        self.live()?;
+        let size = c_uint::try_from(std::mem::size_of::<T>()).map_err(|_| "buffer too large")?;
+        let count = c_uint::try_from(values.len()).map_err(|_| "too many elements")?;
+        let mut id = ffi::VA_INVALID_ID;
+        let st = unsafe {
+            (self.api.create_buffer)(
+                self.dpy,
+                context,
+                ty,
+                size,
+                count,
+                values.as_ptr().cast::<c_void>().cast_mut(),
+                &mut id,
+            )
+        };
+        self.check(st, "vaCreateBuffer")?;
+        Ok(id)
+    }
+
     fn value_buffer<T>(
         &self,
         context: ffi::VAContextID,
@@ -1261,6 +1286,44 @@ impl Session {
             )?);
         }
         let (picture, slice_buffers) = buffers.split_at_mut(head);
+        let mut groups: Vec<&mut [ffi::VABufferID]> = vec![picture];
+        groups.extend(slice_buffers.chunks_mut(2));
+        d.picture(ctx, surface, &mut groups)
+    }
+
+    pub(super) fn decode_groups<P, S>(
+        &mut self,
+        target: usize,
+        pic: &P,
+        groups: &[(&[S], &[u8])],
+    ) -> Result<(), String> {
+        let surface = self.surface(target)?;
+        let mut buffers = Vec::with_capacity(1 + 2 * groups.len());
+        let decoded = self.groups_into(surface, &mut buffers, pic, groups);
+        self.display.destroy_buffers(&buffers);
+        decoded
+    }
+
+    fn groups_into<P, S>(
+        &self,
+        surface: VASurfaceID,
+        buffers: &mut Vec<ffi::VABufferID>,
+        pic: &P,
+        groups: &[(&[S], &[u8])],
+    ) -> Result<(), String> {
+        let d = &self.display;
+        let ctx = self.context;
+        buffers.push(d.value_buffer(ctx, ffi::VAPictureParameterBufferType, pic)?);
+        for (params, data) in groups {
+            buffers.push(d.array_buffer(ctx, ffi::VASliceParameterBufferType, params)?);
+            buffers.push(d.buffer(
+                ctx,
+                ffi::VASliceDataBufferType,
+                data.as_ptr().cast(),
+                data.len(),
+            )?);
+        }
+        let (picture, slice_buffers) = buffers.split_at_mut(1);
         let mut groups: Vec<&mut [ffi::VABufferID]> = vec![picture];
         groups.extend(slice_buffers.chunks_mut(2));
         d.picture(ctx, surface, &mut groups)

@@ -49,6 +49,7 @@ pub struct Job<'a> {
     pub audio: Option<Audio>,
     pub partial: &'a Path,
     pub tune: Option<&'a str>,
+    pub level: Option<media::LevelPlan>,
     pub profile: &'a str,
     pub alpha: bool,
     pub stop: &'a AtomicBool,
@@ -765,8 +766,16 @@ struct AudioPlan {
 enum AudioWork {
     CopyMp4(Box<mp4::Reader>, usize, i64),
     CopyMkv(Box<mkv::Reader>, usize, Option<u32>),
-    Aac(media::AudioStream, Box<aac::Encoder>),
-    Opus(media::AudioStream, Box<opus::enc::Encoder>),
+    Aac(
+        media::AudioStream,
+        Box<aac::Encoder>,
+        Option<Box<media::Leveler>>,
+    ),
+    Opus(
+        media::AudioStream,
+        Box<opus::enc::Encoder>,
+        Option<Box<media::Leveler>>,
+    ),
 }
 
 pub fn mkv_family(path: &Path) -> bool {
@@ -869,7 +878,7 @@ fn audio_plan(job: &Job, audio: &Audio) -> Result<AudioPlan, Fail> {
             Ok(AudioPlan {
                 config,
                 ticks: f64::from(SAMPLE_RATE),
-                work: AudioWork::Aac(stream, Box::new(enc)),
+                work: AudioWork::Aac(stream, Box::new(enc), leveler(job)?),
             })
         }
         Audio::Opus { kbps } => {
@@ -886,10 +895,17 @@ fn audio_plan(job: &Job, audio: &Audio) -> Result<AudioPlan, Fail> {
             Ok(AudioPlan {
                 config: AudioTrackConfig::Mkv(cfg),
                 ticks: f64::from(SAMPLE_RATE),
-                work: AudioWork::Opus(stream, Box::new(enc)),
+                work: AudioWork::Opus(stream, Box::new(enc), leveler(job)?),
             })
         }
     }
+}
+
+fn leveler(job: &Job) -> Result<Option<Box<media::Leveler>>, Fail> {
+    Ok(match &job.level {
+        Some(plan) => Some(Box::new(plan.leveler(SAMPLE_RATE, 2)?)),
+        None => None,
+    })
 }
 
 fn run_audio(
@@ -921,10 +937,21 @@ fn run_audio(
                 send(p)?;
             }
         }
-        AudioWork::Aac(stream, mut enc) => {
+        AudioWork::Aac(stream, mut enc, mut level) => {
             for buf in stream {
                 stopped(stop)?;
-                for p in enc.encode(&buf?)? {
+                let mut buf: AudioBuffer = buf?;
+                if let Some(l) = level.as_mut() {
+                    l.process(&mut buf)?;
+                }
+                for p in enc.encode(&buf)? {
+                    send(p)?;
+                }
+            }
+            if let Some(l) = level.as_mut() {
+                let mut tail = AudioBuffer::new(SAMPLE_RATE, 2);
+                l.flush(&mut tail)?;
+                for p in enc.encode(&tail)? {
                     send(p)?;
                 }
             }
@@ -932,11 +959,21 @@ fn run_audio(
                 send(p)?;
             }
         }
-        AudioWork::Opus(stream, mut enc) => {
+        AudioWork::Opus(stream, mut enc, mut level) => {
             for buf in stream {
                 stopped(stop)?;
-                let buf: AudioBuffer = buf?;
+                let mut buf: AudioBuffer = buf?;
+                if let Some(l) = level.as_mut() {
+                    l.process(&mut buf)?;
+                }
                 for p in enc.encode(&buf)? {
+                    send(p)?;
+                }
+            }
+            if let Some(l) = level.as_mut() {
+                let mut tail = AudioBuffer::new(SAMPLE_RATE, 2);
+                l.flush(&mut tail)?;
+                for p in enc.encode(&tail)? {
                     send(p)?;
                 }
             }

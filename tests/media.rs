@@ -2403,7 +2403,7 @@ fn a_stills_handle_hands_each_index_once_and_matches_single_calls() {
 }
 
 #[test]
-fn av1_in_mp4_mkv_and_webm_probes_and_refuses_cleanly_without_a_decoder() {
+fn av1_in_mp4_mkv_and_webm_probes_and_decodes_on_the_gpu_or_refuses_cleanly() {
     let Ok(encoders) = Command::new("ffmpeg")
         .args(["-hide_banner", "-encoders"])
         .output()
@@ -2458,9 +2458,21 @@ fn av1_in_mp4_mkv_and_webm_probes_and_refuses_cleanly_without_a_decoder() {
             assert_eq!(p.unsupported(), ["av1"], "{name}");
             let e = first_frame(&path, 180, &prefs).unwrap_err().to_string();
             assert!(e.contains("no GPU AV1 decoder"), "{name}: {e}");
-        } else {
-            let still = first_frame(&path, 180, &prefs);
-            assert!(still.is_ok(), "{name}: {:?}", still.err());
+            continue;
         }
+        let still = first_frame(&path, 180, &prefs).unwrap();
+        assert_eq!((still.width, still.height), (320, 180), "{name}");
+        let stills = frames_at_seek(&path, &[0.2, 0.7], 180, Seek::Exact, &prefs).unwrap();
+        assert_eq!(stills.len(), 2, "{name}");
+        let video = decode_video_gpu(&path, 0.0, None, &prefs).unwrap();
+        if !video.on_gpu() {
+            continue;
+        }
+        let mut n = 0;
+        for f in video {
+            assert_eq!(f.unwrap().size(), (640, 360), "{name}");
+            n += 1;
+        }
+        assert_eq!(n, 30, "{name}");
     }
 }

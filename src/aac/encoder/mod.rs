@@ -422,7 +422,7 @@ impl Encoder {
             return None;
         }
         let (ks, gain) = tns::levinson(&r, ORDER);
-        if gain < 1.4 {
+        if !(1.4..=2.0).contains(&gain) {
             return None;
         }
         let mut coef = [0i8; 12];
@@ -533,12 +533,32 @@ impl Encoder {
                     thr_g[g][sfb] = m * gl as f32;
                 }
             }
-            thrs.push(thr_g);
             let tns = if self.cfg.tns && !short && !lfe {
-                self.tns_analyse(spec, &info)
+                let swb = swb_offsets_long(self.sf_index);
+                let bands = info.max_sfb.min(swb.len() - 1).min(64);
+                let energy = |s: &[f32], b: usize| {
+                    s[swb[b] as usize..swb[b + 1] as usize]
+                        .iter()
+                        .map(|v| v * v)
+                        .sum::<f32>()
+                };
+                let mut before = [0f32; 64];
+                for (b, e) in before[..bands].iter_mut().enumerate() {
+                    *e = energy(spec, b);
+                }
+                let tns = self.tns_analyse(spec, &info);
+                if tns.is_some() {
+                    for (b, e) in before[..bands].iter().enumerate() {
+                        if *e > 0.0 {
+                            thr_g[0][b] *= (energy(spec, b) / e).min(1.0);
+                        }
+                    }
+                }
+                tns
             } else {
                 None
             };
+            thrs.push(thr_g);
             tnss.push(tns);
         }
         let swb = info.swb_offsets(self.sf_index);

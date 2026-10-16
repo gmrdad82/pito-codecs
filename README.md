@@ -86,6 +86,7 @@ pcod master.mov site.mp4 --profile best --crf 23    # a light H.264 for the web
 pcod frames/ hero.webm --fps 60                    # RGBA frames to a transparent WebM
 pcod clip.mp4 readme.gif --size 640                # a looping README GIF
 pcod join intro.mp4 scene.mp4 outro.mp4 film.mp4   # copied when the clips match
+pcod talk.mp4 upload.mp4 --loudness youtube        # -14 LUFS in two EBU R128 passes, video copied
 ```
 
 Against pconv 1.0.1 (ffmpeg 9.0.1 with x264, libvpx and libwebp) on 30 s of 1080p30 H.264 talking head, run in turn three times each, medians, at load 22 to 46 on a 32-thread machine; quality against the source (the GIF and WebP against it scaled to 800x450 at 12 fps):

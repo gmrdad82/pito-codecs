@@ -86,9 +86,6 @@ fn plan(request: &Request, media: &Media) -> Result<Planned, Fail> {
     if let (Some(kbps), None) = (request.audio_bitrate, &media.audio) {
         return Err(format!("the source has no audio to encode at {kbps} kbps").into());
     }
-    if request.loudness.is_some() {
-        return Err("--loudness isn't available in this build of pcod".into());
-    }
     if !media.rotation.is_multiple_of(90) {
         return Err(format!(
             "the source is rotated {}°: pcod reads quarter turns only",
@@ -228,6 +225,54 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
     let part = partial(&request.output)?;
     *partial_path = Some(part.clone());
     let progress = Progress::new(options.progress);
+    let track = media.audio.as_ref().map_or(0, |a| a.index);
+    if let (Some(target), Encoder::Copy { .. }) = (request.loudness, &planned.encoder) {
+        let loud = level_copy(
+            &media.path,
+            &part,
+            track,
+            target,
+            request.audio_bitrate,
+            &progress,
+        );
+        progress.clear();
+        let loud = loud?;
+        land(&part, &request.output, request.overwrite)?;
+        *partial_path = None;
+        return finish(
+            options,
+            &request,
+            &planned,
+            started,
+            "CPU",
+            &[],
+            Some(loud),
+            source_hash,
+        );
+    }
+    let level = match request.loudness {
+        Some(target) => {
+            let plan = media::plan_level(
+                &media.path,
+                track,
+                &media::Prefs::default(),
+                &target_of(&target),
+                level_progress(&progress),
+            );
+            match plan {
+                Ok(p) => Some((target, p)),
+                Err(media::Error::Cancelled) => {
+                    progress.clear();
+                    return Err(Box::new(Stopped));
+                }
+                Err(e) => {
+                    progress.clear();
+                    return Err(e.to_string().into());
+                }
+            }
+        }
+        None => None,
+    };
     let job = pipeline::Job {
         media: &media,
         container: planned.container,
@@ -238,20 +283,70 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
         audio: planned.audio.clone(),
         partial: &part,
         tune: request.tune.as_deref(),
+        level: level.as_ref().map(|(_, p)| *p),
         profile: request.profile.name(),
         alpha: media.alpha && planned.container == Container::Webm,
         stop: &signals::STOP,
         progress: &progress,
     };
     let done = pipeline::run(&job);
+    let loud = match (&done, level) {
+        (Ok(_), Some((target, plan))) => {
+            let after = media::measure_loudness(
+                &part,
+                0,
+                &media::Prefs::default(),
+                level_progress(&progress),
+            );
+            Some(after.map(|after| Loud {
+                target,
+                before: plan.before,
+                after,
+                mode: plan.mode(),
+            }))
+        }
+        _ => None,
+    };
     progress.clear();
     let done = done?;
+    let loud = match loud {
+        Some(Ok(l)) => Some(l),
+        Some(Err(media::Error::Cancelled)) => return Err(Box::new(Stopped)),
+        Some(Err(e)) => return Err(e.to_string().into()),
+        None => None,
+    };
     land(&part, &request.output, request.overwrite)?;
     *partial_path = None;
+    finish(
+        options,
+        &request,
+        &planned,
+        started,
+        &done.device,
+        &done.notes,
+        loud,
+        source_hash,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish(
+    options: &Options,
+    request: &Request,
+    planned: &Planned,
+    started: Instant,
+    device: &str,
+    notes: &[String],
+    loud: Option<Loud>,
+    source_hash: String,
+) -> Result<String, Fail> {
     let seconds = started.elapsed().as_secs_f64();
     if !options.json {
         let mut lines = vec![request.output.display().to_string()];
-        lines.extend(done.notes.iter().map(|n| format!("note: {n}")));
+        lines.extend(notes.iter().map(|n| format!("note: {n}")));
+        if let Some(l) = &loud {
+            lines.push(l.lines());
+        }
         return Ok(lines.join("\n"));
     }
     let bytes = std::fs::metadata(&request.output)
@@ -261,7 +356,7 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
         sources: vec![manifest::Source {
             path: request.input.display().to_string(),
             sha256: source_hash,
-            loudness: None,
+            loudness: loud.as_ref().map(|l| stats(&l.before)),
         }],
         params: manifest::Params {
             profile: request.profile.name().into(),
@@ -271,20 +366,121 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
             height: planned.size.1,
             fps: Some(f64::from(planned.fps.0) / f64::from(planned.fps.1.max(1))),
             tune: request.tune.clone(),
-            loudness: None,
+            loudness: loud.as_ref().map(Loud::target),
             audio: planned.audio.as_ref().map(audio_manifest),
         },
-        device: done.device.clone(),
+        device: device.into(),
         seconds: (seconds * 100.0).round() / 100.0,
         files: vec![manifest::Output {
             file: request.output.display().to_string(),
             sha256: hash(&request.output)?,
             bytes,
-            loudness: None,
+            loudness: loud.as_ref().map(|l| stats(&l.after)),
         }],
         join: None,
     };
     Ok(document.to_json())
+}
+
+fn target_of(l: &super::plan::Loudness) -> media::LevelTarget {
+    media::LevelTarget {
+        integrated: l.integrated,
+        true_peak: l.true_peak,
+    }
+}
+
+fn stats(s: &media::LoudnessStats) -> manifest::Measured {
+    manifest::Measured {
+        integrated: s.integrated,
+        range: s.range,
+        true_peak: s.true_peak,
+        threshold: s.threshold,
+    }
+}
+
+fn mode_name(mode: media::LevelMode) -> &'static str {
+    match mode {
+        media::LevelMode::Linear => "linear",
+        media::LevelMode::Limited => "limited",
+    }
+}
+
+struct Loud {
+    target: super::plan::Loudness,
+    before: media::LoudnessStats,
+    after: media::LoudnessStats,
+    mode: media::LevelMode,
+}
+
+impl Loud {
+    fn lines(&self) -> String {
+        let m = |s: &media::LoudnessStats| {
+            format!(
+                "{:.2} LUFS, LRA {:.2} LU, true peak {:.2} dBTP",
+                s.integrated, s.range, s.true_peak
+            )
+        };
+        format!(
+            "loudness before: {}\nloudness after: {} ({}, target {} LUFS, ceiling {} dBTP)",
+            m(&self.before),
+            m(&self.after),
+            mode_name(self.mode),
+            self.target.integrated,
+            self.target.true_peak
+        )
+    }
+
+    fn target(&self) -> manifest::Target {
+        manifest::Target {
+            integrated: self.target.integrated,
+            true_peak: self.target.true_peak,
+            mode: mode_name(self.mode).into(),
+        }
+    }
+}
+
+fn level_progress(progress: &Progress) -> impl FnMut(&media::LevelProgress) -> bool + '_ {
+    let mut stage = None;
+    move |p: &media::LevelProgress| {
+        if stage != Some(p.stage) {
+            stage = Some(p.stage);
+            let name = match p.stage {
+                media::LevelStage::Measuring => "measure",
+                media::LevelStage::Calibrating => "calibrate",
+                media::LevelStage::Levelling => "level",
+            };
+            progress.step(name, 1, 1, Some(1000));
+        }
+        progress.frame((p.done.clamp(0.0, 1.0) * 1000.0) as u64);
+        !signals::STOP.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+fn level_copy(
+    input: &Path,
+    part: &Path,
+    track: usize,
+    target: super::plan::Loudness,
+    kbps: Option<u32>,
+    progress: &Progress,
+) -> Result<Loud, Fail> {
+    let opts = media::LevelOptions {
+        target: target_of(&target),
+        audio_kbps: kbps,
+        track,
+        prefs: media::Prefs::default(),
+    };
+    let done = match media::level(input, part, &opts, level_progress(progress)) {
+        Ok(d) => d,
+        Err(media::Error::Cancelled) => return Err(Box::new(Stopped)),
+        Err(e) => return Err(e.to_string().into()),
+    };
+    Ok(Loud {
+        target,
+        before: done.before,
+        after: done.after,
+        mode: done.mode,
+    })
 }
 
 fn crf_of(rate: media::Rate) -> u8 {
@@ -321,9 +517,6 @@ fn join(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<String,
             request.output.display()
         )
         .into());
-    }
-    if request.loudness.is_some() {
-        return Err("--loudness isn't available in this build of pcod".into());
     }
     let first = source::file(&inputs[0])?;
     let size = match request.size {
@@ -375,12 +568,36 @@ fn join(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<String,
         progress.frame((p.done.clamp(0.0, 1.0) * 1000.0) as u64);
         !signals::STOP.load(std::sync::atomic::Ordering::Relaxed)
     });
-    progress.clear();
     let joined = match joined {
         Ok(j) => j,
-        Err(media::Error::Cancelled) => return Err(Box::new(Stopped)),
-        Err(e) => return Err(e.to_string().into()),
+        Err(e) => {
+            progress.clear();
+            return match e {
+                media::Error::Cancelled => Err(Box::new(Stopped)),
+                e => Err(e.to_string().into()),
+            };
+        }
     };
+    let mut part = part;
+    let loud = match request.loudness {
+        Some(target) => {
+            let levelled = partial(&request.output)?;
+            *partial_path = Some(levelled.clone());
+            let loud = level_copy(
+                &part,
+                &levelled,
+                0,
+                target,
+                request.audio_bitrate,
+                &progress,
+            );
+            let _ = std::fs::remove_file(&part);
+            part = levelled;
+            Some(loud?)
+        }
+        None => None,
+    };
+    progress.clear();
     land(&part, &request.output, request.overwrite)?;
     *partial_path = None;
     let seconds = started.elapsed().as_secs_f64();
@@ -405,7 +622,12 @@ fn join(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<String,
         ),
     };
     if !options.json {
-        return Ok(format!("{}\n{line}", request.output.display()));
+        let mut text = format!("{}\n{line}", request.output.display());
+        if let Some(l) = &loud {
+            text.push('\n');
+            text.push_str(&l.lines());
+        }
+        return Ok(text);
     }
     let sources = inputs
         .iter()
@@ -463,7 +685,7 @@ fn join(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<String,
             height: joined.size.1,
             fps: Some(fps),
             tune: request.tune.clone(),
-            loudness: None,
+            loudness: loud.as_ref().map(Loud::target),
             audio: audio.as_ref().map(audio_manifest),
         },
         device: match joined.route {
@@ -475,13 +697,13 @@ fn join(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<String,
             file: request.output.display().to_string(),
             sha256: hash(&request.output)?,
             bytes,
-            loudness: None,
+            loudness: loud.as_ref().map(|l| stats(&l.after)),
         }],
         join: Some(manifest::Join {
             method: joined.method.name().into(),
             reason: joined.reason.clone(),
             clips: joined.clips,
-            loudness: None,
+            loudness: loud.as_ref().map(|l| stats(&l.before)),
         }),
     };
     Ok(document.to_json())
