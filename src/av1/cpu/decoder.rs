@@ -28,6 +28,7 @@ pub struct SequenceInfo {
     pub max_height: u32,
     pub bit_depth: u8,
     pub layout: Layout,
+    pub matrix: u8,
     pub full_range: bool,
 }
 
@@ -117,6 +118,7 @@ impl Decoder {
             max_height: seq.max_height as u32,
             bit_depth: 8 + 2 * seq.hbd,
             layout: layout_of(seq.layout),
+            matrix: seq.mtrx as u8,
             full_range: seq.color_range as u8 != 0,
         };
         self.sequence = Some(info);

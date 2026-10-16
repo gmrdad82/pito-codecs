@@ -40,9 +40,12 @@ impl Probe {
     pub fn video_native(&self) -> bool {
         match self.video_codec {
             Some(Codec::H264 | Codec::Hevc | Codec::Vp9) => true,
-            Some(Codec::Av1) => super::native::gpu()
-                .0
-                .contains(&(Codec::Av1, crate::media::Direction::Decode)),
+            Some(Codec::Av1) => {
+                cfg!(feature = "av1")
+                    || super::native::gpu()
+                        .0
+                        .contains(&(Codec::Av1, crate::media::Direction::Decode))
+            }
             _ => false,
         }
     }
