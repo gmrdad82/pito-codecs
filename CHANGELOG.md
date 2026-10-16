@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.12.1 — 2026-10-16
+
+### Fixed
+
+- MP4 files with B-frames no longer show one frame twice in players that read them at a constant rate: every sample keeps its own duration, and the edit list carries the start shift, as ffmpeg's own MP4 writer does.
+
 ## v1.12.0 — 2026-10-16
 
 ### Added
