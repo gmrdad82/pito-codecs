@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.12.0 — 2026-10-16
+
+### Added
+
+- `pcod <input> <output>` converts a video, or a folder of PNG frames, by the output's extension: MP4, MOV and MKV get H.264 and AAC, WebM gets VP9 and Opus with alpha kept, GIF and WebP loop and keep alpha. It takes pconv's options (`--profile fast|balanced|best`, `--size`, `--fps`, `--crf`, `--qp`, `--tune`, `--loudness`, `--true-peak`, `--audio-bitrate`, `--force`, `--json`, `--no-progress`) with no ffmpeg anywhere, converts BT.601, full-range and untagged sources to tagged BT.709, applies rotation and pixel aspect, and resizes in linear light.
+- `pcod join` joins clips by stream copy when they match and by a letterboxed re-encode when they don't, saying which and why.
+- `--loudness LUFS|youtube` levels the audio in two EBU R128 passes and copies the video untouched; the loudness before and after is printed.
+- `pcod probe --json`, `pcod profiles`, a `--json` manifest with each file's sha256, and a one-line progress bar on a terminal.
+- Against pconv 1.0.1 on a 30 s 1080p clip: GIF 4.9 s against 17.4 s at the same size, WebP 6.3 s against 8.2 s, WebM 19.9 s against 22.2 s and 13% smaller, the GPU profile 2.3 s against 2.8 s. The CPU H.264 profiles take 1.3 to 1.4 times as long as x264 and make larger files at higher quality.
+
 ## v1.11.0 — 2026-10-16
 
 ### Added
