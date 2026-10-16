@@ -1100,8 +1100,17 @@ fn exact_pages(path: &std::path::Path, decode: Choice, pages: usize, per: usize)
         let t = Instant::now();
         let mut got = 0usize;
         let mut failed = None;
-        stills.frames(page, Seek::Exact, |_, r| match r {
-            Ok(_) => got += 1,
+        let mut sums = vec![0u64; page.len()];
+        stills.frames(page, Seek::Exact, |k, r| match r {
+            Ok(img) => {
+                got += 1;
+                if let Some(slot) = sums.get_mut(k) {
+                    *slot = img
+                        .data
+                        .iter()
+                        .fold(0u64, |a, &b| a.wrapping_mul(31).wrapping_add(b as u64));
+                }
+            }
             Err(e) => failed = Some(e.to_string()),
         })?;
         if let Some(e) = failed {
@@ -1109,7 +1118,11 @@ fn exact_pages(path: &std::path::Path, decode: Choice, pages: usize, per: usize)
         }
         let ms = t.elapsed().as_secs_f64() * 1e3;
         all.push(ms);
-        say!("page {i}: {got} exact stills at {page:.2?} in {ms:.1} ms")?;
+        let sums: Vec<String> = sums.iter().map(|s| format!("{s:016x}")).collect();
+        say!(
+            "page {i}: {got} exact stills at {page:.2?} in {ms:.1} ms, sums {}",
+            sums.join(" ")
+        )?;
     }
     let sum: f64 = all.iter().sum();
     say!("open {opened:.1} ms, {} pages in {sum:.1} ms", all.len())?;
