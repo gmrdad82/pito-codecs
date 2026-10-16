@@ -482,6 +482,9 @@ fn show(out: &mut impl Write, file: &Path) -> Result<(), Fail> {
         p.profile,
         p.fps()
     )?;
+    if p.alpha {
+        writeln!(out, "alpha      yes")?;
+    }
     for a in &p.audio {
         writeln!(
             out,
