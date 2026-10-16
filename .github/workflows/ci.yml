@@ -47,6 +47,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --lib --no-default-features --features audio,mp3,opus,ac3 -- -D warnings
       - run: cargo clippy --all-targets --target x86_64-pc-windows-gnu -- -D warnings
       - run: cargo clippy --all-targets --target aarch64-apple-darwin -- -D warnings
       - run: cargo clippy --all-targets --target aarch64-unknown-linux-gnu -- -D warnings

@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::{LazyLock, Mutex, PoisonError};
 
+use super::base::{Key, key, sorted};
 use super::ffmpeg::{Ffmpeg, codec_of};
-use super::native::{Key, key, sorted};
 use super::route::Prefs;
 use crate::media::{Codec, Error, Result};
 
@@ -43,7 +43,7 @@ impl Probe {
             Some(Codec::H264 | Codec::Hevc | Codec::Vp9) => true,
             Some(Codec::Av1) => {
                 cfg!(feature = "av1")
-                    || super::native::gpu()
+                    || super::base::gpu()
                         .0
                         .contains(&(Codec::Av1, crate::media::Direction::Decode))
             }
@@ -142,7 +142,7 @@ pub fn probe(path: &Path, prefs: &Prefs) -> Result<Probe> {
     known(
         path,
         |k| &mut k.probe,
-        || match super::native::probe(path) {
+        || match super::base::probe(path) {
             Ok(p) => Ok(p),
             Err(native) => match container_ffmpeg(prefs) {
                 Ok(f) => from_flat(&f.probe_flat(&["-show_format", "-show_streams"], path)?),
@@ -156,7 +156,7 @@ pub fn keyframes(path: &Path, prefs: &Prefs) -> Result<Vec<f64>> {
     known(
         path,
         |k| &mut k.keys,
-        || match super::native::keyframes(path) {
+        || match super::base::keyframes(path) {
             Ok(k) => Ok(k),
             Err(native) => keyframes_of(path, prefs).map_err(|_| native),
         },

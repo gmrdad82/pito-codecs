@@ -16,13 +16,16 @@ pub use crate::mp4::{ByteSource, Cut, Snap, Span, TrackKind};
 pub use parse::{Cluster, CuePoint, Info};
 pub use reader::{Options as ReadOptions, Reader};
 pub use remux::{copy, plan, remux, remux_mp4};
-#[cfg(all(
-    feature = "h264",
-    feature = "hevc",
-    feature = "aac",
-    feature = "gpu",
-    feature = "filter",
-    feature = "vp9"
+#[cfg(any(
+    feature = "audio",
+    all(
+        feature = "h264",
+        feature = "hevc",
+        feature = "aac",
+        feature = "gpu",
+        feature = "filter",
+        feature = "vp9"
+    )
 ))]
 pub(crate) use stream::Cursor;
 pub use stream::{Block, Stream};

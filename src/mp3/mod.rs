@@ -1,6 +1,7 @@
 #![allow(clippy::needless_range_loop, clippy::excessive_precision)]
 
 mod bits;
+mod file;
 mod hdr;
 mod layer12;
 mod layer3;
@@ -12,6 +13,8 @@ mod tables;
 mod malformed;
 #[cfg(test)]
 mod tests;
+
+pub use file::{VbrTag, decode_file, vbr_tag};
 
 use bits::Bits;
 use hdr::{HDR_SIZE, Head};

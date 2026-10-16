@@ -74,6 +74,8 @@ let still = first_frame("clip.mp4".as_ref(), 240, &prefs)?;
 println!("{}x{} at {}/{} fps, first frame {}x{}", info.width, info.height, info.fps.0, info.fps.1, still.width, still.height);
 ```
 
+For audio alone, `features = ["audio", "opus", "ac3", "mp3"]` builds the probe, `audio_pcm_range` and `audio_stream` with no video decoder, GPU code or filters.
+
 The GPU route needs nothing extra: libva is loaded at run time on Linux (Mesa's or Intel's driver), VideoToolbox is part of macOS and Media Foundation part of Windows. Without them everything decodes and encodes on the CPU. On Windows, H.265 decode through Media Foundation needs Microsoft's HEVC Video Extensions, and N editions need the Media Feature Pack.
 
 ## Features
@@ -201,7 +203,7 @@ An MKV seek lands on each audio track by that track's own timestamps, even when 
 ![Audio in times real time, pito-codecs against ffmpeg](docs/images/chart-audio.png)
 
 - **AC-3 and E-AC-3** (ported from oxideav-ac3): 10 minutes of 5.1 at 448 kbps decode in 0.56 to 0.59 s on one core against ffmpeg's 0.55 to 0.87 s, and to stereo through `audio_pcm_range` in 0.28 to 0.33 s against ffmpeg's 0.68 to 1.01 s. Within 2e-5 of ffmpeg's float decoder.
-- **MP3** (ported from minimp3): 10 minutes of stereo at 192 kbps decode in 0.32 s on one thread against ffmpeg's 0.30 to 0.38 s, and in 0.16 s from MKV through `audio_pcm_range` against ffmpeg's 0.31 s. Within 4.4e-6 of ffmpeg's mp3float.
+- **MP3** (ported from minimp3): 10 minutes of stereo at 192 kbps decode in 0.32 s on one thread against ffmpeg's 0.30 to 0.38 s, and in 0.16 s from MKV through `audio_pcm_range` against ffmpeg's 0.31 s. Within 4.4e-6 of ffmpeg's mp3float. A bare `.mp3` file decodes gapless with `mp3::decode_file`, which skips ID3 and APE tags and trims the encoder delay and padding its LAME or Xing header gives, sample for sample as ffmpeg does.
 
 ### GIF and WebP
 

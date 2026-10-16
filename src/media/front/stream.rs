@@ -1,11 +1,12 @@
 use std::io::Read;
 use std::path::Path;
+use std::sync::mpsc;
 
 use crate::aac::Resampler;
 
+use super::base::{self as native, PAD, shape};
 use super::feed::Feed;
 use super::ffmpeg::Child;
-use super::native::{self, PAD, shape};
 use super::probe::{container_ffmpeg, probe};
 use super::route::{Caps, Prefs, pick_decode};
 use super::sound::Sound;
@@ -80,7 +81,7 @@ pub fn audio_stream(
     if !from.is_finite() {
         return Err(Error::Invalid(format!("a stream from {from}")));
     }
-    let picked = pick_decode(Codec::Aac, prefs, &Caps::detect(prefs))?;
+    let picked = pick_decode(Codec::Aac, prefs, &Caps::for_audio(prefs))?;
     if picked.route != Route::Ffmpeg {
         match Native::open(path, track, from, rate, channels) {
             Ok(n) => {
@@ -408,4 +409,77 @@ impl Iterator for AudioStream {
         }
         got.transpose()
     }
+}
+
+const QUEUE: usize = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AudioSpan {
+    pub from: f64,
+    pub to: f64,
+    pub rate: u32,
+    pub channels: u16,
+}
+
+impl AudioSpan {
+    pub const WHOLE: AudioSpan = AudioSpan {
+        from: 0.0,
+        to: f64::INFINITY,
+        rate: 48_000,
+        channels: 2,
+    };
+
+    fn limit(&self) -> Option<u64> {
+        self.to
+            .is_finite()
+            .then(|| ((self.to - self.from).max(0.0) * self.rate as f64).round() as u64)
+    }
+}
+
+pub fn decode_audio_span(
+    path: &Path,
+    track: usize,
+    prefs: &Prefs,
+    span: &AudioSpan,
+    mut each: impl FnMut(AudioBuffer) -> Result<()>,
+) -> Result<()> {
+    if !span.from.is_finite() || span.from < 0.0 || span.to.is_nan() || span.to < span.from {
+        return Err(Error::Invalid(format!(
+            "the range {} to {}",
+            span.from, span.to
+        )));
+    }
+    let limit = span.limit();
+    if limit == Some(0) {
+        return Ok(());
+    }
+    let stream = audio_stream(path, track, span.from, span.rate, span.channels, prefs)?;
+    std::thread::scope(|s| {
+        let (tx, rx) = mpsc::sync_channel::<Result<AudioBuffer>>(QUEUE);
+        s.spawn(move || {
+            for b in stream {
+                let failed = b.is_err();
+                if tx.send(b).is_err() || failed {
+                    break;
+                }
+            }
+        });
+        let mut sent = 0u64;
+        for b in rx {
+            let mut b = b?;
+            if let Some(limit) = limit {
+                let left = limit - sent;
+                if b.frames() as u64 >= left {
+                    b.samples.truncate(left as usize * b.channels as usize);
+                    if !b.samples.is_empty() {
+                        each(b)?;
+                    }
+                    break;
+                }
+            }
+            sent += b.frames() as u64;
+            each(b)?;
+        }
+        Ok(())
+    })
 }

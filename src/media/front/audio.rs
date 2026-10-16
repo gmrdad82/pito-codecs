@@ -35,9 +35,9 @@ pub fn audio_pcm_range(
     if from.is_nan() || to.is_nan() || to < from {
         return Err(Error::Invalid(format!("the range {from} to {to}")));
     }
-    let picked = pick_decode(Codec::Aac, prefs, &Caps::detect(prefs))?;
+    let picked = pick_decode(Codec::Aac, prefs, &Caps::for_audio(prefs))?;
     if picked.route != Route::Ffmpeg {
-        match super::native::audio_range(path, track, from, to, rate, channels) {
+        match super::base::audio_range(path, track, from, to, rate, channels) {
             Ok(buf) => return Ok(buf),
             Err(e) if prefs.user_ffmpeg().is_none() => return Err(e),
             Err(_) => {}

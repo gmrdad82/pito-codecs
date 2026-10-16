@@ -628,7 +628,8 @@ fn open(file: &Path, want: Where, threads: usize) -> Result<Opened, Fail> {
     let codec = t
         .codec()
         .ok_or_else(|| about(file, "an unknown video codec"))?;
-    let picked = pick_decode(codec, &prefs, &Caps::detect(&prefs)).map_err(|e| about(file, e))?;
+    let picked =
+        pick_decode(codec, &prefs, &Caps::for_decode(&prefs)).map_err(|e| about(file, e))?;
     let mut notes = picked.reasons;
     if picked.route == Route::Gpu {
         match Decoder::gpu(t, codec) {
