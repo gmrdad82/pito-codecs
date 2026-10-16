@@ -28,6 +28,8 @@ mod manifest;
 mod probe_json;
 #[path = "pcod/progress.rs"]
 mod progress;
+#[path = "pcod/quality.rs"]
+mod quality;
 #[path = "pcod/sha256.rs"]
 mod sha256;
 #[path = "pcod/stills.rs"]
@@ -49,9 +51,6 @@ mod signals;
 mod size;
 #[path = "pcod/source.rs"]
 mod source;
-#[path = "pcod/stubs.rs"]
-mod stubs;
-use stubs::quality;
 
 #[derive(Parser)]
 #[command(
