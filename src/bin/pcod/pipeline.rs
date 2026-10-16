@@ -8,7 +8,7 @@ use pito_codecs::filter::{
 };
 use pito_codecs::gpu::{self, Backend, HwEncoder};
 use pito_codecs::media::{
-    self, AudioBuffer, Bitstream, Codec, Frame, Packet, PixelFormat, Prefs, Rate, Rgba, TimeBase,
+    self, AudioBuffer, Bitstream, Codec, Frame, Packet, PixelFormat, Plane, Prefs, Rate, Rgba, TimeBase,
 };
 use pito_codecs::{aac, gif, h264, mkv, mp4, opus, png, vp9, webp};
 use rayon::prelude::*;
@@ -48,6 +48,7 @@ pub struct Job<'a> {
     pub audio: Option<Audio>,
     pub partial: &'a Path,
     pub tune: Option<&'a str>,
+    pub alpha: bool,
     pub stop: &'a AtomicBool,
     pub progress: &'a Progress,
 }
@@ -60,6 +61,14 @@ pub struct Done {
 enum Pic {
     Yuv(Frame),
     Rgba(Rgba),
+    YuvAlpha(Frame, Plane),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Want {
+    Yuv,
+    Rgba,
+    YuvAlpha,
 }
 
 fn stopped(stop: &AtomicBool) -> Result<(), Fail> {
@@ -207,19 +216,41 @@ fn unpremultiply(img: &mut Rgba) {
 
 struct RgbaFix {
     size: (u32, u32),
-    yuv: bool,
+    want: Want,
 }
 
 impl RgbaFix {
     fn apply(&self, mut img: Rgba) -> Result<Pic, Fail> {
         let resize = (img.width, img.height) != self.size;
-        if self.yuv || resize {
+        let yuv = self.want == Want::Yuv;
+        if yuv || resize {
             premultiply(&mut img);
         }
         if resize {
             img = media::scale(&img, self.size.0, self.size.1);
         }
-        if self.yuv {
+        if resize && !yuv {
+            unpremultiply(&mut img);
+        }
+        if self.want == Want::YuvAlpha {
+            let mut frame = Frame::new(
+                PixelFormat::Yuv420p8,
+                img.width,
+                img.height,
+                0,
+                TimeBase::new(1, 1),
+            );
+            rgba_to_yuv(&img, ColorSpec::BT709, PixelFormat::Yuv420p8, &mut frame)?;
+            let (w, h) = (img.width as usize, img.height as usize);
+            let plane = Plane {
+                data: img.data.chunks_exact(4).map(|px| px[3]).collect(),
+                stride: w,
+                width: w,
+                height: h,
+            };
+            return Ok(Pic::YuvAlpha(frame, plane));
+        }
+        if yuv {
             let mut frame = Frame::new(
                 PixelFormat::Yuv420p8,
                 img.width,
@@ -229,9 +260,6 @@ impl RgbaFix {
             );
             rgba_to_yuv(&img, ColorSpec::BT709, PixelFormat::Yuv420p8, &mut frame)?;
             return Ok(Pic::Yuv(frame));
-        }
-        if resize {
-            unpremultiply(&mut img);
         }
         Ok(Pic::Rgba(img))
     }
@@ -269,6 +297,7 @@ fn send_span(
         let copy = match &pic {
             Pic::Yuv(f) => Pic::Yuv(f.clone()),
             Pic::Rgba(r) => Pic::Rgba(r.clone()),
+            Pic::YuvAlpha(f, a) => Pic::YuvAlpha(f.clone(), a.clone()),
         };
         tx.send(Ok(copy))
             .map_err(|_| Fail::from("the encoder stopped"))?;
@@ -329,16 +358,66 @@ fn produce_file(
     Ok(notes)
 }
 
+fn produce_alpha(
+    job: &Job,
+    want: Want,
+    tx: &SyncSender<Result<Pic, Fail>>,
+) -> Result<Vec<String>, Fail> {
+    let media = job.media;
+    let mut video = media::decode_alpha(&media.path, 0.0)?;
+    let fix = RgbaFix {
+        size: job.size,
+        want,
+    };
+    let color = video.color;
+    let rotation = media.rotation;
+    let image = move |f: Frame, a: Option<Plane>| -> Rgba {
+        let img = media::to_rgba_alpha(&f, a.as_ref(), 0, color);
+        if rotation.is_multiple_of(360) {
+            img
+        } else {
+            media::rotate(&img, rotation)
+        }
+    };
+    let mut retime = Retime {
+        fps: job.fps,
+        origin: None,
+        next: 0,
+    };
+    let mut held: Option<(Frame, Option<Plane>, i64)> = None;
+    while let Some((frame, alpha)) = video.next_frame()? {
+        stopped(job.stop)?;
+        let slot = retime.slot(frame.time_base.seconds(frame.pts));
+        if let Some((f, a, at)) = held.take() {
+            let span = retime.span(at, slot);
+            if !span.is_empty() {
+                send_span(tx, fix.apply(image(f, a))?, span)?;
+            }
+        }
+        held = Some((frame, alpha, slot));
+    }
+    if let Some((f, a, at)) = held.take() {
+        let step = f64::from(media.fps.1.max(1)) / f64::from(media.fps.0.max(1));
+        let end = retime.slot(f.time_base.seconds(f.pts) + step);
+        let until = if retime.next == 0 { end.max(at + 1) } else { end };
+        let span = retime.span(at, until);
+        if !span.is_empty() {
+            send_span(tx, fix.apply(image(f, a))?, span)?;
+        }
+    }
+    Ok(Vec::new())
+}
+
 fn produce_frames(
     job: &Job,
     files: &[PathBuf],
-    rgba: bool,
+    want: Want,
     tx: &SyncSender<Result<Pic, Fail>>,
 ) -> Result<Vec<String>, Fail> {
     let media = job.media;
     let fix = RgbaFix {
         size: job.size,
-        yuv: !rgba,
+        want,
     };
     let mut retime = Retime {
         fps: job.fps,
@@ -395,22 +474,38 @@ enum VEnc {
     H264(Box<h264::Encoder>),
     Gpu(Box<HwEncoder>),
     Vp9(Box<vp9::Encoder>),
+    Vp9Alpha(Box<vp9::AlphaEncoder>),
+}
+
+type Coded = Vec<(Packet, Option<Vec<u8>>)>;
+
+fn plain(packets: Vec<Packet>) -> Coded {
+    packets.into_iter().map(|p| (p, None)).collect()
+}
+
+fn paired(packets: Vec<(Packet, Vec<u8>)>) -> Coded {
+    packets.into_iter().map(|(p, a)| (p, Some(a))).collect()
 }
 
 impl VEnc {
-    fn encode(&mut self, frame: &Frame) -> Result<Vec<Packet>, Fail> {
-        Ok(match self {
-            VEnc::H264(e) => e.encode(frame)?,
-            VEnc::Gpu(e) => e.encode(frame)?,
-            VEnc::Vp9(e) => e.encode(frame)?,
+    fn encode(&mut self, frame: &Frame, alpha: Option<&Plane>) -> Result<Coded, Fail> {
+        Ok(match (self, alpha) {
+            (VEnc::H264(e), _) => plain(e.encode(frame)?),
+            (VEnc::Gpu(e), _) => plain(e.encode(frame)?),
+            (VEnc::Vp9(e), _) => plain(e.encode(frame)?),
+            (VEnc::Vp9Alpha(e), Some(a)) => paired(e.encode(frame, a)?),
+            (VEnc::Vp9Alpha(_), None) => {
+                return Err("a frame without its alpha plane".into());
+            }
         })
     }
 
-    fn flush(&mut self) -> Result<Vec<Packet>, Fail> {
+    fn flush(&mut self) -> Result<Coded, Fail> {
         Ok(match self {
-            VEnc::H264(e) => e.flush()?,
-            VEnc::Gpu(e) => e.flush()?,
-            VEnc::Vp9(e) => e.flush()?,
+            VEnc::H264(e) => plain(e.flush()?),
+            VEnc::Gpu(e) => plain(e.flush()?),
+            VEnc::Vp9(e) => plain(e.flush()?),
+            VEnc::Vp9Alpha(e) => paired(e.flush()?),
         })
     }
 
@@ -418,7 +513,7 @@ impl VEnc {
         match self {
             VEnc::H264(e) => Some(e.avcc()),
             VEnc::Gpu(e) => e.extradata().map(<[u8]>::to_vec),
-            VEnc::Vp9(_) => Some(Vec::new()),
+            VEnc::Vp9(_) | VEnc::Vp9Alpha(_) => Some(Vec::new()),
         }
     }
 }
@@ -517,7 +612,7 @@ fn video_encoder(job: &Job, notes: &mut Vec<String>) -> Result<(VEnc, String), F
                 Rate::Qp(q) => vp9::Rate::Q(q),
                 Rate::Bitrate(k) | Rate::Vbr { kbps: k, .. } => vp9::Rate::Bitrate(k),
             };
-            let mut e = vp9::Encoder::new(vp9::EncoderConfig {
+            let config = vp9::EncoderConfig {
                 width: job.size.0,
                 height: job.size.1,
                 fps: job.fps,
@@ -525,7 +620,13 @@ fn video_encoder(job: &Job, notes: &mut Vec<String>) -> Result<(VEnc, String), F
                 gop: gop_of(job.fps).max(120),
                 threads: 0,
                 aq: false,
-            })?;
+            };
+            if job.alpha {
+                let mut e = vp9::AlphaEncoder::new(config)?;
+                e.set_color(2, false)?;
+                return Ok((VEnc::Vp9Alpha(Box::new(e)), "CPU".into()));
+            }
+            let mut e = vp9::Encoder::new(config)?;
             e.set_color(2, false)?;
             Ok((VEnc::Vp9(Box::new(e)), "CPU".into()))
         }
@@ -548,7 +649,7 @@ struct Mux {
 }
 
 impl Mux {
-    fn push_video(&mut self, p: &Packet) -> Result<(), Fail> {
+    fn push_video(&mut self, p: &Packet, alpha: Option<&[u8]>) -> Result<(), Fail> {
         match &mut self.sink {
             Sink::Mp4(w) => {
                 let mut dts = p.dts.saturating_mul(self.step);
@@ -568,6 +669,7 @@ impl Mux {
                     },
                 )?;
             }
+            Sink::Mkv(w) if alpha.is_some() => w.push_alpha(self.video, p, alpha)?,
             Sink::Mkv(w) => w.push(self.video, p)?,
         }
         Ok(())
@@ -863,7 +965,9 @@ fn open_mux(job: &Job, track: VideoTrack, audio: Option<AudioTrackConfig>) -> Re
             let encoded_tb = TimeBase::new(job.fps.1, job.fps.0);
             let (cfg, tb) = match track {
                 VideoTrack::Encoded(_) if matches!(job.encoder, Encoder::Vp9 { .. }) => {
-                    (mkv::TrackConfig::vp9(w, h, encoded_tb), encoded_tb)
+                    let mut cfg = mkv::TrackConfig::vp9(w, h, encoded_tb);
+                    cfg.alpha = job.alpha;
+                    (cfg, encoded_tb)
                 }
                 VideoTrack::Encoded(x) => (mkv::TrackConfig::h264(x, w, h, encoded_tb), encoded_tb),
                 VideoTrack::Mkv(cfg, tb) => (cfg, tb),
@@ -922,6 +1026,13 @@ impl Merge {
 
 pub fn run(job: &Job) -> Result<Done, Fail> {
     let animated = job.container.animated();
+    let want = if animated {
+        Want::Rgba
+    } else if job.alpha {
+        Want::YuvAlpha
+    } else {
+        Want::Yuv
+    };
     let (tx, rx) = mpsc::sync_channel::<Result<Pic, Fail>>(6);
     let mut notes = Vec::new();
     let mut audio_plan = match &job.audio {
@@ -945,8 +1056,9 @@ pub fn run(job: &Job) -> Result<Done, Fail> {
                 return Ok(Vec::new());
             }
             let made = match &job.media.kind {
+                Kind::File if job.media.alpha => produce_alpha(job, want, &tx),
                 Kind::File => produce_file(job, animated, &tx),
-                Kind::Frames(files) => produce_frames(job, files, animated, &tx),
+                Kind::Frames(files) => produce_frames(job, files, want, &tx),
             };
             if let Err(e) = &made {
                 let _ = tx.send(Err(e.to_string().into()));
@@ -1013,7 +1125,7 @@ fn consume_copy(
             let p = read(i)?;
             let at = mux.video_tb.seconds(p.dts.max(0));
             merge.upto(mux, Some(at))?;
-            mux.push_video(&p)?;
+            mux.push_video(&p, None)?;
             n += 1;
             job.progress.frame(n);
         }
@@ -1076,12 +1188,12 @@ fn consume_video(
     let (mut enc, device) = video_encoder(job, notes)?;
     let mut audio = audio;
     let mut mux: Option<Mux> = None;
-    let mut waiting: Vec<Packet> = Vec::new();
+    let mut waiting: Coded = Vec::new();
     let mut n = 0u64;
     let time_base = TimeBase::new(job.fps.1, job.fps.0);
     let mut feed = |enc: &VEnc,
                     mux: &mut Option<Mux>,
-                    packets: Vec<Packet>,
+                    packets: Coded,
                     merge: &mut Merge|
      -> Result<(), Fail> {
         waiting.extend(packets);
@@ -1092,21 +1204,25 @@ fn consume_video(
             *mux = Some(open_mux(job, VideoTrack::Encoded(x), audio.take())?);
         }
         if let Some(m) = mux.as_mut() {
-            for p in waiting.drain(..) {
+            for (p, a) in waiting.drain(..) {
                 let at = m.video_tb.seconds(p.dts.max(0));
                 merge.upto(m, Some(at))?;
-                m.push_video(&p)?;
+                m.push_video(&p, a.as_deref())?;
             }
         }
         Ok(())
     };
     while let Some(pic) = next_pic(rx, job.stop)? {
-        let Pic::Yuv(mut frame) = pic else {
-            return Err("a picture in the wrong form for the video encoder".into());
+        let (mut frame, alpha) = match pic {
+            Pic::Yuv(f) => (f, None),
+            Pic::YuvAlpha(f, a) => (f, Some(a)),
+            Pic::Rgba(_) => {
+                return Err("a picture in the wrong form for the video encoder".into());
+            }
         };
         frame.pts = i64::try_from(n).unwrap_or(i64::MAX);
         frame.time_base = time_base;
-        let packets = enc.encode(&frame)?;
+        let packets = enc.encode(&frame, alpha.as_ref())?;
         feed(&enc, &mut mux, packets, &mut merge)?;
         n += 1;
         job.progress.frame(n);

@@ -87,12 +87,6 @@ fn plan(request: &Request, media: &Media) -> Result<Planned, Fail> {
     if request.loudness.is_some() {
         return Err("--loudness isn't available in this build of pcod".into());
     }
-    if media.alpha && container == Container::Webm {
-        return Err(
-            "the frames carry alpha, and this build of pcod writes WebM without it; write .gif or .webp to keep it, or .mp4 to drop it onto black"
-                .into(),
-        );
-    }
     if !media.rotation.is_multiple_of(90) {
         return Err(format!(
             "the source is rotated {}°: pcod reads quarter turns only",
@@ -242,6 +236,7 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
         audio: planned.audio.clone(),
         partial: &part,
         tune: request.tune.as_deref(),
+        alpha: media.alpha && planned.container == Container::Webm,
         stop: &signals::STOP,
         progress: &progress,
     };

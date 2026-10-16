@@ -143,7 +143,7 @@ pub fn file(path: &Path) -> Result<Media, Fail> {
         frames: p.frames,
         codec: p.video_codec_name.to_ascii_lowercase(),
         bit_depth: p.bit_depth.max(8),
-        alpha: false,
+        alpha: p.alpha,
         color: look.map_or(Color::UNKNOWN, |l| l.color),
         rotation: p.rotation % 360,
         sar: look.map_or((1, 1), |l| l.sar),
