@@ -61,6 +61,7 @@ pub struct Done {
 }
 
 enum Pic {
+    Gpu(gpu::GpuFrame),
     Yuv(Frame),
     Rgba(Rgba),
     YuvAlpha(Frame, Plane),
@@ -330,8 +331,16 @@ fn send_span(
     span: std::ops::Range<i64>,
 ) -> Result<(), Fail> {
     let count = span.end - span.start;
+    if let Pic::Gpu(_) = pic {
+        if count > 0 {
+            tx.send(Ok(pic))
+                .map_err(|_| Fail::from("the encoder stopped"))?;
+        }
+        return Ok(());
+    }
     for _ in 1..count {
         let copy = match &pic {
+            Pic::Gpu(_) => continue,
             Pic::Yuv(f) => Pic::Yuv(f.clone()),
             Pic::Rgba(r) => Pic::Rgba(r.clone()),
             Pic::YuvAlpha(f, a) => Pic::YuvAlpha(f.clone(), a.clone()),
@@ -391,6 +400,39 @@ fn produce_file(
         if !span.is_empty() {
             send_span(tx, fix.apply(f)?, span)?;
         }
+    }
+    Ok(notes)
+}
+
+pub fn gpu_direct(media: &Media, encoder: &Encoder, fps: (u32, u32)) -> bool {
+    let reduced = |(n, d): (u32, u32)| {
+        let g = (1..=n.min(d))
+            .rev()
+            .find(|g| n % g == 0 && d % g == 0)
+            .unwrap_or(1);
+        (n / g.max(1), d / g.max(1))
+    };
+    matches!(encoder, Encoder::H264Gpu { .. })
+        && media.kind == Kind::File
+        && !media.alpha
+        && media.rotation.is_multiple_of(360)
+        && media.bit_depth == 8
+        && !media.anamorphic()
+        && spec_of(media.color) == ColorSpec::BT709
+        && reduced(media.fps) == reduced(fps)
+}
+
+fn produce_gpu(job: &Job, tx: &SyncSender<Result<Pic, Fail>>) -> Result<Vec<String>, Fail> {
+    let video = media::decode_video_gpu(&job.media.path, 0.0, Some(job.size), &Prefs::default())?;
+    let notes = video.reasons.clone();
+    for frame in video {
+        stopped(job.stop)?;
+        let pic = match frame? {
+            media::VideoFrame::Gpu(g) => Pic::Gpu(g),
+            media::VideoFrame::Cpu(f) => Pic::Yuv(f),
+        };
+        tx.send(Ok(pic))
+            .map_err(|_| Fail::from("the encoder stopped"))?;
     }
     Ok(notes)
 }
@@ -1064,6 +1106,7 @@ impl Merge {
 
 pub fn run(job: &Job) -> Result<Done, Fail> {
     let animated = job.container.animated();
+    let direct = gpu_direct(job.media, job.encoder, job.fps);
     let want = if animated {
         Want::Rgba
     } else if job.alpha {
@@ -1086,7 +1129,7 @@ pub fn run(job: &Job) -> Result<Done, Fail> {
         )
     });
     let audio_work = audio_plan.map(|a| a.work);
-    job.progress.step("encode", 1, 1, job.frames);
+    job.progress.step("encode", 1, 2, job.frames);
     std::thread::scope(|s| -> Result<Done, Fail> {
         let copy = matches!(job.encoder, Encoder::Copy { .. });
         let producer = s.spawn(move || {
@@ -1094,6 +1137,7 @@ pub fn run(job: &Job) -> Result<Done, Fail> {
                 return Ok(Vec::new());
             }
             let made = match &job.media.kind {
+                Kind::File if direct => produce_gpu(job, &tx),
                 Kind::File if job.media.alpha => produce_alpha(job, want, &tx),
                 Kind::File => produce_file(job, animated, &tx),
                 Kind::Frames(files) => produce_frames(job, files, want, &tx),
@@ -1181,7 +1225,7 @@ fn consume_copy(
         let cfg = mkv::TrackConfig::from_track(track);
         let mut mux = open_mux(job, VideoTrack::Mkv(cfg, track.time_base), audio)?;
         pump(&mut mux, track.samples.len(), &|i| Ok(reader.packet(t, i)?))?;
-        job.progress.step("mux", 1, 1, None);
+        job.progress.step("mux", 2, 2, None);
         mux.finish()?;
     } else {
         let reader = mp4::Reader::open(path)?;
@@ -1199,7 +1243,7 @@ fn consume_copy(
         };
         let mut mux = open_mux(job, video, audio)?;
         pump(&mut mux, track.samples.len(), &|i| Ok(reader.packet(t, i)?))?;
-        job.progress.step("mux", 1, 1, None);
+        job.progress.step("mux", 2, 2, None);
         mux.finish()?;
     }
     if n == 0 {
@@ -1251,14 +1295,28 @@ fn consume_video(
         Ok(())
     };
     while let Some(pic) = next_pic(rx, job.stop)? {
+        let pts = i64::try_from(n).unwrap_or(i64::MAX);
+        let pic = match (pic, &mut enc) {
+            (Pic::Gpu(mut g), VEnc::Gpu(e)) if g.on_gpu() => {
+                g.retime(pts, time_base);
+                let packets = plain(e.encode_gpu(&g)?);
+                feed(&enc, &mut mux, packets, &mut merge)?;
+                n += 1;
+                job.progress.frame(n);
+                continue;
+            }
+            (Pic::Gpu(g), _) => Pic::Yuv(g.download()?),
+            (pic, _) => pic,
+        };
         let (mut frame, alpha) = match pic {
+            Pic::Gpu(_) => return Err("a GPU picture the encoder can't take".into()),
             Pic::Yuv(f) => (f, None),
             Pic::YuvAlpha(f, a) => (f, Some(a)),
             Pic::Rgba(_) => {
                 return Err("a picture in the wrong form for the video encoder".into());
             }
         };
-        frame.pts = i64::try_from(n).unwrap_or(i64::MAX);
+        frame.pts = pts;
         frame.time_base = time_base;
         let packets = enc.encode(&frame, alpha.as_ref())?;
         feed(&enc, &mut mux, packets, &mut merge)?;
@@ -1273,7 +1331,7 @@ fn consume_video(
     feed(&enc, &mut mux, packets, &mut merge)?;
     let mut mux = mux.ok_or_else(|| Fail::from("the encoder gave no parameter sets"))?;
     merge.upto(&mut mux, None)?;
-    job.progress.step("mux", 1, 1, None);
+    job.progress.step("mux", 2, 2, None);
     mux.finish()?;
     Ok((device, n))
 }
@@ -1299,7 +1357,7 @@ fn consume_animation(job: &Job, rx: &Receiver<Result<Pic, Fail>>) -> Result<(Str
             if n == 0 {
                 return Err("the source gave no frames".into());
             }
-            job.progress.step("mux", 1, 1, None);
+            job.progress.step("mux", 2, 2, None);
             write_all(job.partial, &enc.finish())?;
         }
         Encoder::Webp { quality, effort } => {
@@ -1322,7 +1380,7 @@ fn consume_animation(job: &Job, rx: &Receiver<Result<Pic, Fail>>) -> Result<(Str
             if n == 0 {
                 return Err("the source gave no frames".into());
             }
-            job.progress.step("mux", 1, 1, None);
+            job.progress.step("mux", 2, 2, None);
             write_all(job.partial, &enc.finish()?)?;
         }
         _ => return Err("this encoder writes no animation".into()),
