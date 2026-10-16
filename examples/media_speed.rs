@@ -12,9 +12,9 @@ use pito_codecs::filter::{ColorSpec, Matrix, Overlay, Range};
 
 use pito_codecs::media::{
     AudioBuffer, Blender, Canvas, Choice, Codec, ExportOptions, Frame, Piece, PixelFormat, Prefs,
-    Rgba, TimeBase, VideoFrame, audio_mix_stream, audio_pcm, audio_stream, blend, decode_video,
-    decode_video_gpu, export, export_frames, export_with_audio, first_frame, frame_count,
-    frames_at, keyframes, probe, to_rgba, to_rgba_height,
+    Rgba, Seek, Stills, TimeBase, VideoFrame, audio_mix_stream, audio_pcm, audio_stream, blend,
+    decode_video, decode_video_gpu, export, export_frames, export_with_audio, first_frame,
+    frame_count, frames_at, keyframes, probe, to_rgba, to_rgba_height,
 };
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
@@ -139,6 +139,16 @@ fn run() -> Res<()> {
         let encode = pick(args.next());
         let overlay = args.next();
         return xport(&path, decode, encode, overlay.as_deref());
+    }
+    if mode.as_deref() == Some("exact") {
+        let decode = match args.next().as_deref() {
+            Some("gpu") => Choice::Gpu,
+            Some("cpu") => Choice::Cpu,
+            _ => Choice::Auto,
+        };
+        let pages = args.next().map(|n| n.parse()).transpose()?.unwrap_or(6);
+        let per = args.next().map(|n| n.parse()).transpose()?.unwrap_or(4);
+        return exact_pages(&path, decode, pages, per);
     }
     if mode.as_deref() == Some("gpu") {
         return gpu_playback(&path);
@@ -1070,4 +1080,38 @@ fn cpu_seconds() -> f64 {
             .unwrap_or(0.0)
     };
     (tick(11) + tick(12)) / 100.0
+}
+
+fn exact_pages(path: &std::path::Path, decode: Choice, pages: usize, per: usize) -> Res<()> {
+    let prefs = Prefs {
+        decode,
+        ..Prefs::default()
+    };
+    let p = probe(path, &prefs)?;
+    let n = (pages * per).max(1);
+    let times: Vec<f64> = (0..n)
+        .map(|k| p.duration * (k as f64 + 0.37) / n as f64)
+        .collect();
+    let t = Instant::now();
+    let stills = Stills::open(path, 160, &prefs)?;
+    let opened = t.elapsed().as_secs_f64() * 1e3;
+    let mut all = Vec::new();
+    for (i, page) in times.chunks(per.max(1)).enumerate() {
+        let t = Instant::now();
+        let mut got = 0usize;
+        let mut failed = None;
+        stills.frames(page, Seek::Exact, |_, r| match r {
+            Ok(_) => got += 1,
+            Err(e) => failed = Some(e.to_string()),
+        })?;
+        if let Some(e) = failed {
+            return Err(e.into());
+        }
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        all.push(ms);
+        say!("page {i}: {got} exact stills at {page:.2?} in {ms:.1} ms")?;
+    }
+    let sum: f64 = all.iter().sum();
+    say!("open {opened:.1} ms, {} pages in {sum:.1} ms", all.len())?;
+    Ok(())
 }

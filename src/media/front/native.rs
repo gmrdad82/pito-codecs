@@ -218,7 +218,7 @@ pub struct Frames {
     flushed: bool,
     buf: Vec<u8>,
     cur: Option<(Box<crate::mkv::Cursor>, i64)>,
-    skip: Option<(Codec, usize, Option<u8>)>,
+    skip: Option<Skip>,
 }
 
 const REORDER: usize = 16;
@@ -253,6 +253,56 @@ fn mkv_start(r: &crate::mkv::Reader, track: usize, from: f64) -> Result<(crate::
         first = false;
     }
     Ok((cur, best.or(low).unwrap_or(0)))
+}
+
+#[derive(Clone)]
+pub(super) enum Skip {
+    Nal(Codec, usize, Option<u8>),
+    #[cfg(feature = "av1")]
+    Av1(Box<crate::av1::parser::Parser>),
+}
+
+impl Skip {
+    fn disposable(&self, data: &[u8]) -> bool {
+        match self {
+            Skip::Nal(codec, length, top) => disposable(*codec, *length, *top, data),
+            #[cfg(feature = "av1")]
+            Skip::Av1(parser) => av1_disposable(parser, data),
+        }
+    }
+}
+
+#[cfg(feature = "av1")]
+fn av1_disposable(parser: &crate::av1::parser::Parser, data: &[u8]) -> bool {
+    use crate::av1::parser::{ObuAction, ObuType};
+    let mut pos = 0usize;
+    let mut frames = 0usize;
+    while let Some(rest) = data.get(pos..).filter(|r| !r.is_empty()) {
+        let used = match parser.read_obu(rest) {
+            Ok(ObuAction::Drop(used)) => used,
+            Ok(ObuAction::Process(obu)) => {
+                match obu.header.obu_type {
+                    ObuType::Frame | ObuType::FrameHeader => match parser.frame_refresh(&obu) {
+                        Ok(Some(0)) => frames += 1,
+                        _ => return false,
+                    },
+                    ObuType::TemporalDelimiter
+                    | ObuType::TileGroup
+                    | ObuType::Metadata
+                    | ObuType::RedundantFrameHeader
+                    | ObuType::Padding => {}
+                    _ => return false,
+                }
+                obu.bytes_used
+            }
+            Err(_) => return false,
+        };
+        if used == 0 {
+            return false;
+        }
+        pos += used;
+    }
+    frames > 0
 }
 
 fn disposable(codec: Codec, length: usize, top: Option<u8>, data: &[u8]) -> bool {
@@ -308,23 +358,46 @@ fn top_layer(config: &crate::mp4::HevcConfig) -> Option<u8> {
     top
 }
 
-pub(super) fn skipper(st: &Stream) -> Option<(Codec, usize, Option<u8>)> {
+pub(super) fn skipper(st: &Stream) -> Option<Skip> {
     match st.codec? {
-        Codec::H264 => Some((
+        Codec::H264 => Some(Skip::Nal(
             Codec::H264,
             st.avc.as_ref()?.length_size.clamp(1, 4) as usize,
             None,
         )),
         Codec::Hevc => {
             let config = crate::mp4::HevcConfig::parse(&st.extradata).ok()?;
-            Some((
+            Some(Skip::Nal(
                 Codec::Hevc,
                 config.length_size.clamp(1, 4) as usize,
                 top_layer(&config),
             ))
         }
+        #[cfg(feature = "av1")]
+        Codec::Av1 => av1_skipper(&st.extradata),
         _ => None,
     }
+}
+
+#[cfg(feature = "av1")]
+fn av1_skipper(av1c: &[u8]) -> Option<Skip> {
+    use crate::av1::parser::{ObuAction, ObuType, Parser};
+    let mut parser = Parser::default();
+    let mut rest = av1c.get(4..)?;
+    while !rest.is_empty() {
+        let used = match parser.read_obu(rest).ok()? {
+            ObuAction::Drop(used) => used,
+            ObuAction::Process(obu) => {
+                if obu.header.obu_type == ObuType::SequenceHeader {
+                    parser.parse_sequence_header_obu(&obu).ok()?;
+                    return Some(Skip::Av1(Box::new(parser)));
+                }
+                obu.bytes_used
+            }
+        };
+        rest = rest.get(used.max(1)..)?;
+    }
+    None
 }
 
 impl Frames {
@@ -463,9 +536,7 @@ impl Frames {
         if let Some((pts, dts, keyframe)) = self.packet()? {
             if pts < self.start
                 && !keyframe
-                && self
-                    .skip
-                    .is_some_and(|(codec, length, top)| disposable(codec, length, top, &self.buf))
+                && self.skip.as_ref().is_some_and(|s| s.disposable(&self.buf))
             {
                 self.next += 1;
                 return Ok(true);
@@ -574,6 +645,13 @@ pub enum Packets<'a> {
 }
 
 impl Packets<'_> {
+    fn upcoming(&self) -> Option<i64> {
+        match self {
+            Packets::Indexed { d, track, next } => d.sample(*track, *next).map(|s| s.0),
+            Packets::Mkv { .. } => None,
+        }
+    }
+
     fn next(&mut self, buf: &mut Vec<u8>) -> Result<Option<(i64, i64, bool)>> {
         match self {
             Packets::Indexed { d, track, next } => {
@@ -630,7 +708,7 @@ pub fn exact(
     rotation: u16,
     height: u32,
     tagged: Color,
-    skip: Option<(Codec, usize, Option<u8>)>,
+    skip: Option<&Skip>,
 ) -> Result<Vec<Rgba>> {
     let mut out: Vec<Rgba> = Vec::with_capacity(targets.len());
     let mut held: Option<GpuFrame> = None;
@@ -640,13 +718,11 @@ pub fn exact(
     while out.len() < targets.len() && !flushed {
         let frames = match src.next(&mut buf)? {
             Some((pts, dts, keyframe)) => {
+                let target = targets.iter().copied().find(|&t| t >= pts);
+                let later = |q: i64| q > pts && target.is_some_and(|t| q <= t);
                 let hidden = !keyframe
-                    && targets
-                        .iter()
-                        .copied()
-                        .find(|&t| t >= pts)
-                        .is_some_and(|t| seen.iter().any(|&q| q > pts && q <= t))
-                    && skip.is_some_and(|(c, l, top)| disposable(c, l, top, &buf));
+                    && (seen.iter().any(|&q| later(q)) || src.upcoming().is_some_and(later))
+                    && skip.is_some_and(|s| s.disposable(&buf));
                 if seen.len() == SEEN {
                     seen.pop_front();
                 }

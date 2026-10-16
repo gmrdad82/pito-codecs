@@ -41,6 +41,11 @@ pub fn frames_at_seek(
 }
 
 const KEPT: usize = 18;
+const GPU_WORKERS: usize = 4;
+
+fn gpu_first(d: &Demux, track: usize, route: Route) -> bool {
+    route == Route::Gpu && d.stream(track).is_ok_and(|s| s.codec == Some(Codec::Av1))
+}
 
 pub struct Stills {
     height: u32,
@@ -197,6 +202,7 @@ impl Stills {
         self.spread(
             &jobs,
             src.route,
+            false,
             |rt| match reader {
                 Some(r) => self.take((rt, true, 1), || native::still_decoder(r, rt)),
                 None => Worker {
@@ -275,6 +281,7 @@ impl Stills {
         self.spread(
             &jobs,
             route,
+            seek == Seek::Exact && gpu_first(&d, v, route),
             |rt| {
                 let key = (rt, stills, if rt == Route::Gpu { 0 } else { threads });
                 let mut w = self.take(key, || {
@@ -306,7 +313,15 @@ impl Stills {
                     shift,
                 };
                 dec.reset();
-                native::exact(&mut src, dec, &targets, rotation, height, color, skip)
+                native::exact(
+                    &mut src,
+                    dec,
+                    &targets,
+                    rotation,
+                    height,
+                    color,
+                    skip.as_ref(),
+                )
             },
             &wanted,
             emit,
@@ -324,6 +339,7 @@ impl Stills {
                 self.spread(
                     &jobs,
                     Route::Ffmpeg,
+                    false,
                     |rt| Worker {
                         key: (rt, false, 0),
                         dec: Err(src.native()),
@@ -357,6 +373,7 @@ impl Stills {
         self.spread(
             &jobs,
             src.route,
+            gpu_first(&d, v, src.route),
             |rt| {
                 let key = (rt, false, if rt == Route::Gpu { 0 } else { threads });
                 self.take(key, || native::video_decoder(&d, rt, threads))
@@ -375,7 +392,15 @@ impl Stills {
                     next: key,
                 };
                 dec.reset();
-                native::exact(&mut packets, dec, &targets, rotation, height, color, skip)
+                native::exact(
+                    &mut packets,
+                    dec,
+                    &targets,
+                    rotation,
+                    height,
+                    color,
+                    skip.as_ref(),
+                )
             },
             &wanted,
             emit,
@@ -383,10 +408,12 @@ impl Stills {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spread(
         &self,
         jobs: &[Vec<f64>],
         route: Route,
+        all_gpu: bool,
         make: impl Fn(Route) -> Worker + Sync,
         run: impl Fn(&mut Worker, &[f64]) -> Result<Vec<Rgba>> + Sync,
         wanted: &[f64],
@@ -394,11 +421,14 @@ impl Stills {
     ) {
         let next = AtomicUsize::new(0);
         std::thread::scope(|s| {
-            let workers = jobs.len().min(16).min(self.limit.load(Ordering::Relaxed));
+            let mut workers = jobs.len().min(16).min(self.limit.load(Ordering::Relaxed));
+            if all_gpu {
+                workers = workers.min(GPU_WORKERS);
+            }
             for w in 0..workers {
                 let (next, make, run) = (&next, &make, &run);
                 s.spawn(move || {
-                    let mut state = make(if w == 0 { route } else { Route::Cpu });
+                    let mut state = make(if w == 0 || all_gpu { route } else { Route::Cpu });
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(batch) = jobs.get(i) else { break };
