@@ -403,6 +403,7 @@ struct Scratch {
     buf: Vec<f32>,
     tmp: Vec<f32>,
     out: Vec<f32>,
+    offs: Vec<usize>,
     rows: Rows,
 }
 
@@ -538,32 +539,47 @@ impl Linear {
         let (sw, sh) = self.src;
         let (dw, _) = self.dst;
         let n = self.v.n;
-        let lo = self.v.left[y0..y1].iter().copied().min().unwrap_or(0);
-        let hi = self.v.left[y0..y1]
-            .iter()
-            .map(|l| l + n)
-            .max()
-            .unwrap_or(0)
-            .min(sh);
-        let stride = sw * 4;
-        s.buf.resize((hi - lo) * stride, 0.0);
+        let line = dw * 4;
+        s.buf.resize(n * line, 0.0);
         s.tmp.resize((sw + 2) * 4, 0.0);
-        s.out.resize(dw * 4, 0.0);
+        s.out.resize(line, 0.0);
+        s.offs.resize(n, 0);
         s.rows.fit(sw.max(dw));
         let wide = self.wide;
-        for r in lo..hi {
-            let row = &mut s.buf[(r - lo) * stride..(r - lo + 1) * stride];
-            match input {
-                Input::Narrow(p) => yuv_row(p, r, sw, sh, &self.curve, &mut s.rows, row, wide),
-                Input::Wide(p) => yuv_row(p, r, sw, sh, &self.curve, &mut s.rows, row, wide),
-                Input::Rgba(d) => rgba_row(&d[r * stride..(r + 1) * stride], &self.curve, row),
-            }
-        }
+        let stride = sw * 4;
+        let mut next = self.v.left[y0];
+        let mut have = 0usize;
         for y in y0..y1 {
+            let l = self.v.left[y];
+            if l > next || l + have < next {
+                next = l;
+                have = 0;
+            }
+            while next < l + n {
+                let r = next;
+                let row = &mut s.tmp[..stride];
+                match input {
+                    Input::Narrow(p) => yuv_row(p, r, sw, sh, &self.curve, &mut s.rows, row, wide),
+                    Input::Wide(p) => yuv_row(p, r, sw, sh, &self.curve, &mut s.rows, row, wide),
+                    Input::Rgba(d) => rgba_row(&d[r * stride..(r + 1) * stride], &self.curve, row),
+                }
+                let slot = (r % n) * line;
+                horizontal(
+                    &s.tmp,
+                    &self.h,
+                    self.np,
+                    &self.pairs,
+                    &mut s.buf[slot..slot + line],
+                    wide,
+                );
+                next += 1;
+                have = (have + 1).min(n);
+            }
+            for (t, o) in s.offs.iter_mut().enumerate() {
+                *o = ((l + t) % n) * line;
+            }
             let c = &self.v.coef[y * n..(y + 1) * n];
-            let at = (self.v.left[y] - lo) * stride;
-            vertical(&s.buf[at..], stride, c, &mut s.tmp[..stride], self.wide);
-            horizontal(&s.tmp, &self.h, self.np, &self.pairs, &mut s.out, self.wide);
+            vertical(&s.buf, &s.offs, c, &mut s.out, wide);
             straight(&s.out, &self.curve, &mut s.rows, dw, wide);
             emit(y, &s.out, &mut s.rows);
         }
@@ -912,13 +928,13 @@ fn put_chroma<S: Sample>(
     }
 }
 
-fn vertical(buf: &[f32], stride: usize, coef: &[f32], out: &mut [f32], wide: bool) {
+fn vertical(buf: &[f32], offs: &[usize], coef: &[f32], out: &mut [f32], wide: bool) {
     let n = coef.len();
     let len = out.len();
-    assert!(n > 0 && buf.len() >= (n - 1) * stride + len);
+    assert!(n > 0 && offs.len() >= n && offs.iter().all(|&o| o + len <= buf.len()));
     #[cfg(target_arch = "x86_64")]
     let from = if wide {
-        unsafe { x86::vertical(buf, stride, coef, out) }
+        unsafe { x86::vertical(buf, offs, coef, out) }
     } else {
         0
     };
@@ -930,11 +946,14 @@ fn vertical(buf: &[f32], stride: usize, coef: &[f32], out: &mut [f32], wide: boo
     let out = &mut out[from..];
     let len = out.len();
     let c0 = coef[0];
-    for (o, &s) in out.iter_mut().zip(&buf[from..from + len]) {
+    for (o, &s) in out
+        .iter_mut()
+        .zip(&buf[offs[0] + from..offs[0] + from + len])
+    {
         *o = c0 * s;
     }
     for (t, &c) in coef.iter().enumerate().skip(1) {
-        let row = &buf[t * stride + from..t * stride + from + len];
+        let row = &buf[offs[t] + from..offs[t] + from + len];
         for (o, &s) in out.iter_mut().zip(row) {
             *o += c * s;
         }
@@ -1025,7 +1044,7 @@ mod x86 {
     #[target_feature(enable = "avx2,fma")]
     pub(super) unsafe fn vertical(
         buf: &[f32],
-        stride: usize,
+        offs: &[usize],
         coef: &[f32],
         out: &mut [f32],
     ) -> usize {
@@ -1038,7 +1057,7 @@ mod x86 {
                 let mut a = [_mm256_setzero_ps(); 4];
                 for (t, &c) in coef.iter().enumerate() {
                     let c = _mm256_set1_ps(c);
-                    let p = b.add(t * stride + i);
+                    let p = b.add(offs[t] + i);
                     for (j, acc) in a.iter_mut().enumerate() {
                         *acc = _mm256_fmadd_ps(_mm256_loadu_ps(p.add(8 * j)), c, *acc);
                     }
@@ -1052,7 +1071,7 @@ mod x86 {
                 let mut acc = _mm256_setzero_ps();
                 for (t, &c) in coef.iter().enumerate() {
                     acc = _mm256_fmadd_ps(
-                        _mm256_loadu_ps(b.add(t * stride + i)),
+                        _mm256_loadu_ps(b.add(offs[t] + i)),
                         _mm256_set1_ps(c),
                         acc,
                     );
