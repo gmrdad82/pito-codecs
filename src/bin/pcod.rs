@@ -337,9 +337,7 @@ fn main() -> ExitCode {
             convert,
         }) => {
             let first = inputs.remove(0);
-            let options = args::options(Some("join"), first, inputs, output, convert);
-            let _ = options;
-            return convert::refuse("join isn't available in this build of pcod");
+            return convert::run(args::options(Some("join"), first, inputs, output, convert));
         }
         Some(Command::Profiles) => return convert::print(&convert::profiles()),
         Some(Command::Probe { file, json: true }) => {

@@ -1108,7 +1108,11 @@ fn whole_video(
 ) -> Result<(u64, u64, Mux, Vec<String>)> {
     job.tell(progress, Stage::Encoding)?;
     let mut enc = encoder(job, video, opts.crf, false, 0, 0)?;
-    let rotation = job.sources[job.index[0]].probe.rotation;
+    let rotation = if job.fit {
+        0
+    } else {
+        job.sources[job.index[0]].probe.rotation
+    };
     let mut out = Sink::new(video.codec, job.size, rotation, (timescale, fd), part);
     let mut resident = Resident::new(&enc);
     let mut at = 0i64;
@@ -1117,6 +1121,7 @@ fn whole_video(
         let si = job.index[n];
         let on_gpu = resident.on
             && job.sources[si].route == Route::Gpu
+            && !(job.fit && super::shape::reshapes(job, si))
             && resident.piece(
                 job,
                 si,

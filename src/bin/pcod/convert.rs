@@ -9,10 +9,12 @@ use super::pipeline::{self, Audio, Stopped};
 use super::plan::{AAC_KBPS, Container, OPUS_KBPS, Request, SAMPLE_RATE, partial, same_file};
 use super::profile::{ANIMATED_FPS, ANIMATED_WIDTH, Encoder, Profile};
 use super::progress::Progress;
+use super::quality;
 use super::sha256;
 use super::signals;
 use super::size::Size;
 use super::source::{self, Kind, Media};
+use pito_codecs::media;
 
 pub struct Options {
     pub request: Request,
@@ -285,6 +287,206 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
     Ok(document.to_json())
 }
 
+fn crf_of(rate: media::Rate) -> u8 {
+    match rate {
+        media::Rate::Crf(c) | media::Rate::Qp(c) => c,
+        _ => 20,
+    }
+}
+
+fn join(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<String, Fail> {
+    let started = Instant::now();
+    let request = &options.request;
+    let (container, _) = request.settings()?;
+    let inputs: Vec<PathBuf> = std::iter::once(request.input.clone())
+        .chain(request.joins.iter().cloned())
+        .collect();
+    if let Some(p) = inputs.iter().find(|p| p.is_dir()) {
+        return Err(format!(
+            "{}: join takes video files, not a folder of frames",
+            p.display()
+        )
+        .into());
+    }
+    if let Some(p) = inputs.iter().find(|p| same_file(p, &request.output)) {
+        return Err(format!(
+            "{} is both a clip and the output: input and output are the same file",
+            p.display()
+        )
+        .into());
+    }
+    if !request.overwrite && request.output.exists() {
+        return Err(format!(
+            "{} already exists; use --force to replace it",
+            request.output.display()
+        )
+        .into());
+    }
+    if request.loudness.is_some() {
+        return Err("--loudness isn't available in this build of pcod".into());
+    }
+    let first = source::file(&inputs[0])?;
+    let size = match request.size {
+        Some(size) => {
+            let (w, h) = first.display_size();
+            Some(size.resolve(w, h)?)
+        }
+        None => None,
+    };
+    let profile = request.profile.name();
+    let animation = request.tune.as_deref() == Some("animation");
+    let webm = container == Container::Webm;
+    let crf = if webm {
+        let vp9 = crf_of(quality::vp9_rate(profile, request.quality.map(f32::from)));
+        ((f32::from(vp9) * 4.0 / 7.0).round() as u8).clamp(1, 51)
+    } else {
+        crf_of(quality::h264_rate(
+            profile,
+            request.quality.map(f32::from),
+            animation,
+        ))
+    };
+    let choice = if request.profile == Profile::Fast {
+        media::Choice::Gpu
+    } else {
+        media::Choice::Cpu
+    };
+    let opts = media::JoinOptions {
+        encode: !request.copy_video,
+        size,
+        fps: request.fps.map(|f| (f, 1)),
+        video: if webm {
+            media::Codec::Vp9
+        } else {
+            media::Codec::H264
+        },
+        crf,
+        audio_kbps: request.audio_bitrate,
+        prefs: media::Prefs {
+            encode: choice,
+            ..media::Prefs::default()
+        },
+    };
+    let part = partial(&request.output)?;
+    *partial_path = Some(part.clone());
+    let progress = Progress::new(options.progress);
+    progress.step("join", 1, 1, Some(1000));
+    let joined = media::join(&inputs, &part, opts, |p| {
+        progress.frame((p.done.clamp(0.0, 1.0) * 1000.0) as u64);
+        !signals::STOP.load(std::sync::atomic::Ordering::Relaxed)
+    });
+    progress.clear();
+    let joined = match joined {
+        Ok(j) => j,
+        Err(media::Error::Cancelled) => return Err(Box::new(Stopped)),
+        Err(e) => return Err(e.to_string().into()),
+    };
+    land(&part, &request.output, request.overwrite)?;
+    *partial_path = None;
+    let seconds = started.elapsed().as_secs_f64();
+    let fps = f64::from(joined.fps.0) / f64::from(joined.fps.1.max(1));
+    let line = match joined.method {
+        media::JoinMethod::Copy => format!(
+            "joined {} clips by stream copy, no re-encode: {}",
+            joined.clips, joined.reason
+        ),
+        media::JoinMethod::Encode => format!(
+            "joined {} clips by re-encoding to {}x{} at {} fps ({}): {}",
+            joined.clips,
+            joined.size.0,
+            joined.size.1,
+            if (fps - fps.round()).abs() < 0.005 {
+                format!("{fps:.0}")
+            } else {
+                format!("{fps:.2}")
+            },
+            profile,
+            joined.reason
+        ),
+    };
+    if !options.json {
+        return Ok(format!("{}\n{line}", request.output.display()));
+    }
+    let sources = inputs
+        .iter()
+        .map(|p| {
+            Ok(manifest::Source {
+                path: p.display().to_string(),
+                sha256: hash(p)?,
+                loudness: None,
+            })
+        })
+        .collect::<Result<Vec<_>, Fail>>()?;
+    let codec = joined
+        .video
+        .to_string()
+        .to_ascii_lowercase()
+        .replace('.', "");
+    let encoder = match joined.method {
+        media::JoinMethod::Copy => Encoder::Copy { codec },
+        media::JoinMethod::Encode => {
+            if webm {
+                request
+                    .profile
+                    .vp9_encoder(request.quality)
+                    .unwrap_or(Encoder::Copy { codec })
+            } else {
+                request.profile.encoder(request.quality)
+            }
+        }
+    };
+    let audio = match joined.audio {
+        media::JoinAudio::Silent => None,
+        media::JoinAudio::Copied => Some(Audio::Copy {
+            codec: if webm { "opus".into() } else { "aac".into() },
+        }),
+        media::JoinAudio::Encoded {
+            codec: media::Codec::Opus,
+            kbps,
+        } => Some(Audio::Opus { kbps }),
+        media::JoinAudio::Encoded { kbps, .. } => Some(Audio::Aac { kbps }),
+    };
+    let bytes = std::fs::metadata(&request.output)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let document = manifest::Manifest {
+        sources,
+        params: manifest::Params {
+            profile: profile.into(),
+            quality: if matches!(encoder, Encoder::Copy { .. }) {
+                None
+            } else {
+                encoder.quality()
+            },
+            encoder: encoder.manifest(),
+            width: joined.size.0,
+            height: joined.size.1,
+            fps: Some(fps),
+            tune: request.tune.clone(),
+            loudness: None,
+            audio: audio.as_ref().map(audio_manifest),
+        },
+        device: match joined.route {
+            media::Route::Gpu => "GPU".into(),
+            _ => "CPU".into(),
+        },
+        seconds: (seconds * 100.0).round() / 100.0,
+        files: vec![manifest::Output {
+            file: request.output.display().to_string(),
+            sha256: hash(&request.output)?,
+            bytes,
+            loudness: None,
+        }],
+        join: Some(manifest::Join {
+            method: joined.method.name().into(),
+            reason: joined.reason.clone(),
+            clips: joined.clips,
+            loudness: None,
+        }),
+    };
+    Ok(document.to_json())
+}
+
 pub fn print(text: &str) -> ExitCode {
     match writeln!(std::io::stdout().lock(), "{text}") {
         Ok(()) => ExitCode::SUCCESS,
@@ -307,7 +509,11 @@ pub fn refuse(message: &str) -> ExitCode {
 pub fn run(options: Options) -> ExitCode {
     signals::catch();
     let mut partial_path = None;
-    let outcome = convert(&options, &mut partial_path);
+    let outcome = if options.request.joins.is_empty() {
+        convert(&options, &mut partial_path)
+    } else {
+        join(&options, &mut partial_path)
+    };
     if let Some(p) = &partial_path {
         let _ = std::fs::remove_file(p);
     }

@@ -259,8 +259,9 @@ pub fn partial(output: &Path) -> Result<PathBuf, String> {
         &std::hash::RandomState::new(),
         (std::process::id(), std::time::SystemTime::now()),
     );
+    let extension = output.extension().and_then(|e| e.to_str()).unwrap_or("out");
     Ok(output.with_file_name(format!(
-        ".{name}.pcod-{}-{:08x}.partial",
+        ".{name}.pcod-{}-{:08x}.partial.{extension}",
         std::process::id(),
         token as u32
     )))
