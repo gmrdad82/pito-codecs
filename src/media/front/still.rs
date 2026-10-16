@@ -469,7 +469,7 @@ fn first_seen(wanted: &[f64]) -> Vec<f64> {
 
 fn mkv_route(r: &mkv::Reader, prefs: &Prefs) -> Option<Route> {
     let codec = r.tracks.get(r.video()?)?.codec()?;
-    if !matches!(codec, Codec::H264 | Codec::Hevc | Codec::Vp9) {
+    if !matches!(codec, Codec::H264 | Codec::Hevc | Codec::Vp9 | Codec::Av1) {
         return None;
     }
     let picked = pick_decode(codec, prefs, &Caps::detect(prefs)).ok()?;

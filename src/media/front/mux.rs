@@ -8,7 +8,7 @@ use crate::gpu::{Color, Device, EncoderConfig as GpuConfig, HwEncoder, Profile a
 use crate::h264::{Encoder, EncoderConfig, Preset, Profile};
 use crate::media::{Bitstream, Rate};
 use crate::mp4::{
-    AvcConfig, HevcConfig, SampleEntry, TrackConfig, VpcConfig, Writer, rotation_matrix,
+    Av1Config, AvcConfig, HevcConfig, SampleEntry, TrackConfig, VpcConfig, Writer, rotation_matrix,
 };
 
 use super::audio::ffmpeg_pcm;
@@ -348,6 +348,7 @@ fn entry_for(codec: Codec, extradata: &[u8], w: u32, h: u32) -> Result<SampleEnt
     Ok(match codec {
         Codec::Hevc => SampleEntry::hevc(HevcConfig::parse(extradata)?, w as u16, h as u16),
         Codec::Vp9 => SampleEntry::vp9(VpcConfig::parse(extradata)?, w as u16, h as u16),
+        Codec::Av1 => SampleEntry::av1(Av1Config::parse(extradata)?, w as u16, h as u16),
         _ => SampleEntry::h264(AvcConfig::parse(extradata)?, w as u16, h as u16),
     })
 }

@@ -101,6 +101,10 @@ impl TrackConfig {
         Self::video("V_VP9", Vec::new(), width, height, time_base)
     }
 
+    pub fn av1(av1c: Vec<u8>, width: u32, height: u32, time_base: TimeBase) -> Self {
+        Self::video("V_AV1", av1c, width, height, time_base)
+    }
+
     pub fn opus(head: Vec<u8>) -> Self {
         let channels = head.get(9).copied().unwrap_or(2) as u32;
         let pre_skip = head
@@ -159,6 +163,7 @@ impl TrackConfig {
         let mut cfg = match &entry.codec {
             CodecConfig::Avc(c) => Self::h264(c.to_bytes(), w, h, time_base),
             CodecConfig::Hevc(c) => Self::hevc(c.to_bytes(), w, h, time_base),
+            CodecConfig::Av1(c) => Self::av1(c.to_bytes(), w, h, time_base),
             CodecConfig::Aac(c) => {
                 let mut cfg = Self::aac(c.asc.clone(), track.sample_rate(), track.channels());
                 cfg.time_base = time_base;

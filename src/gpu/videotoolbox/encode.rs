@@ -388,7 +388,7 @@ pub fn hardware(codec: Codec) -> bool {
     match codec {
         Codec::H264 => h264,
         Codec::Hevc => hevc,
-        Codec::Aac | Codec::Vp9 | Codec::Opus | Codec::Mp3 => false,
+        Codec::Aac | Codec::Vp9 | Codec::Av1 | Codec::Opus | Codec::Mp3 => false,
         Codec::Ac3 | Codec::Eac3 => false,
     }
 }
@@ -467,6 +467,11 @@ unsafe impl Send for VtEncoder {}
 
 impl VtEncoder {
     pub fn new(codec: Codec, config: &EncoderConfig) -> Result<Self> {
+        if codec == Codec::Av1 {
+            return Err(Error::Unsupported(
+                "AV1 encode isn't offered on VideoToolbox".into(),
+            ));
+        }
         let codec_type = codec_type(codec)?;
         let (w, h) = (config.width, config.height);
         if w == 0 || h == 0 || w > 16384 || h > 16384 {
