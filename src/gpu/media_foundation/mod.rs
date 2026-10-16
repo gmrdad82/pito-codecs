@@ -5,11 +5,12 @@ mod stream;
 use std::sync::{Arc, OnceLock};
 
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_DECODER_PROFILE_H264_VLD_NOFGT, D3D11_DECODER_PROFILE_HEVC_VLD_MAIN,
-    D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10,
+    D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0, D3D11_DECODER_PROFILE_H264_VLD_NOFGT,
+    D3D11_DECODER_PROFILE_HEVC_VLD_MAIN, D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10,
 };
 use windows::core::GUID;
 
+use crate::gpu::av1c;
 use crate::gpu::nal::{self, Framing};
 use crate::gpu::{Backend, DecoderBackend, Direction};
 use crate::media::{Codec, Error, Frame, Packet, Result};
@@ -26,6 +27,7 @@ fn dxva_profile(codec: Codec, format: SurfaceFormat) -> GUID {
     match (codec, format) {
         (Codec::Hevc, SurfaceFormat::P010) => D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10,
         (Codec::Hevc, _) => D3D11_DECODER_PROFILE_HEVC_VLD_MAIN,
+        (Codec::Av1, _) => D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0,
         _ => D3D11_DECODER_PROFILE_H264_VLD_NOFGT,
     }
 }
@@ -33,6 +35,7 @@ fn dxva_profile(codec: Codec, format: SurfaceFormat) -> GUID {
 fn label(codec: Codec) -> &'static str {
     match codec {
         Codec::Hevc => "HEVC",
+        Codec::Av1 => "AV1",
         _ => "H.264",
     }
 }
@@ -44,7 +47,7 @@ fn probe() -> Vec<(Codec, Direction)> {
     let Ok(gpu) = Gpu::shared(api) else {
         return Vec::new();
     };
-    [Codec::H264, Codec::Hevc]
+    [Codec::H264, Codec::Hevc, Codec::Av1]
         .into_iter()
         .filter(|&codec| {
             gpu.supports(
@@ -92,11 +95,18 @@ pub struct MfDecoder {
 
 impl MfDecoder {
     pub fn new(codec: Codec, extradata: &[u8]) -> Result<Self> {
-        if !matches!(codec, Codec::H264 | Codec::Hevc) {
+        if !matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1) {
             return Err(Error::Unsupported(format!("{codec:?} on Media Foundation")));
         }
         ensure_com().map_err(Error::Backend)?;
-        let config = nal::parse_extradata(codec, extradata)?;
+        let config = if codec == Codec::Av1 {
+            nal::Config {
+                framing: Framing::AnnexB,
+                parameter_sets: vec![extradata.to_vec()],
+            }
+        } else {
+            nal::parse_extradata(codec, extradata)?
+        };
         let api = mft::api().map_err(Error::Backend)?;
         let gpu = Gpu::shared(api).map_err(Error::Backend)?;
         let mut d = Self {
@@ -114,7 +124,7 @@ impl MfDecoder {
             skip_rasl: false,
             name: format!("Media Foundation {}", label(codec)),
         };
-        if d.sets.iter().any(|n| stream::is_sps(codec, n)) {
+        if codec == Codec::Av1 || d.sets.iter().any(|n| stream::is_sps(codec, n)) {
             d.open()?;
         } else if !available().contains(&(codec, Direction::Decode)) {
             return Err(Error::Unsupported(format!(
@@ -252,6 +262,42 @@ impl MfDecoder {
         Err("the decoder does not accept input".into())
     }
 
+    fn ensure_mft(&mut self) -> Result<()> {
+        if let Some(session) = self.session.as_ref()
+            && session.mft.is_none()
+        {
+            let mft = self.create(&session.plan)?;
+            if let Some(session) = self.session.as_mut() {
+                session.mft = Some(mft);
+            }
+        }
+        Ok(())
+    }
+
+    fn decode_av1(&mut self, packet: &Packet) -> Result<Vec<Frame>> {
+        if self.session.is_none() {
+            return Ok(Vec::new());
+        }
+        if self.waiting {
+            if !packet.keyframe {
+                return Ok(Vec::new());
+            }
+            self.waiting = false;
+        }
+        self.input.clear();
+        if self.need_headers && !av1c::has_sequence_header(&packet.data) {
+            let config = self.sets.first().map_or(&[][..], Vec::as_slice);
+            self.input
+                .extend_from_slice(&av1c::parse(config)?.sequence_header);
+        }
+        self.input.extend_from_slice(&packet.data);
+        self.ensure_mft()?;
+        self.feed(packet.pts).map_err(|e| {
+            self.gpu.note_failure();
+            Error::Backend(e)
+        })
+    }
+
     fn restart(&mut self) {
         if let Some(session) = self.session.as_mut()
             && session.mft.as_ref().is_some_and(|m| m.flush().is_err())
@@ -277,6 +323,9 @@ impl DecoderBackend for MfDecoder {
     fn decode(&mut self, packet: &Packet) -> Result<Vec<Frame>> {
         ensure_com().map_err(Error::Backend)?;
         let codec = self.codec;
+        if codec == Codec::Av1 {
+            return self.decode_av1(packet);
+        }
         let nals = self.framing.split(&packet.data)?;
         let in_band: Vec<&[u8]> = nals
             .iter()
@@ -307,14 +356,7 @@ impl DecoderBackend for MfDecoder {
         }
         let headers = (self.need_headers && in_band.is_empty()).then_some(self.sets.as_slice());
         stream::annexb(&nals, headers, &mut self.input);
-        if let Some(session) = self.session.as_ref()
-            && session.mft.is_none()
-        {
-            let mft = self.create(&session.plan)?;
-            if let Some(session) = self.session.as_mut() {
-                session.mft = Some(mft);
-            }
-        }
+        self.ensure_mft()?;
         self.feed(packet.pts).map_err(|e| {
             self.gpu.note_failure();
             Error::Backend(e)

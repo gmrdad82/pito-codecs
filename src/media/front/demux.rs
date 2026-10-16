@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError, Weak};
 
 use crate::mkv;
-use crate::mp4::{AvcConfig, CodecConfig, HevcConfig, Reader, Track, TrackKind};
+use crate::mp4::{Av1Config, AvcConfig, CodecConfig, HevcConfig, Reader, Track, TrackKind};
 
 use super::native::{self, Readers, cached, rational, sorted};
 use super::probe::{AudioTrack, Probe};
@@ -519,6 +519,9 @@ fn describe(
             .as_deref()
             .and_then(crate::vp9::keyframe_info)
             .map(|k| (format!("Profile {}", k.profile), k.bit_depth.max(8) as u8))
+            .unwrap_or((String::new(), 8)),
+        Some(Codec::Av1) => Av1Config::parse(&t.codec_private)
+            .map(|c| (c.profile_name(), c.bit_depth()))
             .unwrap_or((String::new(), 8)),
         _ => (String::new(), 8),
     };

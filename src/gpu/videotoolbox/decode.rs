@@ -4,11 +4,14 @@ use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 use std::sync::{Mutex, PoisonError};
 
-use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType};
+use objc2_core_foundation::{
+    CFBoolean, CFData, CFDictionary, CFNumber, CFRetained, CFString, CFType,
+};
 use objc2_core_media::{
     CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMSampleTimingInfo, CMTime, CMTimeFlags,
-    CMVideoFormatDescriptionCreateFromH264ParameterSets,
+    CMVideoFormatDescriptionCreate, CMVideoFormatDescriptionCreateFromH264ParameterSets,
     CMVideoFormatDescriptionCreateFromHEVCParameterSets, kCMBlockBufferAssureMemoryNowFlag,
+    kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms, kCMVideoCodecType_AV1,
 };
 use objc2_core_video::{
     CVImageBuffer, CVPixelBufferGetHeight, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
@@ -22,6 +25,7 @@ use objc2_video_toolbox::{
 
 use super::order::{Key, Order};
 use super::{Locked, NV12_FULL, NV12_VIDEO, P010_FULL, P010_VIDEO, codec_type, label, planes};
+use crate::gpu::av1c;
 use crate::gpu::nal::{self, Framing};
 use crate::media::{Codec, Error, Frame, Packet, PixelFormat, Result};
 use crate::syntax::bits::unescape_rbsp;
@@ -176,6 +180,18 @@ fn layout(codec: Codec, sets: &[Vec<u8>]) -> Result<Layout> {
                 sps.max_num_reorder as usize,
             )
         }
+        Codec::Av1 => {
+            let s = av1c::parse(sets.first().map_or(&[][..], Vec::as_slice))?;
+            let bits = u32::from(s.bit_depth);
+            (
+                u32::from(s.is_420()),
+                bits,
+                bits,
+                false,
+                (0, 0, s.size.0, s.size.1),
+                0,
+            )
+        }
         Codec::Aac | Codec::Vp9 | Codec::Opus | Codec::Mp3 => {
             return Err(Error::Unsupported(format!("{codec:?} on VideoToolbox")));
         }
@@ -206,7 +222,40 @@ fn layout(codec: Codec, sets: &[Vec<u8>]) -> Result<Layout> {
     })
 }
 
+fn av1_description(av1c: &[u8]) -> Result<CFRetained<CMFormatDescription>> {
+    let s = av1c::parse(av1c)?;
+    let side = |v: u32| i32::try_from(v).map_err(|_| Error::Invalid(format!("AV1 size {v}")));
+    let (w, h) = (side(s.size.0)?, side(s.size.1)?);
+    let name = CFString::from_static_str("av1C");
+    let len = isize::try_from(av1c.len()).map_err(|_| Error::Invalid("av1C too large".into()))?;
+    let data = unsafe { CFData::new(None, av1c.as_ptr(), len) }
+        .ok_or_else(|| Error::Backend("cannot copy the av1C record".into()))?;
+    let atoms = CFDictionary::<CFString, CFData>::from_slices(&[&*name], &[&*data]);
+    let key: &CFString = unsafe { kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms };
+    let ext = CFDictionary::<CFString, CFType>::from_slices(&[key], &[atoms.as_ref()]);
+    let mut out: *const CMFormatDescription = std::ptr::null();
+    let status = unsafe {
+        CMVideoFormatDescriptionCreate(
+            None,
+            kCMVideoCodecType_AV1,
+            w,
+            h,
+            Some(ext.as_ref()),
+            NonNull::from(&mut out),
+        )
+    };
+    let fd = NonNull::new(out as *mut CMFormatDescription)
+        .filter(|_| status == 0)
+        .ok_or_else(|| {
+            Error::Invalid(format!("VideoToolbox refused the av1C record ({status})"))
+        })?;
+    Ok(unsafe { CFRetained::from_raw(fd) })
+}
+
 fn format_description(codec: Codec, sets: &[Vec<u8>]) -> Result<CFRetained<CMFormatDescription>> {
+    if codec == Codec::Av1 {
+        return av1_description(sets.first().map_or(&[][..], Vec::as_slice));
+    }
     let mut ptrs: Vec<NonNull<u8>> = Vec::with_capacity(sets.len());
     let mut sizes: Vec<usize> = Vec::with_capacity(sets.len());
     for p in sets.iter().filter(|p| !p.is_empty()) {
@@ -417,7 +466,14 @@ impl VtDecoder {
                 "this Mac has no hardware {codec:?} decoder"
             )));
         }
-        let config = nal::parse_extradata(codec, extradata)?;
+        let config = if codec == Codec::Av1 {
+            nal::Config {
+                framing: Framing::AnnexB,
+                parameter_sets: vec![extradata.to_vec()],
+            }
+        } else {
+            nal::parse_extradata(codec, extradata)?
+        };
         let mut d = Self {
             codec,
             framing: config.framing,
@@ -439,8 +495,10 @@ impl VtDecoder {
 
     fn open(&mut self, sets: Vec<Vec<u8>>) -> Result<()> {
         let layout = layout(self.codec, &sets)?;
-        let nals: Vec<&[u8]> = sets.iter().map(Vec::as_slice).collect();
-        self.order.key(self.codec, &nals)?;
+        if self.codec != Codec::Av1 {
+            let nals: Vec<&[u8]> = sets.iter().map(Vec::as_slice).collect();
+            self.order.key(self.codec, &nals)?;
+        }
         self.session = Some(Session::new(self.codec, &sets, &layout)?);
         self.layout = Some(layout);
         self.sets = sets;
@@ -511,6 +569,10 @@ impl VtDecoder {
     }
 
     pub fn decode(&mut self, packet: &Packet) -> Result<Vec<Frame>> {
+        if self.codec == Codec::Av1 {
+            let key = ((self.seq >> 31) as u32, (self.seq & 0x7fff_ffff) as i32);
+            return self.send(&packet.data, packet.pts, Some(key));
+        }
         let nals = self.framing.split(&packet.data)?;
         if self.layout.is_none() {
             let sets: Vec<Vec<u8>> = nals
@@ -533,6 +595,10 @@ impl VtDecoder {
             Framing::Length(4) => Cow::Borrowed(packet.data.as_slice()),
             _ => Cow::Owned(nal::length_prefix(&nals)),
         };
+        self.send(&sample, packet.pts, key)
+    }
+
+    fn send(&mut self, sample: &[u8], pts: i64, key: Option<Key>) -> Result<Vec<Frame>> {
         if self.session.is_none() {
             let layout = self
                 .layout
@@ -546,8 +612,8 @@ impl VtDecoder {
         let key = key.ok_or_else(|| Error::Invalid("a picture without its first slice".into()))?;
         let seq = self.seq;
         self.seq += 1;
-        session.submit(&sample, seq)?;
-        self.in_flight.push((seq, packet.pts, key));
+        session.submit(sample, seq)?;
+        self.in_flight.push((seq, pts, key));
         if self.in_flight.len() > IN_FLIGHT {
             session.wait();
         }

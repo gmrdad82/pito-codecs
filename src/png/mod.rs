@@ -1,9 +1,11 @@
+mod encode;
 mod filter;
 mod inflate;
 #[cfg(test)]
 mod tests;
 
 use crate::media::{self, Error, Result};
+pub use encode::encode;
 use filter::{Simd, unfilter};
 
 const SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];

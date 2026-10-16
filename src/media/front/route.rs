@@ -109,6 +109,7 @@ impl Caps {
             Route::Cpu if codec == Codec::Hevc && dir == Direction::Encode => {
                 "HEVC encodes on the GPU only".to_string()
             }
+            Route::Cpu if codec == Codec::Av1 => "AV1 decodes on the GPU only".to_string(),
             Route::Cpu => format!("no CPU {codec} {what} in this build"),
             Route::Ffmpeg => match (&self.ffmpeg, &self.ffmpeg_missing) {
                 (Some(f), _) => format!("{} has no {codec} {what}", f.path.display()),
@@ -170,6 +171,13 @@ fn pick(
 ) -> Result<Picked> {
     let mut reasons = Vec::new();
     for (route, c) in tries {
+        if c == Codec::Av1 && dir == Direction::Encode && route != Route::Ffmpeg {
+            let why = format!("AV1 encode isn't offered on the {route}");
+            if !reasons.contains(&why) {
+                reasons.push(why);
+            }
+            continue;
+        }
         if route == Route::Gpu && (c == Codec::Aac || (c == Codec::Vp9 && dir == Direction::Encode))
         {
             continue;

@@ -3,7 +3,9 @@ mod encode;
 mod order;
 mod planes;
 
-use objc2_core_media::{CMVideoCodecType, kCMVideoCodecType_H264, kCMVideoCodecType_HEVC};
+use objc2_core_media::{
+    CMVideoCodecType, kCMVideoCodecType_AV1, kCMVideoCodecType_H264, kCMVideoCodecType_HEVC,
+};
 use objc2_core_video::{
     CVImageBuffer, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
     CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPlaneCount, CVPixelBufferLockBaseAddress,
@@ -26,6 +28,7 @@ fn codec_type(codec: Codec) -> Result<CMVideoCodecType> {
     match codec {
         Codec::H264 => Ok(kCMVideoCodecType_H264),
         Codec::Hevc => Ok(kCMVideoCodecType_HEVC),
+        Codec::Av1 => Ok(kCMVideoCodecType_AV1),
         Codec::Aac | Codec::Vp9 | Codec::Opus | Codec::Mp3 => {
             Err(Error::Unsupported(format!("{codec:?} on VideoToolbox")))
         }
@@ -36,6 +39,7 @@ fn codec_type(codec: Codec) -> Result<CMVideoCodecType> {
 fn label(codec: Codec) -> &'static str {
     match codec {
         Codec::Hevc => "VideoToolbox HEVC",
+        Codec::Av1 => "VideoToolbox AV1",
         _ => "VideoToolbox H.264",
     }
 }
@@ -98,7 +102,7 @@ impl Drop for Locked<'_> {
 
 pub fn available() -> Vec<(Codec, Direction)> {
     let mut out = Vec::new();
-    for codec in [Codec::H264, Codec::Hevc] {
+    for codec in [Codec::H264, Codec::Hevc, Codec::Av1] {
         if decode::hardware(codec) {
             out.push((codec, Direction::Decode));
         }

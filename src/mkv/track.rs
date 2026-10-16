@@ -184,6 +184,7 @@ impl Track {
             "hevc" => Some(Codec::Hevc),
             "aac" => Some(Codec::Aac),
             "vp9" => Some(Codec::Vp9),
+            "av1" => Some(Codec::Av1),
             "opus" => Some(Codec::Opus),
             "ac3" => Some(Codec::Ac3),
             "eac3" => Some(Codec::Eac3),
