@@ -41,6 +41,8 @@ pub const VAProfileHEVCMain: VAProfile = 17;
 pub const VAProfileHEVCMain10: VAProfile = 18;
 pub const VAProfileVP9Profile0: VAProfile = 19;
 pub const VAProfileVP9Profile2: VAProfile = 21;
+pub const VAProfileAV1Profile0: VAProfile = 32;
+pub const VAProfileAV1Profile1: VAProfile = 33;
 pub const VAEntrypointVLD: VAEntrypoint = 1;
 
 pub const VAConfigAttribRTFormat: VAConfigAttribType = 0;

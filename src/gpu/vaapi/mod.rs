@@ -345,6 +345,7 @@ fn profiles_for(codec: Codec) -> &'static [ffi::VAProfile] {
         ],
         Codec::Hevc => &[ffi::VAProfileHEVCMain, ffi::VAProfileHEVCMain10],
         Codec::Vp9 => &[ffi::VAProfileVP9Profile0, ffi::VAProfileVP9Profile2],
+        Codec::Av1 => &[ffi::VAProfileAV1Profile0, ffi::VAProfileAV1Profile1],
         Codec::Aac | Codec::Opus | Codec::Mp3 => &[],
         Codec::Ac3 | Codec::Eac3 => &[],
     }
@@ -385,14 +386,18 @@ fn check_profile(display: Option<&Device>, codec: Codec, direction: Direction) -
 
 pub fn available() -> Vec<(Codec, Direction)> {
     let mut out = Vec::new();
-    for codec in [Codec::H264, Codec::Hevc, Codec::Vp9] {
+    for codec in [Codec::H264, Codec::Hevc, Codec::Vp9, Codec::Av1] {
         for direction in [Direction::Decode, Direction::Encode] {
-            if check_profile(None, codec, direction).is_ok() {
+            if offered(codec, direction) && check_profile(None, codec, direction).is_ok() {
                 out.push((codec, direction));
             }
         }
     }
     out
+}
+
+fn offered(codec: Codec, _direction: Direction) -> bool {
+    codec != Codec::Av1
 }
 
 pub fn decoder(codec: Codec, extradata: &[u8]) -> Result<Box<dyn DecoderBackend>> {
@@ -408,6 +413,11 @@ pub fn decoder_on(
     #[cfg(feature = "vp9")]
     if codec == Codec::Vp9 {
         return Ok(Box::new(vp9::Vp9Decoder::on(display.cloned(), held)?));
+    }
+    if codec == Codec::Av1 {
+        return Err(Error::Unsupported(
+            "VA-API AV1 decode is not built in".into(),
+        ));
     }
     Ok(Box::new(VaDecoder::on(
         display.cloned(),
