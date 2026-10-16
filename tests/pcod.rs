@@ -248,10 +248,13 @@ fn a_signal_stops_the_conversion_and_leaves_nothing() {
     while partials(&folder).is_empty() && started.elapsed().as_secs() < 20 {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    Command::new("kill")
-        .args(["-TERM", &child.id().to_string()])
-        .status()
-        .unwrap();
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    let pid = i32::try_from(child.id()).unwrap();
+    unsafe {
+        kill(pid, 15);
+    }
     let out = child.wait_with_output().unwrap();
     let stderr = text(&out.stderr);
     if out.status.code() == Some(0) {
