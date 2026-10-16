@@ -21,7 +21,13 @@ pub mod mp4;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 
-#[cfg(any(feature = "h264", feature = "hevc", feature = "gpu", feature = "aac"))]
+#[cfg(any(
+    feature = "h264",
+    feature = "hevc",
+    feature = "gpu",
+    feature = "aac",
+    feature = "av1"
+))]
 #[cfg_attr(
     not(all(
         feature = "h264",
@@ -44,6 +50,9 @@ pub mod opus;
 
 #[cfg(feature = "vp9")]
 pub mod vp9;
+
+#[cfg(feature = "av1")]
+pub mod av1;
 
 #[cfg(feature = "webp")]
 pub mod webp;

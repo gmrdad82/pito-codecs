@@ -23,11 +23,14 @@ The codecs here are written in Rust. Parts are adapted from permissively license
 | [zune-png](https://github.com/etemesi254/zune-image) | MIT OR Apache-2.0 OR Zlib (Caleb Etemesi) | 0.4.10, `aaf40839ed2596fa83091ccfb49629eb5d8efd91` | The scanline de-filters with their SSE2 and SSE4.1 kernels, the chunk checks, bit unpacking, palette and tRNS expansion and Adam7 geometry in `src/png/`; the RGBA row loop is new. |
 | [zune-inflate](https://github.com/etemesi254/zune-image) | MIT OR Apache-2.0 OR Zlib (Caleb Etemesi), a port of [libdeflate](https://github.com/ebiggers/libdeflate) (MIT) | 0.2.54, `69502ce83fdfecdd0beefd677e2abb3781b29d98` | The whole-buffer zlib and deflate decoder in `src/png/inflate.rs`: decode tables, fast and slow loops, match copies. |
 | [adler2](https://github.com/oyvindln/adler2) | 0BSD OR MIT OR Apache-2.0 | 2.0.1, `89a031a0f42eeff31c70dc598b398cbf31f1680f` | The four-lane Adler-32 in `src/png/inflate.rs`. |
+| [cros-codecs](https://github.com/chromeos/cros-codecs) | BSD-3-Clause (The ChromiumOS Authors) | `5ff6d693ffae0b36935b8fc13092c733b4c2646f` | The AV1 OBU, sequence, frame header and tile group parser in `src/av1/` and the VA-API AV1 picture and tile parameter fill in `src/gpu/vaapi/av1.rs`. |
+| [libva](https://github.com/intel/libva) `va_dec_av1.h` | MIT (Intel) | libva 2.23 | The VA-API AV1 decode structures in `src/gpu/vaapi/av1.rs`. |
 
 ## Specifications
 
 - The ITU-T H.264 and H.265 Recommendations, and the ISO/IEC 14496 parts for AAC and the MP4 file format.
 - The VP9 Bitstream and Decoding Process Specification (v0.6, WebM project).
+- The AV1 Bitstream and Decoding Process Specification (AOMedia, v1.0.0 with Errata 1), against which the cros-codecs parser port in `src/av1/` was checked.
 - The VP Codec ISO Media File Format Binding (v1.0, WebM project) for the `vp09` sample entry and its `vpcC` box, and the WebM project's VP9 levels for the level it carries.
 - RFC 6716 and RFC 8251 (Opus), RFC 7845 (Ogg Opus), RFC 8794 and RFC 9559 (EBML and Matroska) and the WebM container guidelines.
 - RFC 9649 (WebP: the container, VP8L lossless and ALPH, written from it alone) and RFC 6386 (VP8 lossy) for `src/webp/`.

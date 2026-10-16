@@ -1,3 +1,6 @@
+#[cfg(feature = "av1")]
+#[allow(dead_code)]
+mod av1;
 mod encode;
 mod ffi;
 mod h264;
