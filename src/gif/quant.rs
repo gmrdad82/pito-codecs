@@ -1,17 +1,17 @@
 use super::{Error, Result};
 use crate::media::Rgba;
 use rayon::prelude::*;
-use std::sync::LazyLock;
 
 const LEVELS: usize = 64;
 const CELLS: usize = LEVELS * LEVELS * LEVELS;
-const ALPHA_CUT: u8 = 128;
+pub(crate) const ALPHA_CUT: u8 = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dither {
     None,
     Ordered,
     FloydSteinberg,
+    Sierra24A,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,7 +140,7 @@ impl Histogram {
         self.merge(&partial);
     }
 
-    fn add_bytes(&mut self, data: &[u8]) {
+    pub(crate) fn add_bytes(&mut self, data: &[u8]) {
         let bins = &mut self.bins[..];
         for p in data.chunks_exact(4) {
             if p[3] < ALPHA_CUT {
@@ -397,214 +397,5 @@ fn kmeans(points: &[Point], mut centers: Vec<[f32; 3]>, rounds: usize) -> Vec<[f
 crate::media::isa::dispatch! {
     fn nearest_lab(soa: &Soa, p: [f32; 3]) -> usize {
         soa.nearest(p)
-    }
-}
-
-static CELL_LAB: LazyLock<Vec<[f32; 3]>> = LazyLock::new(|| {
-    let level: Vec<f32> = (0..LEVELS)
-        .map(|v| to_linear(((v << 2) as f32 + 1.5) / 255.0))
-        .collect();
-    (0..CELLS)
-        .map(|i| linear_to_oklab(level[i >> 12], level[(i >> 6) & 63], level[i & 63]))
-        .collect()
-});
-
-pub(crate) struct Lut {
-    pub cells: Vec<u8>,
-}
-
-impl Lut {
-    pub fn new(palette: &Palette) -> Lut {
-        let centers: Vec<[f32; 3]> = palette
-            .colors
-            .iter()
-            .map(|c| c.map(|v| v as f32))
-            .map(srgb_f_to_oklab)
-            .collect();
-        let mut cells = vec![0u8; CELLS];
-        cells
-            .par_chunks_mut(SLAB)
-            .enumerate()
-            .for_each(|(br, out)| fill_slab(&centers, br, out));
-        Lut { cells }
-    }
-}
-
-const SLAB: usize = LEVELS * LEVELS * 4;
-
-crate::media::isa::dispatch! {
-    fn fill_slab(centers: &[[f32; 3]], br: usize, out: &mut [u8]) {
-        let labs = &CELL_LAB[br * SLAB..(br + 1) * SLAB];
-        let mut candidates: Vec<u8> = Vec::with_capacity(256);
-        let mut near = vec![0f32; centers.len()];
-        for bg in 0..16 {
-            for bb in 0..16 {
-                let block = |r: usize, g: usize, b: usize| (r << 12) | ((bg * 4 + g) << 6) | (bb * 4 + b);
-                let mut lo = [f32::MAX; 3];
-                let mut hi = [f32::MIN; 3];
-                for r in 0..4 {
-                    for g in 0..4 {
-                        for b in 0..4 {
-                            let p = labs[block(r, g, b)];
-                            for k in 0..3 {
-                                lo[k] = lo[k].min(p[k]);
-                                hi[k] = hi[k].max(p[k]);
-                            }
-                        }
-                    }
-                }
-                let mut bound = f32::MAX;
-                for (c, n) in centers.iter().zip(near.iter_mut()) {
-                    let mut low = 0.0;
-                    let mut high = 0.0;
-                    for k in 0..3 {
-                        let d = (lo[k] - c[k]).max(c[k] - hi[k]).max(0.0);
-                        low += d * d;
-                        let f = (c[k] - lo[k]).abs().max((c[k] - hi[k]).abs());
-                        high += f * f;
-                    }
-                    *n = low;
-                    bound = bound.min(high);
-                }
-                candidates.clear();
-                for (i, &n) in near.iter().enumerate() {
-                    if n <= bound {
-                        candidates.push(i as u8);
-                    }
-                }
-                for r in 0..4 {
-                    for g in 0..4 {
-                        for b in 0..4 {
-                            let at = block(r, g, b);
-                            let p = labs[at];
-                            let mut best = f32::MAX;
-                            let mut pick = 0;
-                            for &i in &candidates {
-                                let c = centers[i as usize];
-                                let x = c[0] - p[0];
-                                let y = c[1] - p[1];
-                                let z = c[2] - p[2];
-                                let d = x * x + y * y + z * z;
-                                if d < best {
-                                    best = d;
-                                    pick = i;
-                                }
-                            }
-                            out[at] = pick;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-const BAYER: [[u8; 8]; 8] = [
-    [0, 32, 8, 40, 2, 34, 10, 42],
-    [48, 16, 56, 24, 50, 18, 58, 26],
-    [12, 44, 4, 36, 14, 46, 6, 38],
-    [60, 28, 52, 20, 62, 30, 54, 22],
-    [3, 35, 11, 43, 1, 33, 9, 41],
-    [51, 19, 59, 27, 49, 17, 57, 25],
-    [15, 47, 7, 39, 13, 45, 5, 37],
-    [63, 31, 55, 23, 61, 29, 53, 21],
-];
-
-pub(crate) struct Mapper<'a> {
-    pub lut: &'a Lut,
-    pub palette: &'a [[u8; 3]],
-    pub dither: Dither,
-    pub transparent: u8,
-}
-
-impl Mapper<'_> {
-    pub fn map(&self, src: &Rgba, out: &mut [u8], err: &mut Vec<i16>) {
-        let w = src.width as usize;
-        if w == 0 || src.height == 0 {
-            return;
-        }
-        match self.dither {
-            Dither::FloydSteinberg => self.map_fs(src, out, err),
-            _ => {
-                let band = 16;
-                out.par_chunks_mut(w * band)
-                    .zip(src.data.par_chunks(w * 4 * band))
-                    .enumerate()
-                    .for_each(|(i, (o, s))| self.map_rows(s, o, w, i * band));
-            }
-        }
-    }
-
-    fn map_rows(&self, src: &[u8], out: &mut [u8], w: usize, y0: usize) {
-        let t = self.transparent;
-        let cells = &self.lut.cells[..];
-        if self.dither == Dither::None {
-            for (o, p) in out.iter_mut().zip(src.chunks_exact(4)) {
-                *o = if p[3] < ALPHA_CUT {
-                    t
-                } else {
-                    cells[cell(p[0], p[1], p[2])]
-                };
-            }
-            return;
-        }
-        let amp = (96.0 / (self.palette.len() as f32).cbrt()).round() as i32;
-        for (y, (orow, srow)) in out.chunks_mut(w).zip(src.chunks(w * 4)).enumerate() {
-            let brow = &BAYER[(y0 + y) & 7];
-            for (x, (o, p)) in orow.iter_mut().zip(srow.chunks_exact(4)).enumerate() {
-                if p[3] < ALPHA_CUT {
-                    *o = t;
-                    continue;
-                }
-                let d = ((brow[x & 7] as i32 * 2 - 63) * amp) >> 7;
-                let r = (p[0] as i32 + d).clamp(0, 255) as u8;
-                let g = (p[1] as i32 + d).clamp(0, 255) as u8;
-                let b = (p[2] as i32 + d).clamp(0, 255) as u8;
-                *o = cells[cell(r, g, b)];
-            }
-        }
-    }
-
-    fn map_fs(&self, src: &Rgba, out: &mut [u8], err: &mut Vec<i16>) {
-        let w = src.width as usize;
-        let h = src.height as usize;
-        let n = (w + 2) * 3;
-        err.clear();
-        err.resize(n * 2, 0);
-        let (mut cur, mut nxt) = err.split_at_mut(n);
-        let cells = &self.lut.cells[..];
-        let pal = self.palette;
-        for y in 0..h {
-            nxt.fill(0);
-            let srow = &src.data[y * w * 4..(y + 1) * w * 4];
-            let orow = &mut out[y * w..(y + 1) * w];
-            let rev = y & 1 == 1;
-            for i in 0..w {
-                let x = if rev { w - 1 - i } else { i };
-                let p = &srow[x * 4..x * 4 + 4];
-                if p[3] < ALPHA_CUT {
-                    orow[x] = self.transparent;
-                    continue;
-                }
-                let e = (x + 1) * 3;
-                let want = [
-                    (p[0] as i32 + cur[e] as i32).clamp(0, 255),
-                    (p[1] as i32 + cur[e + 1] as i32).clamp(0, 255),
-                    (p[2] as i32 + cur[e + 2] as i32).clamp(0, 255),
-                ];
-                let idx = cells[cell(want[0] as u8, want[1] as u8, want[2] as u8)];
-                orow[x] = idx;
-                let got = pal[idx as usize];
-                let (fwd, back) = if rev { (e - 3, e + 3) } else { (e + 3, e - 3) };
-                for c in 0..3 {
-                    let d = want[c] - got[c] as i32;
-                    cur[fwd + c] = (cur[fwd + c] as i32 + d * 7 / 16).clamp(-255, 255) as i16;
-                    nxt[back + c] += (d * 3 / 16) as i16;
-                    nxt[e + c] += (d * 5 / 16) as i16;
-                    nxt[fwd + c] += (d / 16) as i16;
-                }
-            }
-            std::mem::swap(&mut cur, &mut nxt);
-        }
     }
 }

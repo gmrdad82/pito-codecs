@@ -31,7 +31,7 @@ The codecs here are written in Rust. Parts are adapted from permissively license
 - The VP Codec ISO Media File Format Binding (v1.0, WebM project) for the `vp09` sample entry and its `vpcC` box, and the WebM project's VP9 levels for the level it carries.
 - RFC 6716 and RFC 8251 (Opus), RFC 7845 (Ogg Opus), RFC 8794 and RFC 9559 (EBML and Matroska) and the WebM container guidelines.
 - RFC 9649 (WebP: the container, VP8L lossless and ALPH, written from it alone) and RFC 6386 (VP8 lossy) for `src/webp/`.
-- CompuServe's GIF89a specification (1990), the only source for `src/gif/`.
+- CompuServe's GIF89a specification (1990), the source for `src/gif/`; the encoder's frame differencing (the changed-pixel tolerance, the settle limit near moving blocks, the whole-frame redraw on a slow drift), its clamped Sierra-2-4A error diffusion and its 7-bit nearest-colour table follow pconv v1.0.1 (`8879614b928b8fdde500a16376b85a2c95551dc9`, MIT, same author).
 - RFC 1950 and RFC 1951 (zlib and deflate) and the W3C PNG specification for `src/png/`; Microsoft's RIFF WAVE format notes, the only source for `src/media/wav.rs`.
 - ATSC A/52 and ETSI TS 102 366 (AC-3 and E-AC-3), which oxideav-ac3 follows; the KBD window in `src/ac3/` is computed from the A/52 definition.
 - ITU-R BS.1770-4 and EBU Tech 3341 and 3342 (loudness), and ITU-R BT.601, BT.709 and BT.2020 (colour).

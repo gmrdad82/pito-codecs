@@ -1,9 +1,32 @@
 use super::lzw::LzwEncoder;
-use super::quant::{Dither, Histogram, Lut, Mapper, Palette};
+use super::quant::{ALPHA_CUT, Dither, Histogram, Palette};
 use super::{Error, Result};
 use crate::media::Rgba;
 use rayon::prelude::*;
 use std::cell::RefCell;
+use std::collections::VecDeque;
+
+pub const TOLERANCE: u8 = 12;
+pub const BEST_TOLERANCE: u8 = 4;
+pub const REDRAW_PERCENT: u8 = 20;
+
+const BLOCK: usize = 8;
+const DRIFT: i32 = 2;
+const SETTLE: u8 = 4;
+const ERROR_LIMIT: i32 = 16;
+const NEAREST_BITS: u32 = 7;
+const UNSET: u16 = u16::MAX;
+
+const BAYER: [[u8; 8]; 8] = [
+    [0, 32, 8, 40, 2, 34, 10, 42],
+    [48, 16, 56, 24, 50, 18, 58, 26],
+    [12, 44, 4, 36, 14, 46, 6, 38],
+    [60, 28, 52, 20, 62, 30, 54, 22],
+    [3, 35, 11, 43, 1, 33, 9, 41],
+    [51, 19, 59, 27, 49, 17, 57, 25],
+    [15, 47, 7, 39, 13, 45, 5, 37],
+    [63, 31, 55, 23, 61, 29, 53, 21],
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaletteMode {
@@ -18,25 +41,32 @@ pub struct EncodeOptions {
     pub palette: PaletteMode,
     pub loop_count: Option<u16>,
     pub diff: bool,
+    pub tolerance: u8,
+    pub redraw_percent: u8,
 }
 
 impl Default for EncodeOptions {
     fn default() -> Self {
         EncodeOptions {
             colors: 256,
-            dither: Dither::FloydSteinberg,
+            dither: Dither::Sierra24A,
             palette: PaletteMode::Global,
             loop_count: Some(0),
             diff: true,
+            tolerance: TOLERANCE,
+            redraw_percent: REDRAW_PERCENT,
         }
     }
 }
 
-struct Mapped {
-    idx: Vec<u8>,
-    palette: Option<Palette>,
-    alpha: bool,
-    delay: u16,
+pub fn delay_cs(frame: u64, fps_num: u32, fps_den: u32) -> u16 {
+    if fps_num == 0 || fps_den == 0 {
+        return 0;
+    }
+    let (num, den) = (u128::from(fps_num), u128::from(fps_den));
+    let at = |n: u128| (n * 100 * den * 2 + num) / (num * 2);
+    let n = u128::from(frame);
+    (at(n + 1) - at(n)).min(u128::from(u16::MAX)) as u16
 }
 
 struct Record {
@@ -49,38 +79,87 @@ struct Record {
     body: Vec<u8>,
 }
 
+struct Look {
+    palette: Palette,
+    colors: [u32; 256],
+}
+
+impl Look {
+    fn new(palette: Palette) -> Look {
+        let colors = packed_colors(&palette);
+        Look { palette, colors }
+    }
+}
+
+struct Nearest {
+    cells: Vec<u16>,
+}
+
+impl Nearest {
+    fn new() -> Nearest {
+        Nearest {
+            cells: vec![UNSET; 1 << (3 * NEAREST_BITS)],
+        }
+    }
+
+    fn reset(&mut self) {
+        self.cells.fill(UNSET);
+    }
+
+    fn find(&mut self, palette: &[[u8; 3]], c: [i32; 3]) -> u8 {
+        let shift = 8 - NEAREST_BITS;
+        let bin = ((c[0] as usize >> shift) << (2 * NEAREST_BITS))
+            | ((c[1] as usize >> shift) << NEAREST_BITS)
+            | (c[2] as usize >> shift);
+        let found = self.cells[bin];
+        if found != UNSET {
+            return found as u8;
+        }
+        let mut best = 0;
+        let mut distance = i32::MAX;
+        for (i, p) in palette.iter().enumerate() {
+            let (dr, dg, db) = (p[0] as i32 - c[0], p[1] as i32 - c[1], p[2] as i32 - c[2]);
+            let d = dr * dr + dg * dg + db * db;
+            if d < distance {
+                (best, distance) = (i, d);
+            }
+        }
+        self.cells[bin] = best as u16;
+        best as u8
+    }
+}
+
+struct Area {
+    rect: (usize, usize, usize, usize),
+    whole: bool,
+}
+
 pub struct Encoder {
     width: usize,
     height: usize,
     opts: EncodeOptions,
-    global: Option<(Palette, Lut)>,
+    global: Option<Look>,
     out: Vec<u8>,
     started: bool,
-    batch: Vec<(Rgba, u16)>,
-    pending: Option<Mapped>,
-    carry: Option<Rgba>,
-    prev: Option<Rgba>,
+    queue: VecDeque<(Rgba, u16, bool)>,
+    frames: u64,
+    prev_alpha: bool,
+    reference: Vec<u8>,
+    changed: Vec<bool>,
+    distances: Vec<u8>,
     canvas: Vec<u32>,
-    held: Option<Record>,
+    hot: Vec<bool>,
+    near: Vec<bool>,
+    drift: Vec<[i32; 3]>,
+    errors: Vec<[i32; 3]>,
+    nearest: Nearest,
+    records: Vec<Record>,
     spare: Vec<Vec<u8>>,
+    hist: Option<Histogram>,
 }
 
 thread_local! {
     static LZW: RefCell<LzwEncoder> = RefCell::new(LzwEncoder::default());
-    static ERR: RefCell<Vec<i16>> = const { RefCell::new(Vec::new()) };
-    static HIST: RefCell<Option<Histogram>> = const { RefCell::new(None) };
-}
-
-fn keep(slot: &mut Option<Rgba>, from: &Rgba) {
-    match slot {
-        Some(r) => {
-            r.width = from.width;
-            r.height = from.height;
-            r.data.clear();
-            r.data.extend_from_slice(&from.data);
-        }
-        None => *slot = Some(from.clone()),
-    }
 }
 
 fn batch_size() -> usize {
@@ -112,12 +191,23 @@ fn check_frame(frame: &Rgba, width: usize, height: usize) -> Result<()> {
     Ok(())
 }
 
+fn has_alpha(frame: &Rgba) -> bool {
+    frame
+        .data
+        .par_chunks(1 << 16)
+        .any(|c| c.chunks_exact(4).any(|p| p[3] < ALPHA_CUT))
+}
+
 fn packed_colors(p: &Palette) -> [u32; 256] {
     let mut t = [0u32; 256];
     for (d, c) in t.iter_mut().zip(p.colors()) {
         *d = 0xFF00_0000 | c[0] as u32 | (c[1] as u32) << 8 | (c[2] as u32) << 16;
     }
     t
+}
+
+fn global_palette(frames: &[&Rgba], colors: usize) -> Palette {
+    Palette::from_frames(frames, colors.clamp(2, 256).min(255))
 }
 
 impl Encoder {
@@ -127,20 +217,29 @@ impl Encoder {
             colors: opts.colors.clamp(2, 256),
             ..opts
         };
+        let (w, h) = (width as usize, height as usize);
         Ok(Encoder {
-            width: width as usize,
-            height: height as usize,
+            width: w,
+            height: h,
             opts,
             global: None,
             out: Vec::new(),
             started: false,
-            batch: Vec::new(),
-            pending: None,
-            carry: None,
-            prev: None,
-            canvas: vec![0; width as usize * height as usize],
-            held: None,
+            queue: VecDeque::new(),
+            frames: 0,
+            prev_alpha: false,
+            reference: vec![0; w * h * 4],
+            changed: vec![false; w * h],
+            distances: vec![0; w * h],
+            canvas: vec![0; w * h],
+            hot: Vec::new(),
+            near: Vec::new(),
+            drift: Vec::new(),
+            errors: Vec::new(),
+            nearest: Nearest::new(),
+            records: Vec::new(),
             spare: Vec::new(),
+            hist: None,
         })
     }
 
@@ -152,8 +251,7 @@ impl Encoder {
     ) -> Result<Encoder> {
         let mut e = Encoder::new(width, height, opts)?;
         let palette = Palette::new(palette.colors()[..palette.len().min(255)].to_vec())?;
-        let lut = Lut::new(&palette);
-        e.global = Some((palette, lut));
+        e.global = Some(Look::new(palette));
         Ok(e)
     }
 
@@ -161,33 +259,52 @@ impl Encoder {
         self.opts.colors.min(255)
     }
 
+    fn needs_palette(&self) -> bool {
+        self.opts.palette == PaletteMode::Global && self.global.is_none()
+    }
+
     pub fn push(&mut self, frame: Rgba, delay_cs: u16) -> Result<()> {
         check_frame(&frame, self.width, self.height)?;
-        self.batch.push((frame, delay_cs));
-        if self.batch.len() >= batch_size() {
-            self.flush_batch(false);
+        let alpha = has_alpha(&frame);
+        self.queue.push_back((frame, delay_cs, alpha));
+        if self.needs_palette() {
+            if self.queue.len() < batch_size() {
+                return Ok(());
+            }
+            self.palette_from_queue();
+        }
+        while self.queue.len() >= 2 {
+            self.step();
         }
         Ok(())
     }
 
-    fn flush_batch(&mut self, last: bool) {
-        let mut batch = std::mem::take(&mut self.batch);
-        let refs: Vec<(&Rgba, u16)> = batch.iter().map(|(f, d)| (f, *d)).collect();
-        self.process(&refs, last);
-        drop(refs);
-        batch.clear();
-        self.batch = batch;
+    fn palette_from_queue(&mut self) {
+        let refs: Vec<&Rgba> = self.queue.iter().map(|q| &q.0).collect();
+        let palette = global_palette(&refs, self.max_colors());
+        self.global = Some(Look::new(palette));
+    }
+
+    fn step(&mut self) {
+        let Some((frame, delay, alpha)) = self.queue.pop_front() else {
+            return;
+        };
+        let next_alpha = self.queue.front().is_some_and(|q| q.2);
+        self.frame(&frame, delay, alpha, next_alpha);
     }
 
     pub fn finish(mut self) -> Vec<u8> {
-        self.flush_batch(true);
+        if self.needs_palette() && !self.queue.is_empty() {
+            self.palette_from_queue();
+        }
+        while !self.queue.is_empty() {
+            self.step();
+        }
         self.close()
     }
 
     fn close(mut self) -> Vec<u8> {
-        if let Some(r) = self.held.take() {
-            self.write(&r);
-        }
+        self.drain(true);
         if !self.started {
             self.header();
         }
@@ -195,165 +312,121 @@ impl Encoder {
         self.out
     }
 
-    fn process(&mut self, frames: &[(&Rgba, u16)], last: bool) {
-        if self.opts.palette == PaletteMode::Global && self.global.is_none() && !frames.is_empty() {
-            let refs: Vec<&Rgba> = frames.iter().map(|f| f.0).collect();
-            let palette = Palette::from_frames(&refs, self.max_colors());
-            let lut = Lut::new(&palette);
-            self.global = Some((palette, lut));
-        }
-        let n = self.width * self.height;
-        let mut bufs: Vec<Vec<u8>> = (0..frames.len())
-            .map(|_| self.spare.pop().unwrap_or_default())
-            .collect();
-        for b in bufs.iter_mut() {
-            b.resize(n, 0);
-        }
-        let colors = self.max_colors();
-        let dither = self.opts.dither;
-        let global = self.global.as_ref();
-        let mapped: Vec<Mapped> = frames
-            .par_iter()
-            .zip(bufs.into_par_iter())
-            .map(|(&(src, delay), mut idx)| {
-                let alpha = src.data.chunks_exact(4).any(|p| p[3] < 128);
-                let own;
-                let (palette, lut, local) = match global {
-                    Some((p, l)) => (p, l, None),
-                    None => {
-                        let mut h = HIST.take().unwrap_or_default();
-                        h.clear();
-                        h.add(src);
-                        let p = h.palette(colors);
-                        HIST.set(Some(h));
-                        let l = Lut::new(&p);
-                        own = (p, l);
-                        (&own.0, &own.1, Some(own.0.clone()))
-                    }
-                };
-                let mapper = Mapper {
-                    lut,
-                    palette: palette.colors(),
-                    dither,
-                    transparent: palette.len() as u8,
-                };
-                let mut err = ERR.take();
-                mapper.map(src, &mut idx, &mut err);
-                ERR.set(err);
-                Mapped {
-                    idx,
-                    palette: local,
-                    alpha,
-                    delay,
-                }
+    fn frame(&mut self, src: &Rgba, delay: u16, alpha: bool, next_alpha: bool) {
+        let (w, h) = (self.width, self.height);
+        let forced = self.frames == 0 || alpha || next_alpha || self.prev_alpha || !self.opts.diff;
+        self.frames += 1;
+        self.prev_alpha = alpha;
+        let area = if forced {
+            Some(Area {
+                rect: (0, 0, w, h),
+                whole: true,
             })
-            .collect();
-        let carry = self.carry.take();
-        let had_pending = self.pending.is_some();
-        let mut items: Vec<Mapped> = self.pending.take().into_iter().chain(mapped).collect();
-        let srcs: Vec<&Rgba> = carry
-            .iter()
-            .filter(|_| had_pending)
-            .chain(frames.iter().map(|f| f.0))
-            .collect();
-        let count = if last {
-            items.len()
         } else {
-            items.len().saturating_sub(1)
+            self.compare(&src.data)
         };
-        let alphas: Vec<bool> = items.iter().map(|m| m.alpha).collect();
-        let rest = items.split_off(count);
-        let mut prev = self.prev.take();
-        let mut records = Vec::with_capacity(count);
-        for (i, f) in items.into_iter().enumerate() {
-            let before = if i == 0 {
-                prev.as_ref()
-            } else {
-                Some(srcs[i - 1])
-            };
-            let next_alpha = alphas.get(i + 1).copied().unwrap_or(false);
-            records.push(self.diff(f, srcs[i], before, next_alpha));
+        let Some(area) = area else {
+            self.hold(delay);
+            return;
+        };
+        let local = match self.opts.palette {
+            PaletteMode::Global => None,
+            PaletteMode::PerFrame => Some(self.local_palette(src, area.rect)),
+        };
+        let mut idx = self.spare.pop().unwrap_or_default();
+        let Some(look) = local.as_ref().or(self.global.as_ref()) else {
+            return;
+        };
+        let t = look.palette.len() as u8;
+        if local.is_some() {
+            self.nearest.reset();
         }
-        if count > 0 {
-            keep(&mut prev, srcs[count - 1]);
-        }
-        drop(srcs);
-        self.prev = prev;
-        if let Some(m) = rest.into_iter().next() {
-            if count == 0 && had_pending {
-                self.carry = carry;
-            } else {
-                let mut buf = carry;
-                keep(&mut buf, frames[count - had_pending as usize].0);
-                self.carry = buf;
-            }
-            self.pending = Some(m);
-        }
-        let w = self.width;
-        records.par_iter_mut().for_each(|r| encode_body(r, w));
-        for r in records {
-            self.emit(r);
-        }
-    }
-
-    fn diff(&mut self, f: Mapped, src: &Rgba, prev: Option<&Rgba>, next_alpha: bool) -> Record {
-        let palette = f
-            .palette
-            .as_ref()
-            .unwrap_or_else(|| &self.global.as_ref().unwrap().0);
-        let t = palette.len() as u8;
-        let colors = packed_colors(palette);
-        let full = prev.is_none() || f.alpha || next_alpha || !self.opts.diff;
-        let mut idx = f.idx;
-        let w = self.width;
-        let rect = if full {
-            for (c, &i) in self.canvas.iter_mut().zip(&idx) {
-                *c = colors[i as usize];
-            }
-            (0, 0, w, self.height)
-        } else {
-            diff_rows(
-                &mut idx,
-                &mut self.canvas,
-                &src.data,
-                &prev.unwrap().data,
-                &colors,
+        let mut errors = std::mem::take(&mut self.errors);
+        quantize(
+            &Quant {
+                look,
+                dither: self.opts.dither,
                 t,
-                w,
-            )
-        };
+                width: w,
+                rect: area.rect,
+                whole: area.whole,
+            },
+            &src.data,
+            &self.changed,
+            &mut self.reference,
+            &mut self.canvas,
+            &mut errors,
+            &mut self.nearest,
+            &mut idx,
+        );
+        self.errors = errors;
         if next_alpha {
             self.canvas.fill(0);
         }
-        Record {
-            rect,
+        self.records.push(Record {
+            rect: area.rect,
             idx,
-            palette: f.palette,
+            palette: local.map(|l| l.palette),
             transparent: t,
             disposal: if next_alpha { 2 } else { 1 },
-            delay: f.delay,
+            delay,
             body: Vec::new(),
+        });
+        if self.records.len() > batch_size() {
+            self.drain(false);
         }
     }
 
-    fn emit(&mut self, mut r: Record) {
-        if r.rect.2 == 0 {
-            if let Some(h) = self.held.as_mut()
-                && let Some(d) = h.delay.checked_add(r.delay)
-            {
-                h.delay = d;
-                self.spare.push(r.idx);
-                return;
-            }
-            r.rect = (0, 0, 1, 1);
-            r.idx[0] = r.transparent;
-            encode_body(&mut r, self.width);
+    fn local_palette(&mut self, src: &Rgba, rect: (usize, usize, usize, usize)) -> Look {
+        let mut h = self.hist.take().unwrap_or_default();
+        h.clear();
+        let (x, y, w, rows) = rect;
+        for row in y..y + rows {
+            let at = (row * self.width + x) * 4;
+            h.add_bytes(&src.data[at..at + w * 4]);
         }
-        if let Some(h) = self.held.take() {
-            self.write(&h);
-            self.spare.push(h.idx);
+        let p = h.palette(self.max_colors());
+        self.hist = Some(h);
+        Look::new(p)
+    }
+
+    fn hold(&mut self, delay: u16) {
+        if let Some(r) = self.records.last_mut()
+            && let Some(d) = r.delay.checked_add(delay)
+        {
+            r.delay = d;
+            return;
         }
-        self.held = Some(r);
+        let (palette, t) = match &self.global {
+            Some(g) => (None, g.palette.len() as u8),
+            None => (Palette::new(vec![[0, 0, 0]]).ok(), 1),
+        };
+        let mut idx = self.spare.pop().unwrap_or_default();
+        idx.clear();
+        idx.push(t);
+        self.records.push(Record {
+            rect: (0, 0, 1, 1),
+            idx,
+            palette,
+            transparent: t,
+            disposal: 1,
+            delay,
+            body: Vec::new(),
+        });
+    }
+
+    fn drain(&mut self, last: bool) {
+        self.records
+            .par_iter_mut()
+            .filter(|r| r.body.is_empty())
+            .for_each(encode_body);
+        let keep = if last { None } else { self.records.pop() };
+        let records = std::mem::take(&mut self.records);
+        for r in &records {
+            self.write(r);
+        }
+        self.spare.extend(records.into_iter().map(|r| r.idx));
+        self.records.extend(keep);
     }
 
     fn header(&mut self) {
@@ -363,7 +436,8 @@ impl Encoder {
         o.extend_from_slice(&(self.width as u16).to_le_bytes());
         o.extend_from_slice(&(self.height as u16).to_le_bytes());
         match &self.global {
-            Some((p, _)) => {
+            Some(g) => {
+                let p = &g.palette;
                 let bits = bits_for(p.len() + 1);
                 o.push(0x80 | 0x70 | (bits - 1));
                 o.push(p.len() as u8);
@@ -407,6 +481,246 @@ impl Encoder {
         }
         o.extend_from_slice(&r.body);
     }
+
+    fn compare(&mut self, src: &[u8]) -> Option<Area> {
+        let (width, height) = (self.width, self.height);
+        let columns = width.div_ceil(BLOCK);
+        let rows = height.div_ceil(BLOCK);
+        let tolerance = self.opts.tolerance;
+        self.hot.clear();
+        self.hot.resize(columns * rows, false);
+        self.drift.clear();
+        self.drift.resize(columns * rows, [0; 3]);
+        self.distances
+            .par_chunks_mut(width * BLOCK)
+            .zip(self.hot.par_chunks_mut(columns))
+            .zip(self.drift.par_chunks_mut(columns))
+            .zip(
+                src.par_chunks(width * BLOCK * 4)
+                    .zip(self.reference.par_chunks(width * BLOCK * 4)),
+            )
+            .for_each(|(((dist, hot), drift), (s, r))| {
+                measure(dist, hot, drift, s, r, width, tolerance)
+            });
+        let drifting: usize = (0..rows)
+            .map(|block_row| {
+                let tall = BLOCK.min(height - block_row * BLOCK) as i32;
+                (0..columns)
+                    .filter(|&block_column| {
+                        let wide = BLOCK.min(width - block_column * BLOCK) as i32;
+                        let block = block_row * columns + block_column;
+                        !self.hot[block]
+                            && self.drift[block]
+                                .iter()
+                                .any(|sum| sum.abs() > DRIFT * tall * wide)
+                    })
+                    .count()
+            })
+            .sum();
+        let whole = drifting * 100 > self.opts.redraw_percent as usize * columns * rows;
+        self.near.clear();
+        self.near.resize(columns * rows, false);
+        for block_row in 0..rows {
+            for block_column in 0..columns {
+                if !self.hot[block_row * columns + block_column] {
+                    continue;
+                }
+                for near_row in block_row.saturating_sub(1)..(block_row + 2).min(rows) {
+                    for near_column in
+                        block_column.saturating_sub(1)..(block_column + 2).min(columns)
+                    {
+                        self.near[near_row * columns + near_column] = true;
+                    }
+                }
+            }
+        }
+        let settle = tolerance / SETTLE;
+        let near = &self.near;
+        let bounds = self
+            .changed
+            .par_chunks_mut(width * BLOCK)
+            .zip(self.distances.par_chunks(width * BLOCK))
+            .enumerate()
+            .map(|(block_row, (changed, dist))| {
+                let near = &near[block_row * columns..(block_row + 1) * columns];
+                let (mut left, mut right, mut top, mut bottom) = (usize::MAX, 0, usize::MAX, 0);
+                for (row, (crow, drow)) in changed
+                    .chunks_exact_mut(width)
+                    .zip(dist.chunks_exact(width))
+                    .enumerate()
+                {
+                    let mut any = false;
+                    for (column, (c, &d)) in crow.iter_mut().zip(drow).enumerate() {
+                        let limit = if *c || near[column / BLOCK] {
+                            settle
+                        } else {
+                            tolerance
+                        };
+                        let moved = d > limit;
+                        *c = moved;
+                        if moved {
+                            any = true;
+                            left = left.min(column);
+                            right = right.max(column);
+                        }
+                    }
+                    if any {
+                        let y = block_row * BLOCK + row;
+                        top = top.min(y);
+                        bottom = y;
+                    }
+                }
+                (left, right, top, bottom)
+            })
+            .reduce(
+                || (usize::MAX, 0, usize::MAX, 0),
+                |a, b| (a.0.min(b.0), a.1.max(b.1), a.2.min(b.2), a.3.max(b.3)),
+            );
+        if whole {
+            return Some(Area {
+                rect: (0, 0, width, height),
+                whole: true,
+            });
+        }
+        let (left, right, top, bottom) = bounds;
+        (left <= right && top <= bottom).then_some(Area {
+            rect: (left, top, right - left + 1, bottom - top + 1),
+            whole: false,
+        })
+    }
+}
+
+crate::media::isa::dispatch! {
+    fn measure(
+        dist: &mut [u8],
+        hot: &mut [bool],
+        drift: &mut [[i32; 3]],
+        src: &[u8],
+        reference: &[u8],
+        width: usize,
+        tolerance: u8,
+    ) {
+        for ((drow, srow), rrow) in dist
+            .chunks_exact_mut(width)
+            .zip(src.chunks_exact(width * 4))
+            .zip(reference.chunks_exact(width * 4))
+        {
+            for (((d, s), r), (h, sum)) in drow
+                .chunks_mut(BLOCK)
+                .zip(srow.chunks(BLOCK * 4))
+                .zip(rrow.chunks(BLOCK * 4))
+                .zip(hot.iter_mut().zip(drift.iter_mut()))
+            {
+                let mut far = 0u8;
+                let mut acc = [0i32; 3];
+                for ((d, p), q) in d.iter_mut().zip(s.chunks_exact(4)).zip(r.chunks_exact(4)) {
+                    let v = p[0].abs_diff(q[0]).max(p[1].abs_diff(q[1])).max(p[2].abs_diff(q[2]));
+                    *d = v;
+                    far = far.max(v);
+                    for c in 0..3 {
+                        acc[c] += p[c] as i32 - q[c] as i32;
+                    }
+                }
+                if far > tolerance {
+                    *h = true;
+                }
+                for c in 0..3 {
+                    sum[c] += acc[c];
+                }
+            }
+        }
+    }
+}
+
+struct Quant<'a> {
+    look: &'a Look,
+    dither: Dither,
+    t: u8,
+    width: usize,
+    rect: (usize, usize, usize, usize),
+    whole: bool,
+}
+
+fn quantize(
+    q: &Quant,
+    src: &[u8],
+    changed: &[bool],
+    reference: &mut [u8],
+    canvas: &mut [u32],
+    errors: &mut Vec<[i32; 3]>,
+    nearest: &mut Nearest,
+    idx: &mut Vec<u8>,
+) {
+    let (x, y, w, h) = q.rect;
+    let palette = q.look.palette.colors();
+    let colors = &q.look.colors;
+    let diffuse = matches!(q.dither, Dither::FloydSteinberg | Dither::Sierra24A);
+    let amp = (96.0 / (palette.len() as f32).cbrt()).round() as i32;
+    idx.clear();
+    idx.reserve(w * h);
+    errors.clear();
+    errors.resize((w + 2) * 2, [0; 3]);
+    let (mut cur, mut nxt) = errors.split_at_mut(w + 2);
+    for row in y..y + h {
+        nxt.fill([0; 3]);
+        let bayer = &BAYER[row & 7];
+        for (i, column) in (x..x + w).enumerate() {
+            let at = row * q.width + column;
+            let p = &src[at * 4..at * 4 + 4];
+            if p[3] < ALPHA_CUT {
+                reference[at * 4..at * 4 + 4].copy_from_slice(p);
+                canvas[at] = 0;
+                idx.push(q.t);
+                continue;
+            }
+            let offset = match q.dither {
+                Dither::Ordered => [((bayer[column & 7] as i32 * 2 - 63) * amp) >> 7; 3],
+                Dither::None => [0; 3],
+                _ => cur[i + 1],
+            };
+            let wanted = [
+                (p[0] as i32 + offset[0]).clamp(0, 255),
+                (p[1] as i32 + offset[1]).clamp(0, 255),
+                (p[2] as i32 + offset[2]).clamp(0, 255),
+            ];
+            let shown = if q.whole || changed[at] {
+                reference[at * 4..at * 4 + 4].copy_from_slice(p);
+                let index = nearest.find(palette, wanted);
+                canvas[at] = colors[index as usize];
+                idx.push(index);
+                palette[index as usize].map(i32::from)
+            } else {
+                idx.push(q.t);
+                let c = canvas[at];
+                if c == 0 {
+                    wanted
+                } else {
+                    [
+                        (c & 0xFF) as i32,
+                        (c >> 8 & 0xFF) as i32,
+                        (c >> 16 & 0xFF) as i32,
+                    ]
+                }
+            };
+            if !diffuse {
+                continue;
+            }
+            for c in 0..3 {
+                let e = (wanted[c] - shown[c]).clamp(-ERROR_LIMIT, ERROR_LIMIT);
+                if q.dither == Dither::Sierra24A {
+                    cur[i + 2][c] += e / 2;
+                    nxt[i][c] += e / 4;
+                    nxt[i + 1][c] += e / 4;
+                } else {
+                    cur[i + 2][c] += e * 7 / 16;
+                    nxt[i][c] += e * 3 / 16;
+                    nxt[i + 1][c] += e * 5 / 16;
+                    nxt[i + 2][c] += e / 16;
+                }
+            }
+        }
+        std::mem::swap(&mut cur, &mut nxt);
+    }
 }
 
 fn table(o: &mut Vec<u8>, p: &Palette, bits: u8) {
@@ -416,9 +730,9 @@ fn table(o: &mut Vec<u8>, p: &Palette, bits: u8) {
     o.resize(o.len() + ((1usize << bits) - p.len()) * 3, 0);
 }
 
-fn encode_body(r: &mut Record, stride: usize) {
-    let (x, y, w, h) = r.rect;
-    if w == 0 {
+fn encode_body(r: &mut Record) {
+    let (_, _, w, h) = r.rect;
+    if w == 0 || h == 0 {
         return;
     }
     let entries = r
@@ -428,102 +742,10 @@ fn encode_body(r: &mut Record, stride: usize) {
         .max(r.transparent as usize)
         + 1;
     let min = bits_for(entries).max(2);
-    let idx = &r.idx;
-    let rows = (y..y + h).map(|row| &idx[row * stride + x..row * stride + x + w]);
     let mut body = std::mem::take(&mut r.body);
     body.clear();
-    LZW.with_borrow_mut(|l| l.encode(min, rows, &mut body));
+    LZW.with_borrow_mut(|l| l.encode(min, r.idx[..w * h].chunks_exact(w), &mut body));
     r.body = body;
-}
-
-fn diff_rows(
-    idx: &mut [u8],
-    canvas: &mut [u32],
-    src: &[u8],
-    prev: &[u8],
-    colors: &[u32; 256],
-    t: u8,
-    w: usize,
-) -> (usize, usize, usize, usize) {
-    let band = 16;
-    let boxes: Vec<(usize, usize, usize, usize)> = idx
-        .par_chunks_mut(w * band)
-        .zip(canvas.par_chunks_mut(w * band))
-        .zip(
-            src.par_chunks(w * 4 * band)
-                .zip(prev.par_chunks(w * 4 * band)),
-        )
-        .enumerate()
-        .map(|(i, ((ib, cb), (sb, pb)))| {
-            let (x0, y0, x1, y1) = diff_band(ib, cb, sb, pb, colors, t, w);
-            (x0, y0 + i * band, x1, y1 + i * band)
-        })
-        .collect();
-    let mut r = (usize::MAX, usize::MAX, 0, 0);
-    for b in boxes {
-        if b.2 > b.0 {
-            r = (r.0.min(b.0), r.1.min(b.1), r.2.max(b.2), r.3.max(b.3));
-        }
-    }
-    if r.0 == usize::MAX {
-        (0, 0, 0, 0)
-    } else {
-        (r.0, r.1, r.2 - r.0, r.3 - r.1)
-    }
-}
-
-crate::media::isa::dispatch! {
-    fn diff_band(
-        idx: &mut [u8],
-        canvas: &mut [u32],
-        src: &[u8],
-        prev: &[u8],
-        colors: &[u32; 256],
-        t: u8,
-        w: usize,
-    ) -> (usize, usize, usize, usize) {
-        let mut x0 = usize::MAX;
-        let mut x1 = 0;
-        let mut y0 = 0;
-        let mut y1 = 0;
-        for (y, ((irow, crow), (srow, prow))) in idx
-            .chunks_exact_mut(w)
-            .zip(canvas.chunks_exact_mut(w))
-            .zip(src.chunks_exact(w * 4).zip(prev.chunks_exact(w * 4)))
-            .enumerate()
-        {
-            let mut first = usize::MAX;
-            let mut lastx = 0;
-            for (x, ((i, c), (s, p))) in irow
-                .iter_mut()
-                .zip(crow.iter_mut())
-                .zip(srow.chunks_exact(4).zip(prow.chunks_exact(4)))
-                .enumerate()
-            {
-                let col = colors[*i as usize];
-                if s == p || col == *c {
-                    *i = t;
-                } else {
-                    *c = col;
-                    first = first.min(x);
-                    lastx = x;
-                }
-            }
-            if first != usize::MAX {
-                if x0 == usize::MAX {
-                    y0 = y;
-                }
-                x0 = x0.min(first);
-                x1 = x1.max(lastx + 1);
-                y1 = y + 1;
-            }
-        }
-        if x0 == usize::MAX {
-            (0, 0, 0, 0)
-        } else {
-            (x0, y0, x1, y1)
-        }
-    }
 }
 
 pub fn encode(frames: &[Rgba], delays_cs: &[u16], opts: EncodeOptions) -> Result<Vec<u8>> {
@@ -537,19 +759,16 @@ pub fn encode(frames: &[Rgba], delays_cs: &[u16], opts: EncodeOptions) -> Result
     let mut e = match opts.palette {
         PaletteMode::Global => {
             let refs: Vec<&Rgba> = frames.iter().collect();
-            let palette = Palette::from_frames(&refs, opts.colors.clamp(2, 256).min(255));
+            let palette = global_palette(&refs, opts.colors);
             Encoder::with_palette(first.width, first.height, opts, palette)?
         }
         PaletteMode::PerFrame => Encoder::new(first.width, first.height, opts)?,
     };
-    let delays: Vec<u16> = (0..frames.len())
-        .map(|i| delays_cs.get(i).copied().unwrap_or(10))
-        .collect();
-    let size = batch_size();
-    let refs: Vec<(&Rgba, u16)> = frames.iter().zip(delays).collect();
-    let chunks = refs.chunks(size).count();
-    for (i, chunk) in refs.chunks(size).enumerate() {
-        e.process(chunk, i + 1 == chunks);
+    let alphas: Vec<bool> = frames.par_iter().map(has_alpha).collect();
+    for (i, f) in frames.iter().enumerate() {
+        let delay = delays_cs.get(i).copied().unwrap_or(10);
+        let next_alpha = alphas.get(i + 1).copied().unwrap_or(false);
+        e.frame(f, delay, alphas[i], next_alpha);
     }
     Ok(e.close())
 }
