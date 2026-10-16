@@ -447,6 +447,50 @@ The Adler-32 in src/png/inflate.rs follows adler2 2.0.1
 licensed 0BSD OR MIT OR Apache-2.0; it is used under the 0BSD terms, which ask
 for no notice, and is credited here.
 
+The AV1 decode structures in src/gpu/vaapi/av1.rs are transcribed from libva's
+va_dec_av1.h (libva 2.23, https://github.com/intel/libva), Copyright (c) 2019
+Intel Corporation, under the same MIT terms as the libva notice above.
+
+The AV1 syntax parser in src/av1/ (OBU reader, sequence and frame headers with
+reference frame state, order hints, segmentation, loop filter, quantizer, delta,
+CDEF, loop restoration, global motion and film grain parameters, tile info and
+tile groups, and the subexp, uvlc and leb128 helpers) and the VA-API AV1
+picture and tile parameter fill in src/gpu/vaapi/av1.rs are adapted from
+cros-codecs (https://github.com/chromeos/cros-codecs, commit
+5ff6d693ffae0b36935b8fc13092c733b4c2646f: src/codec/av1/parser.rs, reader.rs,
+helpers.rs, src/decoder/stateless/av1.rs and av1/vaapi.rs). Changed: the bit
+reader is src/syntax/bits.rs, Annex B input and the encoder side are left out,
+indexing driven by the bitstream is checked, and film grain output, show
+existing frames and the surface handling are reworked for this package's
+VA-API session. It carries this notice:
+
+Copyright 2022 The ChromiumOS Authors
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors
+   may be used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
 The SHA-256 in src/bin/pcod/sha256.rs is adapted from the sha2 crate 0.10.9
 (https://github.com/RustCrypto/hashes, commit
 82c36a428f8d6f05f3bfccdedb243e9d1f85359d) by the RustCrypto Developers,
