@@ -1734,6 +1734,72 @@ impl Parser {
         Ok(())
     }
 
+    pub fn frame_refresh(&self, obu: &Obu) -> Result<Option<u32>> {
+        let mut r = Reader::new(obu.data);
+        let seq = self.sequence()?;
+        let id_len = if seq.frame_id_numbers_present_flag {
+            seq.additional_frame_id_length_minus_1 + seq.delta_frame_id_length_minus_2 + 3
+        } else {
+            0
+        };
+        let order_hint_bits = seq.order_hint_bits.max(0) as u32;
+        let dmi = &seq.decoder_model_info;
+        if seq.reduced_still_picture_header {
+            return Ok(Some(ALL_FRAMES));
+        }
+        if r.read_bit()? {
+            return Ok(None);
+        }
+        let frame_type = FrameType::from_bits(r.read_bits(2)?);
+        let frame_is_intra = matches!(frame_type, FrameType::IntraOnlyFrame | FrameType::KeyFrame);
+        let show_frame = r.read_bit()?;
+        if show_frame
+            && seq.decoder_model_info_present_flag
+            && !seq.timing_info.equal_picture_interval
+        {
+            r.read_bits(dmi.frame_presentation_time_length_minus_1 + 1)?;
+        }
+        if !show_frame {
+            r.read_bit()?;
+        }
+        if frame_type == FrameType::SwitchFrame || (frame_type == FrameType::KeyFrame && show_frame)
+        {
+            return Ok(Some(ALL_FRAMES));
+        }
+        let error_resilient_mode = r.read_bit()?;
+        r.read_bit()?;
+        let allow_screen_content_tools =
+            if seq.seq_force_screen_content_tools == SELECT_SCREEN_CONTENT_TOOLS {
+                r.read_bit()? as u32
+            } else {
+                seq.seq_force_screen_content_tools
+            };
+        if allow_screen_content_tools > 0 && seq.seq_force_integer_mv == SELECT_INTEGER_MV {
+            r.read_bit()?;
+        }
+        if seq.frame_id_numbers_present_flag {
+            r.read_bits(id_len)?;
+        }
+        r.read_bit()?;
+        r.read_bits(order_hint_bits)?;
+        if !(frame_is_intra || error_resilient_mode) {
+            r.read_bits(3)?;
+        }
+        if seq.decoder_model_info_present_flag && r.read_bit()? {
+            let count = seq.operating_points_cnt_minus_1 as usize + 1;
+            for op in seq.operating_points.iter().take(count) {
+                if op.decoder_model_present_for_this_op {
+                    let in_temporal_layer = (op.idc >> obu.header.temporal_id) & 1 != 0;
+                    let in_spatial_layer = (op.idc >> (obu.header.spatial_id + 8)) & 1 != 0;
+                    if op.idc == 0 || (in_temporal_layer && in_spatial_layer) {
+                        r.read_bits(u32::from(dmi.buffer_removal_time_length_minus_1) + 1)?;
+                    }
+                }
+            }
+        }
+        Ok(Some(r.read_bits(8)?))
+    }
+
     fn parse_uncompressed_frame_header(&mut self, obu: &Obu) -> Result<FrameHeaderObu> {
         let mut r = Reader::new(obu.data);
         let mut fh = FrameHeaderObu {
