@@ -708,13 +708,11 @@ impl Audio {
                 w.add_track(cfg)?
             }
             (Sink::Mkv(w), Encoder::Aac(e)) => {
-                priming = e.priming() as i64;
-                let mut cfg = mkv::TrackConfig::aac(e.extradata(), LEVEL_RATE, 2);
-                cfg.codec_delay = priming as u64 * 1_000_000_000 / LEVEL_RATE as u64;
-                w.add_track(cfg)?
+                w.add_track(mkv::TrackConfig::aac(e.extradata(), LEVEL_RATE, 2))?
             }
             #[cfg(feature = "opus")]
             (Sink::Mkv(w), Encoder::Opus(e)) => {
+                priming = e.pre_skip() as i64;
                 w.add_track(mkv::TrackConfig::opus(e.codec_private()))?
             }
             #[cfg(feature = "opus")]
@@ -752,7 +750,9 @@ impl Audio {
         match (sink, duration) {
             (Sink::Mp4(w), Some(d)) => w.push_timed(self.dst, p, d),
             (Sink::Mp4(w), None) => w.push(self.dst, p),
-            (Sink::Mkv(w), _) => w.push(self.dst, p),
+            (Sink::Mkv(w), _) => {
+                w.push_sample(self.dst, &p.data, p.pts - self.priming, None, p.keyframe)
+            }
         }
     }
 }
