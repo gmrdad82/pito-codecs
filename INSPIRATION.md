@@ -34,6 +34,7 @@ The codecs here are written in Rust. Parts are adapted from permissively license
 | [zimg](https://github.com/sekrit-twc/zimg) | WTFPL v2 (sekrit-twc) | `67e0603271c080e22c8429856dd4a8a56587e61e` | The resampling filter construction, Lanczos weights and BT.1886, BT.709 and sRGB transfer functions behind the linear-light resize in `src/filter/linear.rs`; the LUTs, banding and colour conversions are new. |
 | [fast_image_resize](https://github.com/Cykooz/fast_image_resize) | MIT OR Apache-2.0 (Kirill Kuzminykh) | 6.1.0, `ce36aeb20ed4a33805baa3c0ff4caff7cf163e19` | The interleaved RGBA f32 convolution layout with tap pairs per AVX2 register in `src/filter/linear.rs`, accumulating in f32 with FMA. |
 | pconv | MIT (Catalin Ilinca) | v1.0.1, `8879614b928b8fdde500a16376b85a2c95551dc9` | The join's copy test, its reasons and their wording, the letterbox fit and the colour rules in `src/media/front/join.rs` and `src/media/front/shape.rs`; the packet copy, timing and audio fill are new. |
+| pconv | MIT (Catalin Ilinca) | v1.0.1, `8879614b928b8fdde500a16376b85a2c95551dc9` | The loudness target, its limits and defaults, the YouTube preset and the silent-source refusal in `src/media/front/level.rs`; the two-pass levelling, limiter calibration and stream copy are new. |
 
 ## Specifications
 

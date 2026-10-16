@@ -493,6 +493,12 @@ impl LoudnessMeter {
             .map_or(f64::NEG_INFINITY, lufs)
     }
 
+    pub fn threshold(&self) -> f64 {
+        self.integrated
+            .mean_from(0)
+            .map_or(f64::NEG_INFINITY, |e| lufs(e) - 10.0)
+    }
+
     pub fn range(&self) -> f64 {
         let h = &self.range;
         let Some(start) = h.gate(-20.0) else {
