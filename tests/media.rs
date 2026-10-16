@@ -2458,6 +2458,9 @@ fn av1_in_mp4_mkv_and_webm_probes_and_refuses_cleanly_without_a_decoder() {
             assert_eq!(p.unsupported(), ["av1"], "{name}");
             let e = first_frame(&path, 180, &prefs).unwrap_err().to_string();
             assert!(e.contains("no GPU AV1 decoder"), "{name}: {e}");
+        } else {
+            let still = first_frame(&path, 180, &prefs);
+            assert!(still.is_ok(), "{name}: {:?}", still.err());
         }
     }
 }

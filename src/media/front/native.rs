@@ -56,6 +56,9 @@ pub fn cpu() -> Vec<(Codec, Direction)> {
         (Codec::Aac, Direction::Decode),
         (Codec::Aac, Direction::Encode),
     ];
+    if cfg!(feature = "av1") {
+        caps.push((Codec::Av1, Direction::Decode));
+    }
     if cfg!(feature = "mp3") {
         caps.push((Codec::Mp3, Direction::Decode));
     }
@@ -254,6 +257,8 @@ pub enum Decoder {
     },
     Hevc(Box<crate::hevc::Decoder>),
     Vp9(Box<crate::vp9::Decoder>),
+    #[cfg(feature = "av1")]
+    Av1(Box<crate::av1::cpu::Decoder>),
     Gpu(Box<crate::gpu::HwDecoder>),
 }
 
@@ -287,11 +292,6 @@ impl Decoder {
                 Ok(d) => {
                     let d = d.with_time_base(st.time_base);
                     return Ok((Decoder::Gpu(Box::new(d)), None));
-                }
-                Err(e) if codec == Codec::Av1 => {
-                    return Err(Error::Unsupported(format!(
-                        "no AV1 decoder on this machine ({e})"
-                    )));
                 }
                 Err(e) => {
                     let why = format!("the GPU decoder failed ({e}); decoding on the CPU");
@@ -353,11 +353,17 @@ impl Decoder {
                 dec.set_time_base(tb);
                 Ok(Decoder::Vp9(Box::new(dec)))
             }
-            (Some(Codec::Av1), _) => Err(Error::Unsupported(
-                "no AV1 decoder on this machine: AV1 decodes on the GPU only".to_string(),
-            )),
+            #[cfg(feature = "av1")]
+            (Some(Codec::Av1), _) => {
+                let mut dec = crate::av1::cpu::Decoder::with_threads(threads.max(1));
+                if !st.extradata.is_empty() {
+                    let _ = dec.configure(&st.extradata);
+                }
+                dec.set_time_base(tb);
+                Ok(Decoder::Av1(Box::new(dec)))
+            }
             _ => Err(Error::Unsupported(format!(
-                "our decoders read H.264, HEVC and VP9, not {}",
+                "our decoders read H.264, HEVC, VP9 and AV1, not {}",
                 st.name
             ))),
         }
@@ -388,6 +394,8 @@ impl Decoder {
             }
             Decoder::Hevc(dec) => dec.decode(p),
             Decoder::Vp9(dec) => dec.decode(p),
+            #[cfg(feature = "av1")]
+            Decoder::Av1(dec) => dec.decode(p),
             Decoder::Gpu(dec) => dec.decode(p),
         }
     }
@@ -397,6 +405,8 @@ impl Decoder {
             Decoder::H264 { dec, .. } => dec.flush(),
             Decoder::Hevc(dec) => dec.flush(),
             Decoder::Vp9(dec) => dec.flush(),
+            #[cfg(feature = "av1")]
+            Decoder::Av1(dec) => dec.flush(),
             Decoder::Gpu(dec) => dec.flush(),
         }
     }
@@ -414,6 +424,8 @@ impl Decoder {
         let (matrix, full_range) = match self {
             Decoder::H264 { dec, .. } => dec.color().map(|c| (c.matrix, c.full_range)),
             Decoder::Hevc(dec) => dec.color().map(|c| (c.matrix, c.full_range)),
+            #[cfg(feature = "av1")]
+            Decoder::Av1(dec) => dec.sequence().map(|s| (s.matrix, s.full_range)),
             Decoder::Vp9(_) | Decoder::Gpu(_) => None,
         }
         .unwrap_or((2, false));
