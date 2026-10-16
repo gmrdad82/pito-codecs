@@ -1,11 +1,11 @@
 ---
-title: "Probe, decode, encode and make MP4s from frames with pcod"
-description: "Look inside an MP4, decode it on the CPU or the GPU, encode it to H.264 or HEVC, and turn a folder of PNG frames and a WAV into an MP4 from the command line."
+title: "Probe, decode, encode, take stills and make MP4s from frames with pcod"
+description: "Look inside an MP4, decode it on the CPU or the GPU, encode it to H.264 or HEVC, and turn a folder of PNG frames and a WAV into an MP4, and take stills and contact sheets from the command line."
 sidebar:
   order: 1
 ---
 
-pcod is a small command line over the library. `probe` shows what is inside an MP4, `decode` decodes its whole video track and reports the speed, `encode` decodes, encodes and muxes a new MP4, copying the audio, and `frames` encodes a folder of PNG frames and a WAV into an MP4. Every option is in the [command reference](../../reference/cli/).
+pcod is a small command line over the library. `probe` shows what is inside an MP4, `decode` decodes its whole video track and reports the speed, `encode` decodes, encodes and muxes a new MP4, copying the audio, `frames` encodes a folder of PNG frames and a WAV into an MP4, and `stills` writes stills of a video as PNGs and a contact sheet. Every option is in the [command reference](../../reference/cli/).
 
 The outputs below are from a 10-second 1080p60 H.264 clip cut from NASA's public-domain "A Message of Resilience from the International Space Station", on a 16-core CPU and an AMD card through VA-API. Your speeds will differ.
 
@@ -91,6 +91,33 @@ These are the same 10 seconds of the NASA clip, written out as 1080p PNG frames.
 pcod: gap: the frames jump from 000001.png to 000003.png
 ```
 
+## Stills and contact sheets
+
+`stills` takes N evenly spaced stills (`--count`, 12 by default) or stills at given times (`--at`, comma separated: seconds, `m:ss` or `h:mm:ss`), each scaled to `--height` (360 by default) keeping its shape. `--out` writes `still-001.png`, `still-002.png`, ... into a folder, `--sheet` writes one contact sheet of `--rows` by `--cols` stills on black with `--pad` pixels (8 by default) between and around them, and you can give both. Without `--rows` and `--cols` the sheet is about square; with both and no `--count`, it takes rows times columns stills. Each still is the exact frame at its time; `--seek keyframe` takes the keyframe at or before it instead, which is faster on long GOPs. MP4, MOV, MKV and WebM work, on the GPU route first.
+
+```sh
+pcod stills clip.mp4 --count 24 --cols 6 --sheet sheet.png
+```
+
+```text
+     1.250 s  640x360
+     ...
+sheet  6x4 stills, 3896x1480  sheet.png
+24 stills in 0.37 s
+```
+
+`--json` prints one line instead, with each still's time (the frame shown), the time asked, its size and its PNG's path (null without `--out`), and the sheet:
+
+```sh
+pcod stills clip.mkv -n 6 --cols 3 --height 240 --seek keyframe --sheet sheet.png --json
+```
+
+```text
+{"file":"clip.mkv","height":240,"seek":"keyframe","stills":[{"index":0,"time":0.000000,"asked":1.666667,"width":426,"height":240,"path":null},...],"sheet":{"path":"sheet.png","width":1310,"height":504,"rows":2,"cols":3,"pad":8},"seconds":0.021}
+```
+
+A time past the end of the video stops with one line, `pcod: clip.mp4: 65.000 s is past the end of the video (20.000 s)`.
+
 ## When something fails
 
 A file pcod can't read, or a failing route, ends with one line on stderr and exit code 1:
@@ -101,4 +128,4 @@ pcod: missing.mp4: No such file or directory
 
 A command line it can't parse prints clap's error and usage on stderr with exit code 2; `pcod --help` and `pcod help <command>` print the full help.
 
-pcod's output is plain text for people; it has no JSON mode. For anything beyond these four commands, [use the library](../library/).
+pcod's output is plain text for people; only `stills` has a JSON mode (`--json`). For anything beyond these five commands, [use the library](../library/).
