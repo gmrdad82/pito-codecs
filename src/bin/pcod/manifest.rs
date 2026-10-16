@@ -244,7 +244,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn manifest_is_pconv_shaped_json() {
+    fn manifest_keeps_its_json_shape() {
         let loud = Measured {
             integrated: -14.21,
             range: 0.2,

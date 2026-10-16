@@ -77,8 +77,9 @@ struct Tables {
 
 impl Tables {
     fn reach_end(&mut self) {
-        let end = u64::try_from(self.comp_end).unwrap_or(0);
-        let Some(extra) = end.checked_sub(self.media_duration).filter(|&e| e > 0) else {
+        let start = self.comp_start.unwrap_or(0).max(0);
+        let span = u64::try_from(self.comp_end.saturating_sub(start)).unwrap_or(0);
+        let Some(extra) = span.checked_sub(self.media_duration).filter(|&e| e > 0) else {
             return;
         };
         let Some(last) = self.stts.last_mut() else {
@@ -93,7 +94,7 @@ impl Tables {
         } else {
             last.1 = d;
         }
-        self.media_duration = end;
+        self.media_duration = span;
     }
 }
 

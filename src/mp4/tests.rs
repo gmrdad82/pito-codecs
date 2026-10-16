@@ -422,3 +422,60 @@ fn an_av1c_record_reads_and_writes_back_byte_for_byte() {
     assert_eq!(c.to_bytes(), raw);
     assert!(Av1Config::parse(&raw[..3]).is_err());
 }
+
+#[test]
+fn b_frames_keep_one_tick_per_sample_and_decode_every_frame() {
+    if !tools() {
+        return;
+    }
+    let src = generate(
+        "bframes-tick.mp4",
+        1,
+        &[
+            "-c:v",
+            "libx264",
+            "-bf",
+            "3",
+            "-x264-params",
+            "b-adapt=0:scenecut=0",
+            "-g",
+            "30",
+            "-video_track_timescale",
+            "30",
+        ],
+    );
+    let r = Reader::open(&src).unwrap();
+    let v = r.video().unwrap();
+    let mut cfg = TrackConfig::from_track(&r.tracks[v]).unwrap();
+    cfg.edits.clear();
+    cfg.media_start = None;
+    let out = dir().join("bframes-tick-out.mp4");
+    let mut w = Writer::create_with(&out, Options::default()).unwrap();
+    let t = w.add_track(cfg).unwrap();
+    let n = r.tracks[v].samples.len();
+    for k in 0..n {
+        let s = r.tracks[v].samples[k];
+        let dts = k as i64 - 1;
+        w.push_sample(
+            t,
+            &r.read(v, k).unwrap(),
+            s.pts - s.dts + dts,
+            dts,
+            1,
+            s.keyframe,
+        )
+        .unwrap();
+    }
+    w.finish_faststart().unwrap();
+    let back = Reader::open(&out).unwrap();
+    let bv = back.video().unwrap();
+    assert!(back.tracks[bv].samples.iter().all(|s| s.duration == 1));
+    let raw = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(&out)
+        .args(["-f", "rawvideo", "-pix_fmt", "gray", "-"])
+        .output()
+        .unwrap();
+    assert!(raw.status.success());
+    assert_eq!(raw.stdout.len(), n * 320 * 240);
+}

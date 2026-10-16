@@ -80,7 +80,7 @@ The GPU route needs nothing extra: libva is loaded at run time on Linux (Mesa's 
 
 ### Convert, the command line over everything
 
-`pcod <input> <output>` converts a video, or a folder of PNG frames, into whatever the output's extension names, and needs no ffmpeg: `mp4`, `mov` and `mkv` get H.264 and AAC, `webm` gets VP9 and Opus (with alpha when the source has it), `gif` and `webp` loop forever. Every video comes out limited-range BT.709 and tagged so, with rotation and non-square pixels applied; resizing is Lanczos in linear light. `pcod join` stitches clips by stream copy when they match and re-encodes them when they don't, saying which and why. It takes pconv's command line, profiles, `--json` manifest, probe keys and exit codes, so a script moves from one to the other by changing the binary's name; only the encoder names in the manifest differ.
+`pcod <input> <output>` converts a video, or a folder of PNG frames, into whatever the output's extension names, and needs no ffmpeg: `mp4`, `mov` and `mkv` get H.264 and AAC, `webm` gets VP9 and Opus (with alpha when the source has it), `gif` and `webp` loop forever. Every video comes out limited-range BT.709 and tagged so, with rotation and non-square pixels applied; resizing is Lanczos in linear light. `pcod join` stitches clips by stream copy when they match and re-encodes them when they don't, saying which and why. It takes the command line of pconv, the ffmpeg-based converter it replaced, profiles, `--json` manifest, probe keys and exit codes, so a script moves from one to the other by changing the binary's name; only the encoder names in the manifest differ.
 
 ```sh
 pcod master.mov site.mp4 --profile best --crf 23    # a light H.264 for the web
@@ -90,7 +90,7 @@ pcod join intro.mp4 scene.mp4 outro.mp4 film.mp4   # copied when the clips match
 pcod talk.mp4 upload.mp4 --loudness youtube        # -14 LUFS in two EBU R128 passes, video copied
 ```
 
-Against pconv 1.0.1 (ffmpeg 9.0.1 with x264, libvpx and libwebp) on 30 s of 1080p30 H.264 talking head, run in turn three times each, medians, at load 22 to 46 on a 32-thread machine; quality against the source (the GIF and WebP against it scaled to 800x450 at 12 fps):
+Against pconv 1.0.1, the converter pcod replaced (ffmpeg 9.0.1 with x264, libvpx and libwebp) on 30 s of 1080p30 H.264 talking head, run in turn three times each, medians, at load 22 to 46 on a 32-thread machine; quality against the source (the GIF and WebP against it scaled to 800x450 at 12 fps):
 
 | Output | pcod | pconv | Size, pcod / pconv | PSNR / SSIM, pcod | PSNR / SSIM, pconv |
 |---|---|---|---|---|---|
@@ -424,7 +424,7 @@ The charts are drawn by [pito-compare](https://github.com/gmrdad82/pito-compare)
 
 pito-codecs is the media layer of [PITO MD](https://pitomd.com): Splicer, PITO MD's desk for cutting talking-head videos from their transcripts, opens, plays, cuts and exports through it. Its open siblings:
 
-- [prec](https://github.com/gmrdad82/prec) records the terminal clip at the top of this page, and [pconv](https://github.com/gmrdad82/pconv) turns it into the GIF.
+- [prec](https://github.com/gmrdad82/prec) records the terminal clip at the top of this page, and pcod, this repository's command line, turns it into the GIF.
 - [pito-compare](https://github.com/gmrdad82/pito-compare) draws every chart on this page.
 - [pgpu](https://github.com/gmrdad82/pgpu) shares one GPU between the benchmarks and the other jobs on the test machine.
 - [pfx](https://github.com/gmrdad82/pfx) and [Manfred](https://github.com/gmrdad82/manfred) render and build scenes; [pito-tui](https://github.com/gmrdad82/pito-tui) is the shell of PITO MD's terminal apps.

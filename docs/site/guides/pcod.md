@@ -35,7 +35,7 @@ pcod talk.mp4 upload.mp4 --loudness youtube        # -14 LUFS, the video copied
 
 ### Scripts and agents
 
-With stderr a pipe or a file, pcod draws no progress line, so stdout carries only the result: the output's path (and how a join was made), or one JSON manifest with `--json`, with each file's sha256 and size, the parameters and the time it took. `--no-progress` turns the line off on a terminal. `pcod probe <input> --json` prints what pcod reads from a file, with the same keys as pconv's probe.
+With stderr a pipe or a file, pcod draws no progress line, so stdout carries only the result: the output's path (and how a join was made), or one JSON manifest with `--json`, with each file's sha256 and size, the parameters and the time it took. `--no-progress` turns the line off on a terminal. `pcod probe <input> --json` prints what pcod reads from a file, with the same keys as the probe of pconv, the converter pcod replaced,.
 
 Exit codes: `0` it worked; `1` refused or failed, with one line on stderr starting `pcod: `; `2` the command line is wrong, answered the way clap answers; `128` plus the signal number when Ctrl-C, SIGTERM or SIGHUP stopped it (130 for Ctrl-C on Windows).
 

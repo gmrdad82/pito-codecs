@@ -434,7 +434,8 @@ fn header_durations_match_the_samples(path: &Path, name: &str) {
         };
         let kind = if video { "video" } else { "audio" };
         if name != "ffmpeg" {
-            assert_eq!(media, shown + media_time, "{name}: mdhd of a {kind} track");
+            let expected = if video { shown } else { shown + media_time };
+            assert_eq!(media, expected, "{name}: mdhd of a {kind} track");
             assert_eq!(ticks, media, "{name}: stts of a {kind} track");
         }
         let shown = shown as f64 / ts as f64;
