@@ -7,6 +7,7 @@ use pito_codecs::media::{self, Prefs, Rgba, Seek, Stills, keyframes, probe};
 use pito_codecs::png;
 use rayon::prelude::*;
 
+use super::json::quoted;
 use super::{Fail, about};
 
 pub struct Job {
@@ -115,26 +116,6 @@ fn write_png(path: &Path, image: &Rgba) -> Result<(), Fail> {
     let data = png::encode(image).map_err(|e| about(path, e))?;
     std::fs::write(path, data).map_err(|e| about(path, e))?;
     Ok(())
-}
-
-fn quoted(s: &str) -> String {
-    let mut o = String::with_capacity(s.len() + 2);
-    o.push('"');
-    for ch in s.chars() {
-        match ch {
-            '"' => o.push_str("\\\""),
-            '\\' => o.push_str("\\\\"),
-            '\n' => o.push_str("\\n"),
-            '\r' => o.push_str("\\r"),
-            '\t' => o.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                let _ = write!(o, "\\u{:04x}", c as u32);
-            }
-            c => o.push(c),
-        }
-    }
-    o.push('"');
-    o
 }
 
 fn path_json(p: Option<&Path>) -> String {

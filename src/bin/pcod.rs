@@ -20,6 +20,20 @@ type Fail = Box<dyn Error>;
 
 #[path = "pcod/frames.rs"]
 mod frames;
+#[path = "pcod/json.rs"]
+mod json;
+#[allow(dead_code)]
+#[path = "pcod/manifest.rs"]
+mod manifest;
+#[allow(dead_code)]
+#[path = "pcod/probe_json.rs"]
+mod probe_json;
+#[allow(dead_code)]
+#[path = "pcod/progress.rs"]
+mod progress;
+#[allow(dead_code)]
+#[path = "pcod/sha256.rs"]
+mod sha256;
 #[path = "pcod/stills.rs"]
 mod stills;
 
