@@ -141,6 +141,40 @@ impl Curve {
         a + (b - a) * f
     }
 
+    fn linear_all(&self, v: &mut [f32], wide: bool) {
+        #[cfg(target_arch = "x86_64")]
+        let from = if wide {
+            unsafe { x86::linear(&self.forward, v) }
+        } else {
+            0
+        };
+        #[cfg(not(target_arch = "x86_64"))]
+        let from = {
+            let _ = wide;
+            0
+        };
+        for x in &mut v[from..] {
+            *x = self.linear(*x);
+        }
+    }
+
+    fn gamma_all(&self, v: &mut [f32], wide: bool) {
+        #[cfg(target_arch = "x86_64")]
+        let from = if wide {
+            unsafe { x86::gamma(&self.inverse, self.least, self.most, v) }
+        } else {
+            0
+        };
+        #[cfg(not(target_arch = "x86_64"))]
+        let from = {
+            let _ = wide;
+            0
+        };
+        for x in &mut v[from..] {
+            *x = self.gamma(*x);
+        }
+    }
+
     #[inline(always)]
     fn gamma(&self, x: f32) -> f32 {
         if x.is_nan() || x < self.least {
@@ -336,12 +370,40 @@ enum Input<'a> {
 }
 
 #[derive(Default)]
+struct Rows {
+    r: Vec<f32>,
+    g: Vec<f32>,
+    b: Vec<f32>,
+    a: Vec<f32>,
+    ue: Vec<f32>,
+    ve: Vec<f32>,
+    cu: Vec<f32>,
+    cv: Vec<f32>,
+}
+
+impl Rows {
+    fn fit(&mut self, w: usize) {
+        for v in [
+            &mut self.r,
+            &mut self.g,
+            &mut self.b,
+            &mut self.a,
+            &mut self.ue,
+            &mut self.ve,
+        ] {
+            v.resize(w + 2, 0.0);
+        }
+        self.cu.resize(w.div_ceil(2) + 2, 0.0);
+        self.cv.resize(w.div_ceil(2) + 2, 0.0);
+    }
+}
+
+#[derive(Default)]
 struct Scratch {
     buf: Vec<f32>,
     tmp: Vec<f32>,
     out: Vec<f32>,
-    cu: Vec<f32>,
-    cv: Vec<f32>,
+    rows: Rows,
 }
 
 #[derive(Debug, Clone)]
@@ -461,7 +523,7 @@ impl Linear {
 
     fn band_rows(&self) -> usize {
         let threads = rayon::current_num_threads().max(1);
-        let rows = self.dst.1.div_ceil(threads * 2).max(8);
+        let rows = self.dst.1.div_ceil(threads).max(16);
         (rows + 1) & !1
     }
 
@@ -471,7 +533,7 @@ impl Linear {
         y0: usize,
         y1: usize,
         s: &mut Scratch,
-        mut emit: impl FnMut(usize, &[f32]),
+        mut emit: impl FnMut(usize, &[f32], &mut Rows),
     ) {
         let (sw, sh) = self.src;
         let (dw, _) = self.dst;
@@ -487,13 +549,13 @@ impl Linear {
         s.buf.resize((hi - lo) * stride, 0.0);
         s.tmp.resize((sw + 2) * 4, 0.0);
         s.out.resize(dw * 4, 0.0);
-        s.cu.resize(sw.div_ceil(2) + 2, 0.0);
-        s.cv.resize(sw.div_ceil(2) + 2, 0.0);
+        s.rows.fit(sw.max(dw));
+        let wide = self.wide;
         for r in lo..hi {
             let row = &mut s.buf[(r - lo) * stride..(r - lo + 1) * stride];
             match input {
-                Input::Narrow(p) => yuv_row(p, r, sw, sh, &self.curve, &mut s.cu, &mut s.cv, row),
-                Input::Wide(p) => yuv_row(p, r, sw, sh, &self.curve, &mut s.cu, &mut s.cv, row),
+                Input::Narrow(p) => yuv_row(p, r, sw, sh, &self.curve, &mut s.rows, row, wide),
+                Input::Wide(p) => yuv_row(p, r, sw, sh, &self.curve, &mut s.rows, row, wide),
                 Input::Rgba(d) => rgba_row(&d[r * stride..(r + 1) * stride], &self.curve, row),
             }
         }
@@ -502,7 +564,8 @@ impl Linear {
             let at = (self.v.left[y] - lo) * stride;
             vertical(&s.buf[at..], stride, c, &mut s.tmp[..stride], self.wide);
             horizontal(&s.tmp, &self.h, self.np, &self.pairs, &mut s.out, self.wide);
-            emit(y, &s.out);
+            straight(&s.out, &self.curve, &mut s.rows, dw, wide);
+            emit(y, &s.out, &mut s.rows);
         }
     }
 
@@ -516,9 +579,9 @@ impl Linear {
             .for_each_init(Scratch::default, |s, (b, chunk)| {
                 let y0 = b * rows;
                 let y1 = (y0 + rows).min(dh);
-                self.band(input, y0, y1, s, |y, row| {
+                self.band(input, y0, y1, s, |y, _, rows| {
                     let o = &mut chunk[(y - y0) * line..(y - y0 + 1) * line];
-                    put_rgba(row, &self.curve, o);
+                    put_rgba(rows, dw, o);
                 });
             });
     }
@@ -574,14 +637,18 @@ impl Linear {
             |(s, pair), (b, (((yc, uc), vc), mut ac))| {
                 let y0 = b * rows;
                 let y1 = (y0 + rows).min(dh);
-                self.band(input, y0, y1, s, |y, row| {
+                self.band(input, y0, y1, s, |y, _, rows| {
                     let r = y - y0;
                     let (top, bottom) = pair.split_at_mut(dw * 3);
-                    let half = if r % 2 == 0 { &mut *top } else { &mut *bottom };
+                    let half = if r.is_multiple_of(2) {
+                        &mut *top
+                    } else {
+                        &mut *bottom
+                    };
                     let alpha = ac.as_deref_mut().map(|a| &mut a[r * dw..(r + 1) * dw]);
                     put_luma(
-                        row,
-                        &self.curve,
+                        rows,
+                        dw,
                         &k,
                         has_alpha,
                         &mut yc[r * ys..r * ys + dw],
@@ -589,8 +656,8 @@ impl Linear {
                         half,
                     );
                     let last = y + 1 == dh;
-                    if r % 2 == 1 || last {
-                        let below: &[f32] = if r % 2 == 1 { bottom } else { top };
+                    if !r.is_multiple_of(2) || last {
+                        let below: &[f32] = if !r.is_multiple_of(2) { bottom } else { top };
                         let c = r / 2;
                         put_chroma(
                             top,
@@ -662,53 +729,76 @@ fn yuv_row<S: Sample>(
     w: usize,
     h: usize,
     curve: &Curve,
-    cu: &mut [f32],
-    cv: &mut [f32],
+    s: &mut Rows,
     out: &mut [f32],
+    wide: bool,
 ) {
     let k = p.k;
     let cw = w.div_ceil(2);
     let ch = h.div_ceil(2);
     let k0 = r / 2;
-    let k1 = if r % 2 == 0 {
+    let k1 = if r.is_multiple_of(2) {
         k0.saturating_sub(1)
     } else {
         (k0 + 1).min(ch - 1)
     };
     let (u0, u1) = (&p.u[k0 * p.cs..][..cw], &p.u[k1 * p.cs..][..cw]);
     let (v0, v1) = (&p.v[k0 * p.cs..][..cw], &p.v[k1 * p.cs..][..cw]);
+    let (cu, cv) = (&mut s.cu, &mut s.cv);
     for (o, (&a, &b)) in cu[1..=cw].iter_mut().zip(u0.iter().zip(u1)) {
-        *o = 0.75 * a.get() as f32 + 0.25 * b.get() as f32 - k.c_off;
+        *o = (0.75 * a.get() as f32 + 0.25 * b.get() as f32 - k.c_off) * k.c_mul;
     }
     for (o, (&a, &b)) in cv[1..=cw].iter_mut().zip(v0.iter().zip(v1)) {
-        *o = 0.75 * a.get() as f32 + 0.25 * b.get() as f32 - k.c_off;
+        *o = (0.75 * a.get() as f32 + 0.25 * b.get() as f32 - k.c_off) * k.c_mul;
     }
     cu[0] = cu[1];
     cv[0] = cv[1];
     cu[cw + 1] = cu[cw];
     cv[cw + 1] = cv[cw];
-    let yrow = &p.y[r * p.ys..][..w];
-    let arow = p.a.map(|a| &a[r * p.al..][..w]);
     let (e0, e1) = k.even;
     let (o1, o2) = k.odd;
-    for (x, px) in out[..w * 4].chunks_exact_mut(4).enumerate() {
-        let c = x / 2 + 1;
-        let (u, v) = if x % 2 == 0 {
-            (e0 * cu[c - 1] + e1 * cu[c], e0 * cv[c - 1] + e1 * cv[c])
-        } else {
-            (o1 * cu[c] + o2 * cu[c + 1], o1 * cv[c] + o2 * cv[c + 1])
-        };
-        let yf = (yrow[x].get() as f32 - k.y_off) * k.y_mul;
-        let (uf, vf) = (u * k.c_mul, v * k.c_mul);
-        let rr = curve.linear(yf + k.rv * vf);
-        let gg = curve.linear(yf + k.gu * uf + k.gv * vf);
-        let bb = curve.linear(yf + k.bu * uf);
-        match arow {
-            Some(a) => {
-                let al = a[x].get() as f32 * k.a_mul;
+    for (c, (ue, ve)) in s.ue[..2 * cw]
+        .chunks_exact_mut(2)
+        .zip(s.ve[..2 * cw].chunks_exact_mut(2))
+        .enumerate()
+    {
+        let c = c + 1;
+        ue[0] = e0 * cu[c - 1] + e1 * cu[c];
+        ue[1] = o1 * cu[c] + o2 * cu[c + 1];
+        ve[0] = e0 * cv[c - 1] + e1 * cv[c];
+        ve[1] = o1 * cv[c] + o2 * cv[c + 1];
+    }
+    let yrow = &p.y[r * p.ys..][..w];
+    for (((((&y, &u), &v), rr), gg), bb) in yrow
+        .iter()
+        .zip(&s.ue[..w])
+        .zip(&s.ve[..w])
+        .zip(&mut s.r[..w])
+        .zip(&mut s.g[..w])
+        .zip(&mut s.b[..w])
+    {
+        let yf = (y.get() as f32 - k.y_off) * k.y_mul;
+        *rr = yf + k.rv * v;
+        *gg = yf + k.gu * u + k.gv * v;
+        *bb = yf + k.bu * u;
+    }
+    curve.linear_all(&mut s.r[..w], wide);
+    curve.linear_all(&mut s.g[..w], wide);
+    curve.linear_all(&mut s.b[..w], wide);
+    let planes = s.r[..w].iter().zip(&s.g[..w]).zip(&s.b[..w]);
+    match p.a.map(|a| &a[r * p.al..][..w]) {
+        Some(a) => {
+            for ((px, ((&rr, &gg), &bb)), &al) in
+                out[..w * 4].chunks_exact_mut(4).zip(planes).zip(a)
+            {
+                let al = al.get() as f32 * k.a_mul;
                 px.copy_from_slice(&[rr * al, gg * al, bb * al, al]);
             }
-            None => px.copy_from_slice(&[rr, gg, bb, 1.0]),
+        }
+        None => {
+            for (px, ((&rr, &gg), &bb)) in out[..w * 4].chunks_exact_mut(4).zip(planes) {
+                px.copy_from_slice(&[rr, gg, bb, 1.0]);
+            }
         }
     }
 }
@@ -724,51 +814,71 @@ fn rgba_row(src: &[u8], curve: &Curve, out: &mut [f32]) {
     }
 }
 
-#[inline(always)]
-fn straight(px: &[f32], curve: &Curve) -> [f32; 4] {
-    let a = px[3].clamp(0.0, 1.0);
-    let inv = if a > 1e-6 { 1.0 / a } else { 0.0 };
-    [
-        curve.gamma(px[0] * inv),
-        curve.gamma(px[1] * inv),
-        curve.gamma(px[2] * inv),
-        a,
-    ]
+fn straight(row: &[f32], curve: &Curve, s: &mut Rows, w: usize, wide: bool) {
+    for ((((px, rr), gg), bb), aa) in row[..w * 4]
+        .chunks_exact(4)
+        .zip(&mut s.r[..w])
+        .zip(&mut s.g[..w])
+        .zip(&mut s.b[..w])
+        .zip(&mut s.a[..w])
+    {
+        let a = px[3].clamp(0.0, 1.0);
+        let inv = if a > 1e-6 { 1.0 / a } else { 0.0 };
+        *rr = px[0] * inv;
+        *gg = px[1] * inv;
+        *bb = px[2] * inv;
+        *aa = a;
+    }
+    curve.gamma_all(&mut s.r[..w], wide);
+    curve.gamma_all(&mut s.g[..w], wide);
+    curve.gamma_all(&mut s.b[..w], wide);
 }
 
-fn put_rgba(row: &[f32], curve: &Curve, out: &mut [u8]) {
-    for (px, o) in row.chunks_exact(4).zip(out.chunks_exact_mut(4)) {
-        let s = straight(px, curve);
-        for (d, v) in o.iter_mut().zip(s) {
-            *d = (v * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
-        }
+fn put_rgba(s: &Rows, w: usize, out: &mut [u8]) {
+    let q = |v: f32| (v * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
+    for ((((o, &r), &g), &b), &a) in out[..w * 4]
+        .chunks_exact_mut(4)
+        .zip(&s.r[..w])
+        .zip(&s.g[..w])
+        .zip(&s.b[..w])
+        .zip(&s.a[..w])
+    {
+        o.copy_from_slice(&[q(r), q(g), q(b), q(a)]);
     }
 }
 
 fn put_luma<S: Sample>(
-    row: &[f32],
-    curve: &Curve,
+    s: &Rows,
+    w: usize,
     k: &Encode,
     weigh: bool,
     luma: &mut [S],
     alpha: Option<&mut [S]>,
     half: &mut [f32],
 ) {
-    for ((px, l), h) in row
-        .chunks_exact(4)
-        .zip(luma.iter_mut())
-        .zip(half.chunks_exact_mut(3))
+    let (hu, rest) = half.split_at_mut(w);
+    let (hv, hw) = rest.split_at_mut(w);
+    for (((((((l, &r), &g), &b), &a), u), v), wt) in luma[..w]
+        .iter_mut()
+        .zip(&s.r[..w])
+        .zip(&s.g[..w])
+        .zip(&s.b[..w])
+        .zip(&s.a[..w])
+        .zip(hu.iter_mut())
+        .zip(hv.iter_mut())
+        .zip(hw.iter_mut())
     {
-        let [r, g, b, a] = straight(px, curve);
+        let (r, g, b) = (r.min(1.0), g.min(1.0), b.min(1.0));
         let y = k.y[0] * r + k.y[1] * g + k.y[2] * b;
         *l = S::put((k.y_off + y * k.y_range + 0.5).clamp(0.0, k.max) as i32);
-        h[0] = k.u[0] * r + k.u[1] * g + k.u[2] * b;
-        h[1] = k.v[0] * r + k.v[1] * g + k.v[2] * b;
-        h[2] = if weigh { a } else { 1.0 };
+        let t = if weigh { a } else { 1.0 };
+        *u = t * (k.u[0] * r + k.u[1] * g + k.u[2] * b);
+        *v = t * (k.v[0] * r + k.v[1] * g + k.v[2] * b);
+        *wt = t;
     }
     if let Some(alpha) = alpha {
-        for (px, o) in row.chunks_exact(4).zip(alpha.iter_mut()) {
-            *o = S::put((px[3].clamp(0.0, 1.0) * k.max + 0.5) as i32);
+        for (o, &a) in alpha[..w].iter_mut().zip(&s.a[..w]) {
+            *o = S::put((a * k.max + 0.5) as i32);
         }
     }
 }
@@ -782,30 +892,23 @@ fn put_chroma<S: Sample>(
     v: &mut [S],
 ) {
     let last = w - 1;
+    let q = |c: f32| S::put((k.c_off + c * k.c_range + 0.5).clamp(0.0, k.max) as i32);
     for (x, (ou, ov)) in u.iter_mut().zip(v.iter_mut()).enumerate() {
         let a = 2 * x;
         let at = [a.saturating_sub(1), a, (a + 1).min(last)];
         let (mut su, mut sv, mut sw) = (0.0f32, 0.0f32, 0.0f32);
-        let (mut pu, mut pv, mut pw) = (0.0f32, 0.0f32, 0.0f32);
-        for row in [top, bottom] {
-            for (&i, &t) in at.iter().zip(&k.taps) {
-                let c = &row[i * 3..i * 3 + 3];
-                let wt = t * c[2];
-                su += wt * c[0];
-                sv += wt * c[1];
-                sw += wt;
-                pu += t * c[0];
-                pv += t * c[1];
-                pw += t;
-            }
+        for (&i, &t) in at.iter().zip(&k.taps) {
+            su += t * (top[i] + bottom[i]);
+            sv += t * (top[w + i] + bottom[w + i]);
+            sw += t * (top[2 * w + i] + bottom[2 * w + i]);
         }
         let (cu, cv) = if sw > 1e-6 {
             (su / sw, sv / sw)
         } else {
-            (pu / pw, pv / pw)
+            (0.0, 0.0)
         };
-        *ou = S::put((k.c_off + cu * k.c_range + 0.5).clamp(0.0, k.max) as i32);
-        *ov = S::put((k.c_off + cv * k.c_range + 0.5).clamp(0.0, k.max) as i32);
+        *ou = q(cu);
+        *ov = q(cv);
     }
 }
 
@@ -865,7 +968,59 @@ fn horizontal(row: &[f32], f: &Filter, np: usize, pairs: &[f32], out: &mut [f32]
 
 #[cfg(target_arch = "x86_64")]
 mod x86 {
+    use super::{BASE, DROP, SPAN, STEPS};
     use std::arch::x86_64::*;
+
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) unsafe fn linear(t: &[f32], v: &mut [f32]) -> usize {
+        assert!(t.len() >= SPAN + 2);
+        let steps = _mm256_set1_ps(STEPS as f32);
+        let top = _mm256_set1_ps(SPAN as f32);
+        let zero = _mm256_setzero_ps();
+        let p = v.as_mut_ptr();
+        let mut i = 0;
+        unsafe {
+            while i + 8 <= v.len() {
+                let x = _mm256_mul_ps(_mm256_loadu_ps(p.add(i)), steps);
+                let x = _mm256_min_ps(_mm256_max_ps(x, zero), top);
+                let k = _mm256_cvttps_epi32(x);
+                let f = _mm256_sub_ps(x, _mm256_cvtepi32_ps(k));
+                let a = _mm256_i32gather_ps::<4>(t.as_ptr(), k);
+                let b = _mm256_i32gather_ps::<4>(t.as_ptr().add(1), k);
+                _mm256_storeu_ps(p.add(i), _mm256_fmadd_ps(_mm256_sub_ps(b, a), f, a));
+                i += 8;
+            }
+        }
+        i
+    }
+
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) unsafe fn gamma(t: &[f32], least: f32, most: f32, v: &mut [f32]) -> usize {
+        assert!(t.len() >= super::CELLS + 2);
+        let low = _mm256_set1_ps(least);
+        let high = _mm256_set1_ps(most);
+        let base = _mm256_set1_epi32(BASE as i32);
+        let mask = _mm256_set1_epi32((1 << DROP) - 1);
+        let scale = _mm256_set1_ps(1.0 / (1u32 << DROP) as f32);
+        let p = v.as_mut_ptr();
+        let mut i = 0;
+        unsafe {
+            while i + 8 <= v.len() {
+                let x = _mm256_loadu_ps(p.add(i));
+                let ok = _mm256_cmp_ps::<_CMP_GE_OQ>(x, low);
+                let x = _mm256_blendv_ps(low, _mm256_min_ps(x, high), ok);
+                let bits = _mm256_castps_si256(x);
+                let k = _mm256_sub_epi32(_mm256_srli_epi32::<{ DROP as i32 }>(bits), base);
+                let f = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_and_si256(bits, mask)), scale);
+                let a = _mm256_i32gather_ps::<4>(t.as_ptr(), k);
+                let b = _mm256_i32gather_ps::<4>(t.as_ptr().add(1), k);
+                let y = _mm256_fmadd_ps(_mm256_sub_ps(b, a), f, a);
+                _mm256_storeu_ps(p.add(i), _mm256_and_ps(y, ok));
+                i += 8;
+            }
+        }
+        i
+    }
 
     #[target_feature(enable = "avx2,fma")]
     pub(super) unsafe fn vertical(

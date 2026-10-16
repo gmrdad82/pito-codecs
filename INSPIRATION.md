@@ -24,6 +24,8 @@ The codecs here are written in Rust. Parts are adapted from permissively license
 | [zune-inflate](https://github.com/etemesi254/zune-image) | MIT OR Apache-2.0 OR Zlib (Caleb Etemesi), a port of [libdeflate](https://github.com/ebiggers/libdeflate) (MIT) | 0.2.54, `69502ce83fdfecdd0beefd677e2abb3781b29d98` | The whole-buffer zlib and deflate decoder in `src/png/inflate.rs`: decode tables, fast and slow loops, match copies. |
 | [fdeflate](https://github.com/image-rs/fdeflate) | MIT OR Apache-2.0 (The image-rs Developers) | 0.3.7, `c365c7e6ffa81feb2e1fb762eed7299f05c9b0ca` | The PNG encoder's deflate in `src/png/encode.rs`: the fixed Huffman code tuned for filtered rows, its stored dynamic-block header, zero runs and the bit writer; the Paeth pass and chunk writer are new. |
 | [adler2](https://github.com/oyvindln/adler2) | 0BSD OR MIT OR Apache-2.0 | 2.0.1, `89a031a0f42eeff31c70dc598b398cbf31f1680f` | The four-lane Adler-32 in `src/png/inflate.rs`. |
+| [zimg](https://github.com/sekrit-twc/zimg) | WTFPL v2 (sekrit-twc) | `67e0603271c080e22c8429856dd4a8a56587e61e` | The resampling filter construction, Lanczos weights and BT.1886, BT.709 and sRGB transfer functions behind the linear-light resize in `src/filter/linear.rs`; the LUTs, banding and colour conversions are new. |
+| [fast_image_resize](https://github.com/Cykooz/fast_image_resize) | MIT OR Apache-2.0 (Kirill Kuzminykh) | 6.1.0, `ce36aeb20ed4a33805baa3c0ff4caff7cf163e19` | The interleaved RGBA f32 convolution layout with tap pairs per AVX2 register in `src/filter/linear.rs`, accumulating in f32 with FMA. |
 
 ## Specifications
 
