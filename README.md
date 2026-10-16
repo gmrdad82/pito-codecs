@@ -45,6 +45,7 @@ Expand-Archive pcod.zip "$env:LOCALAPPDATA\pcod" -Force; [Environment]::SetEnvir
 Then, on any MP4, or on a folder of PNG frames:
 
 ```sh
+pcod clip.mov web.mp4 --profile best
 pcod probe clip.mp4
 pcod decode clip.mp4 --route gpu
 pcod encode clip.mp4 out.mp4 --codec hevc --route gpu
@@ -75,6 +76,30 @@ println!("{}x{} at {}/{} fps, first frame {}x{}", info.width, info.height, info.
 The GPU route needs nothing extra: libva is loaded at run time on Linux (Mesa's or Intel's driver), VideoToolbox is part of macOS and Media Foundation part of Windows. Without them everything decodes and encodes on the CPU. On Windows, H.265 decode through Media Foundation needs Microsoft's HEVC Video Extensions, and N editions need the Media Feature Pack.
 
 ## Features
+
+### Convert, the command line over everything
+
+`pcod <input> <output>` converts a video, or a folder of PNG frames, into whatever the output's extension names, and needs no ffmpeg: `mp4`, `mov` and `mkv` get H.264 and AAC, `webm` gets VP9 and Opus (with alpha when the source has it), `gif` and `webp` loop forever. Every video comes out limited-range BT.709 and tagged so, with rotation and non-square pixels applied; resizing is Lanczos in linear light. `pcod join` stitches clips by stream copy when they match and re-encodes them when they don't, saying which and why. It takes pconv's command line, profiles, `--json` manifest, probe keys and exit codes, so a script moves from one to the other by changing the binary's name; only the encoder names in the manifest differ.
+
+```sh
+pcod master.mov site.mp4 --profile best --crf 23    # a light H.264 for the web
+pcod frames/ hero.webm --fps 60                    # RGBA frames to a transparent WebM
+pcod clip.mp4 readme.gif --size 640                # a looping README GIF
+pcod join intro.mp4 scene.mp4 outro.mp4 film.mp4   # copied when the clips match
+```
+
+Against pconv 1.0.1 (ffmpeg 9.0.1 with x264, libvpx and libwebp) on 30 s of 1080p30 H.264 talking head, run in turn three times each, medians, at load 22 to 46 on a 32-thread machine; quality against the source (the GIF and WebP against it scaled to 800x450 at 12 fps):
+
+| Output | pcod | pconv | Size, pcod / pconv | PSNR / SSIM, pcod | PSNR / SSIM, pconv |
+|---|---|---|---|---|---|
+| MP4, `--profile fast` (GPU) | **2.25 s** | 2.79 s | 5.8 / 6.1 MB | 44.4 dB / 0.984 | 44.4 dB / 0.985 |
+| MP4, balanced | 7.33 s | **5.71 s** | 27.1 / 15.8 MB | 49.9 dB / 0.994 | 47.9 dB / 0.992 |
+| MP4, best | 12.30 s | **8.62 s** | 26.9 / 20.0 MB | 50.4 dB / 0.995 | 49.2 dB / 0.994 |
+| WebM, balanced | **19.9 s** | 22.2 s | 5.5 / 6.3 MB | 43.4 dB / 0.983 | 43.8 dB / 0.986 |
+| GIF, 800 px at 12 fps | **1.65 s** | 11.0 s | 45.2 / 22.4 MB | 38.7 dB / 0.978 | 37.4 dB / 0.962 |
+| WebP, 800 px at 12 fps | **2.54 s** | 7.44 s | 13.7 / 7.8 MB | 38.0 dB / 0.971 | 36.3 dB / 0.956 |
+
+On the CPU, our H.264 encoder runs slower than x264 and spends more bytes for more quality on this clip; the GIF and WebP are 3× to 7× faster and larger.
 
 ### Instant first frame
 
@@ -297,7 +322,7 @@ let mut blender = Blender::new();
 blender.draw(&mut frame, &watermark);
 ```
 
-`pcod` (`src/bin/pcod.rs`) is a small command line over the library, and it is what the GIF at the top shows: `pcod decode clip.mp4 --route gpu`, or from a checkout `cargo run --release --bin pcod -- decode clip.mp4 --route gpu`. `pcod frames <dir> <out.mp4> --fps 60 --audio sound.wav` encodes a folder of PNG frames in name order and a WAV into an H.264 (or HEVC) and AAC MP4, BT.709 and faststart, decoding the PNGs on every core ahead of the encoder. `pcod stills clip.mp4 --sheet sheet.png` writes a contact sheet; see Filmstrips. It is behind the `cli` feature, on by default, so a library user with `default-features = false` never builds clap.
+`pcod` (`src/bin/pcod.rs`) is a small command line over the library. `pcod <input> <output>` converts a file or a folder of PNG frames to MP4, MOV, MKV, WebM, GIF or WebP and `pcod join` stitches clips (see Convert above); the GIF at the top shows `pcod decode clip.mp4 --route gpu`, or from a checkout `cargo run --release --bin pcod -- decode clip.mp4 --route gpu`. `pcod frames <dir> <out.mp4> --fps 60 --audio sound.wav` encodes a folder of PNG frames in name order and a WAV into an H.264 (or HEVC) and AAC MP4, BT.709 and faststart, decoding the PNGs on every core ahead of the encoder. `pcod stills clip.mp4 --sheet sheet.png` writes a contact sheet; see Filmstrips. It is behind the `cli` feature, on by default, so a library user with `default-features = false` never builds clap.
 
 
 ## How it was measured
