@@ -3,7 +3,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::OnceLock;
 
 use pito_codecs::media::{Prefs, Rgba, probe};
 
@@ -34,10 +33,9 @@ fn ok(out: &Output) {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
 }
 
-fn frames() -> &'static Path {
-    static FRAMES: OnceLock<PathBuf> = OnceLock::new();
-    FRAMES.get_or_init(|| {
-        let folder = dir("frames");
+fn frames(name: &str) -> PathBuf {
+    {
+        let folder = dir(&format!("{name}-frames"));
         for n in 0..20u32 {
             let mut img = Rgba::new(320, 240);
             for (i, px) in img.data.chunks_exact_mut(4).enumerate() {
@@ -53,7 +51,7 @@ fn frames() -> &'static Path {
             fs::write(folder.join(format!("{n:04}.png")), png).unwrap();
         }
         folder
-    })
+    }
 }
 
 fn partials(folder: &Path) -> Vec<String> {
@@ -133,7 +131,7 @@ fn usage_errors_exit_2_like_clap() {
         text(&out.stderr),
         "error: unrecognized subcommand 'tui'\n\nUsage: pcod [OPTIONS] <INPUT> <OUTPUT>\n       pcod <COMMAND>\n\nFor more information, try '--help'.\n"
     );
-    let folder = frames().to_str().unwrap().to_string();
+    let folder = frames("usage").to_str().unwrap().to_string();
     let out = run(&[&folder, "out.mp4"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(text(&out.stderr).contains("--fps <FPS>"));
@@ -157,7 +155,7 @@ fn an_argument_that_is_not_utf8_exits_2() {
 #[test]
 fn each_extension_gets_its_container_and_the_json_manifest() {
     let folder = dir("containers");
-    let input = frames().to_str().unwrap().to_string();
+    let input = frames("containers").to_str().unwrap().to_string();
     for (name, codec) in [
         ("a.mp4", "h264"),
         ("a.mov", "h264"),
@@ -196,7 +194,7 @@ fn each_extension_gets_its_container_and_the_json_manifest() {
 #[test]
 fn an_existing_output_needs_force() {
     let folder = dir("force");
-    let input = frames().to_str().unwrap().to_string();
+    let input = frames("force").to_str().unwrap().to_string();
     let output = folder.join("out.mp4");
     fs::write(&output, b"old").unwrap();
     let out = run(&[&input, output.to_str().unwrap(), "--fps", "10"]);
@@ -229,7 +227,7 @@ fn an_existing_output_needs_force() {
 #[test]
 fn a_signal_stops_the_conversion_and_leaves_nothing() {
     let folder = dir("signal");
-    let input = frames().to_str().unwrap().to_string();
+    let input = frames("signal").to_str().unwrap().to_string();
     let output = folder.join("big.mp4");
     let child = pcod()
         .args([
