@@ -7,7 +7,7 @@ use std::sync::{Arc, LazyLock, Mutex, PoisonError, Weak};
 use crate::mkv;
 use crate::mp4::{Av1Config, AvcConfig, CodecConfig, HevcConfig, Reader, Track, TrackKind};
 
-use super::native::{self, Readers, cached, rational, sorted};
+use super::base::{self as native, Readers, cached, rational, sorted};
 use super::probe::{AudioTrack, Probe};
 use crate::media::{Codec, Error, Result, TimeBase};
 
@@ -24,9 +24,11 @@ pub struct Stream {
     pub avc: Option<AvcConfig>,
     pub time_base: TimeBase,
     pub color: Option<(u8, bool)>,
+    #[cfg(feature = "gpu")]
     pub look: Option<((u16, u16), crate::gpu::Color)>,
 }
 
+#[cfg(feature = "gpu")]
 fn tagged_look(
     look: Option<((u16, u16), crate::gpu::Color)>,
     tags: Option<&mkv::Colour>,
@@ -335,7 +337,8 @@ impl Demux {
                 let t = mp4_track(r, track)?;
                 let codec = t.codec();
                 let extradata = t.extradata().unwrap_or_default();
-                let color = codec.and_then(|c| crate::gpu::color(c, &extradata));
+                let color = codec.and_then(|c| color_of(c, &extradata));
+                #[cfg(feature = "gpu")]
                 let look = codec.and_then(|c| crate::gpu::look(c, &extradata));
                 Ok(Stream {
                     codec,
@@ -347,6 +350,7 @@ impl Demux {
                     extradata,
                     time_base: TimeBase::new(1, t.timescale.max(1)),
                     color,
+                    #[cfg(feature = "gpu")]
                     look,
                 })
             }
@@ -364,7 +368,8 @@ impl Demux {
                     .and_then(|v| v.colour.as_ref())
                     .and_then(|c| Some((u8::try_from(c.matrix?).ok()?, c.full_range())))
                     .filter(|(m, _)| *m != 2);
-                let color = tagged.or_else(|| codec.and_then(|c| crate::gpu::color(c, &extradata)));
+                let color = tagged.or_else(|| codec.and_then(|c| color_of(c, &extradata)));
+                #[cfg(feature = "gpu")]
                 let look = tagged_look(
                     codec.and_then(|c| crate::gpu::look(c, &extradata)),
                     t.video.as_ref().and_then(|v| v.colour.as_ref()),
@@ -376,6 +381,7 @@ impl Demux {
                     avc,
                     time_base: t.time_base,
                     color,
+                    #[cfg(feature = "gpu")]
                     look,
                 })
             }
@@ -517,8 +523,7 @@ fn describe(
             .unwrap_or((String::new(), 8)),
         Some(Codec::Vp9) => keyframe
             .as_deref()
-            .and_then(crate::vp9::keyframe_info)
-            .map(|k| (format!("Profile {}", k.profile), k.bit_depth.max(8) as u8))
+            .and_then(vp9_profile)
             .unwrap_or((String::new(), 8)),
         Some(Codec::Av1) => Av1Config::parse(&t.codec_private)
             .map(|c| (c.profile_name(), c.bit_depth()))
@@ -596,4 +601,25 @@ pub fn keyframes(r: &Arc<mkv::Reader>) -> Result<Vec<f64>> {
             .map(|s| (t.seconds(s.pts) - start).max(0.0))
             .collect(),
     ))
+}
+
+#[cfg(feature = "gpu")]
+fn color_of(codec: Codec, extradata: &[u8]) -> Option<(u8, bool)> {
+    crate::gpu::color(codec, extradata)
+}
+
+#[cfg(not(feature = "gpu"))]
+fn color_of(_: Codec, _: &[u8]) -> Option<(u8, bool)> {
+    None
+}
+
+#[cfg(feature = "vp9")]
+fn vp9_profile(frame: &[u8]) -> Option<(String, u8)> {
+    crate::vp9::keyframe_info(frame)
+        .map(|k| (format!("Profile {}", k.profile), k.bit_depth.max(8) as u8))
+}
+
+#[cfg(not(feature = "vp9"))]
+fn vp9_profile(_: &[u8]) -> Option<(String, u8)> {
+    None
 }

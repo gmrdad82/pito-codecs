@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
+use super::base as native;
 use super::ffmpeg::Ffmpeg;
-use super::native;
 use crate::media::{Codec, Direction, Error, Result, Route};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -61,6 +61,12 @@ impl Prefs {
     }
 }
 
+const CPU_PICKED: &str = "the settings pick the CPU";
+
+fn reaches_gpu(choice: &Choice) -> bool {
+    !matches!(choice, Choice::Cpu)
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Caps {
     pub gpu: Vec<(Codec, Direction)>,
@@ -72,7 +78,26 @@ pub struct Caps {
 
 impl Caps {
     pub fn detect(prefs: &Prefs) -> Self {
-        let (gpu, gpu_missing) = native::gpu();
+        Caps::probing(
+            prefs,
+            reaches_gpu(&prefs.decode) || reaches_gpu(&prefs.encode),
+        )
+    }
+
+    pub fn for_decode(prefs: &Prefs) -> Self {
+        Caps::probing(prefs, reaches_gpu(&prefs.decode))
+    }
+
+    pub fn for_audio(prefs: &Prefs) -> Self {
+        Caps::probing(prefs, false)
+    }
+
+    fn probing(prefs: &Prefs, gpu: bool) -> Self {
+        let (gpu, gpu_missing) = if gpu {
+            native::gpu()
+        } else {
+            (Vec::new(), Some(CPU_PICKED.to_string()))
+        };
         let mut caps = Caps {
             gpu,
             gpu_missing,

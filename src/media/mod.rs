@@ -30,26 +30,42 @@ pub(crate) fn default_threads() -> usize {
         .min(16)
 }
 
-#[cfg(all(
-    feature = "h264",
-    feature = "hevc",
-    feature = "aac",
-    feature = "mp4",
-    feature = "gpu",
-    feature = "filter",
-    feature = "mkv",
-    feature = "vp9"
+#[cfg(any(
+    feature = "audio",
+    all(
+        feature = "h264",
+        feature = "hevc",
+        feature = "aac",
+        feature = "mp4",
+        feature = "gpu",
+        feature = "filter",
+        feature = "mkv",
+        feature = "vp9"
+    )
 ))]
+#[cfg_attr(
+    not(all(
+        feature = "h264",
+        feature = "hevc",
+        feature = "gpu",
+        feature = "filter",
+        feature = "vp9"
+    )),
+    allow(dead_code)
+)]
 mod front;
 
-#[cfg(all(
-    feature = "h264",
-    feature = "hevc",
-    feature = "aac",
-    feature = "mp4",
-    feature = "gpu",
-    feature = "filter",
-    feature = "mkv",
-    feature = "vp9"
+#[cfg(any(
+    feature = "audio",
+    all(
+        feature = "h264",
+        feature = "hevc",
+        feature = "aac",
+        feature = "mp4",
+        feature = "gpu",
+        feature = "filter",
+        feature = "mkv",
+        feature = "vp9"
+    )
 ))]
 pub use front::*;

@@ -99,15 +99,45 @@ fn decode_matches_ffmpeg_mp3float() {
     }
 }
 
-#[cfg(all(
-    feature = "h264",
-    feature = "hevc",
-    feature = "aac",
-    feature = "mp4",
-    feature = "gpu",
-    feature = "filter",
-    feature = "mkv",
-    feature = "vp9"
+#[test]
+fn a_file_is_trimmed_by_its_lame_tag_like_ffmpeg() {
+    if !has_encoder("libmp3lame") {
+        return;
+    }
+    for (name, rate, extra) in [
+        ("gapless44", 44100u32, ["-b:a", "192k"]),
+        ("gapless48mono", 48000, ["-ac", "1"]),
+    ] {
+        let mp3 = dir().join(format!("{name}.mp3"));
+        let mp3s = mp3.to_str().unwrap();
+        let src = signal(rate);
+        let mut args = vec!["-f", "lavfi", "-i", &src, "-c:a", "libmp3lame"];
+        args.extend_from_slice(&extra);
+        args.extend(["-id3v2_version", "3", mp3s]);
+        ffmpeg(&args);
+        let want = floats(&ffmpeg(&[
+            "-c:a", "mp3float", "-i", mp3s, "-f", "f32le", "-",
+        ]));
+        let got = decode_file(&std::fs::read(&mp3).unwrap()).unwrap();
+        assert_eq!(got.rate, rate, "{name}");
+        assert_eq!(got.samples.len(), want.len(), "{name}");
+        let d = max_diff(&got.samples, &want);
+        assert!(d < 2e-5, "{name}: max difference {d}");
+    }
+}
+
+#[cfg(any(
+    feature = "audio",
+    all(
+        feature = "h264",
+        feature = "hevc",
+        feature = "aac",
+        feature = "mp4",
+        feature = "gpu",
+        feature = "filter",
+        feature = "mkv",
+        feature = "vp9"
+    )
 ))]
 #[test]
 fn range_starts_on_the_right_sample_after_the_encoder_delay() {

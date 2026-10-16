@@ -205,8 +205,8 @@ SOFTWARE.
 
 The MPEG audio decoder in src/mp3/ (layers I, II and III: frame sync, side
 information, scale factors, Huffman decoding, stereo processing, the IMDCT and
-the polyphase synthesis with its SSE and NEON layout, and their tables) is
-ported from minimp3 (https://github.com/lieff/minimp3, commit
+the polyphase synthesis with its SSE and NEON layout, and their tables, and
+the VBR-tag, ID3 and gapless handling of minimp3_ex.h) is ported from minimp3 (https://github.com/lieff/minimp3, commit
 ea99364f61c14656440e8d77e9c233ccf3124633) by lieff, which its authors
 dedicated to the public domain under CC0 1.0 Universal:
 

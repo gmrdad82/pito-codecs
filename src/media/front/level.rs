@@ -1,6 +1,5 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
 
 use crate::filter::{Limiter, LoudnessMeter};
 use crate::media::{AudioBuffer, Codec, Error, Packet, Result};
@@ -10,7 +9,7 @@ use crate::mp4::{self, AvcConfig, Brand, HevcConfig, SampleEntry};
 use super::demux::Demux;
 use super::probe::probe;
 use super::route::Prefs;
-use super::stream::audio_stream;
+use super::stream::{AudioSpan, decode_audio_span};
 
 pub const LEVEL_RATE: u32 = 48_000;
 pub const YOUTUBE_LUFS: f64 = -14.0;
@@ -26,7 +25,6 @@ const CLOSE: f64 = 0.1;
 const TRIES: usize = 3;
 const RETRIES: usize = 2;
 const HEADROOM: f64 = 0.3;
-const QUEUE: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LevelTarget {
@@ -263,77 +261,6 @@ fn tell(progress: &mut Tell, stage: LevelStage, frames: u64, total: u64) -> Resu
     } else {
         Err(Error::Cancelled)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct AudioSpan {
-    pub from: f64,
-    pub to: f64,
-    pub rate: u32,
-    pub channels: u16,
-}
-
-impl AudioSpan {
-    pub const WHOLE: AudioSpan = AudioSpan {
-        from: 0.0,
-        to: f64::INFINITY,
-        rate: LEVEL_RATE,
-        channels: 2,
-    };
-
-    fn limit(&self) -> Option<u64> {
-        self.to
-            .is_finite()
-            .then(|| ((self.to - self.from).max(0.0) * self.rate as f64).round() as u64)
-    }
-}
-
-pub fn decode_audio_span(
-    path: &Path,
-    track: usize,
-    prefs: &Prefs,
-    span: &AudioSpan,
-    mut each: impl FnMut(AudioBuffer) -> Result<()>,
-) -> Result<()> {
-    if !span.from.is_finite() || span.from < 0.0 || span.to.is_nan() || span.to < span.from {
-        return Err(Error::Invalid(format!(
-            "the range {} to {}",
-            span.from, span.to
-        )));
-    }
-    let limit = span.limit();
-    if limit == Some(0) {
-        return Ok(());
-    }
-    let stream = audio_stream(path, track, span.from, span.rate, span.channels, prefs)?;
-    std::thread::scope(|s| {
-        let (tx, rx) = mpsc::sync_channel::<Result<AudioBuffer>>(QUEUE);
-        s.spawn(move || {
-            for b in stream {
-                let failed = b.is_err();
-                if tx.send(b).is_err() || failed {
-                    break;
-                }
-            }
-        });
-        let mut sent = 0u64;
-        for b in rx {
-            let mut b = b?;
-            if let Some(limit) = limit {
-                let left = limit - sent;
-                if b.frames() as u64 >= left {
-                    b.samples.truncate(left as usize * b.channels as usize);
-                    if !b.samples.is_empty() {
-                        each(b)?;
-                    }
-                    break;
-                }
-            }
-            sent += b.frames() as u64;
-            each(b)?;
-        }
-        Ok(())
-    })
 }
 
 fn decoded(source: &Pass, each: impl FnMut(AudioBuffer) -> Result<()>) -> Result<()> {

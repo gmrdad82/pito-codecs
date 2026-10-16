@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use crate::mkv::{self, Block, Cursor};
 
+use super::base::on_grid;
 use super::demux::Demux;
-use super::native::on_grid;
 use super::sound::Sound;
 use crate::media::{Error, Result};
 

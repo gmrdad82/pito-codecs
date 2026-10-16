@@ -27,6 +27,10 @@ track 1: mp3 2 ch 48000 Hz, ours: true
 
 Track numbers count audio tracks only, from 0.
 
+Build with `default-features = false, features = ["audio", "opus", "ac3", "mp3"]` to get the probe, `audio_pcm_range`, `audio_stream` and `audio_mix_stream` with no video decoder, GPU code or filters; leave out the codecs you don't need.
+
+A bare `.mp3` file, outside a container, decodes with `mp3::decode_file(&bytes)`: it skips ID3v2, ID3v1 and APE tags, and trims the encoder delay and padding its LAME or Xing header gives, so the samples match ffmpeg's gapless decode. `mp3::vbr_tag` reads that header from a first frame for a caller that decodes frame by frame with `mp3::Decoder`.
+
 ## A time range
 
 `audio_pcm_range(path, track, from, to, rate, channels, prefs)` returns the samples from `from` to `to` seconds, sample-exact. A range past the end of the track returns only the samples it has, so a buffer shorter than asked means the track ended. `audio_pcm` decodes a whole track to mono or stereo.

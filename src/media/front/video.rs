@@ -32,7 +32,7 @@ impl std::fmt::Debug for Video {
 
 pub fn source(path: &Path, prefs: &Prefs) -> Result<Source> {
     let probe = probe(path, prefs)?;
-    let caps = Caps::detect(prefs);
+    let caps = Caps::for_decode(prefs);
     let demux = Demux::open(path).ok();
     let (mut route, mut reasons, mut ffmpeg_codec) = match probe.video_codec {
         Some(codec) => {
