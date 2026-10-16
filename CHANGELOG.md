@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.14.2 — 2026-10-17
+
+### Fixed
+
+- AV1 stills decoded on the graphics card now use the colour matrix the stream declares, so they match the processor's stills exactly (a BT.601 file at 1080p was converted as BT.709 before). Keyframe stills on the card use the stream's colours for every codec.
+- The first page of AV1 exact stills is fast again: it starts on one graphics-card decoder and the processor while the other card decoders open in the background (first page about 136 ms, was 181-203 ms); later pages keep the four-decoder speed.
+
 ## v1.14.1 — 2026-10-16
 
 ### Changed
