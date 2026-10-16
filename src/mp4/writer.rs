@@ -75,28 +75,6 @@ struct Tables {
     comp_end: i64,
 }
 
-impl Tables {
-    fn reach_end(&mut self) {
-        let end = u64::try_from(self.comp_end).unwrap_or(0);
-        let Some(extra) = end.checked_sub(self.media_duration).filter(|&e| e > 0) else {
-            return;
-        };
-        let Some(last) = self.stts.last_mut() else {
-            return;
-        };
-        let Ok(d) = u32::try_from(last.1 as u64 + extra) else {
-            return;
-        };
-        if last.0 > 1 {
-            last.0 -= 1;
-            self.stts.push((1, d));
-        } else {
-            last.1 = d;
-        }
-        self.media_duration = end;
-    }
-}
-
 fn push_run<T: PartialEq + Copy>(runs: &mut Vec<(u32, T)>, v: T) {
     if let Some(last) = runs.last_mut()
         && last.1 == v
@@ -233,10 +211,10 @@ fn effective_edits(t: &WTrack, movie_ts: u32) -> Vec<Edit> {
         .cfg
         .media_start
         .unwrap_or_else(|| t.t.comp_start.unwrap_or(0).max(0));
-    if start == 0 {
+    let end = t.t.comp_end.max(t.t.media_duration as i64);
+    if start == 0 && end <= t.t.media_duration as i64 {
         return Vec::new();
     }
-    let end = t.t.comp_end.max(t.t.media_duration as i64);
     let rest = end.saturating_sub(start).max(0) as u64;
     vec![Edit {
         segment_duration: rescale(rest, t.cfg.timescale, movie_ts),
@@ -698,9 +676,6 @@ impl<W: Write + Seek> Writer<W> {
     fn finish_mdat(&mut self) -> Result<()> {
         for i in 0..self.tracks.len() {
             self.flush_pending(i, None)?;
-        }
-        for t in &mut self.tracks {
-            t.t.reach_end();
         }
         self.w.write_all(&self.buf)?;
         self.buf = Vec::new();
