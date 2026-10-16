@@ -20,6 +20,9 @@ type Fail = Box<dyn Error>;
 
 #[path = "pcod/frames.rs"]
 mod frames;
+#[allow(dead_code)]
+#[path = "pcod/quality.rs"]
+mod quality;
 #[path = "pcod/stills.rs"]
 mod stills;
 
