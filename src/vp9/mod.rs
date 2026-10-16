@@ -1,5 +1,6 @@
 #![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 
+pub mod alpha;
 pub(crate) mod bits;
 pub(crate) mod boolcoder;
 pub(crate) mod decoder;
@@ -138,5 +139,6 @@ pub struct Picture {
     pub draft: bool,
 }
 
+pub use alpha::{AlphaDecoder, AlphaEncoder};
 pub use decoder::{DecodeStats, Decoder};
 pub use enc::{Encoder, EncoderConfig, Rate};

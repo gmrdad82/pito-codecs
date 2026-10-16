@@ -437,6 +437,63 @@ pub(crate) fn parse_block_elem<S: ByteSource + ?Sized>(
     }
 }
 
+pub(crate) fn block_additional<S: ByteSource + ?Sized>(
+    io: &mut Io<'_, S>,
+    block: u64,
+    limit: u64,
+    data: &mut Vec<u8>,
+) -> Result<bool> {
+    data.clear();
+    let Some(g) = io.header(block, limit)? else {
+        return Ok(false);
+    };
+    if g.id != BLOCK_GROUP {
+        return Ok(false);
+    }
+    let end = g.end(limit);
+    let mut pos = g.data_start();
+    while let Some(c) = io.header(pos, end)? {
+        let ce = c.end(end);
+        if c.id == BLOCK_ADDITIONS {
+            let mut mp = c.data_start();
+            while let Some(m) = io.header(mp, ce)? {
+                let me = m.end(ce);
+                if m.id == BLOCK_MORE {
+                    let (mut id, mut payload) = (1u64, None);
+                    let mut xp = m.data_start();
+                    while let Some(x) = io.header(xp, me)? {
+                        let xe = x.end(me);
+                        match x.id {
+                            BLOCK_ADD_ID => id = io.uint(&x, xe)?,
+                            BLOCK_ADDITIONAL => payload = Some((x.data_start(), xe)),
+                            _ => {}
+                        }
+                        if xe <= xp {
+                            break;
+                        }
+                        xp = xe;
+                    }
+                    if id == 1
+                        && let Some((from, to)) = payload
+                    {
+                        io.read_into(from, to - from, data)?;
+                        return Ok(true);
+                    }
+                }
+                if me <= mp {
+                    break;
+                }
+                mp = me;
+            }
+        }
+        if ce <= pos {
+            break;
+        }
+        pos = ce;
+    }
+    Ok(false)
+}
+
 pub(crate) fn expand(
     b: &BlockRef,
     frames: &[(u64, u32)],
@@ -758,6 +815,21 @@ impl<S: ByteSource> Reader<S> {
             .get(index)
             .ok_or_else(|| Error::Invalid(format!("no sample {index} in track {track}")))?;
         read_frame(&self.source, self.len, t, s.offset, s.size, data)
+    }
+
+    pub fn read_alpha(&self, track: usize, index: usize, data: &mut Vec<u8>) -> Result<bool> {
+        data.clear();
+        let s = self
+            .tracks
+            .get(track)
+            .and_then(|t| t.samples.get(index))
+            .ok_or_else(|| Error::Invalid(format!("no sample {index} in track {track}")))?;
+        if s.lace != 0 {
+            return Ok(false);
+        }
+        let mut cache = Cache::default();
+        let mut io = Io::with_len(&self.source, self.len, &mut cache);
+        block_additional(&mut io, s.block, self.len, data)
     }
 
     pub fn packet(&self, track: usize, index: usize) -> Result<Packet> {

@@ -50,6 +50,7 @@ pub struct Stills {
 }
 
 enum Kind {
+    Alpha(Arc<mkv::Reader>),
     Mkv {
         r: Arc<mkv::Reader>,
         route: Route,
@@ -79,6 +80,7 @@ const _: fn() = || {
 impl Stills {
     pub fn open(path: &Path, height: u32, prefs: &Prefs) -> Result<Stills> {
         let kind = match mkv_head(path) {
+            Ok(Some(r)) if super::alpha::has_alpha(&r) => Kind::Alpha(r),
             Ok(Some(r)) => match mkv_route(&r, prefs) {
                 Some(route) => Kind::Mkv { r, route },
                 None => file(path, prefs)?,
@@ -124,6 +126,7 @@ impl Stills {
             f(i, r);
         };
         match &self.kind {
+            Kind::Alpha(r) => super::alpha::stills(r, self.height, times, seek, &emit),
             Kind::Mkv { r, route } => self.mkv(r, *route, times, seek, &emit),
             Kind::File { src, .. } => match seek {
                 Seek::Keyframe => self.keyframe(src, times, &emit),
@@ -174,7 +177,7 @@ impl Stills {
             Kind::File { src, prefs, keys } => {
                 keys.get_or_init(|| keyframes(&src.path, prefs).unwrap_or_else(|_| vec![0.0]))
             }
-            Kind::Mkv { .. } => &[],
+            Kind::Mkv { .. } | Kind::Alpha(_) => &[],
         }
     }
 
