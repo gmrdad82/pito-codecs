@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 
 use pito_codecs::filter::{
-    Chroma, ColorSpec, Image, ImageMut, Kernel, Light, Matrix, Order, PackedMut, Range, Rotation,
-    Scaler, Transfer, convert_color, rgba_to_yuv, rotate, yuv_to_packed,
+    ColorSpec, Image, ImageMut, Kernel, Light, Matrix, Range, Rotation, Scaler, Transfer,
+    convert_color, rgba_to_yuv, rotate,
 };
 use pito_codecs::gpu::{self, Backend, HwEncoder};
 use pito_codecs::media::{
@@ -139,7 +139,7 @@ impl YuvFix {
             }
             None => frame,
         };
-        if (frame.width, frame.height) != self.size {
+        if (frame.width, frame.height) != self.size || self.rgba {
             if self.scaler.is_none() {
                 self.scaler = Some(linear(
                     (frame.width, frame.height),
@@ -165,34 +165,6 @@ impl YuvFix {
                 s.convert(Image::Yuv(&frame), ImageMut::Yuv(&mut out))?;
                 return Ok(Pic::Yuv(out));
             }
-        }
-        if self.rgba {
-            if frame.format != PixelFormat::Yuv420p8 {
-                let mut out = Frame::new(
-                    PixelFormat::Yuv420p8,
-                    frame.width,
-                    frame.height,
-                    frame.pts,
-                    frame.time_base,
-                );
-                convert_color(
-                    &frame,
-                    self.from,
-                    self.from,
-                    PixelFormat::Yuv420p8,
-                    &mut out,
-                )?;
-                frame = out;
-            }
-            let mut rgba = Rgba::new(frame.width, frame.height);
-            let (w, h) = (rgba.width, rgba.height);
-            yuv_to_packed(
-                &frame,
-                self.from,
-                Chroma::Bilinear,
-                PackedMut::new(w, h, Order::Rgba, &mut rgba.data),
-            )?;
-            return Ok(Pic::Rgba(rgba));
         }
         if self.from != ColorSpec::BT709 || frame.format != PixelFormat::Yuv420p8 {
             let mut out = Frame::new(
@@ -1104,6 +1076,53 @@ impl Merge {
     }
 }
 
+fn produce(
+    job: &Job,
+    want: Want,
+    direct: bool,
+    tx: SyncSender<Result<Pic, Fail>>,
+) -> Result<Vec<String>, Fail> {
+    let made = match &job.media.kind {
+        Kind::File if direct => produce_gpu(job, &tx),
+        Kind::File if job.media.alpha => produce_alpha(job, want, &tx),
+        Kind::File => produce_file(job, want == Want::Rgba, &tx),
+        Kind::Frames(files) => produce_frames(job, files, want, &tx),
+    };
+    if let Err(e) = &made {
+        let _ = tx.send(Err(e.to_string().into()));
+    }
+    made
+}
+
+fn palette_pass(job: &Job, want: Want) -> Result<gif::Palette, Fail> {
+    let (tx, rx) = mpsc::sync_channel::<Result<Pic, Fail>>(6);
+    std::thread::scope(|s| {
+        let producer = s.spawn(move || produce(job, want, false, tx));
+        let mut histogram = gif::Histogram::new();
+        let mut n = 0u64;
+        let looked = (|| -> Result<(), Fail> {
+            while let Some(pic) = next_pic(&rx, job.stop)? {
+                if let Pic::Rgba(img) = pic {
+                    histogram.add(&img);
+                }
+                n += 1;
+                job.progress.frame(n);
+            }
+            Ok(())
+        })();
+        if looked.is_err() {
+            job.stop.store(true, Ordering::Relaxed);
+        }
+        drop(rx);
+        let produced = producer
+            .join()
+            .unwrap_or_else(|_| Err("the decoder failed".into()));
+        looked?;
+        produced?;
+        Ok(histogram.palette(255))
+    })
+}
+
 pub fn run(job: &Job) -> Result<Done, Fail> {
     let animated = job.container.animated();
     let direct = gpu_direct(job.media, job.encoder, job.fps);
@@ -1129,24 +1148,22 @@ pub fn run(job: &Job) -> Result<Done, Fail> {
         )
     });
     let audio_work = audio_plan.map(|a| a.work);
-    job.progress.step("encode", 1, 2, job.frames);
+    let gif = matches!(job.encoder, Encoder::Gif { .. });
+    let steps = if gif { 3 } else { 2 };
+    let palette = if gif {
+        job.progress.step("palette", 1, steps, job.frames);
+        Some(palette_pass(job, want)?)
+    } else {
+        None
+    };
+    job.progress.step("encode", steps - 1, steps, job.frames);
     std::thread::scope(|s| -> Result<Done, Fail> {
         let copy = matches!(job.encoder, Encoder::Copy { .. });
         let producer = s.spawn(move || {
             if copy {
                 return Ok(Vec::new());
             }
-            let made = match &job.media.kind {
-                Kind::File if direct => produce_gpu(job, &tx),
-                Kind::File if job.media.alpha => produce_alpha(job, want, &tx),
-                Kind::File => produce_file(job, animated, &tx),
-                Kind::Frames(files) => produce_frames(job, files, want, &tx),
-            };
-            if let Err(e) = &made {
-                let _ = tx.send(Err(e.to_string().into()));
-            }
-            drop(tx);
-            made
+            produce(job, want, direct, tx)
         });
         let has_audio = audio_work.is_some();
         let audio = s.spawn(move || -> Result<(), Fail> {
@@ -1169,7 +1186,7 @@ pub fn run(job: &Job) -> Result<Done, Fail> {
         let consumed = if copy {
             consume_copy(job, audio_config, merge)
         } else if animated {
-            consume_animation(job, &rx)
+            consume_animation(job, &rx, palette)
         } else {
             consume_video(job, &rx, audio_config, merge, &mut notes)
         };
@@ -1336,20 +1353,30 @@ fn consume_video(
     Ok((device, n))
 }
 
-fn consume_animation(job: &Job, rx: &Receiver<Result<Pic, Fail>>) -> Result<(String, u64), Fail> {
+fn consume_animation(
+    job: &Job,
+    rx: &Receiver<Result<Pic, Fail>>,
+    palette: Option<gif::Palette>,
+) -> Result<(String, u64), Fail> {
     let (w, h) = job.size;
     let fps = (f64::from(job.fps.0), f64::from(job.fps.1.max(1)));
     let at = |n: u64, unit: f64| (n as f64 * unit * fps.1 / fps.0).round() as u64;
     let mut n = 0u64;
     match job.encoder {
-        Encoder::Gif { .. } => {
-            let mut enc = gif::Encoder::new(w, h, gif::EncodeOptions::default())?;
+        Encoder::Gif { tolerance } => {
+            let opts = gif::EncodeOptions {
+                tolerance: *tolerance,
+                ..gif::EncodeOptions::default()
+            };
+            let mut enc = match palette {
+                Some(p) => gif::Encoder::with_palette(w, h, opts, p)?,
+                None => gif::Encoder::new(w, h, opts)?,
+            };
             while let Some(pic) = next_pic(rx, job.stop)? {
                 let Pic::Rgba(img) = pic else {
                     return Err("a picture in the wrong form for the GIF encoder".into());
                 };
-                let delay = (at(n + 1, 100.0) - at(n, 100.0)).clamp(2, u64::from(u16::MAX));
-                enc.push(img, delay as u16)?;
+                enc.push(img, gif::delay_cs(n, job.fps.0, job.fps.1))?;
                 n += 1;
                 job.progress.frame(n);
             }
@@ -1357,7 +1384,7 @@ fn consume_animation(job: &Job, rx: &Receiver<Result<Pic, Fail>>) -> Result<(Str
             if n == 0 {
                 return Err("the source gave no frames".into());
             }
-            job.progress.step("mux", 2, 2, None);
+            job.progress.step("mux", 3, 3, None);
             write_all(job.partial, &enc.finish())?;
         }
         Encoder::Webp { quality, effort } => {
