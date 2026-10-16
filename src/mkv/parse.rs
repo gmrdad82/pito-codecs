@@ -191,6 +191,7 @@ fn video(d: &[u8]) -> VideoInfo {
             PIXEL_CROP_LEFT => v.crop.2 = u as u32,
             PIXEL_CROP_RIGHT => v.crop.3 = u as u32,
             FLAG_INTERLACED => v.interlaced = u,
+            ALPHA_MODE => v.alpha_mode = u,
             COLOUR => v.colour = Some(colour(e.data)),
             PROJECTION => {
                 let mut p = Projection::default();

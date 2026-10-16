@@ -22,6 +22,7 @@ pub struct Probe {
     pub bit_depth: u8,
     pub frames: Option<u64>,
     pub audio: Vec<AudioTrack>,
+    pub alpha: bool,
 }
 
 impl Probe {
@@ -308,5 +309,7 @@ fn from_flat(m: &BTreeMap<String, String>) -> Result<Probe> {
         bit_depth: if pix.contains("10") { 10 } else { 8 },
         frames: num(video, "nb_frames").map(|n| n as u64),
         audio,
+        alpha: get(video, "tags.alpha_mode").map(String::as_str) == Some("1")
+            || pix.starts_with("yuva"),
     })
 }
