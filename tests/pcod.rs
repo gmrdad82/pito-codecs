@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
 use std::sync::OnceLock;
 
 use pito_codecs::media::{Prefs, Rgba, probe};
@@ -240,8 +240,8 @@ fn a_signal_stops_the_conversion_and_leaves_nothing() {
             "--size",
             "2160p",
         ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
     let started = std::time::Instant::now();

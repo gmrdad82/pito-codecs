@@ -8,7 +8,8 @@ use pito_codecs::filter::{
 };
 use pito_codecs::gpu::{self, Backend, HwEncoder};
 use pito_codecs::media::{
-    self, AudioBuffer, Bitstream, Codec, Frame, Packet, PixelFormat, Plane, Prefs, Rate, Rgba, TimeBase,
+    self, AudioBuffer, Bitstream, Codec, Frame, Packet, PixelFormat, Plane, Prefs, Rate, Rgba,
+    TimeBase,
 };
 use pito_codecs::{aac, gif, h264, mkv, mp4, opus, png, vp9, webp};
 use rayon::prelude::*;
@@ -48,6 +49,7 @@ pub struct Job<'a> {
     pub audio: Option<Audio>,
     pub partial: &'a Path,
     pub tune: Option<&'a str>,
+    pub profile: &'a str,
     pub alpha: bool,
     pub stop: &'a AtomicBool,
     pub progress: &'a Progress,
@@ -399,7 +401,11 @@ fn produce_alpha(
     if let Some((f, a, at)) = held.take() {
         let step = f64::from(media.fps.1.max(1)) / f64::from(media.fps.0.max(1));
         let end = retime.slot(f.time_base.seconds(f.pts) + step);
-        let until = if retime.next == 0 { end.max(at + 1) } else { end };
+        let until = if retime.next == 0 {
+            end.max(at + 1)
+        } else {
+            end
+        };
         let span = retime.span(at, until);
         if !span.is_empty() {
             send_span(tx, fix.apply(image(f, a))?, span)?;
@@ -571,12 +577,11 @@ fn video_encoder(job: &Job, notes: &mut Vec<String>) -> Result<(VEnc, String), F
                 Preset::Balanced => "balanced",
                 Preset::Quality => "best",
             };
-            let p = match preset {
-                Preset::Balanced => h264::Preset::Balanced,
-                Preset::Quality => h264::Preset::Quality,
-            };
             let rate = quality::h264_rate(name, Some(f32::from(*crf)), animation);
-            Ok((cpu_h264(job, p, rate)?, "CPU".into()))
+            Ok((
+                cpu_h264(job, quality::h264_preset(name), rate)?,
+                "CPU".into(),
+            ))
         }
         Encoder::H264Gpu { qp } => {
             let config = gpu::EncoderConfig {
@@ -584,7 +589,7 @@ fn video_encoder(job: &Job, notes: &mut Vec<String>) -> Result<(VEnc, String), F
                 height: job.size.1,
                 fps: job.fps,
                 profile: gpu::Profile::High,
-                rate: Rate::Qp(*qp),
+                rate: quality::fast_qp(Some(*qp)),
                 gop: gop_of(job.fps),
                 b_frames: 0,
                 bitstream: Bitstream::LengthPrefixed,
@@ -606,8 +611,7 @@ fn video_encoder(job: &Job, notes: &mut Vec<String>) -> Result<(VEnc, String), F
             }
         }
         Encoder::Vp9 { crf } => {
-            let name = if *crf <= 28 { "best" } else { "balanced" };
-            let rate = match quality::vp9_rate(name, Some(f32::from(*crf))) {
+            let rate = match quality::vp9_rate(job.profile, Some(f32::from(*crf))) {
                 Rate::Crf(c) => vp9::Rate::Crf(c),
                 Rate::Qp(q) => vp9::Rate::Q(q),
                 Rate::Bitrate(k) | Rate::Vbr { kbps: k, .. } => vp9::Rate::Bitrate(k),

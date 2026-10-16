@@ -236,6 +236,7 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
         audio: planned.audio.clone(),
         partial: &part,
         tune: request.tune.as_deref(),
+        profile: request.profile.name(),
         alpha: media.alpha && planned.container == Container::Webm,
         stop: &signals::STOP,
         progress: &progress,
