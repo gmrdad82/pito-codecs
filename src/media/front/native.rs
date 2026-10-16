@@ -222,6 +222,7 @@ pub fn probe(path: &Path) -> Result<Probe> {
         bit_depth,
         frames: Some(t.samples.len() as u64),
         audio,
+        alpha: false,
     })
 }
 

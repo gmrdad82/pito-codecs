@@ -84,6 +84,7 @@ pub fn copy<S: ByteSource, W: Write + Seek>(
     let mut window = Vec::new();
     let mut window_start = 0u64;
     let mut frame = Vec::new();
+    let mut alpha = Vec::new();
     for (offset, k, i) in order {
         let t = &reader.tracks[cut.tracks[k].0];
         let s = t.samples[i];
@@ -108,7 +109,12 @@ pub fn copy<S: ByteSource, W: Write + Seek>(
             super::reader::read_frame(src, len, t, offset, s.size, &mut frame)?;
             &frame
         };
-        writer.push_sample(map[k], data, pts, None, s.keyframe)?;
+        let additional = if t.alpha() && reader.read_alpha(cut.tracks[k].0, i, &mut alpha)? {
+            Some(&alpha[..])
+        } else {
+            None
+        };
+        writer.push_block(map[k], data, pts, None, s.keyframe, additional)?;
     }
     Ok(())
 }

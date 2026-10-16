@@ -47,6 +47,7 @@ pub struct VideoInfo {
     pub interlaced: u64,
     pub colour: Option<Colour>,
     pub projection: Option<Projection>,
+    pub alpha_mode: u64,
 }
 
 impl VideoInfo {
@@ -247,6 +248,10 @@ impl Track {
             .as_ref()
             .and_then(VideoInfo::rotation)
             .unwrap_or(0)
+    }
+
+    pub fn alpha(&self) -> bool {
+        self.kind == TrackKind::Video && self.video.as_ref().is_some_and(|v| v.alpha_mode == 1)
     }
 
     pub fn seconds(&self, ticks: i64) -> f64 {

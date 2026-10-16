@@ -561,6 +561,7 @@ fn describe(
         bit_depth,
         frames,
         audio,
+        alpha: t.alpha(),
     })
 }
 

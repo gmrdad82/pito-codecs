@@ -96,6 +96,7 @@ pub const CODEC_PRIVATE: u32 = 0x63A2;
 pub const CODEC_NAME: u32 = 0x25_8688;
 pub const CODEC_DELAY: u32 = 0x56AA;
 pub const SEEK_PRE_ROLL: u32 = 0x56BB;
+pub const MAX_BLOCK_ADDITION_ID: u32 = 0x55EE;
 
 pub const VIDEO: u32 = 0xE0;
 pub const FLAG_INTERLACED: u32 = 0x9A;

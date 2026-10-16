@@ -1,3 +1,4 @@
+mod alpha;
 mod audio;
 mod demux;
 mod export;
@@ -18,6 +19,7 @@ mod still;
 mod stream;
 mod video;
 
+pub use alpha::{AlphaVideo, decode_alpha, export_rgba, to_rgba_alpha};
 pub use audio::{audio_mix, audio_pcm, audio_pcm_range};
 pub use export::{
     ExportOptions, Exported, Overlay, Part, Piece, Progress, Stage, export, export_with_audio,
