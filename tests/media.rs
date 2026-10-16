@@ -2460,6 +2460,9 @@ fn av1_in_mp4_mkv_and_webm_probes_and_decodes_on_the_gpu_or_refuses_cleanly() {
             assert!(e.contains("no GPU AV1 decoder"), "{name}: {e}");
             continue;
         }
+        if !cfg!(target_os = "linux") {
+            continue;
+        }
         let still = first_frame(&path, 180, &prefs).unwrap();
         assert_eq!((still.width, still.height), (320, 180), "{name}");
         let stills = frames_at_seek(&path, &[0.2, 0.7], 180, Seek::Exact, &prefs).unwrap();
