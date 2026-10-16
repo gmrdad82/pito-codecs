@@ -5,6 +5,7 @@ mod export;
 mod feed;
 mod ffmpeg;
 mod frames;
+mod join;
 #[cfg(test)]
 mod malformed;
 mod mux;
@@ -13,6 +14,7 @@ mod picture;
 mod probe;
 mod resident;
 mod route;
+mod shape;
 mod sound;
 mod still;
 mod stream;
@@ -26,6 +28,7 @@ pub use export::{
 };
 pub use ffmpeg::{Ffmpeg, Listed};
 pub use frames::{Canvas, export_frames};
+pub use join::{JoinAudio, JoinMethod, JoinOptions, Joined, join};
 pub use picture::{
     Blender, Color, blend, rotate, scale, scale_to_height, to_rgba, to_rgba_color, to_rgba_height,
 };
