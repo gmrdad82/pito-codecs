@@ -4,6 +4,7 @@ mod export;
 mod feed;
 mod ffmpeg;
 mod frames;
+mod level;
 #[cfg(test)]
 mod malformed;
 mod mux;
@@ -24,6 +25,12 @@ pub use export::{
 };
 pub use ffmpeg::{Ffmpeg, Listed};
 pub use frames::{Canvas, export_frames};
+pub use level::{
+    AAC_KBPS, DEFAULT_TRUE_PEAK, HIGHEST_TRUE_PEAK, LEVEL_RATE, LOUDEST_LUFS, LOWEST_TRUE_PEAK,
+    LevelMode, LevelOptions, LevelPlan, LevelProgress, LevelStage, LevelTarget, Leveler, Levelled,
+    LoudnessStats, OPUS_KBPS, QUIETEST_LUFS, YOUTUBE_LUFS, YOUTUBE_TRUE_PEAK, level,
+    measure_loudness, plan_level,
+};
 pub use picture::{
     Blender, Color, blend, rotate, scale, scale_to_height, to_rgba, to_rgba_color, to_rgba_height,
 };

@@ -23,6 +23,7 @@ The codecs here are written in Rust. Parts are adapted from permissively license
 | [zune-png](https://github.com/etemesi254/zune-image) | MIT OR Apache-2.0 OR Zlib (Caleb Etemesi) | 0.4.10, `aaf40839ed2596fa83091ccfb49629eb5d8efd91` | The scanline de-filters with their SSE2 and SSE4.1 kernels, the chunk checks, bit unpacking, palette and tRNS expansion and Adam7 geometry in `src/png/`; the RGBA row loop is new. |
 | [zune-inflate](https://github.com/etemesi254/zune-image) | MIT OR Apache-2.0 OR Zlib (Caleb Etemesi), a port of [libdeflate](https://github.com/ebiggers/libdeflate) (MIT) | 0.2.54, `69502ce83fdfecdd0beefd677e2abb3781b29d98` | The whole-buffer zlib and deflate decoder in `src/png/inflate.rs`: decode tables, fast and slow loops, match copies. |
 | [adler2](https://github.com/oyvindln/adler2) | 0BSD OR MIT OR Apache-2.0 | 2.0.1, `89a031a0f42eeff31c70dc598b398cbf31f1680f` | The four-lane Adler-32 in `src/png/inflate.rs`. |
+| pconv | MIT (Catalin Ilinca) | v1.0.1, `8879614b928b8fdde500a16376b85a2c95551dc9` | The loudness target, its limits and defaults, the YouTube preset and the silent-source refusal in `src/media/front/level.rs`; the two-pass levelling, limiter calibration and stream copy are new. |
 
 ## Specifications
 
