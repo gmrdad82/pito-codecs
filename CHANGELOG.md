@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.14.0 — 2026-10-16
+
+### Added
+
+- An `audio` feature: `default-features = false, features = ["audio", "mp3", "opus"]` builds probing and audio decoding (`audio_pcm_range`, `audio_stream`) without any video decoder, GPU code or filters.
+- `mp3::decode_file` decodes a bare .mp3 file gapless: ID3 and APE tags are skipped and the encoder delay and padding from its LAME or Xing header are trimmed, matching ffmpeg sample for sample. `mp3::vbr_tag` reads that header.
+
+### Changed
+
+- A decode set to the CPU, and every audio decode, no longer opens a GPU device to look for decoders.
+
 ## v1.13.0 — 2026-10-16
 
 ### Added
