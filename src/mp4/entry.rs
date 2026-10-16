@@ -43,6 +43,7 @@ pub enum CodecConfig {
     Avc(AvcConfig),
     Hevc(HevcConfig),
     Vp9(VpcConfig),
+    Av1(Av1Config),
     Aac(AacConfig),
     Mp3,
     Pcm(PcmConfig),
@@ -55,6 +56,7 @@ impl CodecConfig {
             CodecConfig::Avc(_) => "h264".into(),
             CodecConfig::Hevc(_) => "hevc".into(),
             CodecConfig::Vp9(_) => "vp9".into(),
+            CodecConfig::Av1(_) => "av1".into(),
             CodecConfig::Aac(_) => "aac".into(),
             CodecConfig::Mp3 => "mp3".into(),
             CodecConfig::Pcm(_) => "pcm".into(),
@@ -69,6 +71,7 @@ impl CodecConfig {
             CodecConfig::Avc(c) => Some(c.to_bytes()),
             CodecConfig::Hevc(c) => Some(c.to_bytes()),
             CodecConfig::Vp9(c) => Some(c.to_bytes()),
+            CodecConfig::Av1(c) => Some(c.to_bytes()),
             CodecConfig::Aac(c) => Some(c.asc.clone()),
             _ => None,
         }
@@ -399,6 +402,87 @@ impl VpcConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Av1Config {
+    pub seq_profile: u8,
+    pub seq_level_idx_0: u8,
+    pub seq_tier_0: bool,
+    pub high_bitdepth: bool,
+    pub twelve_bit: bool,
+    pub monochrome: bool,
+    pub chroma_subsampling_x: bool,
+    pub chroma_subsampling_y: bool,
+    pub chroma_sample_position: u8,
+    pub initial_presentation_delay: Option<u8>,
+    pub config_obus: Vec<u8>,
+}
+
+impl Av1Config {
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        let mut c = Cur::new(data, "av1C");
+        let head = c.u8()?;
+        if head & 0x80 == 0 || head & 0x7F != 1 {
+            return Err(Error::Unsupported(format!(
+                "av1C marker and version {head:#04x}"
+            )));
+        }
+        let a = c.u8()?;
+        let b = c.u8()?;
+        let d = c.u8()?;
+        Ok(Av1Config {
+            seq_profile: a >> 5,
+            seq_level_idx_0: a & 0x1F,
+            seq_tier_0: b & 0x80 != 0,
+            high_bitdepth: b & 0x40 != 0,
+            twelve_bit: b & 0x20 != 0,
+            monochrome: b & 0x10 != 0,
+            chroma_subsampling_x: b & 0x08 != 0,
+            chroma_subsampling_y: b & 0x04 != 0,
+            chroma_sample_position: b & 3,
+            initial_presentation_delay: (d & 0x10 != 0).then_some((d & 0x0F) + 1),
+            config_obus: c.rest().to_vec(),
+        })
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(4 + self.config_obus.len());
+        out.push(0x81);
+        out.push(((self.seq_profile & 7) << 5) | (self.seq_level_idx_0 & 0x1F));
+        out.push(
+            (self.seq_tier_0 as u8) << 7
+                | (self.high_bitdepth as u8) << 6
+                | (self.twelve_bit as u8) << 5
+                | (self.monochrome as u8) << 4
+                | (self.chroma_subsampling_x as u8) << 3
+                | (self.chroma_subsampling_y as u8) << 2
+                | (self.chroma_sample_position & 3),
+        );
+        out.push(match self.initial_presentation_delay {
+            Some(n) => 0x10 | (n.saturating_sub(1) & 0x0F),
+            None => 0,
+        });
+        out.extend_from_slice(&self.config_obus);
+        out
+    }
+
+    pub fn bit_depth(&self) -> u8 {
+        match (self.high_bitdepth, self.twelve_bit) {
+            (true, true) => 12,
+            (true, false) => 10,
+            _ => 8,
+        }
+    }
+
+    pub fn profile_name(&self) -> String {
+        match self.seq_profile {
+            0 => "Main".into(),
+            1 => "High".into(),
+            2 => "Professional".into(),
+            p => format!("Profile {p}"),
+        }
+    }
+}
+
 fn vp9_level((width, height): (u32, u32), (num, den): (u32, u32)) -> u8 {
     let picture = width as u64 * height as u64;
     let rate = picture * num as u64 / den.max(1) as u64;
@@ -581,6 +665,7 @@ pub(crate) fn parse_sample_entry(
                     entry.codec = CodecConfig::Hevc(HevcConfig::parse(p)?)
                 }
                 b"vpcC" if f == b"vp09" => entry.codec = CodecConfig::Vp9(VpcConfig::parse(p)?),
+                b"av1C" if f == b"av01" => entry.codec = CodecConfig::Av1(Av1Config::parse(p)?),
                 b"pasp" => {
                     let mut c = Cur::new(p, "pasp");
                     v.pixel_aspect = Some((c.u32()?, c.u32()?));
@@ -894,6 +979,10 @@ impl SampleEntry {
         Self::video(b"vp09", CodecConfig::Vp9(config), width, height)
     }
 
+    pub fn av1(config: Av1Config, width: u16, height: u16) -> Self {
+        Self::video(b"av01", CodecConfig::Av1(config), width, height)
+    }
+
     pub fn aac(asc: Vec<u8>, channels: u32, sample_rate: u32, bitrate: u32) -> Self {
         let mut config = AacConfig::from_asc(asc);
         config.avg_bitrate = bitrate;
@@ -946,6 +1035,7 @@ impl SampleEntry {
                 CodecConfig::Avc(c) => b.leaf(b"avcC", &c.to_bytes()),
                 CodecConfig::Hevc(c) => b.leaf(b"hvcC", &c.to_bytes()),
                 CodecConfig::Vp9(c) => b.leaf(b"vpcC", &c.to_bytes()),
+                CodecConfig::Av1(c) => b.leaf(b"av1C", &c.to_bytes()),
                 _ => {
                     return Err(Error::Unsupported(format!(
                         "writing {} video",
