@@ -9,6 +9,7 @@ use super::mux::{Planner, Premix, Sound, gop_mp4, premixed_m4a};
 use super::picture::Blender;
 use super::probe::keyframes;
 use super::route::{Caps, Picked, Prefs, pick_encode};
+use super::shape::Pull;
 use super::video::{Source, Video, frame_at, open, source};
 use crate::media::{AudioBuffer, Codec, Error, Frame, PixelFormat, Result, Rgba, Route};
 
@@ -141,6 +142,13 @@ pub(super) struct Job<'a> {
     pub(super) device: Option<crate::gpu::Device>,
     pub(super) look: super::mux::Look,
     pub(super) spare: Arc<Mutex<Option<crate::gpu::HwEncoder>>>,
+    pub(super) fit: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Fit {
+    pub(super) size: (u32, u32),
+    pub(super) fps: (u32, u32),
 }
 
 pub(super) type Tell<'a> = &'a mut dyn FnMut(&Progress) -> bool;
@@ -243,7 +251,17 @@ pub fn export(
     opts: ExportOptions,
     progress: impl FnMut(&Progress) -> bool,
 ) -> Result<Exported> {
-    export_to(out, pieces, opts, None, progress)
+    export_to(out, pieces, opts, None, None, progress)
+}
+
+pub(super) fn export_fitted(
+    out: &Path,
+    pieces: &[Piece],
+    opts: ExportOptions,
+    fit: Fit,
+    progress: impl FnMut(&Progress) -> bool,
+) -> Result<Exported> {
+    export_to(out, pieces, opts, None, Some(fit), progress)
 }
 
 pub fn export_with_audio(
@@ -253,7 +271,7 @@ pub fn export_with_audio(
     mut audio: impl FnMut(usize, usize) -> Result<AudioBuffer> + Send,
     progress: impl FnMut(&Progress) -> bool,
 ) -> Result<Exported> {
-    export_to(out, pieces, opts, Some(&mut audio), progress)
+    export_to(out, pieces, opts, Some(&mut audio), None, progress)
 }
 
 fn export_to(
@@ -261,6 +279,7 @@ fn export_to(
     pieces: &[Piece],
     mut opts: ExportOptions,
     premix: Option<Premix>,
+    fit: Option<Fit>,
     mut progress: impl FnMut(&Progress) -> bool,
 ) -> Result<Exported> {
     if pieces.is_empty() {
@@ -292,14 +311,14 @@ fn export_to(
     let caps = Caps::detect(&opts.prefs);
     let mut video = pick_encode(opts.video, &opts.prefs, &caps)?;
     let first = sources[index[0]].probe.clone();
-    let fps = first.fps;
+    let fps = fit.map_or(first.fps, |f| f.fps);
     if fps.0 == 0 || fps.1 == 0 || fps.0 / fps.1 > MAX_FPS {
         return Err(Error::Invalid(format!(
             "a frame rate of {}/{}",
             fps.0, fps.1
         )));
     }
-    let size = (first.width & !1, first.height & !1);
+    let size = fit.map_or((first.width & !1, first.height & !1), |f| f.size);
     if size.0 == 0 || size.1 == 0 {
         return Err(Error::Invalid(format!(
             "a picture of {}x{}",
@@ -311,11 +330,14 @@ fn export_to(
     } else {
         PixelFormat::Yuv420p8
     };
-    let look = sources[index[0]]
-        .demux
-        .as_ref()
-        .and_then(|d| d.stream(d.video().ok()?).ok()?.look)
-        .unwrap_or(((1, 1), crate::gpu::Color::UNKNOWN));
+    let look = match fit {
+        Some(_) => ((1, 1), crate::gpu::Color::BT709),
+        None => sources[index[0]]
+            .demux
+            .as_ref()
+            .and_then(|d| d.stream(d.video().ok()?).ok()?.look)
+            .unwrap_or(((1, 1), crate::gpu::Color::UNKNOWN)),
+    };
     let mut device = None;
     let mut spare = None;
     let format = match video.route {
@@ -355,7 +377,14 @@ fn export_to(
             ));
         }
     };
-    let why = if opts.overlay.is_some() {
+    if fit.is_some() && ffmpeg.is_some() {
+        return Err(Error::Unsupported(
+            "a fitted export encodes with our own encoders, not ffmpeg".to_string(),
+        ));
+    }
+    let why = if fit.is_some() {
+        None
+    } else if opts.overlay.is_some() {
         Some("an overlay is drawn on every frame, so the whole export is re-encoded".to_string())
     } else if !same {
         Some(match sources.iter().find(|s| s.probe.video_codec != Some(video.codec)) {
@@ -380,7 +409,7 @@ fn export_to(
     } else {
         None
     };
-    let smart = why.is_none();
+    let smart = why.is_none() && fit.is_none();
     let mut reasons: Vec<String> = video.reasons.clone();
     for s in &sources {
         for r in &s.reasons {
@@ -409,6 +438,7 @@ fn export_to(
         device,
         look,
         spare: Arc::new(Mutex::new(spare)),
+        fit: fit.is_some(),
     };
     job.total = pieces
         .iter()
@@ -752,11 +782,18 @@ pub(super) fn reencode(
         return Ok(());
     }
     let mut frames_in = reencode_open(job, si, from, frames)?;
+    if job.fit {
+        let mut shaped = super::shape::Shaped::new(job, si, &mut frames_in)?;
+        return reencode_run(job, &mut shaped, frames, at, push, overlay, progress);
+    }
     reencode_run(job, &mut frames_in, frames, at, push, overlay, progress)
 }
 
 pub(super) fn reencode_open(job: &Job, si: usize, from: i64, frames: i64) -> Result<Video> {
     let src = &job.sources[si];
+    if job.fit {
+        return open(src, job.seconds(from), None, None, None);
+    }
     let size = (src.probe.width, src.probe.height) != job.size;
     open(
         src,
@@ -769,7 +806,7 @@ pub(super) fn reencode_open(job: &Job, si: usize, from: i64, frames: i64) -> Res
 
 pub(super) fn reencode_run(
     job: &mut Job,
-    frames_in: &mut Video,
+    frames_in: &mut dyn Pull,
     frames: i64,
     at: i64,
     push: &mut dyn FnMut(&Frame) -> Result<()>,
@@ -780,7 +817,7 @@ pub(super) fn reencode_run(
     let mut last: Option<Frame> = None;
     let mut blender = Blender::new();
     while n < frames {
-        let mut frame = match frames_in.next() {
+        let mut frame = match frames_in.pull() {
             Some(f) => f?,
             None => match last.clone() {
                 Some(f) => f,
@@ -799,7 +836,7 @@ pub(super) fn reencode_run(
                 let clean = frame.clone();
                 blender.draw(&mut frame, &layer);
                 push(&frame)?;
-                frames_in.recycle(frame);
+                frames_in.give(frame);
                 clean
             }
             None => {
@@ -808,7 +845,7 @@ pub(super) fn reencode_run(
             }
         };
         if let Some(old) = last.replace(keep) {
-            frames_in.recycle(old);
+            frames_in.give(old);
         }
         n += 1;
         job.done += 1;
