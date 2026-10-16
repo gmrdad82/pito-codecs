@@ -227,13 +227,20 @@ impl AnimEncoder {
                 }
             }
             Some(prev) => {
-                let Some((x0, y0, x1, y1)) = changed(prev, image) else {
+                let similar = if self.options.lossless {
+                    0
+                } else {
+                    max_diff(self.options.quality)
+                };
+                let Some((x0, y0, x1, y1)) = changed(prev, image, similar) else {
                     self.spare.push(work);
                     let last = match self.jobs.last_mut() {
-                        Some(j) => &mut j.duration,
-                        None => &mut self.pieces.last_mut().expect("a frame before").duration,
+                        Some(j) => Some(&mut j.duration),
+                        None => self.pieces.last_mut().map(|p| &mut p.duration),
                     };
-                    *last = (*last + duration).min(0xff_ffff);
+                    if let Some(last) = last {
+                        *last = (*last + duration).min(0xff_ffff);
+                    }
                     return Ok(());
                 };
                 let (x0, y0) = (x0 & !1, y0 & !1);
@@ -250,7 +257,7 @@ impl AnimEncoder {
                     opaque &= src.chunks_exact(4).all(|p| p[3] == 255);
                     work.data.extend_from_slice(src);
                 }
-                let blend = opaque && self.options.lossless;
+                let mut blend = opaque;
                 let mut plain = None;
                 if blend {
                     let mut copy = self.spare.pop().unwrap_or_else(|| Rgba::new(0, 0));
@@ -258,19 +265,26 @@ impl AnimEncoder {
                     copy.height = h;
                     copy.data.clear();
                     copy.data.extend_from_slice(&work.data);
-                    plain = Some(copy);
-                    for y in y0..y1 {
-                        let o = y as usize * stride + x0 as usize * 4;
-                        let before = &prev.data[o..o + row];
-                        let wo = (y - y0) as usize * row;
-                        for (dst, old) in work.data[wo..wo + row]
-                            .chunks_exact_mut(4)
-                            .zip(before.chunks_exact(4))
-                        {
-                            if dst == old {
-                                dst.copy_from_slice(&[0, 0, 0, 0]);
+                    if self.options.lossless {
+                        for y in y0..y1 {
+                            let o = y as usize * stride + x0 as usize * 4;
+                            let before = &prev.data[o..o + row];
+                            let wo = (y - y0) as usize * row;
+                            for (dst, old) in work.data[wo..wo + row]
+                                .chunks_exact_mut(4)
+                                .zip(before.chunks_exact(4))
+                            {
+                                if dst == old {
+                                    dst.copy_from_slice(&[0, 0, 0, 0]);
+                                }
                             }
                         }
+                        plain = Some(copy);
+                    } else if flatten(&mut work, prev, x0, y0, similar) {
+                        plain = Some(copy);
+                    } else {
+                        self.spare.push(copy);
+                        blend = false;
                     }
                 }
                 Job {
@@ -283,6 +297,23 @@ impl AnimEncoder {
             }
         };
         match &mut self.prev {
+            Some(p) if !self.options.lossless => {
+                let [x0, y0, w, _] = job.head;
+                let stride = self.width as usize * 4;
+                let row = w as usize * 4;
+                for (r, sub) in job.image.data.chunks_exact(row).enumerate() {
+                    let o = (y0 as usize + r) * stride + x0 as usize * 4;
+                    for ((dst, src), s) in p.data[o..o + row]
+                        .chunks_exact_mut(4)
+                        .zip(image.data[o..o + row].chunks_exact(4))
+                        .zip(sub.chunks_exact(4))
+                    {
+                        if !job.blend || s[3] != 0 {
+                            dst.copy_from_slice(src);
+                        }
+                    }
+                }
+            }
             Some(p) => p.data.copy_from_slice(&image.data),
             None => self.prev = Some(image.clone()),
         }
@@ -376,7 +407,69 @@ impl AnimEncoder {
     }
 }
 
-fn changed(a: &Rgba, b: &Rgba) -> Option<(u32, u32, u32, u32)> {
+const FLAT: usize = 8;
+
+fn max_diff(quality: f32) -> u8 {
+    let v = (f64::from(quality.clamp(0.0, 100.0)) / 100.0).sqrt();
+    (31.0 * (1.0 - v) + v + 0.5) as u8
+}
+
+fn similar(p: &[u8], q: &[u8], diff: u8) -> bool {
+    p[3] == q[3]
+        && p[0].abs_diff(q[0]) <= diff
+        && p[1].abs_diff(q[1]) <= diff
+        && p[2].abs_diff(q[2]) <= diff
+}
+
+fn flatten(work: &mut Rgba, prev: &Rgba, x0: u32, y0: u32, diff: u8) -> bool {
+    let (w, h) = (work.width as usize, work.height as usize);
+    let stride = prev.width as usize * 4;
+    let mut any = false;
+    for by in (0..h).step_by(FLAT) {
+        for bx in (0..w).step_by(FLAT) {
+            let (bw, bh) = (FLAT.min(w - bx), FLAT.min(h - by));
+            let mut sum = [0u32; 3];
+            let mut alike = true;
+            'block: for y in by..by + bh {
+                let o = (y0 as usize + y) * stride + (x0 as usize + bx) * 4;
+                let before = &prev.data[o..o + bw * 4];
+                let wo = (y * w + bx) * 4;
+                for (p, q) in work.data[wo..wo + bw * 4]
+                    .chunks_exact(4)
+                    .zip(before.chunks_exact(4))
+                {
+                    if q[3] != 255 || !similar(p, q, diff) {
+                        alike = false;
+                        break 'block;
+                    }
+                    for c in 0..3 {
+                        sum[c] += u32::from(p[c]);
+                    }
+                }
+            }
+            if !alike {
+                continue;
+            }
+            any = true;
+            let n = (bw * bh) as u32;
+            let fill = [
+                (sum[0] / n) as u8,
+                (sum[1] / n) as u8,
+                (sum[2] / n) as u8,
+                0,
+            ];
+            for y in by..by + bh {
+                let wo = (y * w + bx) * 4;
+                for p in work.data[wo..wo + bw * 4].chunks_exact_mut(4) {
+                    p.copy_from_slice(&fill);
+                }
+            }
+        }
+    }
+    any
+}
+
+fn changed(a: &Rgba, b: &Rgba, diff: u8) -> Option<(u32, u32, u32, u32)> {
     let w = a.width as usize;
     let rows_a = a.data.chunks_exact(w * 4);
     let mut y0 = None;
@@ -387,19 +480,21 @@ fn changed(a: &Rgba, b: &Rgba) -> Option<(u32, u32, u32, u32)> {
         if ra == rb {
             continue;
         }
-        y0.get_or_insert(y);
-        y1 = y + 1;
         let pa = ra.chunks_exact(4);
-        let first = pa
+        let Some(first) = pa
             .clone()
             .zip(rb.chunks_exact(4))
-            .position(|(p, q)| p != q)
-            .unwrap();
+            .position(|(p, q)| !similar(p, q, diff))
+        else {
+            continue;
+        };
         let last = w - pa
             .rev()
             .zip(rb.chunks_exact(4).rev())
-            .position(|(p, q)| p != q)
-            .unwrap();
+            .position(|(p, q)| !similar(p, q, diff))
+            .unwrap_or(0);
+        y0.get_or_insert(y);
+        y1 = y + 1;
         x0 = x0.min(first);
         x1 = x1.max(last);
     }

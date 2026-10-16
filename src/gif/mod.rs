@@ -4,7 +4,10 @@ mod lzw;
 mod quant;
 
 pub use decode::{Animation, Decoder, Disposal, Frame, decode};
-pub use encode::{EncodeOptions, Encoder, PaletteMode, encode};
+pub use encode::{
+    BEST_TOLERANCE, EncodeOptions, Encoder, PaletteMode, REDRAW_PERCENT, TOLERANCE, delay_cs,
+    encode,
+};
 pub use quant::{Dither, Histogram, Palette};
 
 use std::fmt;

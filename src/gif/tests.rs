@@ -587,3 +587,56 @@ fn bad_encoder_input_is_an_error() {
     assert!(e.push(Rgba::new(4, 4), 1).is_err());
     assert!(Palette::new(Vec::new()).is_err());
 }
+
+#[test]
+fn small_changes_keep_and_a_fade_redraws_whole() {
+    let (w, h) = (96u32, 64u32);
+    let frame = |lift: u8, noise: bool, square: bool| {
+        let mut f = Rgba::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let jitter = if noise && (x * 7 + y * 3) % 5 == 0 {
+                    8
+                } else {
+                    0
+                };
+                let v = ((x / 12 + y / 16) % 8) as u8 * 24 + 20 + lift + jitter;
+                let inside = (30..40).contains(&x) && (20..30).contains(&y);
+                let p = if square && inside {
+                    [240, 16, 16, 255]
+                } else {
+                    [v, v, 255 - v, 255]
+                };
+                let i = ((y * w + x) * 4) as usize;
+                f.data[i..i + 4].copy_from_slice(&p);
+            }
+        }
+        f
+    };
+    let mut frames = vec![frame(0, false, false), frame(0, true, true)];
+    frames.extend((1..=3).map(|k| frame(k * 4, false, false)));
+    let opts = EncodeOptions::default();
+    let a = decode(&encode(&frames, &[5; 5], opts).unwrap()).unwrap();
+    assert_eq!((a.loop_count, a.frames.len()), (Some(0), 5));
+    let (first, next) = (&a.frames[0].0, &a.frames[1].0);
+    assert!(same(first, &frames[0]), "the first frame is exact");
+    let pixels = next
+        .data
+        .chunks_exact(4)
+        .zip(first.data.chunks_exact(4))
+        .zip(frames[1].data.chunks_exact(4));
+    for (i, ((p, q), s)) in pixels.enumerate() {
+        let (x, y) = (i as u32 % w, i as u32 / w);
+        let off = (0..3).map(|c| p[c].abs_diff(s[c])).max().unwrap_or(0);
+        assert!(off <= opts.tolerance, "{off} levels off at {x},{y}");
+        if (30..40).contains(&x) && (20..30).contains(&y) {
+            assert_eq!(p, s, "the moved square is drawn at {x},{y}");
+        } else if x >= 56 || y >= 48 {
+            assert_eq!(p, q, "noise under the tolerance is kept at {x},{y}");
+        }
+    }
+    assert!(
+        same(&a.frames[3].0, &frames[3]),
+        "a fade under the tolerance redraws the whole frame"
+    );
+}
