@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.11.0 — 2026-10-16
+
+### Added
+
+- AV1 decode. AV1 in MP4, MKV and WebM probes, shows its first frame, takes stills and decodes on the graphics card through VA-API (8 and 10-bit, film grain), and on the processor everywhere else with a decoder ported from rav1d; every frame of the test streams matches dav1d bit for bit. A 1080p first frame takes 26 to 71 ms on the card and 38 to 46 ms on the processor, against 89 to 119 ms through ffmpeg with dav1d. VideoToolbox (Apple M3 and later) and Media Foundation decode AV1 too, built but untested on that hardware.
+- VP9 with alpha in WebM, written and read the way libvpx does it, so transparent web video made here plays in browsers and ffmpeg, and transparent WebM from elsewhere opens with its alpha: `export_rgba` and `decode_alpha`.
+- `media::join` joins clips in order: a stream copy when every clip matches the first, otherwise a re-encode to the first clip's size and rate that letterboxes other shapes and gives silent clips silence.
+- `media::level` levels a file's audio to a loudness target (EBU R128, two passes, a true-peak limiter when gain alone would clip), copying the video untouched; `plan_level` and `Leveler` do the same inside an export.
+- Linear-light Lanczos resize with premultiplied alpha (`filter::Light::Linear`), so downscaled pictures keep their brightness and transparent edges get no dark fringes.
+
+### Changed
+
+- GIFs store only the part of each frame that changed beyond a small noise tolerance and redraw the whole frame on a slow fade or pan; Sierra-2-4A dithering. Animated WebP stores lossy frames as changed sub-rectangles too, up to a fifth smaller.
+- The AAC encoder shapes its noise with TNS only where it helps, so levelled audio no longer overshoots its true-peak ceiling.
+
 ## v1.10.0 — 2026-10-16
 
 ### Added
