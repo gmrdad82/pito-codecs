@@ -27,6 +27,9 @@ The codecs here are written in Rust. Parts are adapted from permissively license
 | [adler2](https://github.com/oyvindln/adler2) | 0BSD OR MIT OR Apache-2.0 | 2.0.1, `89a031a0f42eeff31c70dc598b398cbf31f1680f` | The four-lane Adler-32 in `src/png/inflate.rs`. |
 | [sha2](https://github.com/RustCrypto/hashes) | MIT (sha2 is MIT OR Apache-2.0, RustCrypto Developers) | 0.10.9, `82c36a428f8d6f05f3bfccdedb243e9d1f85359d` | The SHA-256 compression functions (portable, x86-64 SHA-NI and AArch64 SHA2) and round constants in `src/bin/pcod/sha256.rs`; the streaming buffer and dispatch are new. |
 | [pconv](https://github.com/gmrdad82/pconv) | MIT (Catalin Ilinca) | v1.0.1, `8879614` | The progress line in `src/bin/pcod/progress.rs`, the `probe` JSON keys in `src/bin/pcod/probe_json.rs` and the `--json` manifest shape in `src/bin/pcod/manifest.rs`. |
+| [rav1d](https://github.com/memorysafety/rav1d) | BSD-2-Clause (VideoLAN and dav1d authors, Internet Security Research Group) | `0c851fa046d6a36430570459283e5886fbdd8a66` | The AV1 decoder in `src/av1/cpu/`: OBU and header parsing, the entropy decoder and CDFs, reconstruction (intra, inter, transforms), loop filter, CDEF, loop restoration, film grain, reference MVs and frame and tile threading, with the Rust fallback kernels; the frame front is new. |
+| [zimg](https://github.com/sekrit-twc/zimg) | WTFPL v2 (sekrit-twc) | `67e0603271c080e22c8429856dd4a8a56587e61e` | The resampling filter construction, Lanczos weights and BT.1886, BT.709 and sRGB transfer functions behind the linear-light resize in `src/filter/linear.rs`; the LUTs, banding and colour conversions are new. |
+| [fast_image_resize](https://github.com/Cykooz/fast_image_resize) | MIT OR Apache-2.0 (Kirill Kuzminykh) | 6.1.0, `ce36aeb20ed4a33805baa3c0ff4caff7cf163e19` | The interleaved RGBA f32 convolution layout with tap pairs per AVX2 register in `src/filter/linear.rs`, accumulating in f32 with FMA. |
 
 ## Specifications
 

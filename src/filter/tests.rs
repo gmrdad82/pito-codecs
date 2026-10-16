@@ -1980,3 +1980,55 @@ mod overlay_reference {
         }
     }
 }
+
+#[test]
+fn linear_light_resize_keeps_light_and_alpha_edges() {
+    let mut board = Rgba::new(64, 64);
+    for (i, px) in board.data.chunks_exact_mut(4).enumerate() {
+        let v = if (i % 64 + i / 64) % 2 == 0 { 255 } else { 0 };
+        px.copy_from_slice(&[v, v, v, 255]);
+    }
+    let s = Scaler::new(64, 64, 16, 16, PixelFormat::Yuv420p8, Kernel::Lanczos)
+        .unwrap()
+        .light(Light::Linear);
+    let mut out = Rgba::new(1, 1);
+    s.convert(Image::Rgba(&board), ImageMut::Rgba(&mut out))
+        .unwrap();
+    assert_eq!((out.width, out.height), (16, 16));
+    assert!(
+        out.data
+            .chunks_exact(4)
+            .all(|p| (180..=200).contains(&p[0]) && p[3] == 255)
+    );
+
+    let mut edge = Rgba::new(64, 32);
+    for (i, px) in edge.data.chunks_exact_mut(4).enumerate() {
+        if i % 64 < 32 {
+            px.copy_from_slice(&[255, 0, 0, 255]);
+        }
+    }
+    let s = Scaler::new(64, 32, 21, 11, PixelFormat::Yuv420p8, Kernel::Lanczos)
+        .unwrap()
+        .light(Light::Linear);
+    s.convert(Image::Rgba(&edge), ImageMut::Rgba(&mut out))
+        .unwrap();
+    let seen: Vec<_> = out.data.chunks_exact(4).filter(|p| p[3] > 8).collect();
+    assert!(seen.iter().any(|p| p[3] < 250));
+    assert!(seen.iter().all(|p| p[0] >= 250 && p[1] <= 4 && p[2] <= 4));
+
+    let mut flat = Frame::new(PixelFormat::Yuv420p10, 64, 48, 0, TimeBase::new(1, 25));
+    for (p, v) in flat.planes.iter_mut().zip([400u16, 450, 560]) {
+        p.data
+            .chunks_exact_mut(2)
+            .for_each(|c| c.copy_from_slice(&v.to_ne_bytes()));
+    }
+    let s = Scaler::new(64, 48, 40, 30, PixelFormat::Yuv420p10, Kernel::Lanczos)
+        .unwrap()
+        .light(Light::Linear)
+        .output(PixelFormat::Yuv420p8);
+    let mut small = Frame::new(PixelFormat::Yuv420p8, 2, 2, 0, TimeBase::new(1, 25));
+    s.run(&flat, &mut small).unwrap();
+    for (p, want) in small.planes.iter().zip([100u8, 112, 140]) {
+        assert!(p.data.iter().all(|&v| v.abs_diff(want) <= 1), "{want}");
+    }
+}
