@@ -4,9 +4,10 @@
 
 [![CI](https://github.com/gmrdad82/pito-codecs/actions/workflows/ci.yml/badge.svg)](https://github.com/gmrdad82/pito-codecs/actions/workflows/ci.yml) [![Version](https://img.shields.io/github/v/tag/gmrdad82/pito-codecs)](https://github.com/gmrdad82/pito-codecs/tags)
 
-**Video and audio codecs in pure Rust, on the CPU and the GPU, with no ffmpeg inside.** H.264, H.265, VP9, AAC, AC-3, E-AC-3, Opus and MP3; MP4, MOV, MKV and WebM; GIF and WebP. One MIT Cargo package, a feature per part, two direct dependencies and no C linked.
+**Video and audio codecs in pure Rust, on the CPU and the GPU, with no ffmpeg inside.** H.264, H.265, VP9, AV1 decode, AAC, AC-3, E-AC-3, Opus and MP3; MP4, MOV, MKV and WebM; GIF and WebP. One MIT Cargo package, a feature per part, two direct dependencies and no C linked.
 
 - **First frame 12× to 28× faster than ffmpeg:** 4.2 ms against 85.2 ms for a 1440p H.264 file on the CPU.
+- **AV1 on the card and the processor:** first frame 1.6× to 4.4× faster than ffmpeg with dav1d, every frame bit-exact with dav1d.
 - **Filmstrips 9× to 11× faster:** 12 stills at 240 px in 24 to 36 ms.
 - **Frame-accurate smart cuts 1.7× to 2.0× faster** than an ffmpeg re-encode: only the frames around each cut are encoded, and 40 short cuts run 1.3× to 1.4× faster on the card than in 1.4.2.
 - **GPU decode and encode on VA-API 1.1× to 1.2× faster** than ffmpeg's, and frames can stay on the card from decode to encode.
@@ -110,6 +111,18 @@ On the CPU, ffmpeg's hand-written assembly still decodes H.264 1.3× to 1.5× fa
 
 ![CPU decode, pito-codecs against ffmpeg](docs/images/chart-decode-cpu.png)
 
+### AV1
+
+AV1 in MP4, MKV and WebM probes, shows its first frame, takes stills and decodes on the card through VA-API, with frames that can stay on the card, and on the processor everywhere else. Our header parser is a port of ChromiumOS's cros-codecs, and the processor decoder is a port of rav1d, the Rust translation of dav1d. Every frame of the test streams (8 and 10-bit, tiles, film grain, hidden frames shown later, size switches) is bit-exact with dav1d on both routes. On a 20 s 1080p30 AV1 file from SVT-AV1, run in turn three times each at load 27 to 29:
+
+| Job | Card (VA-API) | Processor (ours) | ffmpeg with dav1d |
+| --- | --- | --- | --- |
+| First frame, 240 px | 26 to 71 ms | 38 to 46 ms | 89 to 119 ms |
+| 12 stills, 240 px | 26 to 36 ms | 30 to 32 ms | 73 to 85 ms |
+| Decode 300 frames at 1080p | 460 to 514 fps | 174 to 214 fps | 365 to 675 fps |
+
+The processor decoder has no SIMD yet, so a whole decode runs at about a quarter of dav1d's assembly; the first frame and stills come first anyway, because the file opens without a separate process.
+
 ### Encode and transcode on the GPU
 
 H.264 and H.265 encode through VA-API, VideoToolbox and NVENC, and a transcode keeps every frame on the GPU from decode to encode. Our VA-API encodes run 1.1× to 1.2× faster than ffmpeg's at the same settings.
@@ -182,18 +195,19 @@ Scaling (bilinear, bicubic, Lanczos) runs 1.6× to 2.1× faster than ffmpeg's sw
 | H.264 | CPU: Baseline, Main and High, progressive 8-bit 4:2:0, CAVLC and CABAC, bit-exact with ffmpeg. GPU: VA-API and VideoToolbox for the same profiles, bit-exact; Media Foundation. | CPU: Baseline, Main and High with CABAC and B-frames; CRF, QP, CBR and VBR. GPU: VA-API High; VideoToolbox Main and High; NVENC. |
 | H.265 | CPU: Main and Main 10, tiles and WPP, bit-exact with ffmpeg. GPU: VA-API and VideoToolbox, Main and Main 10, bit-exact; Media Foundation. | GPU only: VA-API Main; VideoToolbox Main and Main 10; NVENC. Without a GPU HEVC encoder it falls back to H.264 and says why. |
 | VP9 | CPU: profiles 0 to 3 (8, 10 and 12-bit; 4:2:0, 4:2:2 and 4:4:4), tiles, bit-exact with ffmpeg and libvpx. GPU: VA-API for 8 and 10-bit 4:2:0, bit-exact. | CPU: profile 0, with motion search, trellis, rate control, AQ and tile threads; ffmpeg and libvpx decode it bit-exact to our reconstruction. |
+| AV1 | CPU: profiles 0 and 1 (8 and 10-bit, 4:2:0 and 4:4:4), tiles, film grain and frame threading, a port of rav1d, bit-exact with dav1d; no SIMD yet, so about a quarter of dav1d's speed. GPU: VA-API profile 0, 8 and 10-bit, film grain, hidden and shown-again frames and size switches at keyframes, bit-exact with dav1d; VideoToolbox and Media Foundation. | — |
 | AAC | AAC-LC, mono to 7.1. | AAC-LC, CBR and VBR. |
 | AC-3 and E-AC-3 | Mono to 5.1 at 32, 44.1 and 48 kHz with coupling and rematrixing, within 2e-5 of ffmpeg's float decoder. Spectral extension, AHT and 7.1 through E-AC-3 dependent substreams are built but untested, since ffmpeg's encoder makes none of them; enhanced coupling and the reduced sample rates are refused. | — |
 | Opus | SILK, CELT, hybrid and multistream; the RFC 8251 conformance vectors decode to the reference's final range on every packet. | CELT, VBR and CBR, 6 to 510 kbps. **Experimental:** SILK and hybrid speech decode clean in libopus but sound worse than libopus at low rates. |
 | MP3, MP2, MP1 | MPEG-1, 2 and 2.5 audio, layers I, II and III, mono and stereo, CBR and VBR, within about 1e-6 of ffmpeg's mp3float. | — |
 | MP4 and MOV | Tracks, sample tables, rotation, edit lists, fragmented files. | MP4 or MOV, faststart or fragmented; remux of a time range without re-encoding. |
-| MKV and WebM | Tracks, lacing, Cues, seeking. | H.264, HEVC, VP9, Opus and AAC; WebM's codec rules enforced; remux. |
-| GIF | GIF87a and 89a, interlace, disposal, transparency, loops. | Oklab palettes, ordered or Floyd-Steinberg dither, frame differencing. |
+| MKV and WebM | Tracks, lacing, Cues, seeking; VP9 with alpha. | H.264, HEVC, VP9, Opus and AAC; VP9 with alpha as libvpx writes it (a second VP9 stream in BlockAdditional, AlphaMode on the track); WebM's codec rules enforced; remux. |
+| GIF | GIF87a and 89a, interlace, disposal, transparency, loops. | Oklab palettes, ordered, Floyd-Steinberg or Sierra-2-4A dither; each frame stores only the rectangle that changed beyond a noise tolerance, and a slow change over a fifth of the frame redraws it whole. |
 | WebP | Lossless VP8L and lossy VP8, alpha, animation; bit-exact with libwebp. | Lossless VP8L and lossy VP8, alpha, animation. |
 | PNG | Grey, grey and alpha, RGB, RGBA and palette with tRNS, 1 to 16-bit, Adam7, all five filters; to 8-bit RGBA, equal to ffmpeg's decode. | — |
 | WAV | PCM 8, 16, 24 and 32-bit, float 32 and 64-bit, any rate and channel count. | — |
 
-Not covered: DTS, FLAC, Vorbis, ALAC, AV1, ProRes, DNxHD, MPEG-2 and VP8 video, and subtitle tracks.
+Not covered: DTS, FLAC, Vorbis, ALAC, AV1 encode, ProRes, DNxHD, MPEG-2 and VP8 video, and subtitle tracks.
 
 ## GPUs and systems
 
@@ -201,11 +215,11 @@ The front tries the GPU first and our own CPU code second, for every decode and 
 
 | Route | System | Decode | Encode | Tested on |
 | --- | --- | --- | --- | --- |
-| VA-API, AMD (Mesa radeonsi) | Linux | H.264, H.265, VP9 | H.264, H.265; overlays composed on the card | AMD Radeon RX 9060 XT (RDNA 4), before every release |
-| VA-API, Intel (iHD) | Linux | H.264, H.265, VP9 | H.264, H.265 | Built, untested on Intel hardware |
-| VideoToolbox | macOS | H.264, H.265 | H.264, H.265 | GitHub's Apple Silicon runners on every push: decode bit-exact with ffmpeg, encodes decoded back |
+| VA-API, AMD (Mesa radeonsi) | Linux | H.264, H.265, VP9, AV1 | H.264, H.265; overlays composed on the card | AMD Radeon RX 9060 XT (RDNA 4), before every release |
+| VA-API, Intel (iHD) | Linux | H.264, H.265, VP9, AV1 | H.264, H.265 | Built, untested on Intel hardware |
+| VideoToolbox | macOS | H.264, H.265, AV1 | H.264, H.265 | GitHub's Apple Silicon runners on every push: decode bit-exact with ffmpeg, encodes decoded back; AV1 (Apple M3 and later) built, untested |
 | NVENC | Linux, Windows | — | H.264, H.265 | Built and unit-tested, untested on NVIDIA hardware |
-| Media Foundation | Windows | H.264, H.265 | — | Built and unit-tested, untested on GPU hardware |
+| Media Foundation | Windows | H.264, H.265, AV1 | — | Built and unit-tested, untested on GPU hardware |
 
 The CPU codecs run and are tested on every push on Linux x86-64 and arm64, Windows x86-64 and macOS on Apple Silicon, with AVX2 kernels on x86-64 and NEON or portable paths on arm64.
 
