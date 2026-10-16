@@ -1,5 +1,4 @@
 #[cfg(feature = "av1")]
-#[allow(dead_code)]
 mod av1;
 mod encode;
 mod ffi;
@@ -396,8 +395,8 @@ pub fn available() -> Vec<(Codec, Direction)> {
     out
 }
 
-fn offered(codec: Codec, _direction: Direction) -> bool {
-    codec != Codec::Av1
+fn offered(codec: Codec, direction: Direction) -> bool {
+    codec != Codec::Av1 || (cfg!(feature = "av1") && direction == Direction::Decode)
 }
 
 pub fn decoder(codec: Codec, extradata: &[u8]) -> Result<Box<dyn DecoderBackend>> {
@@ -414,6 +413,15 @@ pub fn decoder_on(
     if codec == Codec::Vp9 {
         return Ok(Box::new(vp9::Vp9Decoder::on(display.cloned(), held)?));
     }
+    #[cfg(feature = "av1")]
+    if codec == Codec::Av1 {
+        return Ok(Box::new(av1::Av1Decoder::on(
+            display.cloned(),
+            held,
+            extradata,
+        )?));
+    }
+    #[cfg(not(feature = "av1"))]
     if codec == Codec::Av1 {
         return Err(Error::Unsupported(
             "VA-API AV1 decode is not built in".into(),

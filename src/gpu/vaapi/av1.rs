@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::ops::Range;
 
 use super::backend;
-use super::ffi::{self, VAProfile, VASurfaceID};
+use super::ffi::{self, VASurfaceID};
 use super::va::Session;
 use super::{Accel, LAG, Picture};
 use crate::av1::parser::{
@@ -12,8 +12,6 @@ use crate::av1::parser::{
 use crate::gpu::biplanar::Geometry;
 use crate::gpu::{Backend, DecoderBackend, GpuFrame};
 use crate::media::{Error, Frame, Packet, Result};
-
-const VA_PROFILE_AV1_PROFILE0: VAProfile = 32;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -445,9 +443,9 @@ impl Av1Decoder {
                 .to_string(),
         };
         let supported = match &display {
-            Some(d) => super::supports(d, VA_PROFILE_AV1_PROFILE0, crate::gpu::Direction::Decode),
+            Some(d) => super::supports(d, ffi::VAProfileAV1Profile0, crate::gpu::Direction::Decode),
             None => super::va::probe().is_ok_and(|d| {
-                super::supports(&d, VA_PROFILE_AV1_PROFILE0, crate::gpu::Direction::Decode)
+                super::supports(&d, ffi::VAProfileAV1Profile0, crate::gpu::Direction::Decode)
             }),
         };
         if !supported {
@@ -481,6 +479,7 @@ impl Av1Decoder {
         Ok(d)
     }
 
+    #[cfg(test)]
     pub fn grain(&mut self, on: bool) {
         self.grain = on;
     }
@@ -513,7 +512,7 @@ impl Av1Decoder {
         };
         let mut session = Session::new(
             self.display.as_ref(),
-            &[VA_PROFILE_AV1_PROFILE0],
+            &[ffi::VAProfileAV1Profile0],
             size,
             NUM_REF_FRAMES + 2 + LAG + extra + self.held,
             geometry,
@@ -949,7 +948,7 @@ mod tests {
 
     fn has_av1() -> bool {
         super::super::va::probe().is_ok_and(|d| {
-            super::super::supports(&d, VA_PROFILE_AV1_PROFILE0, crate::gpu::Direction::Decode)
+            super::super::supports(&d, ffi::VAProfileAV1Profile0, crate::gpu::Direction::Decode)
         })
     }
 
