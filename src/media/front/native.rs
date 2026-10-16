@@ -53,7 +53,7 @@ impl Decoder {
                 .ok_or_else(|| Error::Unsupported("an unknown video codec".to_string()))?;
             match crate::gpu::HwDecoder::new(codec, &st.extradata) {
                 Ok(d) => {
-                    let d = d.with_time_base(st.time_base);
+                    let d = d.with_time_base(st.time_base).with_color(st.color);
                     return Ok((Decoder::Gpu(Box::new(d)), None));
                 }
                 Err(e) => {
@@ -189,7 +189,8 @@ impl Decoder {
             Decoder::Hevc(dec) => dec.color().map(|c| (c.matrix, c.full_range)),
             #[cfg(feature = "av1")]
             Decoder::Av1(dec) => dec.sequence().map(|s| (s.matrix, s.full_range)),
-            Decoder::Vp9(_) | Decoder::Gpu(_) => None,
+            Decoder::Gpu(dec) => dec.color(),
+            Decoder::Vp9(_) => None,
         }
         .unwrap_or((2, false));
         Color { matrix, full_range }
@@ -774,6 +775,40 @@ pub fn exact(
         }
     }
     Ok(out)
+}
+
+pub fn prime(d: &Demux, dec: &mut Decoder) -> Result<()> {
+    let track = d.video()?;
+    let mut data = Vec::new();
+    let got = match d {
+        Demux::Mp4(_) => Packets::Indexed { d, track, next: 0 }.next(&mut data)?,
+        Demux::Mkv(r) => {
+            let mut cur = crate::mkv::Cursor::new(r);
+            Packets::Mkv {
+                r,
+                cur: &mut cur,
+                track,
+                shift: d.shift(track),
+            }
+            .next(&mut data)?
+        }
+    };
+    if let Some((pts, dts, keyframe)) = got {
+        let p = Packet {
+            data,
+            pts,
+            dts,
+            keyframe,
+        };
+        for f in decode_any(dec, Some(&p))? {
+            release(dec, f);
+        }
+        for f in decode_any(dec, None)? {
+            release(dec, f);
+        }
+    }
+    dec.reset();
+    Ok(())
 }
 
 pub fn still_decoder(reader: &Arc<Reader>, route: Route) -> Result<Decoder> {

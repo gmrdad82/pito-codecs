@@ -148,7 +148,8 @@ fn run() -> Res<()> {
         };
         let pages = args.next().map(|n| n.parse()).transpose()?.unwrap_or(6);
         let per = args.next().map(|n| n.parse()).transpose()?.unwrap_or(4);
-        return exact_pages(&path, decode, pages, per);
+        let height = args.next().map(|n| n.parse()).transpose()?.unwrap_or(160);
+        return exact_pages(&path, decode, pages, per, height);
     }
     if mode.as_deref() == Some("gpu") {
         return gpu_playback(&path);
@@ -1082,7 +1083,13 @@ fn cpu_seconds() -> f64 {
     (tick(11) + tick(12)) / 100.0
 }
 
-fn exact_pages(path: &std::path::Path, decode: Choice, pages: usize, per: usize) -> Res<()> {
+fn exact_pages(
+    path: &std::path::Path,
+    decode: Choice,
+    pages: usize,
+    per: usize,
+    height: u32,
+) -> Res<()> {
     let prefs = Prefs {
         decode,
         ..Prefs::default()
@@ -1093,7 +1100,7 @@ fn exact_pages(path: &std::path::Path, decode: Choice, pages: usize, per: usize)
         .map(|k| p.duration * (k as f64 + 0.37) / n as f64)
         .collect();
     let t = Instant::now();
-    let stills = Stills::open(path, 160, &prefs)?;
+    let stills = Stills::open(path, height, &prefs)?;
     let opened = t.elapsed().as_secs_f64() * 1e3;
     let mut all = Vec::new();
     for (i, page) in times.chunks(per.max(1)).enumerate() {
