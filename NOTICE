@@ -43,7 +43,7 @@ Adapted modules (one line per module, filled in by each task):
 - src/vp9/enc/: the VP9 encoder; its motion vector prediction (mvref.rs) and the syntax contexts of entropy.rs mirror crates/vp9's tile.rs, and it reuses the decoder's tables, probability adaptation and loop filter; the rest is new.
 - src/gif/: written from the GIF89a specification; the encoder's frame differencing, its clamped Sierra-2-4A diffusion and its 7-bit nearest-colour table in src/gif/encode.rs are adapted from pconv v1.0.1 (commit 8879614b928b8fdde500a16376b85a2c95551dc9), Copyright (c) 2026 Cătălin Ilinca, MIT, the same author and licence as this package.
 - src/vp9/enc/tx/: the inverse DCT and ADST butterflies (transform_gen.rs), the scan, band and energy-class tables and the coefficient-context neighbours from crates/vp9; the forward transforms (the transposes of those butterflies), the quantiser, the trellis and the AVX2 kernels are new.
-- src/webp/: new, written from RFC 9649 (the container, VP8L lossless and animation); src/webp/vp8/ is described below.
+- src/webp/: new, written from RFC 9649 (the container, VP8L lossless and animation); src/webp/vp8/ is described below; the lossy animation sub-frames (the quality-to-difference limit, similar-pixel rectangles and flattened similar 8x8 blocks) in src/webp/anim.rs follow libwebp's anim_encode.c.
 - src/opus/enc/: the CELT encoder is new, written from RFC 6716; it shares the decoder's tables and range coder.
 
 The VA-API declarations in src/gpu/vaapi/ffi.rs are transcribed from libva's
