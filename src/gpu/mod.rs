@@ -171,6 +171,19 @@ pub fn driver(backend: Backend) -> Result<String> {
     allow(dead_code)
 )]
 pub(crate) fn look(codec: Codec, extradata: &[u8]) -> Option<((u16, u16), Color)> {
+    #[cfg(feature = "av1")]
+    if codec == Codec::Av1 {
+        let c = av1_color(extradata)?;
+        return Some((
+            (1, 1),
+            Color {
+                primaries: c.color_primaries,
+                transfer: c.transfer_characteristics,
+                matrix: c.matrix_coefficients,
+                full_range: c.color_range,
+            },
+        ));
+    }
     let sets = nal::parse_extradata(codec, extradata).ok()?.parameter_sets;
     let (sar, full_range, primaries, transfer, matrix) = match codec {
         Codec::H264 => {
@@ -232,6 +245,10 @@ pub(crate) fn look(codec: Codec, extradata: &[u8]) -> Option<((u16, u16), Color)
     allow(dead_code)
 )]
 pub(crate) fn color(codec: Codec, extradata: &[u8]) -> Option<(u8, bool)> {
+    #[cfg(feature = "av1")]
+    if codec == Codec::Av1 {
+        return av1_color(extradata).map(|c| (c.matrix_coefficients, c.color_range));
+    }
     let sets = nal::parse_extradata(codec, extradata).ok()?.parameter_sets;
     match codec {
         Codec::H264 => {
@@ -252,6 +269,25 @@ pub(crate) fn color(codec: Codec, extradata: &[u8]) -> Option<(u8, bool)> {
         }
         _ => None,
     }
+}
+
+#[cfg(feature = "av1")]
+fn av1_color(av1c: &[u8]) -> Option<crate::av1::parser::ColorConfig> {
+    use crate::av1::parser::{ObuAction, ObuType, Parser};
+    let mut parser = Parser::default();
+    let mut rest = av1c.get(4..)?;
+    while !rest.is_empty() {
+        let used = match parser.read_obu(rest).ok()? {
+            ObuAction::Drop(used) => used,
+            ObuAction::Process(obu) if obu.header.obu_type == ObuType::SequenceHeader => {
+                parser.parse_sequence_header_obu(&obu).ok()?;
+                return Some(parser.sequence().ok()?.color_config);
+            }
+            ObuAction::Process(obu) => obu.bytes_used,
+        };
+        rest = rest.get(used.max(1)..)?;
+    }
+    None
 }
 
 pub(crate) trait DecoderBackend: Send {
@@ -392,6 +428,7 @@ impl Device {
 pub struct HwDecoder {
     inner: Box<dyn DecoderBackend>,
     time_base: TimeBase,
+    color: Option<(u8, bool)>,
 }
 
 #[cfg_attr(
@@ -423,6 +460,7 @@ impl HwDecoder {
             Ok(Self {
                 inner,
                 time_base: TimeBase::new(1, 90000),
+                color: color(codec, extradata),
             })
         }
         #[cfg(not(target_os = "linux"))]
@@ -443,7 +481,17 @@ impl HwDecoder {
         Ok(Self {
             inner,
             time_base: TimeBase::new(1, 90000),
+            color: color(codec, extradata),
         })
+    }
+
+    pub(crate) fn with_color(mut self, color: Option<(u8, bool)>) -> Self {
+        self.color = color.or(self.color);
+        self
+    }
+
+    pub(crate) fn color(&self) -> Option<(u8, bool)> {
+        self.color
     }
 
     pub fn with_time_base(mut self, time_base: TimeBase) -> Self {

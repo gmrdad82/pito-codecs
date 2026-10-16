@@ -1,6 +1,6 @@
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use crate::mkv;
@@ -37,21 +37,69 @@ pub fn frames_at_seek(
     seek: Seek,
     prefs: &Prefs,
 ) -> Result<Vec<Rgba>> {
-    Stills::open(path, height, prefs)?.collect(times, seek)
+    let mut stills = Stills::open(path, height, prefs)?;
+    stills.warm = false;
+    stills.collect(times, seek)
 }
 
 const KEPT: usize = 18;
 const GPU_WORKERS: usize = 4;
 
-fn gpu_first(d: &Demux, track: usize, route: Route) -> bool {
-    route == Route::Gpu && d.stream(track).is_ok_and(|s| s.codec == Some(Codec::Av1))
+const WARM: Key = (Route::Gpu, false, 0);
+
+fn gpu_first(d: &Demux, track: usize, route: Route) -> Option<&Demux> {
+    (route == Route::Gpu && d.stream(track).is_ok_and(|s| s.codec == Some(Codec::Av1))).then_some(d)
 }
 
 pub struct Stills {
     height: u32,
     kind: Kind,
+    shared: Arc<Shared>,
+    warm: bool,
+}
+
+struct Shared {
     kept: Mutex<Vec<Worker>>,
     limit: AtomicUsize,
+    warming: AtomicUsize,
+    broken: AtomicBool,
+}
+
+impl Shared {
+    fn put(&self, w: Worker) {
+        if w.dec.is_err() {
+            return;
+        }
+        let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
+        if kept.len() < self.limit.load(Ordering::Relaxed) {
+            kept.push(w);
+        }
+    }
+
+    fn put_warm(&self, w: Worker) {
+        let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
+        let evicted = if kept.len() < self.limit.load(Ordering::Relaxed) {
+            None
+        } else {
+            kept.iter()
+                .position(|k| k.key.0 != Route::Gpu)
+                .map(|i| kept.swap_remove(i))
+        };
+        if kept.len() < self.limit.load(Ordering::Relaxed) {
+            kept.push(w);
+        }
+        drop(kept);
+        drop(evicted);
+    }
+
+    fn ready(&self, key: Key) -> usize {
+        self.kept
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|w| w.key == key)
+            .count()
+    }
 }
 
 enum Kind {
@@ -95,8 +143,13 @@ impl Stills {
         Ok(Stills {
             height,
             kind,
-            kept: Mutex::new(Vec::new()),
-            limit: AtomicUsize::new(KEPT),
+            shared: Arc::new(Shared {
+                kept: Mutex::new(Vec::new()),
+                limit: AtomicUsize::new(KEPT),
+                warming: AtomicUsize::new(0),
+                broken: AtomicBool::new(false),
+            }),
+            warm: true,
         })
     }
 
@@ -106,16 +159,22 @@ impl Stills {
 
     pub fn keep(&self, decoders: usize) {
         let n = decoders.max(1);
-        self.limit.store(n, Ordering::Relaxed);
-        self.kept
+        self.shared.limit.store(n, Ordering::Relaxed);
+        self.shared
+            .kept
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .truncate(n);
     }
 
     pub fn trim(&self) {
-        let dropped =
-            std::mem::take(&mut *self.kept.lock().unwrap_or_else(PoisonError::into_inner));
+        let dropped = std::mem::take(
+            &mut *self
+                .shared
+                .kept
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
         drop(dropped);
     }
 
@@ -152,7 +211,11 @@ impl Stills {
 
     fn take(&self, key: Key, make: impl FnOnce() -> Result<native::Decoder>) -> Worker {
         let mut kept = {
-            let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut kept = self
+                .shared
+                .kept
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             kept.iter()
                 .position(|w| w.key == key)
                 .map(|i| kept.swap_remove(i))
@@ -167,14 +230,42 @@ impl Stills {
         })
     }
 
-    fn put(&self, w: Worker) {
-        if w.dec.is_err() {
-            return;
+    fn warm_up(&self, d: &Demux) -> (usize, usize) {
+        let s = &self.shared;
+        let target = GPU_WORKERS.min(s.limit.load(Ordering::Relaxed)).max(1);
+        let ready = s.ready(WARM);
+        if ready >= target || !self.warm || s.broken.load(Ordering::Relaxed) {
+            return (ready, target);
         }
-        let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
-        if kept.len() < self.limit.load(Ordering::Relaxed) {
-            kept.push(w);
+        let missing = target.saturating_sub(ready.max(1) + s.warming.load(Ordering::Relaxed));
+        for _ in 0..missing {
+            let (shared, d) = (self.shared.clone(), d.clone());
+            shared.warming.fetch_add(1, Ordering::Relaxed);
+            let spawned = std::thread::Builder::new()
+                .name("stills-warm".into())
+                .spawn(move || {
+                    let dec = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                        let mut dec = native::video_decoder(&d, Route::Gpu, 1)?;
+                        if dec.route() == Route::Gpu {
+                            native::prime(&d, &mut dec)?;
+                        }
+                        Ok::<_, Error>(dec)
+                    }));
+                    match dec {
+                        Ok(Ok(dec)) if dec.route() == Route::Gpu => shared.put_warm(Worker {
+                            key: WARM,
+                            dec: Ok(dec),
+                            cur: None,
+                        }),
+                        _ => shared.broken.store(true, Ordering::Relaxed),
+                    }
+                    shared.warming.fetch_sub(1, Ordering::Relaxed);
+                });
+            if spawned.is_err() {
+                self.shared.warming.fetch_sub(1, Ordering::Relaxed);
+            }
         }
+        (ready, target)
     }
 
     fn keys(&self) -> &[f64] {
@@ -202,7 +293,7 @@ impl Stills {
         self.spread(
             &jobs,
             src.route,
-            false,
+            None,
             |rt| match reader {
                 Some(r) => self.take((rt, true, 1), || native::still_decoder(r, rt)),
                 None => Worker {
@@ -281,7 +372,11 @@ impl Stills {
         self.spread(
             &jobs,
             route,
-            seek == Seek::Exact && gpu_first(&d, v, route),
+            if seek == Seek::Exact {
+                gpu_first(&d, v, route)
+            } else {
+                None
+            },
             |rt| {
                 let key = (rt, stills, if rt == Route::Gpu { 0 } else { threads });
                 let mut w = self.take(key, || {
@@ -339,7 +434,7 @@ impl Stills {
                 self.spread(
                     &jobs,
                     Route::Ffmpeg,
-                    false,
+                    None,
                     |rt| Worker {
                         key: (rt, false, 0),
                         dec: Err(src.native()),
@@ -413,7 +508,7 @@ impl Stills {
         &self,
         jobs: &[Vec<f64>],
         route: Route,
-        all_gpu: bool,
+        gpu: Option<&Demux>,
         make: impl Fn(Route) -> Worker + Sync,
         run: impl Fn(&mut Worker, &[f64]) -> Result<Vec<Rgba>> + Sync,
         wanted: &[f64],
@@ -421,14 +516,22 @@ impl Stills {
     ) {
         let next = AtomicUsize::new(0);
         std::thread::scope(|s| {
-            let mut workers = jobs.len().min(16).min(self.limit.load(Ordering::Relaxed));
-            if all_gpu {
-                workers = workers.min(GPU_WORKERS);
+            let mut workers = jobs
+                .len()
+                .min(16)
+                .min(self.shared.limit.load(Ordering::Relaxed));
+            let mut on_route = 1;
+            if let Some(d) = gpu {
+                let (ready, target) = self.warm_up(d);
+                if ready >= target {
+                    workers = workers.min(target);
+                }
+                on_route = ready.clamp(1, target);
             }
             for w in 0..workers {
                 let (next, make, run) = (&next, &make, &run);
                 s.spawn(move || {
-                    let mut state = make(if w == 0 || all_gpu { route } else { Route::Cpu });
+                    let mut state = make(if w < on_route { route } else { Route::Cpu });
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(batch) = jobs.get(i) else { break };
@@ -442,7 +545,7 @@ impl Stills {
                         }
                         deliver(wanted, batch, got, emit);
                     }
-                    self.put(state);
+                    self.shared.put(state);
                 });
             }
         });

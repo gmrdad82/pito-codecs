@@ -2404,6 +2404,87 @@ fn a_stills_handle_hands_each_index_once_and_matches_single_calls() {
 }
 
 #[test]
+fn av1_stills_on_the_gpu_match_the_cpu_in_a_tagged_matrix() {
+    let Ok(encoders) = Command::new("ffmpeg")
+        .args(["-hide_banner", "-encoders"])
+        .output()
+    else {
+        return;
+    };
+    if !String::from_utf8_lossy(&encoders.stdout).contains("libsvtav1") {
+        return;
+    }
+    let path = dir().join("av1-709.mp4");
+    if !path.exists() {
+        ffmpeg_make(
+            &path,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=s=640x360:r=30:d=2",
+                "-c:v",
+                "libsvtav1",
+                "-preset",
+                "12",
+                "-g",
+                "30",
+                "-pix_fmt",
+                "yuv420p",
+                "-colorspace",
+                "bt709",
+                "-color_primaries",
+                "bt709",
+                "-color_trc",
+                "bt709",
+            ],
+        );
+    }
+    let prefs = |decode| Prefs {
+        decode,
+        ..Prefs::default()
+    };
+    let Ok(gpu) = Stills::open(&path, 360, &prefs(Choice::Gpu)) else {
+        return;
+    };
+    let cpu = Stills::open(&path, 360, &prefs(Choice::Cpu)).unwrap();
+    let times = [0.1, 0.45, 0.8, 1.2, 1.55, 1.9];
+    let psnr = |a: &Rgba, b: &Rgba| {
+        let se: f64 = a
+            .data
+            .iter()
+            .zip(&b.data)
+            .map(|(x, y)| (f64::from(*x) - f64::from(*y)).powi(2))
+            .sum();
+        10.0 * (255.0f64.powi(2) / (se / a.data.len() as f64).max(1e-9)).log10()
+    };
+    for seek in [Seek::Exact, Seek::Keyframe] {
+        for round in 0..2 {
+            let mut want: Vec<Option<Rgba>> = vec![None; times.len()];
+            cpu.frames(&times, seek, |i, r| want[i] = Some(r.unwrap()))
+                .unwrap();
+            let mut got: Vec<Option<Result<Rgba, String>>> = vec![None; times.len()];
+            if gpu
+                .frames(&times, seek, |i, r| {
+                    got[i] = Some(r.map_err(|e| e.to_string()))
+                })
+                .is_err()
+            {
+                return;
+            }
+            for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                let (Some(Ok(g)), Some(w)) = (g, w) else {
+                    return;
+                };
+                assert_eq!((g.width, g.height), (w.width, w.height));
+                let p = psnr(g, w);
+                assert!(p > 50.0, "{seek:?} round {round} still {i}: {p:.1} dB");
+            }
+        }
+    }
+}
+
+#[test]
 fn av1_in_mp4_mkv_and_webm_probes_and_decodes_on_the_gpu_or_refuses_cleanly() {
     let Ok(encoders) = Command::new("ffmpeg")
         .args(["-hide_banner", "-encoders"])
