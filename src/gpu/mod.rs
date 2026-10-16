@@ -606,7 +606,7 @@ impl GpuFrame {
     allow(dead_code)
 )]
 impl GpuFrame {
-    pub(crate) fn retime(&mut self, pts: i64, time_base: TimeBase) {
+    pub fn retime(&mut self, pts: i64, time_base: TimeBase) {
         self.time_base = time_base;
         match &mut self.inner {
             GpuInner::Cpu(f) => {

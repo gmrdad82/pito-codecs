@@ -16,45 +16,93 @@ use pito_codecs::mp4::{
 };
 use pito_codecs::{h264, hevc};
 
-type Fail = Box<dyn Error>;
+type Fail = Box<dyn Error + Send + Sync>;
 
 #[path = "pcod/frames.rs"]
 mod frames;
 #[path = "pcod/json.rs"]
 mod json;
-#[allow(dead_code)]
 #[path = "pcod/manifest.rs"]
 mod manifest;
-#[allow(dead_code)]
 #[path = "pcod/probe_json.rs"]
 mod probe_json;
-#[allow(dead_code)]
 #[path = "pcod/progress.rs"]
 mod progress;
-#[allow(dead_code)]
 #[path = "pcod/quality.rs"]
 mod quality;
-#[allow(dead_code)]
 #[path = "pcod/sha256.rs"]
 mod sha256;
 #[path = "pcod/stills.rs"]
 mod stills;
 
+#[path = "pcod/args.rs"]
+mod args;
+#[path = "pcod/convert.rs"]
+mod convert;
+#[path = "pcod/pipeline.rs"]
+mod pipeline;
+#[path = "pcod/plan.rs"]
+mod plan;
+#[path = "pcod/profile.rs"]
+mod profile;
+#[path = "pcod/signals.rs"]
+mod signals;
+#[path = "pcod/size.rs"]
+mod size;
+#[path = "pcod/source.rs"]
+mod source;
+
 #[derive(Parser)]
 #[command(
     name = "pcod",
     version,
-    about = "Probe, decode and encode with pito-codecs"
+    about = "Convert, probe, decode and encode with pito-codecs",
+    args_conflicts_with_subcommands = true,
+    override_usage = args::USAGE,
+    after_help = args::help()
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+    #[arg(value_name = "INPUT", help = "A video file, or a folder of PNG frames")]
+    input: Option<PathBuf>,
+    #[arg(
+        value_name = "OUTPUT",
+        help = "The file to write: mp4, mov, mkv, webm, gif or webp"
+    )]
+    output: Option<PathBuf>,
+    #[command(flatten)]
+    convert: args::ConvertArgs,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    #[command(about = "Show what is in an MP4")]
-    Probe { file: PathBuf },
+    #[command(about = "Convert a video or a folder of PNG frames (the default command)")]
+    Convert {
+        #[arg(value_name = "INPUT")]
+        input: PathBuf,
+        #[arg(value_name = "OUTPUT")]
+        output: PathBuf,
+        #[command(flatten)]
+        convert: args::ConvertArgs,
+    },
+    #[command(about = "Join clips in order into one file")]
+    Join {
+        #[arg(value_name = "INPUTS", num_args = 2.., required = true)]
+        inputs: Vec<PathBuf>,
+        #[arg(value_name = "OUTPUT")]
+        output: PathBuf,
+        #[command(flatten)]
+        convert: args::ConvertArgs,
+    },
+    #[command(about = "List the profiles and what each one does")]
+    Profiles,
+    #[command(about = "Show what is in a video file")]
+    Probe {
+        file: PathBuf,
+        #[arg(long, help = "Print what pcod reads as JSON")]
+        json: bool,
+    },
     #[command(about = "Decode the whole video track and report the speed")]
     Decode {
         file: PathBuf,
@@ -266,7 +314,41 @@ fn main() -> ExitCode {
         Err(e) => e.exit(),
     };
     panic::set_hook(Box::new(|_| {}));
-    let outcome = panic::catch_unwind(AssertUnwindSafe(|| run(cli)));
+    let command = match cli.command {
+        None => {
+            return convert::run(args::bare(cli.input, cli.output, cli.convert));
+        }
+        Some(Command::Convert {
+            input,
+            output,
+            convert,
+        }) => {
+            return convert::run(args::options(
+                Some("convert"),
+                input,
+                Vec::new(),
+                output,
+                convert,
+            ));
+        }
+        Some(Command::Join {
+            mut inputs,
+            output,
+            convert,
+        }) => {
+            let first = inputs.remove(0);
+            return convert::run(args::options(Some("join"), first, inputs, output, convert));
+        }
+        Some(Command::Profiles) => return convert::print(&convert::profiles()),
+        Some(Command::Probe { file, json: true }) => {
+            return match probe_json::probe_json(&file) {
+                Ok(text) => convert::print(&text),
+                Err(e) => convert::refuse(&e.to_string()),
+            };
+        }
+        Some(c) => c,
+    };
+    let outcome = panic::catch_unwind(AssertUnwindSafe(|| run(command)));
     let text = match outcome {
         Ok(Ok(())) => return ExitCode::SUCCESS,
         Ok(Err(e)) => e.to_string(),
@@ -294,10 +376,11 @@ fn main() -> ExitCode {
     ExitCode::FAILURE
 }
 
-fn run(cli: Cli) -> Result<(), Fail> {
+fn run(command: Command) -> Result<(), Fail> {
     let mut out = io::stdout().lock();
-    let result = match cli.command {
-        Command::Probe { file } => show(&mut out, &file),
+    let result = match command {
+        Command::Probe { file, .. } => show(&mut out, &file),
+        Command::Convert { .. } | Command::Join { .. } | Command::Profiles => Ok(()),
         Command::Decode {
             file,
             route,
@@ -397,6 +480,9 @@ fn show(out: &mut impl Write, file: &Path) -> Result<(), Fail> {
         p.profile,
         p.fps()
     )?;
+    if p.alpha {
+        writeln!(out, "alpha      yes")?;
+    }
     for a in &p.audio {
         writeln!(
             out,

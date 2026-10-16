@@ -62,6 +62,6 @@ done
 status=0
 "$pcod" > /dev/null 2> "$dir/err.txt" || status=$?
 [ "$status" -eq 2 ] || fail "a bare pcod exited $status, not 2"
-grep -Eq "^error: 'pcod(\.exe)?' requires a subcommand" "$dir/err.txt" || fail "a bare pcod did not print clap's error"
+grep -Eq "^error: the following required arguments were not provided:" "$dir/err.txt" || fail "a bare pcod did not print clap's error"
 
 echo "smoke ok"

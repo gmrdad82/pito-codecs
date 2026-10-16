@@ -1,13 +1,43 @@
 ---
-title: "Probe, decode, encode, take stills and make MP4s from frames with pcod"
-description: "Look inside an MP4, decode it on the CPU or the GPU, encode it to H.264 or HEVC, and turn a folder of PNG frames and a WAV into an MP4, and take stills and contact sheets from the command line."
+title: "Convert, join, probe, decode, encode and take stills with pcod"
+description: "Convert a video or a folder of PNG frames to MP4, MOV, MKV, WebM, GIF or WebP, join clips, look inside a file, decode it on the CPU or the GPU, encode it to H.264 or HEVC, and take stills and contact sheets from the command line."
 sidebar:
   order: 1
 ---
 
-pcod is a small command line over the library. `probe` shows what is inside an MP4, `decode` decodes its whole video track and reports the speed, `encode` decodes, encodes and muxes a new MP4, copying the audio, `frames` encodes a folder of PNG frames and a WAV into an MP4, and `stills` writes stills of a video as PNGs and a contact sheet. Every option is in the [command reference](../../reference/cli/).
+pcod is a small command line over the library. `pcod <input> <output>` converts a file or a folder of PNG frames, `join` stitches clips, `probe` shows what is inside a file, `decode` decodes its whole video track and reports the speed, `encode` decodes, encodes and muxes a new MP4, copying the audio, `frames` encodes a folder of PNG frames and a WAV into an MP4, and `stills` writes stills of a video as PNGs and a contact sheet. Every option is in the [command reference](../../reference/cli/).
 
 The outputs below are from a 10-second 1080p60 H.264 clip cut from NASA's public-domain "A Message of Resilience from the International Space Station", on a 16-core CPU and an AMD card through VA-API. Your speeds will differ.
+
+## Convert
+
+`pcod <input> <output>` converts a video file, or a folder of PNG frames, into the container its output's extension names, with sensible settings and nothing else to learn. `pcod convert <input> <output>` is the same command spelled out.
+
+```sh
+pcod master.mov site.mp4 --profile best --crf 23    # a light H.264 for the web
+pcod master.mov hero.webm --size 1080p             # VP9 at 1080p
+pcod recording.mkv draft.mp4 --profile fast        # a quick draft on the GPU
+pcod clip.mp4 readme.gif --size 640 --fps 12       # a looping README GIF
+pcod clip.mp4 readme.webp                          # an animated WebP
+pcod frames/ trailer.webm --fps 60                 # PNG frames to a transparent WebM
+pcod join intro.mp4 scene.mp4 outro.mp4 film.mp4   # one file, copied when the clips match
+pcod talk.mp4 upload.mp4 --loudness youtube        # -14 LUFS, the video copied
+```
+
+- **Containers.** `mp4`, `mov` and `mkv` get H.264 and AAC, `webm` gets VP9 and Opus, `gif` and `webp` are animated and loop forever, with no audio. Every video output is limited-range BT.709 and tagged so: BT.601, full-range and untagged sources are converted (untagged is read as BT.709), rotation and non-square pixels are applied.
+- **Profiles.** `balanced` (the default) and `best` are our H.264 encoder on the CPU at quality settings matched to x264's medium CRF 20 and slow CRF 18, measured by SSIM; `fast` is H.264 on the GPU (VA-API, NVENC, VideoToolbox) at QP 25, and on the CPU where no GPU encoder is found, saying why. For `.webm`, balanced matches libvpx-vp9 at CRF 32 and best at CRF 28. `--crf` takes x264's numbers (libvpx's for `.webm`) and goes with balanced and best, `--qp` with fast. `pcod profiles` lists them all.
+- **Size and rate.** `--size` takes a width (the height follows the aspect), `WxH` within 1% of the aspect, or `720p`, `1080p`, `1440p` or `2160p`; pcod never stretches a picture. Resizing is a Lanczos filter in linear light, with premultiplied alpha. `--fps` sets the frame rate. GIFs and WebPs are 800 px wide at 12 fps by default, or the source's width and rate where smaller.
+- **Alpha.** A folder of RGBA PNG frames, or a WebM with alpha, keeps its alpha in `.webm` (VP9 alpha, read by browsers and ffmpeg), `.gif` and `.webp`; in H.264 it is laid onto black. A folder needs `--fps`.
+- **Audio.** AAC-LC 320k stereo at 48 kHz in `mp4`, `mov` and `mkv` (an AAC source is copied when nothing changes its audio), Opus 128k in `webm` (an Opus source is copied). `--audio-bitrate` sets the rate, 32 to 512, and with no video option the video is copied untouched.
+- **Loudness.** `--loudness youtube` levels the audio to -14 LUFS under a -2 dBTP true-peak ceiling in two EBU R128 passes; any target from -70 to -5 LUFS works too, with `--true-peak` for the ceiling (-1 dBTP by default). With no video option the video is copied untouched. pcod prints the loudness before and after, and `--json` carries both.
+- **Join.** `pcod join` stitches clips in order. When every clip matches the first (codec, size, rate, colour, headers and audio) it is a stream copy; otherwise, or with any video option, it re-encodes them to the first clip's size and rate, letterboxing a clip of another shape. It says which, and why.
+- **Existing outputs** are refused unless `--force` is given. pcod writes a hidden partial file beside the output and renames it into place at the end, so a failed or stopped run leaves nothing behind.
+
+### Scripts and agents
+
+With stderr a pipe or a file, pcod draws no progress line, so stdout carries only the result: the output's path (and how a join was made), or one JSON manifest with `--json`, with each file's sha256 and size, the parameters and the time it took. `--no-progress` turns the line off on a terminal. `pcod probe <input> --json` prints what pcod reads from a file, with the same keys as pconv's probe.
+
+Exit codes: `0` it worked; `1` refused or failed, with one line on stderr starting `pcod: `; `2` the command line is wrong, answered the way clap answers; `128` plus the signal number when Ctrl-C, SIGTERM or SIGHUP stopped it (130 for Ctrl-C on Windows).
 
 ## Probe
 
@@ -128,4 +158,4 @@ pcod: missing.mp4: No such file or directory
 
 A command line it can't parse prints clap's error and usage on stderr with exit code 2; `pcod --help` and `pcod help <command>` print the full help.
 
-pcod's output is plain text for people; only `stills` has a JSON mode (`--json`). For anything beyond these five commands, [use the library](../library/).
+pcod's output is plain text for people; conversions, joins, `probe` and `stills` also print JSON with `--json`. For anything beyond these commands, [use the library](../library/).
