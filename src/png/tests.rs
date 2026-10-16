@@ -153,3 +153,26 @@ fn malformed_files_are_errors() {
     }
     assert!(super::decode(b"\x89PNG\r\n\x1a\nnonsense").is_err());
 }
+
+#[test]
+fn writes_what_the_png_crate_reads() {
+    for (w, h, seed) in [(1, 1, 1), (7, 5, 2), (640, 360, 3), (33, 300, 4)] {
+        let mut image = crate::media::Rgba::new(w, h);
+        let noise = pattern(image.data.len(), seed);
+        for (i, (px, n)) in image
+            .data
+            .chunks_exact_mut(4)
+            .zip(noise.chunks_exact(4))
+            .enumerate()
+        {
+            let flat = (i / 97) % 3 == 0;
+            px[0] = if flat { 0 } else { n[0] };
+            px[1] = if flat { 0 } else { n[1] };
+            px[2] = if flat { 200 } else { n[2] };
+            px[3] = 255;
+        }
+        let file = super::encode(&image).expect("encode");
+        assert_eq!(expected(&file), image.data, "{w}x{h}");
+        assert_eq!(super::decode(&file).expect("decode").data, image.data);
+    }
+}

@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.10.0 — 2026-10-16
+
+### Added
+
+- `pcod stills` takes N evenly spaced stills of a video, or stills at given times, at a height, and writes them as PNGs and/or one contact sheet (rows by columns, with padding); `--json` lists each still's time, size and path. A 24-still sheet of a 10-minute 1080p file takes about 0.6 s, where ffmpeg's tile filter takes about 6 s.
+- `png::encode` writes an RGB PNG, with a fast deflate ported from fdeflate.
+
 ## v1.9.0 — 2026-10-15
 
 ### Added
