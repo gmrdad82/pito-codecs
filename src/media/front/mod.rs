@@ -32,10 +32,10 @@ pub use ffmpeg::{Ffmpeg, Listed};
 pub use frames::{Canvas, export_frames};
 pub use join::{JoinAudio, JoinMethod, JoinOptions, Joined, join};
 pub use level::{
-    AAC_KBPS, DEFAULT_TRUE_PEAK, HIGHEST_TRUE_PEAK, LEVEL_RATE, LOUDEST_LUFS, LOWEST_TRUE_PEAK,
-    LevelMode, LevelOptions, LevelPlan, LevelProgress, LevelStage, LevelTarget, Leveler, Levelled,
-    LoudnessStats, OPUS_KBPS, QUIETEST_LUFS, YOUTUBE_LUFS, YOUTUBE_TRUE_PEAK, level,
-    measure_loudness, plan_level,
+    AAC_KBPS, AudioSpan, DEFAULT_TRUE_PEAK, HIGHEST_TRUE_PEAK, LEVEL_RATE, LOUDEST_LUFS,
+    LOWEST_TRUE_PEAK, LevelMode, LevelOptions, LevelPlan, LevelProgress, LevelStage, LevelTarget,
+    Leveler, Levelled, LoudnessStats, OPUS_KBPS, QUIETEST_LUFS, YOUTUBE_LUFS, YOUTUBE_TRUE_PEAK,
+    decode_audio_span, level, measure_loudness, plan_level, plan_level_span,
 };
 pub use look::{VideoLook, video_look};
 pub use picture::{

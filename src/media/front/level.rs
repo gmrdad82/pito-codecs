@@ -265,13 +265,47 @@ fn tell(progress: &mut Tell, stage: LevelStage, frames: u64, total: u64) -> Resu
     }
 }
 
-fn decoded(
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AudioSpan {
+    pub from: f64,
+    pub to: f64,
+    pub rate: u32,
+    pub channels: u16,
+}
+
+impl AudioSpan {
+    pub const WHOLE: AudioSpan = AudioSpan {
+        from: 0.0,
+        to: f64::INFINITY,
+        rate: LEVEL_RATE,
+        channels: 2,
+    };
+
+    fn limit(&self) -> Option<u64> {
+        self.to
+            .is_finite()
+            .then(|| ((self.to - self.from).max(0.0) * self.rate as f64).round() as u64)
+    }
+}
+
+pub fn decode_audio_span(
     path: &Path,
     track: usize,
     prefs: &Prefs,
+    span: &AudioSpan,
     mut each: impl FnMut(AudioBuffer) -> Result<()>,
 ) -> Result<()> {
-    let stream = audio_stream(path, track, 0.0, LEVEL_RATE, 2, prefs)?;
+    if !span.from.is_finite() || span.from < 0.0 || span.to.is_nan() || span.to < span.from {
+        return Err(Error::Invalid(format!(
+            "the range {} to {}",
+            span.from, span.to
+        )));
+    }
+    let limit = span.limit();
+    if limit == Some(0) {
+        return Ok(());
+    }
+    let stream = audio_stream(path, track, span.from, span.rate, span.channels, prefs)?;
     std::thread::scope(|s| {
         let (tx, rx) = mpsc::sync_channel::<Result<AudioBuffer>>(QUEUE);
         s.spawn(move || {
@@ -282,26 +316,42 @@ fn decoded(
                 }
             }
         });
+        let mut sent = 0u64;
         for b in rx {
-            each(b?)?;
+            let mut b = b?;
+            if let Some(limit) = limit {
+                let left = limit - sent;
+                if b.frames() as u64 >= left {
+                    b.samples.truncate(left as usize * b.channels as usize);
+                    if !b.samples.is_empty() {
+                        each(b)?;
+                    }
+                    break;
+                }
+            }
+            sent += b.frames() as u64;
+            each(b)?;
         }
         Ok(())
     })
 }
 
+fn decoded(source: &Pass, each: impl FnMut(AudioBuffer) -> Result<()>) -> Result<()> {
+    decode_audio_span(source.path, source.track, source.prefs, &source.span, each)
+}
+
 fn meter_pass(
-    path: &Path,
-    track: usize,
-    prefs: &Prefs,
+    source: &Pass,
     mut leveler: Option<Leveler>,
     stage: LevelStage,
-    total: u64,
     progress: &mut Tell,
 ) -> Result<LoudnessStats> {
-    let mut meter = LoudnessMeter::new(LEVEL_RATE, 2)?;
+    let span = source.span;
+    let total = source.total;
+    let mut meter = LoudnessMeter::new(span.rate, span.channels)?;
     let mut frames = 0u64;
     tell(progress, stage, 0, total)?;
-    decoded(path, track, prefs, |mut b| {
+    decoded(source, |mut b| {
         frames += b.frames() as u64;
         if let Some(l) = leveler.as_mut() {
             l.process(&mut b)?;
@@ -310,7 +360,7 @@ fn meter_pass(
         tell(progress, stage, frames, total)
     })?;
     if let Some(l) = leveler.as_mut() {
-        let mut tail = AudioBuffer::new(LEVEL_RATE, 2);
+        let mut tail = AudioBuffer::new(span.rate, span.channels);
         l.flush(&mut tail)?;
         meter.process(&tail)?;
     }
@@ -323,19 +373,11 @@ pub fn measure_loudness(
     prefs: &Prefs,
     mut progress: impl FnMut(&LevelProgress) -> bool,
 ) -> Result<LoudnessStats> {
-    let total = audio_frames(path, track, prefs)?;
-    meter_pass(
-        path,
-        track,
-        prefs,
-        None,
-        LevelStage::Measuring,
-        total,
-        &mut progress,
-    )
+    let source = Pass::open(path, track, prefs, AudioSpan::WHOLE)?;
+    meter_pass(&source, None, LevelStage::Measuring, &mut progress)
 }
 
-fn audio_frames(path: &Path, track: usize, prefs: &Prefs) -> Result<u64> {
+fn audio_frames(path: &Path, track: usize, prefs: &Prefs, span: &AudioSpan) -> Result<u64> {
     let p = probe(path, prefs)?;
     if p.audio.is_empty() {
         return Err(Error::Unsupported("no audio to level".into()));
@@ -346,7 +388,8 @@ fn audio_frames(path: &Path, track: usize, prefs: &Prefs) -> Result<u64> {
             p.audio.len()
         )));
     }
-    Ok((p.duration.max(0.0) * LEVEL_RATE as f64).round() as u64)
+    let end = p.duration.max(0.0).min(span.to);
+    Ok(((end - span.from).max(0.0) * span.rate as f64).round() as u64)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -791,25 +834,23 @@ pub fn plan_level(
     track: usize,
     prefs: &Prefs,
     target: &LevelTarget,
+    progress: impl FnMut(&LevelProgress) -> bool,
+) -> Result<LevelPlan> {
+    plan_level_span(path, track, prefs, &AudioSpan::WHOLE, target, progress)
+}
+
+pub fn plan_level_span(
+    path: &Path,
+    track: usize,
+    prefs: &Prefs,
+    span: &AudioSpan,
+    target: &LevelTarget,
     mut progress: impl FnMut(&LevelProgress) -> bool,
 ) -> Result<LevelPlan> {
     target.check()?;
     let progress: &mut Tell = &mut progress;
-    let source = Pass {
-        path,
-        track,
-        prefs,
-        total: audio_frames(path, track, prefs)?,
-    };
-    let before = meter_pass(
-        path,
-        track,
-        prefs,
-        None,
-        LevelStage::Measuring,
-        source.total,
-        progress,
-    )?;
+    let source = Pass::open(path, track, prefs, *span)?;
+    let before = meter_pass(&source, None, LevelStage::Measuring, progress)?;
     let gain = target.integrated - before.integrated;
     planned(&source, before, target, HEADROOM, gain, progress)
 }
@@ -818,7 +859,20 @@ struct Pass<'a> {
     path: &'a Path,
     track: usize,
     prefs: &'a Prefs,
+    span: AudioSpan,
     total: u64,
+}
+
+impl<'a> Pass<'a> {
+    fn open(path: &'a Path, track: usize, prefs: &'a Prefs, span: AudioSpan) -> Result<Pass<'a>> {
+        Ok(Pass {
+            path,
+            track,
+            prefs,
+            span,
+            total: audio_frames(path, track, prefs, &span)?,
+        })
+    }
 }
 
 fn planned(
@@ -842,16 +896,9 @@ fn planned(
         });
     }
     for _ in 0..TRIES {
-        let trial = Leveler::with_gain(LEVEL_RATE, 2, gain_db, Some(ceiling))?;
-        let got = meter_pass(
-            source.path,
-            source.track,
-            source.prefs,
-            Some(trial),
-            LevelStage::Calibrating,
-            source.total,
-            progress,
-        )?;
+        let span = source.span;
+        let trial = Leveler::with_gain(span.rate, span.channels, gain_db, Some(ceiling))?;
+        let got = meter_pass(source, Some(trial), LevelStage::Calibrating, progress)?;
         let short = target.integrated - got.integrated;
         if !short.is_finite() || short.abs() <= CLOSE {
             break;
@@ -885,22 +932,9 @@ pub fn level(
             "an audio bitrate of {kbps} kbps, outside 32 to 512"
         )));
     }
-    let source = Pass {
-        path: input,
-        track: opts.track,
-        prefs: &opts.prefs,
-        total: audio_frames(input, opts.track, &opts.prefs)?,
-    };
+    let source = Pass::open(input, opts.track, &opts.prefs, AudioSpan::WHOLE)?;
     let demux = Demux::open(input)?;
-    let before = meter_pass(
-        input,
-        opts.track,
-        &opts.prefs,
-        None,
-        LevelStage::Measuring,
-        source.total,
-        progress,
-    )?;
+    let before = meter_pass(&source, None, LevelStage::Measuring, progress)?;
     let part = partial(output);
     let mut headroom = HEADROOM;
     let mut gain = target.integrated - before.integrated;
@@ -983,7 +1017,7 @@ fn write(
         }
         Ok(())
     };
-    decoded(source.path, source.track, source.prefs, |mut b| {
+    decoded(source, |mut b| {
         leveler.process(&mut b)?;
         frames += b.frames() as u64;
         let packets = enc.encode(&b)?;

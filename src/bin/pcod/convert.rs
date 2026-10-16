@@ -20,6 +20,7 @@ pub struct Options {
     pub request: Request,
     pub json: bool,
     pub progress: bool,
+    pub wav: Option<super::extract::Wav>,
 }
 
 struct Planned {
@@ -184,11 +185,11 @@ fn audio_manifest(audio: &Audio) -> manifest::Audio {
     }
 }
 
-fn hash(path: &Path) -> Result<String, Fail> {
+pub fn hash(path: &Path) -> Result<String, Fail> {
     sha256::sha256_file(path).map_err(|e| format!("{}: {e}", path.display()).into())
 }
 
-fn land(partial_path: &Path, output: &Path, overwrite: bool) -> Result<(), Fail> {
+pub fn land(partial_path: &Path, output: &Path, overwrite: bool) -> Result<(), Fail> {
     if overwrite {
         return std::fs::rename(partial_path, output)
             .map_err(|e| format!("{}: {e}", output.display()).into());
@@ -382,14 +383,14 @@ fn finish(
     Ok(document.to_json())
 }
 
-fn target_of(l: &super::plan::Loudness) -> media::LevelTarget {
+pub fn target_of(l: &super::plan::Loudness) -> media::LevelTarget {
     media::LevelTarget {
         integrated: l.integrated,
         true_peak: l.true_peak,
     }
 }
 
-fn stats(s: &media::LoudnessStats) -> manifest::Measured {
+pub fn stats(s: &media::LoudnessStats) -> manifest::Measured {
     manifest::Measured {
         integrated: s.integrated,
         range: s.range,
@@ -405,15 +406,15 @@ fn mode_name(mode: media::LevelMode) -> &'static str {
     }
 }
 
-struct Loud {
-    target: super::plan::Loudness,
-    before: media::LoudnessStats,
-    after: media::LoudnessStats,
-    mode: media::LevelMode,
+pub struct Loud {
+    pub target: super::plan::Loudness,
+    pub before: media::LoudnessStats,
+    pub after: media::LoudnessStats,
+    pub mode: media::LevelMode,
 }
 
 impl Loud {
-    fn lines(&self) -> String {
+    pub fn lines(&self) -> String {
         let m = |s: &media::LoudnessStats| {
             format!(
                 "{:.2} LUFS, LRA {:.2} LU, true peak {:.2} dBTP",
@@ -430,7 +431,7 @@ impl Loud {
         )
     }
 
-    fn target(&self) -> manifest::Target {
+    pub fn target(&self) -> manifest::Target {
         manifest::Target {
             integrated: self.target.integrated,
             true_peak: self.target.true_peak,
@@ -439,7 +440,7 @@ impl Loud {
     }
 }
 
-fn level_progress(progress: &Progress) -> impl FnMut(&media::LevelProgress) -> bool + '_ {
+pub fn level_progress(progress: &Progress) -> impl FnMut(&media::LevelProgress) -> bool + '_ {
     let mut stage = None;
     move |p: &media::LevelProgress| {
         if stage != Some(p.stage) {
@@ -731,7 +732,9 @@ pub fn refuse(message: &str) -> ExitCode {
 pub fn run(options: Options) -> ExitCode {
     signals::catch();
     let mut partial_path = None;
-    let outcome = if options.request.joins.is_empty() {
+    let outcome = if let Some(wav) = &options.wav {
+        super::extract::run(&options, wav, &mut partial_path)
+    } else if options.request.joins.is_empty() {
         convert(&options, &mut partial_path)
     } else {
         join(&options, &mut partial_path)
