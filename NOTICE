@@ -488,6 +488,44 @@ The progress line, the probe and manifest JSON shapes in src/bin/pcod/ are
 adapted from pconv 1.0.1 (commit 8879614), MIT, by Cătălin Ilinca, the author
 of pito-codecs.
 
+The linear-light resize in src/filter/linear.rs follows zimg
+(https://github.com/sekrit-twc/zimg, commit
+67e0603271c080e22c8429856dd4a8a56587e61e) by sekrit-twc: the resampling filter
+construction (pixel-centre positions, half-up rounding, mirrored edges, f32
+coefficient error diffusion), the Lanczos weights and the BT.1886, BT.709 and
+sRGB transfer functions with their constants. zimg is licensed under the Do What
+The F*ck You Want To Public License, version 2 (Sam Hocevar, 2004), whose only
+term is: "0. You just DO WHAT THE FUCK YOU WANT TO."; it is credited here.
+
+The interleaved RGBA f32 convolution layout in src/filter/linear.rs (taps taken
+in pairs across one 256-bit register, rows convolved over flat components) is
+adapted from fast_image_resize 6.1.0
+(https://github.com/Cykooz/fast_image_resize, commit
+ce36aeb20ed4a33805baa3c0ff4caff7cf163e19), licensed MIT OR Apache-2.0; the MIT
+terms are taken here:
+
+MIT License
+
+Copyright (c) 2021 Kirill Kuzminykh
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 The PITO MD wordmark in assets/marks/pitomd-wordmark.svg is copied by bin/marks
 from the PITO MD brand masters at aa3aee8b232a1b848995bf3d9a012a01d4aff8ec
 (exports/pitomd/readme/wordmark.svg). The PITO MD name and its logos are

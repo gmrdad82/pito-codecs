@@ -1,7 +1,9 @@
-use super::color::Siting;
+use super::color::{ColorSpec, Siting};
+use super::linear::{Image, ImageMut, Light, Linear, Transfer};
 use super::plane::{Sample, Simd, check, plane_dims, reshape, samples, samples_mut, simd, sized};
 use crate::media::{Error, Frame, PixelFormat, Result};
 use rayon::prelude::*;
+use std::sync::Arc;
 
 const BITS: i32 = 14;
 const ONE: f64 = (1 << BITS) as f64;
@@ -14,7 +16,7 @@ pub enum Kernel {
 }
 
 impl Kernel {
-    fn radius(self) -> f64 {
+    pub(super) fn radius(self) -> f64 {
         match self {
             Kernel::Bilinear => 1.0,
             Kernel::Bicubic => 2.0,
@@ -22,7 +24,7 @@ impl Kernel {
         }
     }
 
-    fn weight(self, x: f64) -> f64 {
+    pub(super) fn weight(self, x: f64) -> f64 {
         let x = x.abs();
         match self {
             Kernel::Bilinear => (1.0 - x).max(0.0),
@@ -157,6 +159,12 @@ pub struct Scaler {
     dst: (u32, u32),
     planes: [PlaneTaps; 2],
     simd: Simd,
+    light: Light,
+    transfer: Transfer,
+    from: ColorSpec,
+    to: ColorSpec,
+    output: PixelFormat,
+    linear: Option<Arc<Linear>>,
 }
 
 impl Scaler {
@@ -185,7 +193,59 @@ impl Scaler {
                 PlaneTaps::new(src, dst, 1, 0.0, kernel),
             ],
             simd: simd(),
+            light: Light::Gamma,
+            transfer: Transfer::Bt1886,
+            from: ColorSpec::BT709,
+            to: ColorSpec::BT709,
+            output: format,
+            linear: None,
         })
+    }
+
+    pub fn light(mut self, light: Light) -> Self {
+        self.light = light;
+        self.rebuild()
+    }
+
+    pub fn transfer(mut self, transfer: Transfer) -> Self {
+        self.transfer = transfer;
+        self.rebuild()
+    }
+
+    pub fn color(mut self, from: ColorSpec, to: ColorSpec) -> Self {
+        self.from = from;
+        self.to = to;
+        self.rebuild()
+    }
+
+    pub fn output(mut self, format: PixelFormat) -> Self {
+        self.output = format;
+        self.rebuild()
+    }
+
+    fn engine(&self) -> Linear {
+        Linear::new(
+            self.src,
+            self.dst,
+            self.kernel,
+            self.light,
+            self.transfer,
+            self.from,
+            self.to,
+            self.output,
+        )
+    }
+
+    fn rebuild(mut self) -> Self {
+        self.linear = Some(Arc::new(self.engine()));
+        self
+    }
+
+    pub fn convert(&self, src: Image, dst: ImageMut) -> Result<()> {
+        match &self.linear {
+            Some(engine) => engine.convert(src, dst),
+            None => self.engine().convert(src, dst),
+        }
     }
 
     pub fn siting(mut self, siting: Siting) -> Self {
@@ -209,6 +269,14 @@ impl Scaler {
                 "scaler expects {:?} {}x{}, got {:?} {}x{}",
                 self.format, self.src.0, self.src.1, src.format, src.width, src.height
             )));
+        }
+        if self.light == Light::Linear {
+            return self.convert(Image::Yuv(src), ImageMut::Yuv(dst));
+        }
+        if self.output != self.format {
+            return Err(Error::Invalid(
+                "a gamma-light scaler keeps its pixel format".into(),
+            ));
         }
         check(src)?;
         reshape(
