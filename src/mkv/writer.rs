@@ -52,6 +52,7 @@ pub struct TrackConfig {
     pub seek_pre_roll: u64,
     pub language: String,
     pub name: Option<String>,
+    pub alpha: bool,
 }
 
 impl TrackConfig {
@@ -71,6 +72,7 @@ impl TrackConfig {
             seek_pre_roll: 0,
             language: "und".into(),
             name: None,
+            alpha: false,
         }
     }
 
@@ -149,6 +151,7 @@ impl TrackConfig {
             seek_pre_roll: track.seek_pre_roll,
             language: track.language.clone(),
             name: (!track.name.is_empty()).then(|| track.name.clone()),
+            alpha: track.alpha(),
         }
     }
 
@@ -252,6 +255,10 @@ fn track_entry(t: &TrackConfig, number: u64) -> Vec<u8> {
     if let Some(d) = t.default_duration {
         el_uint(&mut e, DEFAULT_DURATION, d);
     }
+    let alpha = t.alpha && t.kind == TrackKind::Video;
+    if alpha {
+        el_uint(&mut e, MAX_BLOCK_ADDITION_ID, 1);
+    }
     if t.codec_delay > 0 {
         el_uint(&mut e, CODEC_DELAY, t.codec_delay);
     }
@@ -262,6 +269,9 @@ fn track_entry(t: &TrackConfig, number: u64) -> Vec<u8> {
         let mut v = Vec::new();
         el_uint(&mut v, PIXEL_WIDTH, t.width as u64);
         el_uint(&mut v, PIXEL_HEIGHT, t.height as u64);
+        if alpha {
+            el_uint(&mut v, ALPHA_MODE, 1);
+        }
         if !t.rotation.is_multiple_of(360) {
             let mut p = Vec::new();
             el_uint(&mut p, PROJECTION_TYPE, 0);
@@ -442,6 +452,34 @@ impl<W: Write + Seek> Writer<W> {
         duration: Option<u32>,
         keyframe: bool,
     ) -> Result<()> {
+        self.push_block(track, data, pts, duration, keyframe, None)
+    }
+
+    pub fn push_alpha(
+        &mut self,
+        track: usize,
+        packet: &Packet,
+        alpha: Option<&[u8]>,
+    ) -> Result<()> {
+        self.push_block(
+            track,
+            &packet.data,
+            packet.pts,
+            None,
+            packet.keyframe,
+            alpha,
+        )
+    }
+
+    pub fn push_block(
+        &mut self,
+        track: usize,
+        data: &[u8],
+        pts: i64,
+        duration: Option<u32>,
+        keyframe: bool,
+        additional: Option<&[u8]>,
+    ) -> Result<()> {
         self.start()?;
         let t = self
             .tracks
@@ -493,7 +531,7 @@ impl<W: Write + Seek> Writer<W> {
         let rel = (ts - self.cluster_ts.unwrap_or(ts)) as i16;
         let number = track as u8 + 1;
         match explicit {
-            None => {
+            None if additional.is_none() => {
                 write_id(&mut self.cluster, SIMPLE_BLOCK);
                 write_size(&mut self.cluster, data.len() as u64 + 4, 1);
                 self.cluster.push(0x80 | number);
@@ -501,15 +539,28 @@ impl<W: Write + Seek> Writer<W> {
                 self.cluster.push(if keyframe { 0x80 } else { 0 });
                 self.cluster.extend_from_slice(data);
             }
-            Some(d) => {
+            explicit => {
                 let mut tail = Vec::with_capacity(16);
-                el_uint(
-                    &mut tail,
-                    BLOCK_DURATION,
-                    (d.saturating_add(SCALE / 2) / SCALE) as u64,
-                );
-                if !keyframe {
-                    el(&mut tail, REFERENCE_BLOCK, &[0xFF]);
+                if let Some(add) = additional {
+                    let mut more = Vec::with_capacity(add.len() + 8);
+                    el_uint(&mut more, BLOCK_ADD_ID, 1);
+                    el(&mut more, BLOCK_ADDITIONAL, add);
+                    let mut adds = Vec::with_capacity(more.len() + 8);
+                    el(&mut adds, BLOCK_MORE, &more);
+                    el(&mut tail, BLOCK_ADDITIONS, &adds);
+                    if !keyframe {
+                        el(&mut tail, REFERENCE_BLOCK, &[0xFF]);
+                    }
+                }
+                if let Some(d) = explicit {
+                    el_uint(
+                        &mut tail,
+                        BLOCK_DURATION,
+                        (d.saturating_add(SCALE / 2) / SCALE) as u64,
+                    );
+                    if !keyframe && additional.is_none() {
+                        el(&mut tail, REFERENCE_BLOCK, &[0xFF]);
+                    }
                 }
                 let block_len = data.len() as u64 + 4;
                 let mut head = Vec::with_capacity(16);
