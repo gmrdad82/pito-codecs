@@ -4,6 +4,7 @@ mod export;
 mod feed;
 mod ffmpeg;
 mod frames;
+mod look;
 #[cfg(test)]
 mod malformed;
 mod mux;
@@ -24,6 +25,7 @@ pub use export::{
 };
 pub use ffmpeg::{Ffmpeg, Listed};
 pub use frames::{Canvas, export_frames};
+pub use look::{VideoLook, video_look};
 pub use picture::{
     Blender, Color, blend, rotate, scale, scale_to_height, to_rgba, to_rgba_color, to_rgba_height,
 };
