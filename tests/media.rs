@@ -2401,3 +2401,63 @@ fn a_stills_handle_hands_each_index_once_and_matches_single_calls() {
         }
     }
 }
+
+#[test]
+fn av1_in_mp4_mkv_and_webm_probes_and_refuses_cleanly_without_a_decoder() {
+    let Ok(encoders) = Command::new("ffmpeg")
+        .args(["-hide_banner", "-encoders"])
+        .output()
+    else {
+        return;
+    };
+    if !String::from_utf8_lossy(&encoders.stdout).contains("libsvtav1") {
+        return;
+    }
+    let prefs = Prefs::default();
+    for (name, pix, bits) in [
+        ("av1-8.mp4", "yuv420p", 8),
+        ("av1-8.mkv", "yuv420p", 8),
+        ("av1-8.webm", "yuv420p", 8),
+        ("av1-10.mp4", "yuv420p10le", 10),
+    ] {
+        let path = dir().join(name);
+        if !path.exists() {
+            ffmpeg_make(
+                &path,
+                &[
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=s=640x360:r=30:d=1",
+                    "-c:v",
+                    "libsvtav1",
+                    "-preset",
+                    "12",
+                    "-g",
+                    "30",
+                    "-pix_fmt",
+                    pix,
+                ],
+            );
+        }
+        let p = probe(&path, &prefs).unwrap();
+        assert_eq!(
+            (
+                p.video_codec,
+                p.video_codec_name.as_str(),
+                p.width,
+                p.height,
+                p.bit_depth,
+                p.profile.as_str()
+            ),
+            (Some(Codec::Av1), "av1", 640, 360, bits, "Main"),
+            "{name}"
+        );
+        assert!((p.duration - 1.0).abs() < 0.05, "{name}: {}", p.duration);
+        if !p.video_native() {
+            assert_eq!(p.unsupported(), ["av1"], "{name}");
+            let e = first_frame(&path, 180, &prefs).unwrap_err().to_string();
+            assert!(e.contains("no GPU AV1 decoder"), "{name}: {e}");
+        }
+    }
+}

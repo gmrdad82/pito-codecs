@@ -180,6 +180,7 @@ pub fn probe(path: &Path) -> Result<Probe> {
         Some(CodecConfig::Avc(c)) => demux::avc_profile(c.profile),
         Some(CodecConfig::Hevc(c)) => demux::hevc_profile(c),
         Some(CodecConfig::Vp9(c)) => (format!("Profile {}", c.profile), c.bit_depth.max(8)),
+        Some(CodecConfig::Av1(c)) => (c.profile_name(), c.bit_depth()),
         _ => (String::new(), 8),
     };
     let audio = r
@@ -286,6 +287,11 @@ impl Decoder {
                     let d = d.with_time_base(st.time_base);
                     return Ok((Decoder::Gpu(Box::new(d)), None));
                 }
+                Err(e) if codec == Codec::Av1 => {
+                    return Err(Error::Unsupported(format!(
+                        "no AV1 decoder on this machine ({e})"
+                    )));
+                }
                 Err(e) => {
                     let why = format!("the GPU decoder failed ({e}); decoding on the CPU");
                     return Ok((Decoder::new(st, threads)?, Some(why)));
@@ -346,6 +352,9 @@ impl Decoder {
                 dec.set_time_base(tb);
                 Ok(Decoder::Vp9(Box::new(dec)))
             }
+            (Some(Codec::Av1), _) => Err(Error::Unsupported(
+                "no AV1 decoder on this machine: AV1 decodes on the GPU only".to_string(),
+            )),
             _ => Err(Error::Unsupported(format!(
                 "our decoders read H.264, HEVC and VP9, not {}",
                 st.name

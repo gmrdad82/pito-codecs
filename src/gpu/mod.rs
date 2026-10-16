@@ -3,6 +3,10 @@
 pub(crate) mod biplanar;
 mod nal;
 
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+mod av1c;
+
 #[cfg(test)]
 mod tests;
 

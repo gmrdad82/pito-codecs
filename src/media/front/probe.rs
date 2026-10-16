@@ -38,10 +38,13 @@ impl Probe {
     }
 
     pub fn video_native(&self) -> bool {
-        matches!(
-            self.video_codec,
-            Some(Codec::H264 | Codec::Hevc | Codec::Vp9)
-        )
+        match self.video_codec {
+            Some(Codec::H264 | Codec::Hevc | Codec::Vp9) => true,
+            Some(Codec::Av1) => super::native::gpu()
+                .0
+                .contains(&(Codec::Av1, crate::media::Direction::Decode)),
+            _ => false,
+        }
     }
 
     pub fn unsupported(&self) -> Vec<String> {
