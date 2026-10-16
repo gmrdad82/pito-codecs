@@ -7,7 +7,6 @@ pub trait Prim: Copy {
     fn cell(v: Self) -> Self::Cell;
     fn load(c: &Self::Cell, o: Ordering) -> Self;
     fn store(c: &Self::Cell, v: Self, o: Ordering);
-    fn swap(c: &Self::Cell, v: Self, o: Ordering) -> Self;
     fn compare_exchange(
         c: &Self::Cell,
         current: Self,
@@ -29,9 +28,6 @@ macro_rules! prim {
             }
             fn store(c: &$a, v: Self, o: Ordering) {
                 c.store(v, o)
-            }
-            fn swap(c: &$a, v: Self, o: Ordering) -> Self {
-                c.swap(v, o)
             }
             fn compare_exchange(
                 c: &$a,
@@ -108,10 +104,6 @@ impl<T: Atom> Atomic<T> {
 
     pub fn store(&self, v: T, o: Ordering) {
         <T::Repr as Prim>::store(&self.0, v.pack(), o)
-    }
-
-    pub fn swap(&self, v: T, o: Ordering) -> T {
-        T::unpack(<T::Repr as Prim>::swap(&self.0, v.pack(), o))
     }
 
     pub fn compare_exchange(

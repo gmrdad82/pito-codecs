@@ -110,10 +110,6 @@ impl<P: Pixels> WithOffset<P> {
     pub fn wrapping_as_ptr<BD: BitDepth>(&self) -> *const BD::Pixel {
         self.data.wrapping_as_ptr_at::<BD>(self.offset)
     }
-
-    pub fn wrapping_as_mut_ptr<BD: BitDepth>(&self) -> *const BD::Pixel {
-        self.data.wrapping_as_mut_ptr_at::<BD>(self.offset)
-    }
 }
 
 impl<S: Strided> Strided for WithOffset<S> {

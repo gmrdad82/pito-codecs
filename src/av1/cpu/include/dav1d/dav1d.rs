@@ -2,18 +2,12 @@ use std::ffi::{c_int, c_uint};
 
 use crate::av1::cpu::flags::bitflags;
 
-use crate::av1::cpu::c_arc::RawArc;
 use crate::av1::cpu::error::Rav1dError;
 use crate::av1::cpu::in_range::InRange;
 use crate::av1::cpu::include::dav1d::picture::{Dav1dPicAllocator, Rav1dPicAllocator};
-use crate::av1::cpu::internal::Rav1dContext;
 pub use crate::av1::cpu::log::Dav1dLogger;
 use crate::av1::cpu::log::Rav1dLogger;
 use crate::av1::cpu::validate_input;
-
-pub type Dav1dContext = RawArc<Rav1dContext>;
-
-pub type Dav1dRef = ();
 
 pub const RAV1D_MAX_THREADS: usize = 256;
 pub const RAV1D_MAX_FRAME_DELAY: usize = 256;
@@ -22,16 +16,6 @@ pub const DAV1D_MAX_THREADS: c_int = RAV1D_MAX_THREADS as _;
 pub const DAV1D_MAX_FRAME_DELAY: c_int = RAV1D_MAX_FRAME_DELAY as _;
 
 pub type Dav1dInloopFilterType = c_uint;
-pub const DAV1D_INLOOPFILTER_ALL: Dav1dInloopFilterType =
-    Rav1dInloopFilterType::all().bits() as Dav1dInloopFilterType;
-pub const DAV1D_INLOOPFILTER_NONE: Dav1dInloopFilterType =
-    Rav1dInloopFilterType::empty().bits() as Dav1dInloopFilterType;
-pub const DAV1D_INLOOPFILTER_DEBLOCK: Dav1dInloopFilterType =
-    Rav1dInloopFilterType::DEBLOCK.bits() as Dav1dInloopFilterType;
-pub const DAV1D_INLOOPFILTER_CDEF: Dav1dInloopFilterType =
-    Rav1dInloopFilterType::CDEF.bits() as Dav1dInloopFilterType;
-pub const DAV1D_INLOOPFILTER_RESTORATION: Dav1dInloopFilterType =
-    Rav1dInloopFilterType::RESTORATION.bits() as Dav1dInloopFilterType;
 
 bitflags! {
     #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -55,14 +39,6 @@ impl From<Dav1dInloopFilterType> for Rav1dInloopFilterType {
 }
 
 pub type Dav1dDecodeFrameType = c_uint;
-pub const DAV1D_DECODEFRAMETYPE_ALL: Dav1dDecodeFrameType =
-    Rav1dDecodeFrameType::All as Dav1dDecodeFrameType;
-pub const DAV1D_DECODEFRAMETYPE_REFERENCE: Dav1dDecodeFrameType =
-    Rav1dDecodeFrameType::Reference as Dav1dDecodeFrameType;
-pub const DAV1D_DECODEFRAMETYPE_INTRA: Dav1dDecodeFrameType =
-    Rav1dDecodeFrameType::Intra as Dav1dDecodeFrameType;
-pub const DAV1D_DECODEFRAMETYPE_KEY: Dav1dDecodeFrameType =
-    Rav1dDecodeFrameType::Key as Dav1dDecodeFrameType;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum Rav1dDecodeFrameType {
@@ -109,10 +85,6 @@ impl TryFrom<Dav1dDecodeFrameType> for Rav1dDecodeFrameType {
 }
 
 pub type Dav1dEventFlags = c_uint;
-pub const DAV1D_EVENT_FLAG_NEW_SEQUENCE: Dav1dEventFlags =
-    Rav1dEventFlags::NEW_SEQUENCE.bits() as Dav1dEventFlags;
-pub const DAV1D_EVENT_FLAG_NEW_OP_PARAMS_INFO: Dav1dEventFlags =
-    Rav1dEventFlags::NEW_OP_PARAMS_INFO.bits() as Dav1dEventFlags;
 
 bitflags! {
     #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]

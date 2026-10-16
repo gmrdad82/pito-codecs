@@ -6,7 +6,7 @@ use std::{fmt, mem};
 
 use crate::av1::cpu::enums::EnumCount;
 use crate::av1::cpu::flags::bitflags;
-use crate::av1::cpu::pod::{AsBytes, FromBytes, FromZeroes};
+use crate::av1::cpu::pod::{AsBytes, FromBytes};
 
 use crate::av1::cpu::align::ArrayDefault;
 use crate::av1::cpu::enum_map::{DefaultValue, EnumKey};

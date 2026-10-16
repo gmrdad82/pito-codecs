@@ -133,10 +133,6 @@ impl<T> RawArc<T> {
         Self(arc_into_raw(arc).cast())
     }
 
-    pub unsafe fn as_ref(&self) -> &T {
-        unsafe { self.0.cast().as_ref() }
-    }
-
     pub unsafe fn into_arc(self) -> Arc<T> {
         let raw = self.0.cast().as_ptr();
 

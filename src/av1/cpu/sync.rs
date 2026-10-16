@@ -12,10 +12,6 @@ impl<T> Mutex<T> {
     pub const fn new(value: T) -> Self {
         Self(s::Mutex::new(value))
     }
-
-    pub fn into_inner(self) -> T {
-        self.0.into_inner().unwrap_or_else(PoisonError::into_inner)
-    }
 }
 
 impl<T: ?Sized> Mutex<T> {
@@ -29,10 +25,6 @@ impl<T: ?Sized> Mutex<T> {
             Err(TryLockError::Poisoned(e)) => Some(MutexGuard(Some(e.into_inner()))),
             Err(TryLockError::WouldBlock) => None,
         }
-    }
-
-    pub fn get_mut(&mut self) -> &mut T {
-        self.0.get_mut().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -59,15 +51,7 @@ impl<T: ?Sized> DerefMut for MutexGuard<'_, T> {
 #[derive(Default)]
 pub struct RwLock<T: ?Sized>(s::RwLock<T>);
 
-impl<T> RwLock<T> {
-    pub const fn new(value: T) -> Self {
-        Self(s::RwLock::new(value))
-    }
-
-    pub fn into_inner(self) -> T {
-        self.0.into_inner().unwrap_or_else(PoisonError::into_inner)
-    }
-}
+impl<T> RwLock<T> {}
 
 impl<T: ?Sized> RwLock<T> {
     pub fn read(&self) -> RwLockReadGuard<'_, T> {

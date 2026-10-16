@@ -2,11 +2,11 @@ use std::num::NonZero;
 use std::thread::available_parallelism;
 
 #[derive(Clone, Copy, Default)]
-pub struct CpuFlags(u32);
+pub struct CpuFlags;
 
 impl CpuFlags {
     pub const fn empty() -> Self {
-        Self(0)
+        Self
     }
 }
 

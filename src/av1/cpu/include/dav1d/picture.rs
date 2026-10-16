@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::{array, mem};
 
 use crate::av1::cpu::extensions::To as _;
-use crate::av1::cpu::pod::{AsBytes, FromBytes, FromZeroes};
+use crate::av1::cpu::pod::AsBytes;
 
 use crate::av1::cpu::c_arc::RawArc;
 use crate::av1::cpu::disjoint_mut::{
@@ -29,7 +29,6 @@ use crate::av1::cpu::strided::Strided;
 use crate::av1::cpu::with_offset::WithOffset;
 
 pub const RAV1D_PICTURE_ALIGNMENT: usize = 64;
-pub const DAV1D_PICTURE_ALIGNMENT: usize = RAV1D_PICTURE_ALIGNMENT;
 
 #[derive(Default)]
 #[repr(C)]

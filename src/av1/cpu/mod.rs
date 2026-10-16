@@ -1,6 +1,9 @@
 #![allow(
+    non_upper_case_globals,
+    clippy::wrong_self_convention,
+    clippy::manual_is_multiple_of,
+    clippy::missing_safety_doc,
     unsafe_op_in_unsafe_fn,
-    dead_code,
     clippy::derivable_impls,
     clippy::erasing_op,
     clippy::ptr_eq,
@@ -59,103 +62,99 @@
     clippy::zero_prefixed_literal
 )]
 
-pub mod include {
-    pub mod common {
+pub(crate) mod include {
+    pub(crate) mod common {
         pub(crate) mod attributes;
         pub(crate) mod bitdepth;
         pub(crate) mod dump;
         pub(crate) mod intops;
         pub(crate) mod validate;
     }
-    pub mod dav1d {
-        pub mod common;
-        pub mod data;
-        pub mod dav1d;
-        pub mod headers;
-        pub mod picture;
+    pub(crate) mod dav1d {
+        pub(crate) mod common;
+        pub(crate) mod data;
+        pub(crate) mod dav1d;
+        pub(crate) mod headers;
+        pub(crate) mod picture;
     }
 }
 
-pub mod align;
+pub(crate) mod align;
 pub(crate) mod c_arc;
 pub(crate) mod c_box;
-mod cdef;
-mod cdef_apply;
-mod cdf;
-mod const_fn;
-pub mod cpu;
-mod ctx;
-mod cursor;
-mod data;
-mod decode;
-mod dequant_tables;
+pub(crate) mod cdef;
+pub(crate) mod cdef_apply;
+pub(crate) mod cdf;
+pub(crate) mod const_fn;
+pub(crate) mod cpu;
+pub(crate) mod ctx;
+pub(crate) mod cursor;
+pub(crate) mod data;
+pub(crate) mod decode;
+pub(crate) mod dequant_tables;
 pub(crate) mod disjoint_mut;
 pub(crate) mod enum_map;
-mod env;
+pub(crate) mod env;
 pub(crate) mod error;
-mod ffi_safe;
-mod fg_apply;
-mod filmgrain;
-mod getbits;
+pub(crate) mod ffi_safe;
+pub(crate) mod fg_apply;
+pub(crate) mod filmgrain;
+pub(crate) mod getbits;
 pub(crate) mod pic_or_buf;
 pub(crate) mod pixels;
 pub(crate) mod relaxed_atomic;
-pub mod send_sync_non_null;
+pub(crate) mod send_sync_non_null;
 pub(crate) mod strided;
 pub(crate) mod with_offset;
 pub(crate) mod wrap_fn_ptr;
 
-mod extensions;
-mod in_range;
-mod internal;
-mod intra_edge;
-mod ipred;
-mod ipred_prepare;
-mod iter;
-mod itx;
-mod itx_1d;
+pub(crate) mod extensions;
+pub(crate) mod in_range;
+pub(crate) mod internal;
+pub(crate) mod intra_edge;
+pub(crate) mod ipred;
+pub(crate) mod ipred_prepare;
+pub(crate) mod iter;
+pub(crate) mod itx;
+pub(crate) mod itx_1d;
 pub(crate) mod levels;
-mod lf_apply;
-mod lf_mask;
+pub(crate) mod lf_apply;
+pub(crate) mod lf_mask;
 pub(crate) mod log;
-mod loopfilter;
-mod looprestoration;
-mod lr_apply;
-mod mc;
-mod msac;
-mod obu;
-mod pal;
-mod picture;
-mod pool;
-mod qm;
-mod recon;
-mod refmvs;
+pub(crate) mod loopfilter;
+pub(crate) mod looprestoration;
+pub(crate) mod lr_apply;
+pub(crate) mod mc;
+pub(crate) mod msac;
+pub(crate) mod obu;
+pub(crate) mod pal;
+pub(crate) mod picture;
+pub(crate) mod pool;
+pub(crate) mod qm;
+pub(crate) mod recon;
+pub(crate) mod refmvs;
 
-mod atom;
-mod decoder;
-mod enums;
-mod flags;
-mod pod;
-mod scan;
-mod sync;
-mod tables;
-mod thread_task;
-mod warpmv;
-mod wedge;
+pub(crate) mod atom;
+pub(crate) mod decoder;
+pub(crate) mod enums;
+pub(crate) mod flags;
+pub(crate) mod pod;
+pub(crate) mod scan;
+pub(crate) mod sync;
+pub(crate) mod tables;
+pub(crate) mod thread_task;
+pub(crate) mod warpmv;
+pub(crate) mod wedge;
 
 pub use decoder::{Decoder, Layout, Picture, SequenceInfo};
 
-use std::ffi::{CStr, c_char, c_uint, c_void};
-use std::ptr::NonNull;
+use std::ffi::{CStr, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Once};
-use std::{cmp, mem, ptr, slice, thread};
+use std::{cmp, mem, thread};
 
-use crate::av1::cpu::extensions::To as _;
 use crate::av1::cpu::sync::Mutex;
 
-use crate::av1::cpu::c_arc::RawArc;
-use crate::av1::cpu::c_box::{CBox, CRef, FnFree};
 use crate::av1::cpu::cpu::{rav1d_init_cpu, rav1d_num_logical_processors};
 use crate::av1::cpu::decode::rav1d_decode_frame_exit;
 pub use crate::av1::cpu::error::{Dav1dResult, Rav1dError, Rav1dResult};
@@ -165,14 +164,12 @@ use crate::av1::cpu::include::common::bitdepth::BitDepth8;
 use crate::av1::cpu::include::common::bitdepth::BitDepth16;
 use crate::av1::cpu::include::common::intops::clip;
 use crate::av1::cpu::include::common::validate::validate_input;
-use crate::av1::cpu::include::dav1d::common::{Dav1dDataProps, Rav1dDataProps};
-use crate::av1::cpu::include::dav1d::data::{Dav1dData, Rav1dData};
+use crate::av1::cpu::include::dav1d::data::Rav1dData;
 use crate::av1::cpu::include::dav1d::dav1d::{
-    Dav1dContext, Dav1dEventFlags, Dav1dSettings, RAV1D_MAX_THREADS, Rav1dDecodeFrameType,
-    Rav1dInloopFilterType, Rav1dSettings,
+    RAV1D_MAX_THREADS, Rav1dDecodeFrameType, Rav1dInloopFilterType, Rav1dSettings,
 };
-use crate::av1::cpu::include::dav1d::headers::{Dav1dSequenceHeader, Rav1dFilmGrainData};
-use crate::av1::cpu::include::dav1d::picture::{Dav1dPicture, Rav1dPicture};
+use crate::av1::cpu::include::dav1d::headers::Rav1dFilmGrainData;
+use crate::av1::cpu::include::dav1d::picture::Rav1dPicture;
 use crate::av1::cpu::internal::{
     Rav1dBitDepthDSPContext, Rav1dContext, Rav1dContextFrameThread, Rav1dContextTaskThread,
     Rav1dContextTaskType, Rav1dFrameContext, Rav1dState, Rav1dTaskContext,
@@ -180,7 +177,7 @@ use crate::av1::cpu::internal::{
 };
 use crate::av1::cpu::iter::wrapping_iter;
 use crate::av1::cpu::log::{Rav1dLog as _, Rav1dLogger};
-use crate::av1::cpu::obu::{rav1d_parse_obus, rav1d_parse_sequence_header};
+use crate::av1::cpu::obu::rav1d_parse_obus;
 use crate::av1::cpu::picture::{PictureFlags, rav1d_picture_alloc_copy};
 use crate::av1::cpu::send_sync_non_null::SendSyncNonNull;
 use crate::av1::cpu::thread_task::{FRAME_ERROR, rav1d_task_delayed_fg, rav1d_worker_task};
@@ -245,11 +242,6 @@ fn get_num_threads(s: &Rav1dSettings) -> NumThreads {
         cmp::min((n_tc as f64).sqrt().ceil() as u16, 8)
     };
     NumThreads { n_fc, n_tc }
-}
-
-#[cold]
-pub(crate) fn rav1d_get_frame_delay(s: &Rav1dSettings) -> u16 {
-    get_num_threads(s).n_fc
 }
 
 #[cold]
@@ -646,3 +638,6 @@ impl Rav1dContext {
         ttd.cond.notify_all();
     }
 }
+
+#[cfg(test)]
+mod tests;

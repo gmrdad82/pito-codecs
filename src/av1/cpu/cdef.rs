@@ -480,8 +480,6 @@ fn cdef_find_dir_rust<BD: BitDepth>(
     best_dir as c_int
 }
 
-#[deny(unsafe_op_in_unsafe_fn)]
-
 impl Rav1dCdefDSPContext {
     pub const fn default<BD: BitDepth>() -> Self {
         Self {

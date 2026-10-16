@@ -20,18 +20,8 @@ impl From<CArc<[u8]>> for Rav1dData {
 }
 
 impl Rav1dData {
-    pub fn create(size: usize) -> Rav1dResult<Self> {
-        let data = CArc::zeroed_slice(size)?;
-        Ok(data.into())
-    }
-
     pub fn wrap(data: CRef<[u8]>) -> Rav1dResult<Self> {
         Ok(CArc::wrap(data)?.into())
-    }
-
-    pub fn wrap_user_data(&mut self, user_data: CRef<u8>) -> Rav1dResult {
-        self.m.user_data = Some(CArc::wrap(user_data)?);
-        Ok(())
     }
 }
 

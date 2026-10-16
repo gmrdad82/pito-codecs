@@ -45,10 +45,6 @@ pub trait Pixels {
         self.as_mut_ptr_at::<BD>(pixel_offset).cast_const()
     }
 
-    fn wrapping_as_mut_ptr_at<BD: BitDepth>(&self, pixel_offset: usize) -> *mut BD::Pixel {
-        self.as_mut_ptr::<BD>().wrapping_add(pixel_offset)
-    }
-
     fn wrapping_as_ptr_at<BD: BitDepth>(&self, pixel_offset: usize) -> *const BD::Pixel {
         self.as_ptr::<BD>().wrapping_add(pixel_offset)
     }

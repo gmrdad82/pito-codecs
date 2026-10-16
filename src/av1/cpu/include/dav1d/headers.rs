@@ -8,7 +8,6 @@ use crate::av1::cpu::enums::EnumCount;
 
 use crate::av1::cpu::align::ArrayDefault;
 use crate::av1::cpu::enum_map::EnumKey;
-use crate::av1::cpu::error::Rav1dError;
 use crate::av1::cpu::levels::SegmentId;
 use crate::av1::cpu::relaxed_atomic::RelaxedAtomic;
 
@@ -53,7 +52,6 @@ pub const DAV1D_MAX_OPERATING_POINTS: usize = 32;
 pub const DAV1D_MAX_TILE_COLS: usize = 64;
 pub const DAV1D_MAX_TILE_ROWS: usize = 64;
 pub const DAV1D_MAX_SEGMENTS: u8 = SegmentId::COUNT as _;
-pub const DAV1D_NUM_REF_FRAMES: usize = 8;
 pub const DAV1D_PRIMARY_REF_NONE: u8 = 7;
 pub const DAV1D_REFS_PER_FRAME: usize = 7;
 pub const DAV1D_TOTAL_REFS_PER_FRAME: usize = DAV1D_REFS_PER_FRAME + 1;
@@ -62,21 +60,9 @@ pub(crate) const RAV1D_MAX_CDEF_STRENGTHS: usize = DAV1D_MAX_CDEF_STRENGTHS;
 pub(crate) const RAV1D_MAX_OPERATING_POINTS: usize = DAV1D_MAX_OPERATING_POINTS;
 pub(crate) const RAV1D_MAX_TILE_COLS: usize = DAV1D_MAX_TILE_COLS;
 pub(crate) const RAV1D_MAX_TILE_ROWS: usize = DAV1D_MAX_TILE_ROWS;
-pub(crate) const _RAV1D_NUM_REF_FRAMES: usize = DAV1D_NUM_REF_FRAMES;
 pub(crate) const RAV1D_PRIMARY_REF_NONE: u8 = DAV1D_PRIMARY_REF_NONE;
 pub(crate) const RAV1D_REFS_PER_FRAME: usize = DAV1D_REFS_PER_FRAME;
 pub(crate) const RAV1D_TOTAL_REFS_PER_FRAME: usize = DAV1D_TOTAL_REFS_PER_FRAME;
-
-pub type Dav1dObuType = c_uint;
-pub const DAV1D_OBU_PADDING: Dav1dObuType = Rav1dObuType::Padding as Dav1dObuType;
-pub const DAV1D_OBU_REDUNDANT_FRAME_HDR: Dav1dObuType =
-    Rav1dObuType::RedundantFrameHdr as Dav1dObuType;
-pub const DAV1D_OBU_FRAME: Dav1dObuType = Rav1dObuType::Frame as Dav1dObuType;
-pub const DAV1D_OBU_METADATA: Dav1dObuType = Rav1dObuType::Metadata as Dav1dObuType;
-pub const DAV1D_OBU_TILE_GRP: Dav1dObuType = Rav1dObuType::TileGrp as Dav1dObuType;
-pub const DAV1D_OBU_FRAME_HDR: Dav1dObuType = Rav1dObuType::FrameHdr as Dav1dObuType;
-pub const DAV1D_OBU_TD: Dav1dObuType = Rav1dObuType::Td as Dav1dObuType;
-pub const DAV1D_OBU_SEQ_HDR: Dav1dObuType = Rav1dObuType::SeqHdr as Dav1dObuType;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Rav1dObuType {
@@ -121,10 +107,6 @@ impl Rav1dObuType {
 }
 
 pub type Dav1dTxfmMode = c_uint;
-pub const DAV1D_N_TX_MODES: usize = Rav1dTxfmMode::COUNT;
-pub const DAV1D_TX_4X4_ONLY: Dav1dTxfmMode = Rav1dTxfmMode::Only4x4 as Dav1dTxfmMode;
-pub const DAV1D_TX_LARGEST: Dav1dTxfmMode = Rav1dTxfmMode::Largest as Dav1dTxfmMode;
-pub const DAV1D_TX_SWITCHABLE: Dav1dTxfmMode = Rav1dTxfmMode::Switchable as Dav1dTxfmMode;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum Rav1dTxfmMode {
@@ -168,15 +150,6 @@ impl TryFrom<Dav1dTxfmMode> for Rav1dTxfmMode {
 }
 
 pub type Dav1dFilterMode = u8;
-pub const DAV1D_N_SWITCHABLE_FILTERS: usize = Rav1dFilterMode::N_SWITCHABLE_FILTERS as usize;
-pub const DAV1D_N_FILTERS: usize = Rav1dFilterMode::N_FILTERS as usize;
-pub const DAV1D_FILTER_SWITCHABLE: Dav1dFilterMode = Rav1dFilterMode::Switchable as Dav1dFilterMode;
-pub const DAV1D_FILTER_BILINEAR: Dav1dFilterMode = Rav1dFilterMode::Bilinear as Dav1dFilterMode;
-pub const DAV1D_FILTER_8TAP_SHARP: Dav1dFilterMode = Rav1dFilterMode::Sharp8Tap as Dav1dFilterMode;
-pub const DAV1D_FILTER_8TAP_SMOOTH: Dav1dFilterMode =
-    Rav1dFilterMode::Smooth8Tap as Dav1dFilterMode;
-pub const DAV1D_FILTER_8TAP_REGULAR: Dav1dFilterMode =
-    Rav1dFilterMode::Regular8Tap as Dav1dFilterMode;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum Rav1dFilterMode {
@@ -235,10 +208,6 @@ impl TryFrom<Dav1dFilterMode> for Rav1dFilterMode {
 }
 
 pub type Dav1dAdaptiveBoolean = c_uint;
-pub const DAV1D_OFF: Dav1dAdaptiveBoolean = Rav1dAdaptiveBoolean::Off as Dav1dAdaptiveBoolean;
-pub const DAV1D_ON: Dav1dAdaptiveBoolean = Rav1dAdaptiveBoolean::On as Dav1dAdaptiveBoolean;
-pub const DAV1D_ADAPTIVE: Dav1dAdaptiveBoolean =
-    Rav1dAdaptiveBoolean::Adaptive as Dav1dAdaptiveBoolean;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Rav1dAdaptiveBoolean {
@@ -286,12 +255,6 @@ impl TryFrom<Dav1dAdaptiveBoolean> for Rav1dAdaptiveBoolean {
 }
 
 pub type Dav1dRestorationType = u8;
-pub const DAV1D_RESTORATION_NONE: Dav1dRestorationType = Rav1dRestorationType::None.to_repr();
-pub const DAV1D_RESTORATION_SWITCHABLE: Dav1dRestorationType =
-    Rav1dRestorationType::Switchable.to_repr();
-pub const DAV1D_RESTORATION_WIENER: Dav1dRestorationType = Rav1dRestorationType::Wiener.to_repr();
-pub const DAV1D_RESTORATION_SGRPROJ: Dav1dRestorationType =
-    Rav1dRestorationType::SgrProj(SgrIdx::I0).to_repr();
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SgrIdx {
@@ -410,14 +373,6 @@ impl Rav1dRestorationType {
 }
 
 pub type Dav1dWarpedMotionType = c_uint;
-pub const DAV1D_WM_TYPE_IDENTITY: Dav1dWarpedMotionType =
-    Rav1dWarpedMotionType::Identity as Dav1dWarpedMotionType;
-pub const DAV1D_WM_TYPE_TRANSLATION: Dav1dWarpedMotionType =
-    Rav1dWarpedMotionType::Translation as Dav1dWarpedMotionType;
-pub const DAV1D_WM_TYPE_ROT_ZOOM: Dav1dWarpedMotionType =
-    Rav1dWarpedMotionType::RotZoom as Dav1dWarpedMotionType;
-pub const DAV1D_WM_TYPE_AFFINE: Dav1dWarpedMotionType =
-    Rav1dWarpedMotionType::Affine as Dav1dWarpedMotionType;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rav1dWarpedMotionType {
@@ -453,23 +408,7 @@ pub struct Dav1dWarpedMotionParams {
     pub abcd: [i16; 4],
 }
 
-impl Dav1dWarpedMotionParams {
-    pub const fn alpha(&self) -> i16 {
-        self.abcd[0]
-    }
-
-    pub const fn beta(&self) -> i16 {
-        self.abcd[1]
-    }
-
-    pub const fn gamma(&self) -> i16 {
-        self.abcd[2]
-    }
-
-    pub const fn delta(&self) -> i16 {
-        self.abcd[3]
-    }
-}
+impl Dav1dWarpedMotionParams {}
 
 #[derive(Clone)]
 pub struct Rav1dWarpedMotionParams {
@@ -577,10 +516,6 @@ impl Sub for Rav1dPixelLayout {
 }
 
 pub type Dav1dPixelLayout = c_uint;
-pub const DAV1D_PIXEL_LAYOUT_I400: Dav1dPixelLayout = Rav1dPixelLayout::I400.into_rav1d();
-pub const DAV1D_PIXEL_LAYOUT_I420: Dav1dPixelLayout = Rav1dPixelLayout::I420.into_rav1d();
-pub const DAV1D_PIXEL_LAYOUT_I422: Dav1dPixelLayout = Rav1dPixelLayout::I422.into_rav1d();
-pub const DAV1D_PIXEL_LAYOUT_I444: Dav1dPixelLayout = Rav1dPixelLayout::I444.into_rav1d();
 
 impl From<Rav1dPixelLayout> for Dav1dPixelLayout {
     fn from(value: Rav1dPixelLayout) -> Self {
@@ -690,10 +625,6 @@ impl Rav1dFrameType {
 }
 
 pub type Dav1dFrameType = c_uint;
-pub const DAV1D_FRAME_TYPE_KEY: Dav1dFrameType = Rav1dFrameType::Key.into_rav1d();
-pub const DAV1D_FRAME_TYPE_INTER: Dav1dFrameType = Rav1dFrameType::Inter.into_rav1d();
-pub const DAV1D_FRAME_TYPE_INTRA: Dav1dFrameType = Rav1dFrameType::Intra.into_rav1d();
-pub const DAV1D_FRAME_TYPE_SWITCH: Dav1dFrameType = Rav1dFrameType::Switch.into_rav1d();
 
 impl From<Rav1dFrameType> for Dav1dFrameType {
     fn from(value: Rav1dFrameType) -> Self {
@@ -720,21 +651,6 @@ impl Rav1dFrameType {
 }
 
 pub type Dav1dColorPrimaries = c_uint;
-pub const DAV1D_COLOR_PRI_BT709: Dav1dColorPrimaries = Rav1dColorPrimaries::BT709.to_dav1d();
-pub const DAV1D_COLOR_PRI_UNKNOWN: Dav1dColorPrimaries =
-    Rav1dColorPrimaries::Unspecified.to_dav1d();
-pub const DAV1D_COLOR_PRI_BT470M: Dav1dColorPrimaries = Rav1dColorPrimaries::BT470M.to_dav1d();
-pub const DAV1D_COLOR_PRI_BT470BG: Dav1dColorPrimaries = Rav1dColorPrimaries::BT470BG.to_dav1d();
-pub const DAV1D_COLOR_PRI_BT601: Dav1dColorPrimaries = Rav1dColorPrimaries::BT601.to_dav1d();
-pub const DAV1D_COLOR_PRI_SMPTE240: Dav1dColorPrimaries = Rav1dColorPrimaries::SMPTE240.to_dav1d();
-pub const DAV1D_COLOR_PRI_FILM: Dav1dColorPrimaries = Rav1dColorPrimaries::Film.to_dav1d();
-pub const DAV1D_COLOR_PRI_BT2020: Dav1dColorPrimaries = Rav1dColorPrimaries::BT2020.to_dav1d();
-pub const DAV1D_COLOR_PRI_XYZ: Dav1dColorPrimaries = Rav1dColorPrimaries::XYZ.to_dav1d();
-pub const DAV1D_COLOR_PRI_SMPTE431: Dav1dColorPrimaries = Rav1dColorPrimaries::SMPTE431.to_dav1d();
-pub const DAV1D_COLOR_PRI_SMPTE432: Dav1dColorPrimaries = Rav1dColorPrimaries::SMPTE432.to_dav1d();
-pub const DAV1D_COLOR_PRI_EBU3213: Dav1dColorPrimaries = Rav1dColorPrimaries::EBU3213.to_dav1d();
-
-pub const DAV1D_COLOR_PRI_RESERVED: Dav1dColorPrimaries = 255;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum Rav1dColorPrimaries {
@@ -816,42 +732,6 @@ impl TryFrom<Dav1dColorPrimaries> for Rav1dColorPrimaries {
 }
 
 pub type Dav1dTransferCharacteristics = c_uint;
-pub const DAV1D_TRC_BT709: Dav1dTransferCharacteristics =
-    Rav1dTransferCharacteristics::BT709.to_dav1d();
-pub const DAV1D_TRC_UNKNOWN: Dav1dTransferCharacteristics =
-    Rav1dTransferCharacteristics::Unspecified.to_dav1d();
-pub const DAV1D_TRC_BT470M: Dav1dTransferCharacteristics =
-    Rav1dTransferCharacteristics::BT470M.to_dav1d();
-pub const DAV1D_TRC_BT470BG: Dav1dTransferCharacteristics =
-    Rav1dTransferCharacteristics::BT470BG.to_dav1d();
-pub const DAV1D_TRC_BT601: Dav1dTransferCharacteristics =
-    Rav1dTransferCharacteristics::BT601.to_dav1d();
-pub const DAV1D_TRC_SMPTE240: Dav1dTransferCharacteristics =
-    Rav1dTransferCharacteristics::SMPTE240.to_dav1d();
-pub const DAV1D_TRC_LINEAR: Dav1dTransferCharacteristics =
-    Rav1dTransferCharacteristics::Linear.to_dav1d();
-pub const DAV1D_TRC_LOG100: Dav1dTransferCharacteristics =
-    Rav1dTransferCharacteristics::Log100.to_dav1d();
-pub const DAV1D_TRC_LOG100_SQRT10: Dav1dTransferCharacteristics =
-    Rav1dTransferCharacteristics::Log100Sqrt10.to_dav1d();
-pub const DAV1D_TRC_IEC61966: Dav1dTransferCharacteristics =
-    Rav1dTransferCharacteristics::IEC61966.to_dav1d();
-pub const DAV1D_TRC_BT1361: Dav1dTransferCharacteristics =
-    Rav1dTransferCharacteristics::BT1361.to_dav1d();
-pub const DAV1D_TRC_SRGB: Dav1dTransferCharacteristics =
-    Rav1dTransferCharacteristics::SRGB.to_dav1d();
-pub const DAV1D_TRC_BT2020_10BIT: Dav1dTransferCharacteristics =
-    Rav1dTransferCharacteristics::BT2020_10Bit.to_dav1d();
-pub const DAV1D_TRC_BT2020_12BIT: Dav1dTransferCharacteristics =
-    Rav1dTransferCharacteristics::BT2020_12Bit.to_dav1d();
-pub const DAV1D_TRC_SMPTE2084: Dav1dTransferCharacteristics =
-    Rav1dTransferCharacteristics::SMPTE2084.to_dav1d();
-pub const DAV1D_TRC_SMPTE428: Dav1dTransferCharacteristics =
-    Rav1dTransferCharacteristics::SMPTE428.to_dav1d();
-pub const DAV1D_TRC_HLG: Dav1dTransferCharacteristics =
-    Rav1dTransferCharacteristics::HLG.to_dav1d();
-
-pub const DAV1D_TRC_RESERVED: Dav1dTransferCharacteristics = 255;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum Rav1dTransferCharacteristics {
@@ -954,29 +834,6 @@ impl TryFrom<Dav1dTransferCharacteristics> for Rav1dTransferCharacteristics {
 }
 
 pub type Dav1dMatrixCoefficients = c_uint;
-pub const DAV1D_MC_IDENTITY: Dav1dMatrixCoefficients = Rav1dMatrixCoefficients::Identity.to_dav1d();
-pub const DAV1D_MC_BT709: Dav1dMatrixCoefficients = Rav1dMatrixCoefficients::BT709.to_dav1d();
-pub const DAV1D_MC_UNKNOWN: Dav1dMatrixCoefficients =
-    Rav1dMatrixCoefficients::Unspecified.to_dav1d();
-pub const DAV1D_MC_FCC: Dav1dMatrixCoefficients = Rav1dMatrixCoefficients::FCC.to_dav1d();
-pub const DAV1D_MC_BT470BG: Dav1dMatrixCoefficients = Rav1dMatrixCoefficients::BT470BG.to_dav1d();
-pub const DAV1D_MC_BT601: Dav1dMatrixCoefficients = Rav1dMatrixCoefficients::BT601.to_dav1d();
-pub const DAV1D_MC_SMPTE240: Dav1dMatrixCoefficients = Rav1dMatrixCoefficients::SMPTE240.to_dav1d();
-pub const DAV1D_MC_SMPTE_YCGCO: Dav1dMatrixCoefficients =
-    Rav1dMatrixCoefficients::SMPTE_YCgCo.to_dav1d();
-pub const DAV1D_MC_BT2020_NCL: Dav1dMatrixCoefficients =
-    Rav1dMatrixCoefficients::BT2020NCL.to_dav1d();
-pub const DAV1D_MC_BT2020_CL: Dav1dMatrixCoefficients =
-    Rav1dMatrixCoefficients::BT2020CL.to_dav1d();
-pub const DAV1D_MC_SMPTE2085: Dav1dMatrixCoefficients =
-    Rav1dMatrixCoefficients::SMPTE2085.to_dav1d();
-pub const DAV1D_MC_CHROMAT_NCL: Dav1dMatrixCoefficients =
-    Rav1dMatrixCoefficients::ChromatNCL.to_dav1d();
-pub const DAV1D_MC_CHROMAT_CL: Dav1dMatrixCoefficients =
-    Rav1dMatrixCoefficients::ChromatCL.to_dav1d();
-pub const DAV1D_MC_ICTCP: Dav1dMatrixCoefficients = Rav1dMatrixCoefficients::ICtCp.to_dav1d();
-
-pub const DAV1D_MC_RESERVED: Dav1dMatrixCoefficients = 255;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum Rav1dMatrixCoefficients {
@@ -1068,12 +925,6 @@ impl TryFrom<Dav1dMatrixCoefficients> for Rav1dMatrixCoefficients {
 }
 
 pub type Dav1dChromaSamplePosition = c_uint;
-pub const DAV1D_CHR_UNKNOWN: Dav1dChromaSamplePosition =
-    Rav1dChromaSamplePosition::Unknown as Dav1dChromaSamplePosition;
-pub const DAV1D_CHR_VERTICAL: Dav1dChromaSamplePosition =
-    Rav1dChromaSamplePosition::Vertical as Dav1dChromaSamplePosition;
-pub const DAV1D_CHR_COLOCATED: Dav1dChromaSamplePosition =
-    Rav1dChromaSamplePosition::Colocated as Dav1dChromaSamplePosition;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Rav1dChromaSamplePosition {
@@ -1150,8 +1001,6 @@ pub struct Rav1dContentLightLevel {
     pub max_frame_average_light_level: u16,
 }
 
-pub type Dav1dContentLightLevel = Rav1dContentLightLevel;
-
 #[repr(C)]
 pub struct Rav1dMasteringDisplay {
     pub primaries: [[u16; 2]; 3],
@@ -1162,8 +1011,6 @@ pub struct Rav1dMasteringDisplay {
 
     pub min_luminance: u32,
 }
-
-pub type Dav1dMasteringDisplay = Rav1dMasteringDisplay;
 
 #[repr(transparent)]
 pub struct ITUTT35PayloadPtr(*const u8);

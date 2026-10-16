@@ -6,7 +6,7 @@ use std::{cmp, iter, mem, slice};
 
 use crate::av1::cpu::extensions::To;
 use crate::av1::cpu::flags::bitflags;
-use crate::av1::cpu::pod::{AsBytes, FromBytes, FromZeroes};
+use crate::av1::cpu::pod::{AsBytes, FromBytes};
 
 use crate::av1::cpu::align::AlignedVec64;
 use crate::av1::cpu::cpu::CpuFlags;
@@ -802,10 +802,6 @@ fn sgr_mix_rust<BD: BitDepth>(
         }
     }
 }
-
-#[deny(unsafe_op_in_unsafe_fn)]
-#[deny(unsafe_op_in_unsafe_fn)]
-#[deny(unsafe_op_in_unsafe_fn)]
 
 impl Rav1dLoopRestorationDSPContext {
     pub const fn default<BD: BitDepth>() -> Self {
