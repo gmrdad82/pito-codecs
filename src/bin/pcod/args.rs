@@ -5,6 +5,7 @@ use clap::{CommandFactory, ValueEnum};
 
 use super::Cli;
 use super::convert::Options;
+use super::extract::{RATES, Wav, is_wav};
 use super::plan::{Loudness, Request};
 use super::profile::{ANIMATED_FPS, ANIMATED_WIDTH, LIGHT_WEB_CRF, Profile, VP9_LIGHT_WEB_CRF};
 use super::size::Size;
@@ -13,7 +14,7 @@ pub const USAGE: &str = "pcod [OPTIONS] <INPUT> <OUTPUT>\n       pcod <COMMAND>"
 
 pub fn help() -> String {
     format!(
-        "The output's extension picks the container: mp4, mov, mkv (H.264 and AAC), webm (VP9 and Opus), gif or webp (animated, looping, {ANIMATED_WIDTH} px wide at {ANIMATED_FPS} fps by default, or the source's width and rate where smaller). The input is a video file or a folder of PNG frames in name order (--fps gives their rate).
+        "The output's extension picks the container: mp4, mov, mkv (H.264 and AAC), webm (VP9 and Opus), gif or webp (animated, looping, {ANIMATED_WIDTH} px wide at {ANIMATED_FPS} fps by default, or the source's width and rate where smaller). A .wav output is the audio alone: the first audio track as 16-bit PCM, stereo at the source's rate when it is 44100 or 48000 Hz (else 48000), with --from and --to for a range, --mono, --rate and --loudness. The input is a video file or a folder of PNG frames in name order (--fps gives their rate).
 Profiles: balanced (the default) and best are H.264 on the CPU at CRF 20 and 18 on x264's scale; fast is H.264 on the GPU at QP 25, on the CPU where no GPU encoder is found. For .webm, balanced is VP9 at CRF 32 and best at 28 on libvpx's scale.
 Light web: --profile best --crf {LIGHT_WEB_CRF} (.webm: --crf {VP9_LIGHT_WEB_CRF})
 For screen recordings: --tune animation
@@ -34,6 +35,13 @@ pub enum ProfileArg {
 
 pub fn size_of(text: &str) -> Result<Size, String> {
     Size::parse(text)
+}
+
+pub fn rate_hz(text: &str) -> Result<u32, String> {
+    text.parse()
+        .ok()
+        .filter(|r| RATES.contains(r))
+        .ok_or_else(|| "use 44100 or 48000".to_string())
 }
 
 pub fn loudness_of(text: &str) -> Result<Loudness, String> {
@@ -75,6 +83,14 @@ pub struct ConvertArgs {
     pub true_peak: Option<f64>,
     #[arg(long, help = "The audio bitrate in kbps, 32 to 512")]
     pub audio_bitrate: Option<u32>,
+    #[arg(long, value_parser = super::time_of, help = "For a .wav: start at this time (seconds, m:ss or h:mm:ss)")]
+    pub from: Option<f64>,
+    #[arg(long, value_parser = super::time_of, help = "For a .wav: stop at this time")]
+    pub to: Option<f64>,
+    #[arg(long, help = "For a .wav: one channel instead of two")]
+    pub mono: bool,
+    #[arg(long, value_parser = rate_hz, value_name = "HZ", help = "For a .wav: 44100 or 48000 [default: the source's when it is one of them, else 48000]")]
+    pub rate: Option<u32>,
     #[arg(long, help = "Replace an existing output")]
     pub force: bool,
     #[arg(long, help = "Print a JSON manifest instead of the plain result")]
@@ -147,6 +163,16 @@ pub fn options(
             "invalid UTF-8 was detected in one or more arguments",
         );
     }
+    if is_wav(&output) {
+        return wav(sub, input, joining, output, args);
+    }
+    if args.from.is_some() || args.to.is_some() || args.mono || args.rate.is_some() {
+        usage_error(
+            sub,
+            ErrorKind::ArgumentConflict,
+            "--from, --to, --mono and --rate fit a .wav output",
+        );
+    }
     let picture = args.profile.is_some()
         || args.size.is_some()
         || args.fps.is_some()
@@ -204,5 +230,71 @@ pub fn options(
         request,
         json: args.json,
         progress: super::progress::enabled(args.json, args.no_progress),
+        wav: None,
+    }
+}
+
+fn wav(
+    sub: Option<&str>,
+    input: PathBuf,
+    joining: bool,
+    output: PathBuf,
+    args: ConvertArgs,
+) -> Options {
+    let conflict = |message: &str| usage_error(sub, ErrorKind::ArgumentConflict, message);
+    if joining {
+        conflict(
+            "join writes mp4, mov, mkv or webm, not .wav: join first, then take the .wav from the joined file",
+        );
+    }
+    if input.is_dir() {
+        conflict("a .wav takes its audio from a video file, not a folder of frames");
+    }
+    let picture = [
+        (args.profile.is_some(), "--profile"),
+        (args.size.is_some(), "--size"),
+        (args.fps.is_some(), "--fps"),
+        (args.crf.is_some(), "--crf"),
+        (args.qp.is_some(), "--qp"),
+        (args.tune.is_some(), "--tune"),
+        (args.audio_bitrate.is_some(), "--audio-bitrate"),
+    ];
+    if let Some((_, flag)) = picture.iter().find(|(set, _)| *set) {
+        conflict(&format!(
+            "{flag} doesn't apply to .wav, which is uncompressed audio"
+        ));
+    }
+    let from = args.from.unwrap_or(0.0);
+    if let Some(to) = args.to
+        && to <= from
+    {
+        usage_error(
+            sub,
+            ErrorKind::ValueValidation,
+            format!("--to {to} must come after --from {from}"),
+        );
+    }
+    let mut loudness = args.loudness;
+    if let (Some(tp), Some(l)) = (args.true_peak, loudness.as_mut()) {
+        l.true_peak = tp;
+    }
+    if let Some(l) = &loudness
+        && let Err(e) = l.check()
+    {
+        usage_error(sub, ErrorKind::ValueValidation, e);
+    }
+    let mut request = Request::new(input, output);
+    request.overwrite = args.force;
+    request.loudness = loudness;
+    Options {
+        request,
+        json: args.json,
+        progress: super::progress::enabled(args.json, args.no_progress),
+        wav: Some(Wav {
+            from,
+            to: args.to,
+            mono: args.mono,
+            rate: args.rate,
+        }),
     }
 }

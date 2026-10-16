@@ -39,6 +39,8 @@ mod stills;
 mod args;
 #[path = "pcod/convert.rs"]
 mod convert;
+#[path = "pcod/extract.rs"]
+mod extract;
 #[path = "pcod/pipeline.rs"]
 mod pipeline;
 #[path = "pcod/plan.rs"]
@@ -68,7 +70,7 @@ struct Cli {
     input: Option<PathBuf>,
     #[arg(
         value_name = "OUTPUT",
-        help = "The file to write: mp4, mov, mkv, webm, gif or webp"
+        help = "The file to write: mp4, mov, mkv, webm, gif, webp, or wav for the audio alone"
     )]
     output: Option<PathBuf>,
     #[command(flatten)]
@@ -219,7 +221,7 @@ enum SeekKind {
     Keyframe,
 }
 
-fn time_of(text: &str) -> Result<f64, String> {
+pub fn time_of(text: &str) -> Result<f64, String> {
     let bad = || format!("'{text}' is not a time such as 90, 1:30 or 1:02:03.5");
     let parts: Vec<&str> = text.trim().split(':').collect();
     if parts.len() > 3 {
