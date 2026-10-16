@@ -87,7 +87,7 @@ pub(super) fn reshapes(job: &Job, si: usize) -> bool {
     let (sar, color) = color_of(src);
     let target = spec(color);
     (src.probe.width, src.probe.height) != job.size
-        || src.probe.rotation % 360 != 0
+        || !src.probe.rotation.is_multiple_of(360)
         || (sar.0 != sar.1 && sar.0 > 0 && sar.1 > 0)
         || src.probe.fps != job.fps
         || target != ColorSpec::BT709

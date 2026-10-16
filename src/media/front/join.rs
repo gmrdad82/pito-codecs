@@ -736,7 +736,7 @@ fn plan_video(clips: &[Clip], kind: Kind) -> Result<VideoPlan> {
 }
 
 fn plan_audio(clips: &[Clip], video: &VideoPlan, kind: Kind) -> Result<Lane> {
-    let mut per_clip: Vec<Vec<Planned>> = Vec::new();
+    let mut per_clip: Vec<Vec<(Planned, i64)>> = Vec::new();
     let mut tb_out = None;
     for (c, clip) in clips.iter().enumerate() {
         let Some(sound) = &clip.audio else {
@@ -760,7 +760,7 @@ fn plan_audio(clips: &[Clip], video: &VideoPlan, kind: Kind) -> Result<Lane> {
                 continue;
             }
             let at = rescale(rel, tb, out) + offset;
-            list.push(Planned {
+            let planned = Planned {
                 pts: at,
                 dts: at,
                 key: t.key,
@@ -769,26 +769,47 @@ fn plan_audio(clips: &[Clip], video: &VideoPlan, kind: Kind) -> Result<Lane> {
                     track: sound.track,
                     index: i,
                 },
-            });
+            };
+            list.push((planned, rescale(t.dur, tb, out)));
         }
-        list.sort_by_key(|p| p.dts);
+        list.sort_by_key(|p| p.0.dts);
+        let mut last = 0;
+        for k in 0..list.len() {
+            if list[k].1 <= 0 {
+                list[k].1 = match list.get(k + 1) {
+                    Some(n) => n.0.pts - list[k].0.pts,
+                    None => last,
+                };
+            }
+            last = list[k].1;
+        }
         per_clip.push(list);
     }
     let tb = tb_out.unwrap_or(TimeBase::new(1, RATE));
     let mut packets = Vec::new();
-    let mut last: Option<i64> = None;
+    let mut at: Option<i64> = None;
     for c in 0..per_clip.len() {
         let next = video.offsets.get(c + 1).copied().unwrap_or(video.end);
         let mut cut = rescale(next, video.lane.tb, tb);
         if let Some(first) = per_clip.get(c + 1).and_then(|l| l.first()) {
-            cut = cut.min(first.pts);
+            cut = cut.min(first.0.pts);
         }
-        for p in &per_clip[c] {
-            if p.pts >= cut || last.is_some_and(|l| p.dts <= l) {
+        for &(p, d) in &per_clip[c] {
+            let d = d.max(1);
+            let y = *at.get_or_insert(p.pts);
+            if p.pts + d / 2 < y {
                 continue;
             }
-            last = Some(p.dts);
-            packets.push(*p);
+            if y + d > cut + d / 2 {
+                break;
+            }
+            let y = if p.pts > y + d / 2 { p.pts } else { y };
+            packets.push(Planned {
+                pts: y,
+                dts: y,
+                ..p
+            });
+            at = Some(y + d);
         }
     }
     Ok(Lane { tb, packets })
@@ -825,7 +846,7 @@ fn encode_audio(
     };
     let mut data = Vec::new();
     let mut packets = Vec::new();
-    let mut keep = |got: Vec<Packet>, data: &mut Vec<u8>, packets: &mut Vec<Planned>| {
+    let keep = |got: Vec<Packet>, data: &mut Vec<u8>, packets: &mut Vec<Planned>| {
         for p in got {
             let at = data.len();
             data.extend_from_slice(&p.data);

@@ -24,6 +24,7 @@ The codecs here are written in Rust. Parts are adapted from permissively license
 | [zune-inflate](https://github.com/etemesi254/zune-image) | MIT OR Apache-2.0 OR Zlib (Caleb Etemesi), a port of [libdeflate](https://github.com/ebiggers/libdeflate) (MIT) | 0.2.54, `69502ce83fdfecdd0beefd677e2abb3781b29d98` | The whole-buffer zlib and deflate decoder in `src/png/inflate.rs`: decode tables, fast and slow loops, match copies. |
 | [fdeflate](https://github.com/image-rs/fdeflate) | MIT OR Apache-2.0 (The image-rs Developers) | 0.3.7, `c365c7e6ffa81feb2e1fb762eed7299f05c9b0ca` | The PNG encoder's deflate in `src/png/encode.rs`: the fixed Huffman code tuned for filtered rows, its stored dynamic-block header, zero runs and the bit writer; the Paeth pass and chunk writer are new. |
 | [adler2](https://github.com/oyvindln/adler2) | 0BSD OR MIT OR Apache-2.0 | 2.0.1, `89a031a0f42eeff31c70dc598b398cbf31f1680f` | The four-lane Adler-32 in `src/png/inflate.rs`. |
+| pconv | MIT (Catalin Ilinca) | v1.0.1, `8879614b928b8fdde500a16376b85a2c95551dc9` | The join's copy test, its reasons and their wording, the letterbox fit and the colour rules in `src/media/front/join.rs` and `src/media/front/shape.rs`; the packet copy, timing and audio fill are new. |
 
 ## Specifications
 
