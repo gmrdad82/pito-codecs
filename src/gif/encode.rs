@@ -345,13 +345,13 @@ impl Encoder {
         quantize(
             &Quant {
                 look,
+                src: &src.data,
                 dither: self.opts.dither,
                 t,
                 width: w,
                 rect: area.rect,
                 whole: area.whole,
             },
-            &src.data,
             &self.changed,
             &mut self.reference,
             &mut self.canvas,
@@ -634,6 +634,7 @@ crate::media::isa::dispatch! {
 
 struct Quant<'a> {
     look: &'a Look,
+    src: &'a [u8],
     dither: Dither,
     t: u8,
     width: usize,
@@ -643,7 +644,6 @@ struct Quant<'a> {
 
 fn quantize(
     q: &Quant,
-    src: &[u8],
     changed: &[bool],
     reference: &mut [u8],
     canvas: &mut [u32],
@@ -666,7 +666,7 @@ fn quantize(
         let bayer = &BAYER[row & 7];
         for (i, column) in (x..x + w).enumerate() {
             let at = row * q.width + column;
-            let p = &src[at * 4..at * 4 + 4];
+            let p = &q.src[at * 4..at * 4 + 4];
             if p[3] < ALPHA_CUT {
                 reference[at * 4..at * 4 + 4].copy_from_slice(p);
                 canvas[at] = 0;
