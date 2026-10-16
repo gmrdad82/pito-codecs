@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 
 use pito_codecs::filter::{
-    Chroma, ColorSpec, Kernel, Matrix, Order, PackedMut, Range, Rotation, Scaler, convert_color,
-    rgba_to_yuv, rotate, yuv_to_packed,
+    Chroma, ColorSpec, Image, ImageMut, Kernel, Light, Matrix, Order, PackedMut, Range, Rotation,
+    Scaler, Transfer, convert_color, rgba_to_yuv, rotate, yuv_to_packed,
 };
 use pito_codecs::gpu::{self, Backend, HwEncoder};
 use pito_codecs::media::{
@@ -112,6 +112,22 @@ struct YuvFix {
     rgba: bool,
 }
 
+fn linear(
+    src: (u32, u32),
+    dst: (u32, u32),
+    from: ColorSpec,
+    format: PixelFormat,
+    transfer: Transfer,
+) -> Result<Scaler, Fail> {
+    Ok(
+        Scaler::new(src.0, src.1, dst.0, dst.1, format, Kernel::Lanczos)?
+            .light(Light::Linear)
+            .transfer(transfer)
+            .color(from, ColorSpec::BT709)
+            .output(PixelFormat::Yuv420p8),
+    )
+}
+
 impl YuvFix {
     fn apply(&mut self, frame: Frame) -> Result<Pic, Fail> {
         let mut frame = match self.rotation {
@@ -124,25 +140,29 @@ impl YuvFix {
         };
         if (frame.width, frame.height) != self.size {
             if self.scaler.is_none() {
-                self.scaler = Some(Scaler::new(
-                    frame.width,
-                    frame.height,
-                    self.size.0,
-                    self.size.1,
+                self.scaler = Some(linear(
+                    (frame.width, frame.height),
+                    self.size,
+                    self.from,
                     frame.format,
-                    Kernel::Lanczos,
+                    Transfer::Bt1886,
                 )?);
             }
             if let Some(s) = &self.scaler {
+                if self.rgba {
+                    let mut rgba = Rgba::new(self.size.0, self.size.1);
+                    s.convert(Image::Yuv(&frame), ImageMut::Rgba(&mut rgba))?;
+                    return Ok(Pic::Rgba(rgba));
+                }
                 let mut out = Frame::new(
-                    frame.format,
+                    PixelFormat::Yuv420p8,
                     self.size.0,
                     self.size.1,
                     frame.pts,
                     frame.time_base,
                 );
-                s.run(&frame, &mut out)?;
-                frame = out;
+                s.convert(Image::Yuv(&frame), ImageMut::Yuv(&mut out))?;
+                return Ok(Pic::Yuv(out));
             }
         }
         if self.rgba {
@@ -201,17 +221,7 @@ fn premultiply(img: &mut Rgba) {
             for c in &mut px[..3] {
                 *c = ((u32::from(*c) * a + 127) / 255) as u8;
             }
-        }
-    }
-}
-
-fn unpremultiply(img: &mut Rgba) {
-    for px in img.data.chunks_exact_mut(4) {
-        let a = u32::from(px[3]);
-        if a > 0 && a < 255 {
-            for c in &mut px[..3] {
-                *c = ((u32::from(*c) * 255 + a / 2) / a).min(255) as u8;
-            }
+            px[3] = 255;
         }
     }
 }
@@ -219,51 +229,76 @@ fn unpremultiply(img: &mut Rgba) {
 struct RgbaFix {
     size: (u32, u32),
     want: Want,
+    scaler: Option<Scaler>,
 }
 
 impl RgbaFix {
+    fn new(
+        src: (u32, u32),
+        size: (u32, u32),
+        want: Want,
+        transfer: Transfer,
+    ) -> Result<RgbaFix, Fail> {
+        let scaler = if src != size {
+            Some(linear(
+                src,
+                size,
+                ColorSpec::BT709,
+                PixelFormat::Yuv420p8,
+                transfer,
+            )?)
+        } else {
+            None
+        };
+        Ok(RgbaFix { size, want, scaler })
+    }
+
     fn apply(&self, mut img: Rgba) -> Result<Pic, Fail> {
-        let resize = (img.width, img.height) != self.size;
-        let yuv = self.want == Want::Yuv;
-        if yuv || resize {
+        if self.want == Want::Yuv {
             premultiply(&mut img);
         }
-        if resize {
-            img = media::scale(&img, self.size.0, self.size.1);
+        let (w, h) = self.size;
+        let blank = || Frame::new(PixelFormat::Yuv420p8, w, h, 0, TimeBase::new(1, 1));
+        match (&self.scaler, self.want) {
+            (Some(s), Want::Rgba) => {
+                let mut out = Rgba::new(w, h);
+                s.convert(Image::Rgba(&img), ImageMut::Rgba(&mut out))?;
+                Ok(Pic::Rgba(out))
+            }
+            (Some(s), Want::Yuv) => {
+                let mut frame = blank();
+                s.convert(Image::Rgba(&img), ImageMut::Yuv(&mut frame))?;
+                Ok(Pic::Yuv(frame))
+            }
+            (Some(s), Want::YuvAlpha) => {
+                let mut frame = blank();
+                let mut plane = Plane {
+                    data: Vec::new(),
+                    stride: 0,
+                    width: 0,
+                    height: 0,
+                };
+                s.convert(Image::Rgba(&img), ImageMut::Yuva(&mut frame, &mut plane))?;
+                Ok(Pic::YuvAlpha(frame, plane))
+            }
+            (None, Want::Rgba) => Ok(Pic::Rgba(img)),
+            (None, Want::Yuv) => {
+                let mut frame = blank();
+                rgba_to_yuv(&img, ColorSpec::BT709, PixelFormat::Yuv420p8, &mut frame)?;
+                Ok(Pic::Yuv(frame))
+            }
+            (None, Want::YuvAlpha) => {
+                let mut frame = blank();
+                rgba_to_yuv(&img, ColorSpec::BT709, PixelFormat::Yuv420p8, &mut frame)?;
+                let plane = Plane {
+                    data: img.data.chunks_exact(4).map(|px| px[3]).collect(),
+                    stride: w as usize,
+                    width: w as usize,
+                    height: h as usize,
+                };
+                Ok(Pic::YuvAlpha(frame, plane))
+            }
         }
-        if resize && !yuv {
-            unpremultiply(&mut img);
-        }
-        if self.want == Want::YuvAlpha {
-            let mut frame = Frame::new(
-                PixelFormat::Yuv420p8,
-                img.width,
-                img.height,
-                0,
-                TimeBase::new(1, 1),
-            );
-            rgba_to_yuv(&img, ColorSpec::BT709, PixelFormat::Yuv420p8, &mut frame)?;
-            let (w, h) = (img.width as usize, img.height as usize);
-            let plane = Plane {
-                data: img.data.chunks_exact(4).map(|px| px[3]).collect(),
-                stride: w,
-                width: w,
-                height: h,
-            };
-            return Ok(Pic::YuvAlpha(frame, plane));
-        }
-        if yuv {
-            let mut frame = Frame::new(
-                PixelFormat::Yuv420p8,
-                img.width,
-                img.height,
-                0,
-                TimeBase::new(1, 1),
-            );
-            rgba_to_yuv(&img, ColorSpec::BT709, PixelFormat::Yuv420p8, &mut frame)?;
-            return Ok(Pic::Yuv(frame));
-        }
-        Ok(Pic::Rgba(img))
     }
 }
 
@@ -367,10 +402,12 @@ fn produce_alpha(
 ) -> Result<Vec<String>, Fail> {
     let media = job.media;
     let mut video = media::decode_alpha(&media.path, 0.0)?;
-    let fix = RgbaFix {
-        size: job.size,
-        want,
+    let shown = if media.rotation % 180 == 90 {
+        (video.height, video.width)
+    } else {
+        (video.width, video.height)
     };
+    let fix = RgbaFix::new(shown, job.size, want, Transfer::Bt1886)?;
     let color = video.color;
     let rotation = media.rotation;
     let image = move |f: Frame, a: Option<Plane>| -> Rgba {
@@ -421,10 +458,7 @@ fn produce_frames(
     tx: &SyncSender<Result<Pic, Fail>>,
 ) -> Result<Vec<String>, Fail> {
     let media = job.media;
-    let fix = RgbaFix {
-        size: job.size,
-        want,
-    };
+    let fix = RgbaFix::new((media.width, media.height), job.size, want, Transfer::Srgb)?;
     let mut retime = Retime {
         fps: job.fps,
         origin: None,
