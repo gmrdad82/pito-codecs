@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.14.1 — 2026-10-16
+
+### Changed
+
+- Exact stills of an AV1 video decode on the GPU in every worker, where only the first one did before: six pages of four exact stills from a 1080p AV1 file take 2.4 s instead of 3.2 s on an AMD card, with the same pictures.
+- Exact stills and export pre-roll skip AV1 frames that no other frame references, as they already did for H.264 and HEVC.
+
 ## v1.14.0 — 2026-10-16
 
 ### Added
