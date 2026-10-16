@@ -407,3 +407,18 @@ fn ten_minutes_of_silent_aac_in_a_small_file_read_every_sample() {
     assert_eq!(s.len(), n);
     assert!(s.iter().all(|s| s.size as usize == frame.len()));
 }
+
+#[test]
+fn an_av1c_record_reads_and_writes_back_byte_for_byte() {
+    let raw = [
+        0x81, 0x01, 0x4c, 0x00, 0x0a, 0x0c, 0x02, 0x00, 0x00, 0x0d, 0x26, 0x27, 0xfb, 0x38, 0x05,
+        0xf0, 0x80, 0x80,
+    ];
+    let c = Av1Config::parse(&raw).unwrap();
+    assert_eq!(
+        (c.seq_profile, c.bit_depth(), c.profile_name().as_str()),
+        (0, 10, "Main")
+    );
+    assert_eq!(c.to_bytes(), raw);
+    assert!(Av1Config::parse(&raw[..3]).is_err());
+}

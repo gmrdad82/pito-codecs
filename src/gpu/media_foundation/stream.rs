@@ -84,6 +84,23 @@ pub fn plan(codec: Codec, sets: &[Vec<u8>]) -> Result<Plan> {
                 crop: sps.crop_rect(),
             }
         }
+        Codec::Av1 => {
+            let s = crate::gpu::av1c::parse(sets.first().map_or(&[][..], Vec::as_slice))?;
+            let format = match (s.profile, s.bit_depth, s.is_420()) {
+                (0, 8, true) => SurfaceFormat::Nv12,
+                (0, 10, true) => SurfaceFormat::P010,
+                (p, b, _) => {
+                    return Err(unsupported(format!(
+                        "AV1 profile {p} at {b}-bit on Media Foundation"
+                    )));
+                }
+            };
+            Plan {
+                format,
+                coded: s.size,
+                crop: (0, 0, s.size.0, s.size.1),
+            }
+        }
         Codec::Vp9 => return Err(unsupported("VP9 on Media Foundation")),
         Codec::Aac | Codec::Opus | Codec::Mp3 => {
             return Err(unsupported(format!("{codec:?} is not a video codec")));

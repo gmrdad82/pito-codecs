@@ -73,6 +73,7 @@ impl Track {
             CodecConfig::Avc(_) => Some(Codec::H264),
             CodecConfig::Hevc(_) => Some(Codec::Hevc),
             CodecConfig::Vp9(_) => Some(Codec::Vp9),
+            CodecConfig::Av1(_) => Some(Codec::Av1),
             CodecConfig::Aac(_) => Some(Codec::Aac),
             _ => None,
         }
