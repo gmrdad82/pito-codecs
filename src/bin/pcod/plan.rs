@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use super::json::Json;
 use super::profile::{Encoder, GIF_MAX_FPS, Profile};
 use super::size::Size;
 
@@ -265,15 +264,4 @@ pub fn partial(output: &Path) -> Result<PathBuf, String> {
         std::process::id(),
         token as u32
     )))
-}
-
-pub fn loudness_json(target: Option<&Loudness>, mode: &str) -> Json {
-    match target {
-        Some(t) => Json::map([
-            ("integrated", t.integrated.into()),
-            ("true_peak", t.true_peak.into()),
-            ("mode", mode.into()),
-        ]),
-        None => Json::Null,
-    }
 }

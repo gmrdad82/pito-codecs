@@ -55,7 +55,6 @@ pub struct Job<'a> {
 pub struct Done {
     pub device: String,
     pub notes: Vec<String>,
-    pub decode_notes: Vec<String>,
 }
 
 enum Pic {
@@ -991,13 +990,9 @@ pub fn run(job: &Job) -> Result<Done, Fail> {
             .join()
             .unwrap_or_else(|_| Err("the audio failed".into()));
         let (device, _) = consumed?;
-        let decode_notes = produced?;
+        produced?;
         sounded?;
-        Ok(Done {
-            device,
-            notes,
-            decode_notes,
-        })
+        Ok(Done { device, notes })
     })
 }
 

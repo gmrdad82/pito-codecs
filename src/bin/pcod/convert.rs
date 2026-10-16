@@ -4,11 +4,9 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use super::Fail;
-use super::json::Json;
+use super::manifest;
 use super::pipeline::{self, Audio, Stopped};
-use super::plan::{
-    AAC_KBPS, Container, OPUS_KBPS, Request, SAMPLE_RATE, loudness_json, partial, same_file,
-};
+use super::plan::{AAC_KBPS, Container, OPUS_KBPS, Request, SAMPLE_RATE, partial, same_file};
 use super::profile::{ANIMATED_FPS, ANIMATED_WIDTH, Encoder, Profile};
 use super::progress::Progress;
 use super::sha256;
@@ -167,97 +165,34 @@ fn plan(request: &Request, media: &Media) -> Result<Planned, Fail> {
     })
 }
 
-fn audio_json(audio: &Option<Audio>) -> Json {
+fn audio_manifest(audio: &Audio) -> manifest::Audio {
     match audio {
-        None => Json::Null,
-        Some(Audio::Copy { codec }) => {
-            Json::map([("encoder", "copy".into()), ("codec", codec.as_str().into())])
-        }
-        Some(Audio::Aac { kbps }) => Json::map([
-            ("encoder", "aac".into()),
-            ("kbps", (*kbps).into()),
-            ("layout", "stereo".into()),
-            ("sample_rate", SAMPLE_RATE.into()),
-        ]),
-        Some(Audio::Opus { kbps }) => {
-            Json::map([("encoder", "opus".into()), ("kbps", (*kbps).into())])
-        }
+        Audio::Copy { codec } => manifest::Audio {
+            encoder: "copy".into(),
+            codec: Some(codec.clone()),
+            kbps: None,
+            layout: None,
+            sample_rate: None,
+        },
+        Audio::Aac { kbps } => manifest::Audio {
+            encoder: "aac".into(),
+            codec: None,
+            kbps: Some(*kbps),
+            layout: Some("stereo".into()),
+            sample_rate: Some(SAMPLE_RATE),
+        },
+        Audio::Opus { kbps } => manifest::Audio {
+            encoder: "opus".into(),
+            codec: None,
+            kbps: Some(*kbps),
+            layout: None,
+            sample_rate: None,
+        },
     }
-}
-
-fn encoder_words(encoder: &Encoder) -> Vec<String> {
-    let w = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    match encoder {
-        Encoder::H264 { preset, crf } => w(&[
-            "encode",
-            "h264",
-            "cpu",
-            &format!("preset {}", preset.name()),
-            &format!("crf {crf}"),
-        ]),
-        Encoder::H264Gpu { qp } => w(&["encode", "h264", "gpu", &format!("qp {qp}")]),
-        Encoder::Vp9 { crf } => w(&["encode", "vp9", &format!("crf {crf}")]),
-        Encoder::Gif { tolerance } => w(&["encode", "gif", &format!("tolerance {tolerance}")]),
-        Encoder::Webp { quality, effort } => w(&[
-            "encode",
-            "webp",
-            &format!("quality {quality}"),
-            &format!("effort {effort}"),
-        ]),
-        Encoder::Copy { codec } => w(&["copy", codec]),
-    }
-}
-
-fn audio_words(audio: &Audio) -> Vec<String> {
-    match audio {
-        Audio::Copy { codec } => vec!["copy".into(), codec.clone()],
-        Audio::Aac { kbps } => vec![
-            "encode".into(),
-            "aac".into(),
-            format!("{kbps}k"),
-            "stereo".into(),
-            SAMPLE_RATE.to_string(),
-        ],
-        Audio::Opus { kbps } => vec!["encode".into(), "opus".into(), format!("{kbps}k")],
-    }
-}
-
-fn pipeline_steps(media: &Media, planned: &Planned) -> Json {
-    let mut steps: Vec<Vec<String>> = Vec::new();
-    if !matches!(planned.encoder, Encoder::Copy { .. }) {
-        steps.push(match &media.kind {
-            Kind::File => vec!["decode".to_string(), media.codec.clone()],
-            Kind::Frames(files) => vec!["read".into(), format!("{} png", files.len())],
-        });
-        if planned.size != media.display_size() {
-            steps.push(vec![
-                "scale".into(),
-                format!("{}x{}", planned.size.0, planned.size.1),
-                "lanczos".into(),
-            ]);
-        }
-    }
-    steps.push(encoder_words(&planned.encoder));
-    if let Some(a) = &planned.audio {
-        steps.push(audio_words(a));
-    }
-    Json::List(
-        steps
-            .into_iter()
-            .map(|w| Json::List(w.into_iter().map(Json::Str).collect()))
-            .collect(),
-    )
 }
 
 fn hash(path: &Path) -> Result<String, Fail> {
     sha256::sha256_file(path).map_err(|e| format!("{}: {e}", path.display()).into())
-}
-
-fn source_hashes(media: &Media) -> Result<Json, Fail> {
-    match &media.kind {
-        Kind::File => Ok(hash(&media.path)?.into()),
-        Kind::Frames(_) => Ok(Json::Null),
-    }
 }
 
 fn land(partial_path: &Path, output: &Path, overwrite: bool) -> Result<(), Fail> {
@@ -290,10 +225,9 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
         request.fps = None;
     }
     let planned = plan(&request, &media)?;
-    let source_hash = if options.json {
-        source_hashes(&media)?
-    } else {
-        Json::Null
+    let source_hash = match (&media.kind, options.json) {
+        (Kind::File, true) => hash(&media.path)?,
+        _ => String::new(),
     };
     let part = partial(&request.output)?;
     *partial_path = Some(part.clone());
@@ -325,66 +259,34 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
     let bytes = std::fs::metadata(&request.output)
         .map(|m| m.len())
         .unwrap_or(0);
-    let mut document = Json::map([
-        (
-            "tool",
-            Json::map([
-                ("name", "pcod".into()),
-                ("version", env!("CARGO_PKG_VERSION").into()),
-            ]),
-        ),
-        (
-            "source",
-            Json::map([
-                ("path", request.input.as_path().into()),
-                ("sha256", source_hash),
-                ("loudness", Json::Null),
-            ]),
-        ),
-        (
-            "params",
-            Json::map([
-                ("profile", request.profile.name().into()),
-                ("encoder", planned.encoder.json()),
-                ("quality", planned.encoder.quality()),
-                (
-                    "size",
-                    Json::map([
-                        ("width", planned.size.0.into()),
-                        ("height", planned.size.1.into()),
-                    ]),
-                ),
-                (
-                    "fps",
-                    (f64::from(planned.fps.0) / f64::from(planned.fps.1.max(1))).into(),
-                ),
-                ("tune", request.tune.clone().into()),
-                (
-                    "loudness",
-                    loudness_json(request.loudness.as_ref(), "linear"),
-                ),
-                ("audio", audio_json(&planned.audio)),
-            ]),
-        ),
-        ("device", done.device.as_str().into()),
-        ("seconds", ((seconds * 100.0).round() / 100.0).into()),
-        (
-            "files",
-            Json::List(vec![Json::map([
-                ("file", request.output.as_path().into()),
-                ("sha256", hash(&request.output)?.into()),
-                ("bytes", bytes.into()),
-                ("args", pipeline_steps(&media, &planned)),
-                ("loudness", Json::Null),
-            ])]),
-        ),
-    ]);
-    let mut notes = done.notes.clone();
-    notes.extend(done.decode_notes.iter().cloned());
-    if !notes.is_empty() {
-        document.set("notes", notes.into());
-    }
-    Ok(document.text())
+    let document = manifest::Manifest {
+        sources: vec![manifest::Source {
+            path: request.input.display().to_string(),
+            sha256: source_hash,
+            loudness: None,
+        }],
+        params: manifest::Params {
+            profile: request.profile.name().into(),
+            encoder: planned.encoder.manifest(),
+            quality: planned.encoder.quality(),
+            width: planned.size.0,
+            height: planned.size.1,
+            fps: Some(f64::from(planned.fps.0) / f64::from(planned.fps.1.max(1))),
+            tune: request.tune.clone(),
+            loudness: None,
+            audio: planned.audio.as_ref().map(audio_manifest),
+        },
+        device: done.device.clone(),
+        seconds: (seconds * 100.0).round() / 100.0,
+        files: vec![manifest::Output {
+            file: request.output.display().to_string(),
+            sha256: hash(&request.output)?,
+            bytes,
+            loudness: None,
+        }],
+        join: None,
+    };
+    Ok(document.to_json())
 }
 
 pub fn print(text: &str) -> ExitCode {

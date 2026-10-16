@@ -174,12 +174,11 @@ fn each_extension_gets_its_container_and_the_json_manifest() {
         let bytes = fs::metadata(&output).unwrap().len();
         assert_eq!(field(&json, "bytes"), Some(bytes.to_string().as_str()));
         let sha = json
-            .split("\"sha256\":\"")
-            .nth(1)
+            .rsplit("\"sha256\":\"")
+            .next()
             .map(|s| &s[..64])
             .unwrap_or("");
         assert!(sha.bytes().all(|b| b.is_ascii_hexdigit()), "{json}");
-        assert!(json.contains("\"args\":[["), "{json}");
         if !codec.is_empty() {
             let p = probe(&output, &Prefs::default()).unwrap();
             assert_eq!(p.video_codec_name, codec, "{name}");

@@ -136,6 +136,17 @@ pub fn options(
     args: ConvertArgs,
 ) -> Options {
     let joining = sub == Some("join");
+    if std::iter::once(&input)
+        .chain(&joins)
+        .chain(std::iter::once(&output))
+        .any(|p| p.to_str().is_none())
+    {
+        usage_error(
+            sub,
+            ErrorKind::InvalidUtf8,
+            "invalid UTF-8 was detected in one or more arguments",
+        );
+    }
     let picture = args.profile.is_some()
         || args.size.is_some()
         || args.fps.is_some()
@@ -192,11 +203,6 @@ pub fn options(
     Options {
         request,
         json: args.json,
-        progress: !args.no_progress && !args.json && drawable(),
+        progress: super::progress::enabled(args.json, args.no_progress),
     }
-}
-
-fn drawable() -> bool {
-    use std::io::IsTerminal;
-    std::io::stderr().is_terminal() && std::env::var_os("TERM").is_none_or(|t| t != "dumb")
 }

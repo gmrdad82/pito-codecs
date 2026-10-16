@@ -22,16 +22,12 @@ type Fail = Box<dyn Error + Send + Sync>;
 mod frames;
 #[path = "pcod/json.rs"]
 mod json;
-#[allow(dead_code)]
 #[path = "pcod/manifest.rs"]
 mod manifest;
-#[allow(dead_code)]
 #[path = "pcod/probe_json.rs"]
 mod probe_json;
-#[allow(dead_code)]
 #[path = "pcod/progress.rs"]
 mod progress;
-#[allow(dead_code)]
 #[path = "pcod/sha256.rs"]
 mod sha256;
 #[path = "pcod/stills.rs"]
@@ -41,8 +37,6 @@ mod stills;
 mod args;
 #[path = "pcod/convert.rs"]
 mod convert;
-#[path = "pcod/json.rs"]
-mod json;
 #[path = "pcod/pipeline.rs"]
 mod pipeline;
 #[path = "pcod/plan.rs"]
@@ -57,7 +51,7 @@ mod size;
 mod source;
 #[path = "pcod/stubs.rs"]
 mod stubs;
-use stubs::{probe_json, progress, quality, sha256};
+use stubs::quality;
 
 #[derive(Parser)]
 #[command(

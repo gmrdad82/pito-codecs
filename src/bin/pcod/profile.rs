@@ -1,4 +1,5 @@
 use super::json::Json;
+use super::manifest;
 
 pub const FAST_QP: u8 = 25;
 pub const BALANCED_CRF: u8 = 20;
@@ -113,38 +114,44 @@ impl Preset {
 }
 
 impl Encoder {
-    pub fn quality(&self) -> Json {
+    pub fn quality(&self) -> Option<manifest::Quality> {
         match self {
-            Encoder::H264 { crf, .. } | Encoder::Vp9 { crf } => Json::map([("crf", (*crf).into())]),
-            Encoder::H264Gpu { qp } => Json::map([("qp", (*qp).into())]),
-            Encoder::Webp { quality, .. } => Json::map([("quality", (*quality).into())]),
-            _ => Json::Null,
+            Encoder::H264 { crf, .. } | Encoder::Vp9 { crf } => {
+                Some(manifest::Quality::Crf(u32::from(*crf)))
+            }
+            Encoder::H264Gpu { qp } => Some(manifest::Quality::Qp(u32::from(*qp))),
+            Encoder::Webp { quality, .. } => Some(manifest::Quality::Webp(u32::from(*quality))),
+            _ => None,
         }
     }
 
-    pub fn json(&self) -> Json {
-        match self {
-            Encoder::H264 { preset, crf } => Json::map([
-                ("encoder", "h264".into()),
-                ("preset", preset.name().into()),
-                ("crf", (*crf).into()),
-            ]),
-            Encoder::H264Gpu { qp } => {
-                Json::map([("encoder", "h264_gpu".into()), ("qp", (*qp).into())])
-            }
-            Encoder::Vp9 { crf } => Json::map([("encoder", "vp9".into()), ("crf", (*crf).into())]),
-            Encoder::Gif { tolerance } => Json::map([
-                ("encoder", "gif".into()),
-                ("tolerance", (*tolerance).into()),
-            ]),
-            Encoder::Webp { quality, effort } => Json::map([
-                ("encoder", "webp".into()),
-                ("quality", (*quality).into()),
-                ("compression_level", (*effort).into()),
-            ]),
-            Encoder::Copy { codec } => {
-                Json::map([("encoder", "copy".into()), ("codec", codec.as_str().into())])
-            }
+    pub fn manifest(&self) -> manifest::Encoder {
+        let (encoder, codec, settings): (&str, Option<String>, Vec<(&'static str, Json)>) =
+            match self {
+                Encoder::H264 { preset, crf } => (
+                    "h264",
+                    None,
+                    vec![("preset", preset.name().into()), ("crf", (*crf).into())],
+                ),
+                Encoder::H264Gpu { qp } => ("h264_gpu", None, vec![("qp", (*qp).into())]),
+                Encoder::Vp9 { crf } => ("vp9", None, vec![("crf", (*crf).into())]),
+                Encoder::Gif { tolerance } => {
+                    ("gif", None, vec![("tolerance", (*tolerance).into())])
+                }
+                Encoder::Webp { quality, effort } => (
+                    "webp",
+                    None,
+                    vec![
+                        ("quality", (*quality).into()),
+                        ("compression_level", (*effort).into()),
+                    ],
+                ),
+                Encoder::Copy { codec } => ("copy", Some(codec.clone()), Vec::new()),
+            };
+        manifest::Encoder {
+            encoder: encoder.into(),
+            codec,
+            settings,
         }
     }
 }
