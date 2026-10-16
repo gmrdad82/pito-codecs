@@ -53,3 +53,6 @@ pub mod gif;
 
 #[cfg(feature = "png")]
 pub mod png;
+
+#[cfg(feature = "av1")]
+pub mod av1;

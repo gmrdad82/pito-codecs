@@ -24,6 +24,7 @@ The codecs here are written in Rust. Parts are adapted from permissively license
 | [zune-inflate](https://github.com/etemesi254/zune-image) | MIT OR Apache-2.0 OR Zlib (Caleb Etemesi), a port of [libdeflate](https://github.com/ebiggers/libdeflate) (MIT) | 0.2.54, `69502ce83fdfecdd0beefd677e2abb3781b29d98` | The whole-buffer zlib and deflate decoder in `src/png/inflate.rs`: decode tables, fast and slow loops, match copies. |
 | [fdeflate](https://github.com/image-rs/fdeflate) | MIT OR Apache-2.0 (The image-rs Developers) | 0.3.7, `c365c7e6ffa81feb2e1fb762eed7299f05c9b0ca` | The PNG encoder's deflate in `src/png/encode.rs`: the fixed Huffman code tuned for filtered rows, its stored dynamic-block header, zero runs and the bit writer; the Paeth pass and chunk writer are new. |
 | [adler2](https://github.com/oyvindln/adler2) | 0BSD OR MIT OR Apache-2.0 | 2.0.1, `89a031a0f42eeff31c70dc598b398cbf31f1680f` | The four-lane Adler-32 in `src/png/inflate.rs`. |
+| [rav1d](https://github.com/memorysafety/rav1d) | BSD-2-Clause (VideoLAN and dav1d authors, Internet Security Research Group) | `0c851fa046d6a36430570459283e5886fbdd8a66` | The AV1 decoder in `src/av1/cpu/`: OBU and header parsing, the entropy decoder and CDFs, reconstruction (intra, inter, transforms), loop filter, CDEF, loop restoration, film grain, reference MVs and frame and tile threading, with the Rust fallback kernels; the frame front is new. |
 
 ## Specifications
 
