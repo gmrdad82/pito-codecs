@@ -32,6 +32,9 @@ mod probe_json;
 #[path = "pcod/progress.rs"]
 mod progress;
 #[allow(dead_code)]
+#[path = "pcod/quality.rs"]
+mod quality;
+#[allow(dead_code)]
 #[path = "pcod/sha256.rs"]
 mod sha256;
 #[path = "pcod/stills.rs"]
