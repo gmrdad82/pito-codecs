@@ -2440,47 +2440,122 @@ fn av1_stills_on_the_gpu_match_the_cpu_in_a_tagged_matrix() {
             ],
         );
     }
-    let prefs = |decode| Prefs {
+    let cpu = Stills::open(&path, 360, &route_prefs(Choice::Cpu)).unwrap();
+    gpu_stills_match(&path, &cpu, &[0.1, 0.45, 0.8, 1.2, 1.55, 1.9]);
+}
+
+fn route_prefs(decode: Choice) -> Prefs {
+    Prefs {
         decode,
         ..Prefs::default()
-    };
-    let Ok(gpu) = Stills::open(&path, 360, &prefs(Choice::Gpu)) else {
-        return;
-    };
-    let cpu = Stills::open(&path, 360, &prefs(Choice::Cpu)).unwrap();
-    let times = [0.1, 0.45, 0.8, 1.2, 1.55, 1.9];
-    let psnr = |a: &Rgba, b: &Rgba| {
-        let se: f64 = a
-            .data
-            .iter()
-            .zip(&b.data)
-            .map(|(x, y)| (f64::from(*x) - f64::from(*y)).powi(2))
-            .sum();
-        10.0 * (255.0f64.powi(2) / (se / a.data.len() as f64).max(1e-9)).log10()
+    }
+}
+
+fn still_psnr(a: &Rgba, b: &Rgba) -> f64 {
+    let se: f64 = a
+        .data
+        .iter()
+        .zip(&b.data)
+        .map(|(x, y)| (f64::from(*x) - f64::from(*y)).powi(2))
+        .sum();
+    10.0 * (255.0f64.powi(2) / (se / a.data.len() as f64).max(1e-9)).log10()
+}
+
+fn gpu_stills_match(path: &Path, cpu: &Stills, times: &[f64]) -> bool {
+    let Ok(gpu) = Stills::open(path, 360, &route_prefs(Choice::Gpu)) else {
+        return false;
     };
     for seek in [Seek::Exact, Seek::Keyframe] {
         for round in 0..2 {
             let mut want: Vec<Option<Rgba>> = vec![None; times.len()];
-            cpu.frames(&times, seek, |i, r| want[i] = Some(r.unwrap()))
+            cpu.frames(times, seek, |i, r| want[i] = Some(r.unwrap()))
                 .unwrap();
             let mut got: Vec<Option<Result<Rgba, String>>> = vec![None; times.len()];
             if gpu
-                .frames(&times, seek, |i, r| {
+                .frames(times, seek, |i, r| {
                     got[i] = Some(r.map_err(|e| e.to_string()))
                 })
                 .is_err()
             {
-                return;
+                return false;
             }
             for (i, (g, w)) in got.iter().zip(&want).enumerate() {
                 let (Some(Ok(g)), Some(w)) = (g, w) else {
-                    return;
+                    return false;
                 };
                 assert_eq!((g.width, g.height), (w.width, w.height));
-                let p = psnr(g, w);
-                assert!(p > 50.0, "{seek:?} round {round} still {i}: {p:.1} dB");
+                let p = still_psnr(g, w);
+                assert!(
+                    p > 50.0,
+                    "{} {seek:?} round {round} still {i}: {p:.1} dB",
+                    path.display()
+                );
             }
         }
+    }
+    true
+}
+
+#[test]
+fn vp9_stills_follow_the_vpcc_matrix_on_the_gpu_and_the_cpu() {
+    let Ok(encoders) = Command::new("ffmpeg")
+        .args(["-hide_banner", "-encoders"])
+        .output()
+    else {
+        return;
+    };
+    if !String::from_utf8_lossy(&encoders.stdout).contains("libvpx-vp9") {
+        return;
+    }
+    let mp4 = dir().join("vp9-709.mp4");
+    let mkv = dir().join("vp9-709.mkv");
+    if !mp4.exists() {
+        ffmpeg_make(
+            &mp4,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=s=640x360:r=30:d=2",
+                "-c:v",
+                "libvpx-vp9",
+                "-deadline",
+                "realtime",
+                "-cpu-used",
+                "8",
+                "-g",
+                "30",
+                "-pix_fmt",
+                "yuv420p",
+                "-colorspace",
+                "bt709",
+                "-color_primaries",
+                "bt709",
+                "-color_trc",
+                "bt709",
+            ],
+        );
+    }
+    if !mkv.exists() {
+        ffmpeg_make(&mkv, &["-i", mp4.to_str().unwrap(), "-c", "copy"]);
+    }
+    let times = [0.1, 0.45, 0.8, 1.2, 1.55, 1.9];
+    let cpu = Stills::open(&mp4, 360, &route_prefs(Choice::Cpu)).unwrap();
+    let tagged = Stills::open(&mkv, 360, &route_prefs(Choice::Cpu)).unwrap();
+    for seek in [Seek::Exact, Seek::Keyframe] {
+        let mut want: Vec<Option<Rgba>> = vec![None; times.len()];
+        tagged
+            .frames(&times, seek, |i, r| want[i] = Some(r.unwrap()))
+            .unwrap();
+        cpu.frames(&times, seek, |i, r| {
+            let (g, w) = (r.unwrap(), want[i].as_ref().unwrap());
+            let p = still_psnr(&g, w);
+            assert!(p > 50.0, "{seek:?} CPU MP4 still {i} vs MKV: {p:.1} dB");
+        })
+        .unwrap();
+    }
+    if gpu_stills_match(&mp4, &cpu, &times) {
+        assert!(gpu_stills_match(&mkv, &cpu, &times));
     }
 }
 

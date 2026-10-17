@@ -19,7 +19,7 @@ pub enum Decoder {
         buf: Vec<u8>,
     },
     Hevc(Box<crate::hevc::Decoder>),
-    Vp9(Box<crate::vp9::Decoder>),
+    Vp9(Box<crate::vp9::Decoder>, Option<(u8, bool)>),
     #[cfg(feature = "av1")]
     Av1(Box<crate::av1::cpu::Decoder>),
     Gpu(Box<crate::gpu::HwDecoder>),
@@ -114,7 +114,7 @@ impl Decoder {
             (Some(Codec::Vp9), _) => {
                 let mut dec = crate::vp9::Decoder::with_threads(threads.max(1));
                 dec.set_time_base(tb);
-                Ok(Decoder::Vp9(Box::new(dec)))
+                Ok(Decoder::Vp9(Box::new(dec), st.color))
             }
             #[cfg(feature = "av1")]
             (Some(Codec::Av1), _) => {
@@ -156,7 +156,7 @@ impl Decoder {
                 out
             }
             Decoder::Hevc(dec) => dec.decode(p),
-            Decoder::Vp9(dec) => dec.decode(p),
+            Decoder::Vp9(dec, _) => dec.decode(p),
             #[cfg(feature = "av1")]
             Decoder::Av1(dec) => dec.decode(p),
             Decoder::Gpu(dec) => dec.decode(p),
@@ -167,7 +167,7 @@ impl Decoder {
         match self {
             Decoder::H264 { dec, .. } => dec.flush(),
             Decoder::Hevc(dec) => dec.flush(),
-            Decoder::Vp9(dec) => dec.flush(),
+            Decoder::Vp9(dec, _) => dec.flush(),
             #[cfg(feature = "av1")]
             Decoder::Av1(dec) => dec.flush(),
             Decoder::Gpu(dec) => dec.flush(),
@@ -190,7 +190,7 @@ impl Decoder {
             #[cfg(feature = "av1")]
             Decoder::Av1(dec) => dec.sequence().map(|s| (s.matrix, s.full_range)),
             Decoder::Gpu(dec) => dec.color(),
-            Decoder::Vp9(_) => None,
+            Decoder::Vp9(_, color) => *color,
         }
         .unwrap_or((2, false));
         Color { matrix, full_range }
