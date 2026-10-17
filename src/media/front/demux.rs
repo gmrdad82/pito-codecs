@@ -5,7 +5,9 @@ use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError, Weak};
 
 use crate::mkv;
-use crate::mp4::{Av1Config, AvcConfig, CodecConfig, HevcConfig, Reader, Track, TrackKind};
+use crate::mp4::{
+    Av1Config, AvcConfig, CodecConfig, HevcConfig, Reader, Track, TrackKind, VpcConfig,
+};
 
 use super::base::{self as native, Readers, cached, rational, sorted};
 use super::probe::{AudioTrack, Probe};
@@ -337,9 +339,19 @@ impl Demux {
                 let t = mp4_track(r, track)?;
                 let codec = t.codec();
                 let extradata = t.extradata().unwrap_or_default();
-                let color = codec.and_then(|c| color_of(c, &extradata));
+                let vpcc = match t.config() {
+                    Some(CodecConfig::Vp9(c)) => Some(c),
+                    _ => None,
+                };
+                let color = match vpcc {
+                    Some(c) => vpcc_color(c),
+                    None => codec.and_then(|c| color_of(c, &extradata)),
+                };
                 #[cfg(feature = "gpu")]
-                let look = codec.and_then(|c| crate::gpu::look(c, &extradata));
+                let look = match vpcc {
+                    Some(c) => vpcc_look(c),
+                    None => codec.and_then(|c| crate::gpu::look(c, &extradata)),
+                };
                 Ok(Stream {
                     codec,
                     name: t.config().map(|c| c.name()).unwrap_or_default(),
@@ -606,6 +618,30 @@ pub fn keyframes(r: &Arc<mkv::Reader>) -> Result<Vec<f64>> {
 #[cfg(feature = "gpu")]
 fn color_of(codec: Codec, extradata: &[u8]) -> Option<(u8, bool)> {
     crate::gpu::color(codec, extradata)
+}
+
+fn vpcc_color(c: &VpcConfig) -> Option<(u8, bool)> {
+    (c.matrix_coefficients != 2 || c.full_range).then_some((c.matrix_coefficients, c.full_range))
+}
+
+#[cfg(feature = "gpu")]
+fn vpcc_look(c: &VpcConfig) -> Option<((u16, u16), crate::gpu::Color)> {
+    let described = [
+        c.colour_primaries,
+        c.transfer_characteristics,
+        c.matrix_coefficients,
+    ]
+    .iter()
+    .any(|&v| v != 2);
+    (described || c.full_range).then_some((
+        (1, 1),
+        crate::gpu::Color {
+            primaries: c.colour_primaries,
+            transfer: c.transfer_characteristics,
+            matrix: c.matrix_coefficients,
+            full_range: c.full_range,
+        },
+    ))
 }
 
 #[cfg(not(feature = "gpu"))]
