@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.14.3 — 2026-10-17
+
+### Fixed
+
+- VP9 stills and frames from an MP4 whose colour tags sit only in its vpcC box now use the file's colour matrix and range on the graphics card and the processor, so they no longer come out with shifted colours; tagged VP9 in MKV and WebM now follows its colour tags on the processor too.
+
 ## v1.14.2 — 2026-10-17
 
 ### Fixed
