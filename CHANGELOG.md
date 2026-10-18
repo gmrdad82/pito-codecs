@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.15.0 — 2026-10-18
+
+### Added
+
+- `pcod loudness <file>` measures an audio track per EBU R128 and ITU-R BS.1770-4: integrated loudness, loudness range, true peak, sample peak, and the short-term and momentary maxima, with `--json`. It reads the track at its own rate and channels and agrees with ffmpeg's ebur128 to 0.1.
+- `--linear` keeps the dynamics when levelling: the gain to the target, then the true-peak limiter on the peaks alone, without raising the gain to make up what the limiter takes (the result can land under the target).
+- `pcod frames` takes `--loudness`, `--true-peak`, `--linear` and `--audio-bitrate`. The ceiling holds for the AAC in the MP4, not just for the WAV: pcod encodes a trial, lowers the limiter until the decoded AAC stays under the ceiling, and prints the MP4's loudness.
+- WAV, bare MP3 and audio-only M4A, MKA and WebM files are read as inputs, so `pcod in.wav out.wav --loudness -14` works.
+- Library: `meter_loudness`, `level_pcm`, `level_with`, `plan_level_styled` and `LevelStyle`.
+
+### Changed
+
+- A re-encoded conversion with `--loudness` checks the true peak after a trial AAC or Opus encode, so the encoded audio stays under the ceiling.
+- The README's install lines fetch the latest release.
+
 ## v1.14.3 — 2026-10-17
 
 ### Fixed
