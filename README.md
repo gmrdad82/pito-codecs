@@ -2,7 +2,7 @@
 
 # pito-codecs
 
-[![CI](https://github.com/gmrdad82/pito-codecs/actions/workflows/ci.yml/badge.svg)](https://github.com/gmrdad82/pito-codecs/actions/workflows/ci.yml) [![Version](https://img.shields.io/github/v/tag/gmrdad82/pito-codecs)](https://github.com/gmrdad82/pito-codecs/tags)
+[![Version](https://img.shields.io/github/v/tag/gmrdad82/pito-codecs)](https://github.com/gmrdad82/pito-codecs/tags)
 
 **Video and audio codecs in pure Rust, on the CPU and the GPU, with no ffmpeg inside.** H.264, H.265, VP9, AV1 decode, AAC, AC-3, E-AC-3, Opus and MP3; MP4, MOV, MKV and WebM; GIF and WebP. One MIT Cargo package, a feature per part, two direct dependencies and no C linked.
 
@@ -262,7 +262,7 @@ The CPU codecs run and are tested on every push on Linux x86-64 and arm64, Windo
 - **Two direct dependencies** for the library on Linux, rayon and libloading, 8 crates in all; clap only for pcod, behind the `cli` feature. No C or C++ is linked, and libva is loaded at run time, so a binary starts on a machine without it.
 - **pcod is 5.7 MB** (v1.3.0, Linux x86-64, release build, stripped).
 - **About 134,000 lines of Rust** under `src/`, one package with a feature per part.
-- **Graceful on bad input:** every parser and decoder is fuzzed on CI, and malformed files return errors instead of panicking.
+- **Graceful on bad input:** every parser and decoder has a cargo-fuzz target in `fuzz/`, and malformed files return errors instead of panicking.
 
 ## Use the library
 
@@ -446,12 +446,7 @@ cargo test --release
 
 The tests use the system ffmpeg as an oracle when it is installed and skip those checks when it is not, and the GPU tests skip cleanly without a device. `bin/gate` runs rustfmt, clippy with warnings as errors and the tests, then a release build (`--fast` skips the build). `bin/docs-bundle vX.Y.Z [out dir]` builds `docs-vX.Y.Z.tar.gz`, the documentation each Release carries: the guides in `docs/site`, a command reference made from pcod's own help, the API reference from `cargo doc` and the changelog.
 
-[CI](.github/workflows/ci.yml) runs on every push and pull request. One job checks formatting and runs clippy for Linux x64 and arm64, Windows and macOS. Then four runners test in parallel: Linux x64 and Linux arm64 (Debian with its ffmpeg), Windows x64 and macOS on Apple Silicon, each with every test under nextest in the `ci` profile (the release optimisation without LTO, so the test binaries link quickly), the doc tests and a full release build. On a `v` tag it also checks that the tag matches the crate's version. What that covers:
-
-- **CPU codecs, containers and filters** on x86-64 with the AVX2 kernels, and on arm64 with the portable paths and the filters' NEON kernels, on Linux, Windows and macOS.
-- **VideoToolbox** on macOS: H.264 and H.265 decode bit-exact with ffmpeg, H.264 and H.265 encode decoded back by ffmpeg, bitrate modes, and a transcode that scales on the GPU.
-- **Media Foundation and NVENC** only build and run their unit tests, since the runners have no GPU.
-- **VA-API** runs on the maintainer's AMD machine before each release, with the benchmarks.
+Every change is checked on the maintainer's machines before it merges: formatting, clippy with warnings as errors, the tests with ffmpeg as the oracle, and the doc tests. Every release runs the full suite and builds pcod for Linux x86-64, Windows x86-64 and macOS on Apple Silicon there too, along with the VA-API tests and the benchmarks on an AMD card; the GitHub Release carries those binaries and their checksums. Media Foundation, NVENC and VideoToolbox are built for their systems; Media Foundation and NVENC have not run on their hardware here.
 
 ## Contributing
 
