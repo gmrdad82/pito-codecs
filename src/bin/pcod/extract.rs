@@ -215,12 +215,16 @@ fn write(
     let track = probe.audio.first().map_or(0, |a| a.index);
     let plan = match target {
         Some(t) => Some(
-            media::plan_level_span(
+            media::plan_level_styled(
                 input,
                 track,
                 prefs,
                 span,
                 &target_of(&t),
+                media::LevelStyle {
+                    linear: t.linear,
+                    encoded: None,
+                },
                 level_progress(progress),
             )
             .map_err(cancelled)?,

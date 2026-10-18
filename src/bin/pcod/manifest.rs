@@ -34,6 +34,7 @@ pub struct Target {
     pub integrated: f64,
     pub true_peak: f64,
     pub mode: String,
+    pub linear: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -162,6 +163,7 @@ impl Params {
                         ("integrated", t.integrated.into()),
                         ("true_peak", t.true_peak.into()),
                         ("mode", t.mode.as_str().into()),
+                        ("linear", Json::Bool(t.linear)),
                     ])
                 }),
             ),
@@ -273,6 +275,7 @@ mod tests {
                     integrated: -14.0,
                     true_peak: -2.0,
                     mode: "linear".into(),
+                    linear: false,
                 }),
                 audio: Some(Audio {
                     encoder: "aac".into(),

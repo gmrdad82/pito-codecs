@@ -166,6 +166,9 @@ const GENERIC: [&str; 6] = [
 ];
 
 pub fn probe(path: &Path) -> Result<Probe> {
+    if let Some(kind) = super::bare::sniff(path) {
+        return super::bare::probe(path, kind);
+    }
     if let Ok(Some(head)) = demux::mkv_head(path)
         && let Ok(Some(p)) = demux::probe_head(&head)
     {
@@ -175,20 +178,7 @@ pub fn probe(path: &Path) -> Result<Probe> {
         Demux::Mp4(r) => r,
         Demux::Mkv(r) => return demux::probe(&r),
     };
-    let (v, t) = video_track(&r)?;
     let starts = Demux::Mp4(r.clone()).starts();
-    let (width, height) = t
-        .entry()
-        .and_then(|e| e.video)
-        .map(|v| (v.width as u32, v.height as u32))
-        .unwrap_or((t.width, t.height));
-    let (profile, bit_depth) = match t.config() {
-        Some(CodecConfig::Avc(c)) => demux::avc_profile(c.profile),
-        Some(CodecConfig::Hevc(c)) => demux::hevc_profile(c),
-        Some(CodecConfig::Vp9(c)) => (format!("Profile {}", c.profile), c.bit_depth.max(8)),
-        Some(CodecConfig::Av1(c)) => (c.profile_name(), c.bit_depth()),
-        _ => (String::new(), 8),
-    };
     let audio = r
         .audio()
         .into_iter()
@@ -213,6 +203,26 @@ pub fn probe(path: &Path) -> Result<Probe> {
             }
         })
         .collect();
+    let Ok((v, t)) = video_track(&r) else {
+        let duration = r
+            .audio()
+            .into_iter()
+            .map(|i| r.tracks[i].duration_seconds())
+            .fold(0.0f64, f64::max);
+        return audio_only(audio, duration, starts.file);
+    };
+    let (width, height) = t
+        .entry()
+        .and_then(|e| e.video)
+        .map(|v| (v.width as u32, v.height as u32))
+        .unwrap_or((t.width, t.height));
+    let (profile, bit_depth) = match t.config() {
+        Some(CodecConfig::Avc(c)) => demux::avc_profile(c.profile),
+        Some(CodecConfig::Hevc(c)) => demux::hevc_profile(c),
+        Some(CodecConfig::Vp9(c)) => (format!("Profile {}", c.profile), c.bit_depth.max(8)),
+        Some(CodecConfig::Av1(c)) => (c.profile_name(), c.bit_depth()),
+        _ => (String::new(), 8),
+    };
     let lead = starts.track(v).map_or(0.0, |s| (s - starts.file).max(0.0));
     Ok(Probe {
         duration: lead + t.duration_seconds(),
@@ -227,6 +237,28 @@ pub fn probe(path: &Path) -> Result<Probe> {
         profile,
         bit_depth,
         frames: Some(t.samples.len() as u64),
+        audio,
+        alpha: false,
+    })
+}
+
+pub(super) fn audio_only(audio: Vec<AudioTrack>, duration: f64, start: f64) -> Result<Probe> {
+    if audio.is_empty() {
+        return Err(Error::Invalid("no video or audio track".to_string()));
+    }
+    Ok(Probe {
+        duration,
+        start,
+        video_start: None,
+        fps: (0, 1),
+        width: 0,
+        height: 0,
+        rotation: 0,
+        video_codec: None,
+        video_codec_name: String::new(),
+        profile: String::new(),
+        bit_depth: 0,
+        frames: None,
         audio,
         alpha: false,
     })

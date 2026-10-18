@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use crate::filter::{Limiter, LoudnessMeter};
+use crate::filter::{Limiter, Loudness, LoudnessMeter};
 use crate::media::{AudioBuffer, Codec, Error, Packet, Result};
 use crate::mkv;
 use crate::mp4::{self, AvcConfig, Brand, HevcConfig, SampleEntry};
@@ -100,6 +100,12 @@ pub enum LevelStage {
 pub struct LevelProgress {
     pub stage: LevelStage,
     pub done: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LevelStyle {
+    pub linear: bool,
+    pub encoded: Option<(Codec, u32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -302,6 +308,199 @@ pub fn measure_loudness(
 ) -> Result<LoudnessStats> {
     let source = Pass::open(path, track, prefs, AudioSpan::WHOLE)?;
     meter_pass(&source, None, LevelStage::Measuring, &mut progress)
+}
+
+pub fn meter_loudness(
+    path: &Path,
+    track: usize,
+    prefs: &Prefs,
+    mut progress: impl FnMut(&LevelProgress) -> bool,
+) -> Result<Loudness> {
+    let p = probe(path, prefs)?;
+    let t = p
+        .audio
+        .get(track)
+        .ok_or_else(|| Error::Invalid(format!("audio track {track} of {}", p.audio.len())))?;
+    if t.rate == 0 || t.channels == 0 {
+        return Err(Error::Unsupported(format!(
+            "audio track {track} reads as {} channels at {} Hz",
+            t.channels, t.rate
+        )));
+    }
+    let span = AudioSpan {
+        rate: t.rate,
+        channels: t.channels,
+        ..AudioSpan::WHOLE
+    };
+    let source = Pass::open(path, track, prefs, span)?;
+    let mut meter = LoudnessMeter::new(span.rate, span.channels)?;
+    let mut frames = 0u64;
+    let progress: &mut Tell = &mut progress;
+    tell(progress, LevelStage::Measuring, 0, source.total)?;
+    decoded(&source, |b| {
+        frames += b.frames() as u64;
+        meter.process(&b)?;
+        tell(progress, LevelStage::Measuring, frames, source.total)
+    })?;
+    Ok(meter.summary())
+}
+
+fn format_for(codec: Codec) -> Format {
+    if codec == Codec::Opus {
+        Format::Webm
+    } else {
+        Format::Mp4(Brand::Mp4)
+    }
+}
+
+fn encoded_pass(
+    source: &Pass,
+    mut leveler: Leveler,
+    codec: Codec,
+    kbps: u32,
+    progress: &mut Tell,
+) -> Result<LoudnessStats> {
+    let mut enc = Encoder::new(format_for(codec), kbps)?;
+    let mut checker = enc.checker()?;
+    let mut meter = LoudnessMeter::new(LEVEL_RATE, 2)?;
+    let stage = LevelStage::Calibrating;
+    let total = source.total;
+    let mut frames = 0u64;
+    let pass = Pass {
+        span: AudioSpan {
+            rate: LEVEL_RATE,
+            channels: 2,
+            ..source.span
+        },
+        ..*source
+    };
+    tell(progress, stage, 0, total)?;
+    let mut emit = |packets: Vec<Packet>| -> Result<()> {
+        for p in packets {
+            meter.process(&checker.decode(&p)?)?;
+        }
+        Ok(())
+    };
+    decoded(&pass, |mut b| {
+        leveler.process(&mut b)?;
+        frames += b.frames() as u64;
+        emit(enc.encode(&b)?)?;
+        tell(progress, stage, frames, total)
+    })?;
+    let mut tail = AudioBuffer::new(LEVEL_RATE, 2);
+    leveler.flush(&mut tail)?;
+    let mut packets = enc.encode(&tail)?;
+    packets.extend(enc.flush()?);
+    emit(packets)?;
+    Ok(LoudnessStats::of(&meter))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LevelledPcm {
+    pub buffer: AudioBuffer,
+    pub before: LoudnessStats,
+    pub after: LoudnessStats,
+    pub encoded: Option<LoudnessStats>,
+    pub mode: LevelMode,
+    pub gain_db: f64,
+    pub ceiling_db: Option<f64>,
+}
+
+fn measured(b: &AudioBuffer) -> Result<LoudnessStats> {
+    let mut meter = LoudnessMeter::new(b.rate, b.channels)?;
+    meter.process(b)?;
+    Ok(LoudnessStats::of(&meter))
+}
+
+fn levelled(buffer: &AudioBuffer, gain_db: f64, ceiling_db: Option<f64>) -> Result<AudioBuffer> {
+    let mut leveler = Leveler::with_gain(buffer.rate, buffer.channels, gain_db, ceiling_db)?;
+    let mut out = buffer.clone();
+    leveler.process(&mut out)?;
+    let mut tail = AudioBuffer::new(buffer.rate, buffer.channels);
+    leveler.flush(&mut tail)?;
+    out.samples.extend_from_slice(&tail.samples);
+    Ok(out)
+}
+
+pub fn level_pcm(
+    buffer: &AudioBuffer,
+    target: &LevelTarget,
+    style: LevelStyle,
+) -> Result<LevelledPcm> {
+    target.check()?;
+    let before = measured(buffer)?;
+    if !before.integrated.is_finite() || before.integrated <= QUIETEST_LUFS {
+        return Err(silent(target));
+    }
+    let linear = target.integrated - before.integrated;
+    let mut headroom = HEADROOM;
+    let mut gain_db = linear;
+    let mut retries = 0;
+    loop {
+        let ceiling = target.true_peak - headroom;
+        let ceiling_db = (before.true_peak + linear > ceiling).then_some(ceiling);
+        let mut out = levelled(buffer, gain_db, ceiling_db)?;
+        let mut after = measured(&out)?;
+        if ceiling_db.is_some() && !style.linear {
+            for _ in 0..TRIES {
+                let short = target.integrated - after.integrated;
+                if !short.is_finite() || short.abs() <= CLOSE {
+                    break;
+                }
+                gain_db += short;
+                out = levelled(buffer, gain_db, ceiling_db)?;
+                after = measured(&out)?;
+            }
+        }
+        let encoded = match style.encoded {
+            Some((codec, kbps)) => Some(encoded_pcm(&out, codec, kbps)?),
+            None => None,
+        };
+        let peak = encoded.map_or(after.true_peak, |e| e.true_peak);
+        let over = peak - target.true_peak;
+        if over > 0.0 && retries < RETRIES {
+            retries += 1;
+            headroom += over + CLOSE;
+            continue;
+        }
+        let mode = if ceiling_db.is_some() {
+            LevelMode::Limited
+        } else {
+            LevelMode::Linear
+        };
+        return Ok(LevelledPcm {
+            buffer: out,
+            before,
+            after,
+            encoded,
+            mode,
+            gain_db,
+            ceiling_db,
+        });
+    }
+}
+
+fn encoded_pcm(buffer: &AudioBuffer, codec: Codec, kbps: u32) -> Result<LoudnessStats> {
+    if buffer.rate != LEVEL_RATE || buffer.channels != 2 {
+        return Err(Error::Invalid(format!(
+            "an encode check takes {LEVEL_RATE} Hz stereo, not {} Hz with {} channels",
+            buffer.rate, buffer.channels
+        )));
+    }
+    let mut enc = Encoder::new(format_for(codec), kbps)?;
+    let mut checker = enc.checker()?;
+    let mut meter = LoudnessMeter::new(LEVEL_RATE, 2)?;
+    let mut packets = Vec::new();
+    for part in buffer.samples.chunks(LEVEL_RATE as usize * 2) {
+        let mut b = AudioBuffer::new(LEVEL_RATE, 2);
+        b.samples.extend_from_slice(part);
+        packets.extend(enc.encode(&b)?);
+    }
+    packets.extend(enc.flush()?);
+    for p in &packets {
+        meter.process(&checker.decode(p)?)?;
+    }
+    Ok(LoudnessStats::of(&meter))
 }
 
 fn audio_frames(path: &Path, track: usize, prefs: &Prefs, span: &AudioSpan) -> Result<u64> {
@@ -774,14 +973,66 @@ pub fn plan_level_span(
     target: &LevelTarget,
     mut progress: impl FnMut(&LevelProgress) -> bool,
 ) -> Result<LevelPlan> {
+    plan_level_styled(
+        path,
+        track,
+        prefs,
+        span,
+        target,
+        LevelStyle::default(),
+        &mut progress,
+    )
+}
+
+pub fn plan_level_styled(
+    path: &Path,
+    track: usize,
+    prefs: &Prefs,
+    span: &AudioSpan,
+    target: &LevelTarget,
+    style: LevelStyle,
+    mut progress: impl FnMut(&LevelProgress) -> bool,
+) -> Result<LevelPlan> {
     target.check()?;
     let progress: &mut Tell = &mut progress;
     let source = Pass::open(path, track, prefs, *span)?;
     let before = meter_pass(&source, None, LevelStage::Measuring, progress)?;
     let gain = target.integrated - before.integrated;
-    planned(&source, before, target, HEADROOM, gain, progress)
+    let mut headroom = HEADROOM;
+    let mut plan = planned(
+        &source,
+        before,
+        target,
+        headroom,
+        gain,
+        style.linear,
+        progress,
+    )?;
+    let Some((codec, kbps)) = style.encoded else {
+        return Ok(plan);
+    };
+    for _ in 0..RETRIES {
+        let trial = plan.leveler(LEVEL_RATE, 2)?;
+        let got = encoded_pass(&source, trial, codec, kbps, progress)?;
+        let over = got.true_peak - target.true_peak;
+        if over.is_nan() || over <= 0.0 {
+            break;
+        }
+        headroom += over + CLOSE;
+        plan = planned(
+            &source,
+            before,
+            target,
+            headroom,
+            plan.gain_db,
+            style.linear,
+            progress,
+        )?;
+    }
+    Ok(plan)
 }
 
+#[derive(Clone, Copy)]
 struct Pass<'a> {
     path: &'a Path,
     track: usize,
@@ -808,6 +1059,7 @@ fn planned(
     target: &LevelTarget,
     headroom: f64,
     mut gain_db: f64,
+    linear_only: bool,
     progress: &mut Tell,
 ) -> Result<LevelPlan> {
     if !before.integrated.is_finite() || before.integrated <= QUIETEST_LUFS {
@@ -820,6 +1072,13 @@ fn planned(
             before,
             gain_db: linear,
             ceiling_db: None,
+        });
+    }
+    if linear_only {
+        return Ok(LevelPlan {
+            before,
+            gain_db: linear,
+            ceiling_db: Some(ceiling),
         });
     }
     for _ in 0..TRIES {
@@ -843,6 +1102,16 @@ pub fn level(
     input: &Path,
     output: &Path,
     opts: &LevelOptions,
+    progress: impl FnMut(&LevelProgress) -> bool,
+) -> Result<Levelled> {
+    level_with(input, output, opts, LevelStyle::default(), progress)
+}
+
+pub fn level_with(
+    input: &Path,
+    output: &Path,
+    opts: &LevelOptions,
+    style: LevelStyle,
     mut progress: impl FnMut(&LevelProgress) -> bool,
 ) -> Result<Levelled> {
     let progress: &mut Tell = &mut progress;
@@ -867,7 +1136,15 @@ pub fn level(
     let mut gain = target.integrated - before.integrated;
     let mut retries = 0;
     loop {
-        let plan = planned(&source, before, &target, headroom, gain, progress)?;
+        let plan = planned(
+            &source,
+            before,
+            &target,
+            headroom,
+            gain,
+            style.linear,
+            progress,
+        )?;
         let leveler = plan.leveler(LEVEL_RATE, 2)?;
         let written = write(&source, &demux, &part, format, kbps, leveler, progress);
         let (after, video, video_packets, audio) = match written {

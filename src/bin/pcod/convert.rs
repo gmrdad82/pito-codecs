@@ -253,11 +253,21 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
     }
     let level = match request.loudness {
         Some(target) => {
-            let plan = media::plan_level(
+            let encoded = match &planned.audio {
+                Some(Audio::Aac { kbps }) => Some((media::Codec::Aac, *kbps)),
+                Some(Audio::Opus { kbps }) => Some((media::Codec::Opus, *kbps)),
+                _ => None,
+            };
+            let plan = media::plan_level_styled(
                 &media.path,
                 track,
                 &media::Prefs::default(),
+                &media::AudioSpan::WHOLE,
                 &target_of(&target),
+                media::LevelStyle {
+                    linear: target.linear,
+                    encoded,
+                },
                 level_progress(&progress),
             );
             match plan {
@@ -421,11 +431,15 @@ impl Loud {
                 s.integrated, s.range, s.true_peak
             )
         };
+        let mode = match (self.target.linear, self.mode) {
+            (true, media::LevelMode::Limited) => "linear gain, peaks limited",
+            (_, mode) => mode_name(mode),
+        };
         format!(
             "loudness before: {}\nloudness after: {} ({}, target {} LUFS, ceiling {} dBTP)",
             m(&self.before),
             m(&self.after),
-            mode_name(self.mode),
+            mode,
             self.target.integrated,
             self.target.true_peak
         )
@@ -436,6 +450,7 @@ impl Loud {
             integrated: self.target.integrated,
             true_peak: self.target.true_peak,
             mode: mode_name(self.mode).into(),
+            linear: self.target.linear,
         }
     }
 }
@@ -471,7 +486,11 @@ fn level_copy(
         track,
         prefs: media::Prefs::default(),
     };
-    let done = match media::level(input, part, &opts, level_progress(progress)) {
+    let style = media::LevelStyle {
+        linear: target.linear,
+        encoded: None,
+    };
+    let done = match media::level_with(input, part, &opts, style, level_progress(progress)) {
         Ok(d) => d,
         Err(media::Error::Cancelled) => return Err(Box::new(Stopped)),
         Err(e) => return Err(e.to_string().into()),

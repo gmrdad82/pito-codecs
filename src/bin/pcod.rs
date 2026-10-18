@@ -105,6 +105,18 @@ enum Command {
         #[arg(long, help = "Print what pcod reads as JSON")]
         json: bool,
     },
+    #[command(
+        about = "Measure an audio track's loudness (EBU R128, ITU-R BS.1770-4)",
+        long_about = "Measure an audio track's loudness (EBU R128, ITU-R BS.1770-4)\n\nReads the track at its own rate and channels and reports the integrated loudness (gated), the loudness range, the true peak (4x oversampled below 88.2 kHz), the sample peak and the short-term (3 s) and momentary (400 ms) maxima. Five- and six-channel tracks weigh the surrounds by 1.41 and leave out the LFE (the fourth channel). The file is a video or an audio file: MP4, MOV, M4A, MKV, MKA, WebM, WAV or MP3."
+    )]
+    Loudness {
+        #[arg(help = "A video or audio file")]
+        file: PathBuf,
+        #[arg(long, default_value_t = 0, help = "The audio track, counted from 0")]
+        track: usize,
+        #[arg(long, help = "Print the measurements as JSON")]
+        json: bool,
+    },
     #[command(about = "Decode the whole video track and report the speed")]
     Decode {
         file: PathBuf,
@@ -139,6 +151,29 @@ enum Command {
         fps: (u32, u32),
         #[arg(long, help = "A PCM WAV to encode as the audio track")]
         audio: Option<PathBuf>,
+        #[arg(
+            long,
+            allow_hyphen_values = true,
+            requires = "audio",
+            value_parser = args::loudness_of,
+            help = "Level the audio to LUFS (-70 to -5) or youtube, measured on the encoded AAC"
+        )]
+        loudness: Option<plan::Loudness>,
+        #[arg(
+            long,
+            allow_hyphen_values = true,
+            requires = "loudness",
+            help = "The true-peak ceiling the encoded AAC keeps, in dBTP [default: -1]"
+        )]
+        true_peak: Option<f64>,
+        #[arg(
+            long,
+            requires = "loudness",
+            help = "Keep the dynamics: gain to the target, then only a true-peak limiter at the ceiling (may land under the target)"
+        )]
+        linear: bool,
+        #[arg(long, default_value_t = 192, value_parser = clap::value_parser!(u32).range(32..=512), help = "The AAC bitrate in kbps, 32 to 512")]
+        audio_bitrate: u32,
         #[arg(
             long,
             value_enum,
@@ -382,6 +417,7 @@ fn run(command: Command) -> Result<(), Fail> {
     let mut out = io::stdout().lock();
     let result = match command {
         Command::Probe { file, .. } => show(&mut out, &file),
+        Command::Loudness { file, track, json } => loudness(&mut out, &file, track, json),
         Command::Convert { .. } | Command::Join { .. } | Command::Profiles => Ok(()),
         Command::Decode {
             file,
@@ -401,6 +437,10 @@ fn run(command: Command) -> Result<(), Fail> {
             output,
             fps,
             audio,
+            loudness,
+            true_peak,
+            linear,
+            audio_bitrate,
             codec,
             route,
             crf,
@@ -412,6 +452,8 @@ fn run(command: Command) -> Result<(), Fail> {
                 output,
                 fps,
                 audio,
+                loudness: args::loudness_with(loudness, true_peak, linear),
+                audio_kbps: audio_bitrate,
                 codec: codec.codec(),
                 prefs: route.prefs(),
                 crf,
@@ -454,6 +496,58 @@ fn run(command: Command) -> Result<(), Fail> {
     };
     result?;
     out.flush()?;
+    Ok(())
+}
+
+fn loudness(out: &mut impl Write, file: &Path, track: usize, json: bool) -> Result<(), Fail> {
+    let prefs = Prefs::default();
+    let p = probe(file, &prefs).map_err(|e| about(file, e))?;
+    let t = p.audio.get(track).ok_or_else(|| {
+        about(
+            file,
+            match p.audio.len() {
+                0 => "the file has no audio".to_string(),
+                n => format!("there is no audio track {track}; the file has {n}"),
+            },
+        )
+    })?;
+    let m = media::meter_loudness(file, track, &prefs, |_| true).map_err(|e| about(file, e))?;
+    if json {
+        let doc = json::Json::Obj(vec![
+            ("file", file.display().to_string().into()),
+            ("track", track.into()),
+            ("codec", t.codec.as_str().into()),
+            ("channels", t.channels.into()),
+            ("sample_rate", t.rate.into()),
+            ("seconds", p.duration.into()),
+            ("integrated", m.integrated.into()),
+            ("range", m.range.into()),
+            ("true_peak", m.true_peak.into()),
+            ("sample_peak", m.sample_peak.into()),
+            ("short_term_max", m.short_term_max.into()),
+            ("momentary_max", m.momentary_max.into()),
+        ]);
+        writeln!(out, "{}", doc.text())?;
+        return Ok(());
+    }
+    let n = |v: f64| {
+        if v.is_finite() {
+            format!("{v:7.2}")
+        } else {
+            "   -inf".to_string()
+        }
+    };
+    writeln!(
+        out,
+        "audio           track {track}, {} {} ch {} Hz, {:.2} s",
+        t.codec, t.channels, t.rate, p.duration
+    )?;
+    writeln!(out, "integrated      {} LUFS", n(m.integrated))?;
+    writeln!(out, "range           {} LU", n(m.range))?;
+    writeln!(out, "true peak       {} dBTP", n(m.true_peak))?;
+    writeln!(out, "sample peak     {} dBFS", n(m.sample_peak))?;
+    writeln!(out, "short-term max  {} LUFS", n(m.short_term_max))?;
+    writeln!(out, "momentary max   {} LUFS", n(m.momentary_max))?;
     Ok(())
 }
 

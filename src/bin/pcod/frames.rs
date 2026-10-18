@@ -12,6 +12,8 @@ use pito_codecs::media::{
 use pito_codecs::png;
 
 use super::Fail;
+use super::convert::target_of;
+use super::plan::Loudness;
 
 const RATE: u32 = 48_000;
 
@@ -20,6 +22,8 @@ pub struct Job {
     pub output: PathBuf,
     pub fps: (u32, u32),
     pub audio: Option<PathBuf>,
+    pub loudness: Option<Loudness>,
+    pub audio_kbps: u32,
     pub codec: Codec,
     pub prefs: Prefs,
     pub crf: u8,
@@ -192,7 +196,17 @@ impl Pool {
     }
 }
 
+fn shown(s: &media::LoudnessStats) -> String {
+    format!(
+        "{:.2} LUFS, LRA {:.2} LU, true peak {:.2} dBTP",
+        s.integrated, s.range, s.true_peak
+    )
+}
+
 pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
+    if let Some(l) = &job.loudness {
+        l.check()?;
+    }
     let files = listed(&job.dir)?;
     let first = std::fs::read(&files[0]).map_err(|e| format!("{}: {e}", files[0].display()))?;
     let info = png::info(&first).map_err(|e| format!("{}: {e}", files[0].display()))?;
@@ -220,13 +234,40 @@ pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
     )?;
     let pcm = match &job.audio {
         Some(path) => {
-            let buf = sound(path)?;
+            let mut buf = sound(path)?;
             writeln!(
                 out,
-                "audio   {}: {:.2} s, AAC 48 kHz stereo",
+                "audio   {}: {:.2} s, AAC 48 kHz stereo at {} kbps",
                 name(path),
-                buf.frames() as f64 / RATE as f64
+                buf.frames() as f64 / RATE as f64,
+                job.audio_kbps
             )?;
+            if let Some(l) = &job.loudness {
+                let style = media::LevelStyle {
+                    linear: l.linear,
+                    encoded: Some((Codec::Aac, job.audio_kbps)),
+                };
+                let done = media::level_pcm(&buf, &target_of(l), style)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                writeln!(out, "before  {}", shown(&done.before))?;
+                let how = match (done.mode, l.linear) {
+                    (media::LevelMode::Linear, _) => "linear gain".to_string(),
+                    (_, true) => format!(
+                        "linear gain, peaks limited at {:.2} dBTP",
+                        done.ceiling_db.unwrap_or(l.true_peak)
+                    ),
+                    (_, false) => format!(
+                        "gain and limiter at {:.2} dBTP",
+                        done.ceiling_db.unwrap_or(l.true_peak)
+                    ),
+                };
+                writeln!(
+                    out,
+                    "level   {:+.2} dB, {how} (target {} LUFS, ceiling {} dBTP)",
+                    done.gain_db, l.integrated, l.true_peak
+                )?;
+                buf = done.buffer;
+            }
             Some(buf)
         }
         None => {
@@ -258,6 +299,7 @@ pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
     let opts = ExportOptions {
         video: job.codec,
         crf: job.crf,
+        audio_kbps: job.audio_kbps,
         prefs: job.prefs.clone(),
         ..ExportOptions::default()
     };
@@ -328,6 +370,11 @@ pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
         job.output.display(),
         std::fs::metadata(&job.output)?.len() as f64 / 1e6
     )?;
+    if job.loudness.is_some() {
+        let after = media::measure_loudness(&job.output, 0, &Prefs::default(), |_| true)
+            .map_err(|e| format!("{}: {e}", job.output.display()))?;
+        writeln!(out, "after   {} (the MP4's AAC)", shown(&after))?;
+    }
     Ok(())
 }
 

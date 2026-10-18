@@ -48,6 +48,20 @@ pub fn loudness_of(text: &str) -> Result<Loudness, String> {
     Loudness::parse(text)
 }
 
+pub fn loudness_with(
+    loudness: Option<Loudness>,
+    true_peak: Option<f64>,
+    linear: bool,
+) -> Option<Loudness> {
+    loudness.map(|mut l| {
+        if let Some(tp) = true_peak {
+            l.true_peak = tp;
+        }
+        l.linear = linear;
+        l
+    })
+}
+
 #[derive(clap::Args, Clone, Default)]
 pub struct ConvertArgs {
     #[arg(long, value_enum, help = "fast, balanced (the default) or best")]
@@ -81,6 +95,12 @@ pub struct ConvertArgs {
         help = "The true-peak ceiling in dBTP [default: -1]"
     )]
     pub true_peak: Option<f64>,
+    #[arg(
+        long,
+        requires = "loudness",
+        help = "Keep the dynamics: gain to the target, then only a true-peak limiter at the ceiling (may land under the target)"
+    )]
+    pub linear: bool,
     #[arg(long, help = "The audio bitrate in kbps, 32 to 512")]
     pub audio_bitrate: Option<u32>,
     #[arg(long, value_parser = super::time_of, help = "For a .wav: start at this time (seconds, m:ss or h:mm:ss)")]
@@ -188,10 +208,7 @@ pub fn options(
     if folder && args.fps.is_none() {
         missing(sub, &["--fps <FPS>"]);
     }
-    let mut loudness = args.loudness;
-    if let (Some(tp), Some(l)) = (args.true_peak, loudness.as_mut()) {
-        l.true_peak = tp;
-    }
+    let loudness = loudness_with(args.loudness, args.true_peak, args.linear);
     let mut request = Request::new(input, output);
     request.joins = joins;
     request.profile = profile;
@@ -274,10 +291,7 @@ fn wav(
             format!("--to {to} must come after --from {from}"),
         );
     }
-    let mut loudness = args.loudness;
-    if let (Some(tp), Some(l)) = (args.true_peak, loudness.as_mut()) {
-        l.true_peak = tp;
-    }
+    let loudness = loudness_with(args.loudness, args.true_peak, args.linear);
     if let Some(l) = &loudness
         && let Err(e) = l.check()
     {

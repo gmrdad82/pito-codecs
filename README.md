@@ -20,26 +20,29 @@ Every speed number on this page was measured on one machine (AMD Ryzen 9 9950X, 
 
 ## Install and first use
 
-pcod, the command line over the library, comes with every [GitHub Release](https://github.com/gmrdad82/pito-codecs/releases/latest) for Linux x86-64, Windows x86-64 and macOS on Apple Silicon.
+pcod, the command line over the library, comes with every [GitHub Release](https://github.com/gmrdad82/pito-codecs/releases/latest) for Linux x86-64, Windows x86-64 and macOS on Apple Silicon. These lines fetch the latest release.
 
 Linux x86-64:
 
 ```sh
-v=v1.10.0; curl -fsSLO "https://github.com/gmrdad82/pito-codecs/releases/download/$v/pcod-$v-linux-x86_64.tar.gz"
+v=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/gmrdad82/pito-codecs/releases/latest); v=${v##*/}
+curl -fsSLO "https://github.com/gmrdad82/pito-codecs/releases/download/$v/pcod-$v-linux-x86_64.tar.gz"
 tar -xzf "pcod-$v-linux-x86_64.tar.gz" pcod && install -Dm755 pcod ~/.local/bin/pcod
 ```
 
 macOS on Apple Silicon:
 
 ```sh
-v=v1.10.0; curl -fsSLO "https://github.com/gmrdad82/pito-codecs/releases/download/$v/pcod-$v-macos-arm64.tar.gz"
+v=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/gmrdad82/pito-codecs/releases/latest); v=${v##*/}
+curl -fsSLO "https://github.com/gmrdad82/pito-codecs/releases/download/$v/pcod-$v-macos-arm64.tar.gz"
 tar -xzf "pcod-$v-macos-arm64.tar.gz" pcod && sudo install -m755 pcod /usr/local/bin/pcod
 ```
 
 Windows x86-64, in PowerShell:
 
 ```powershell
-$v="v1.10.0"; Invoke-WebRequest "https://github.com/gmrdad82/pito-codecs/releases/download/$v/pcod-$v-windows-x86_64.zip" -OutFile pcod.zip
+$v = (Invoke-RestMethod https://api.github.com/repos/gmrdad82/pito-codecs/releases/latest).tag_name
+Invoke-WebRequest "https://github.com/gmrdad82/pito-codecs/releases/download/$v/pcod-$v-windows-x86_64.zip" -OutFile pcod.zip
 Expand-Archive pcod.zip "$env:LOCALAPPDATA\pcod" -Force; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";$env:LOCALAPPDATA\pcod", "User")
 ```
 
@@ -54,13 +57,13 @@ pcod frames frames/ trailer.mp4 --fps 60 --audio trailer.wav
 pcod stills clip.mp4 --count 24 --cols 6 --sheet sheet.png --out stills/
 ```
 
-`SHA256SUMS` in each Release lists every archive's checksum. To build pcod from source anywhere, Linux arm64 included, with Rust 1.97 or newer: `cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag v1.10.0 pito-codecs --bin pcod`.
+`SHA256SUMS` in each Release lists every archive's checksum. To build pcod from source anywhere, Linux arm64 included, with Rust 1.97 or newer: `cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag v1.15.0 pito-codecs --bin pcod`.
 
 In a Rust project, add the library with the parts you need (all are on by default):
 
 ```toml
 [dependencies]
-pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v1.10.0", default-features = false, features = ["h264", "hevc", "vp9", "aac", "mp4", "mkv", "gpu", "filter", "opus", "ac3", "mp3"] }
+pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v1.15.0", default-features = false, features = ["h264", "hevc", "vp9", "aac", "mp4", "mkv", "gpu", "filter", "opus", "ac3", "mp3"] }
 ```
 
 and let it pick the fastest route for each job:
@@ -91,6 +94,8 @@ pcod clip.mp4 readme.gif --size 640                # a looping README GIF
 pcod join intro.mp4 scene.mp4 outro.mp4 film.mp4   # copied when the clips match
 pcod talk.mp4 upload.mp4 --loudness youtube        # -14 LUFS in two EBU R128 passes, video copied
 pcod phone.mp4 engine.wav --from 0:12 --to 0:20     # a range of the audio as 16-bit PCM WAV
+pcod mix.wav master.wav --loudness -14 --linear     # -14 LUFS keeping the dynamics, peaks limited
+pcod loudness master.mp4 --json                     # EBU R128 integrated, range, true peak, maxima
 ```
 
 Against pconv 1.0.1, the converter pcod replaced (ffmpeg 9.0.1 with x264, libvpx and libwebp) on 30 s of 1080p30 H.264 talking head, run in turn three times each, medians, at load 22 to 46 on a 32-thread machine; quality against the source (the GIF and WebP against it scaled to 800x450 at 12 fps):
@@ -430,7 +435,7 @@ pito-codecs is the media layer of [PITO MD](https://pitomd.com): Splicer, PITO M
 - [prec](https://github.com/gmrdad82/prec) records the terminal clip at the top of this page, and pcod, this repository's command line, turns it into the GIF.
 - [pito-compare](https://github.com/gmrdad82/pito-compare) draws every chart on this page.
 - [pgpu](https://github.com/gmrdad82/pgpu) shares one GPU between the benchmarks and the other jobs on the test machine.
-- [pfx](https://github.com/gmrdad82/pfx) and [Manfred](https://github.com/gmrdad82/manfred) render and build scenes; [pito-tui](https://github.com/gmrdad82/pito-tui) is the shell of PITO MD's terminal apps.
+- [pfx](https://github.com/gmrdad82/pfx) and Manfred render and build scenes; [pito-tui](https://github.com/gmrdad82/pito-tui) is the shell of PITO MD's terminal apps.
 
 ## Build and test
 
