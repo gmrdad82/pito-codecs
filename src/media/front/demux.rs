@@ -495,6 +495,10 @@ pub fn probe_head(r: &Arc<mkv::Reader>) -> Result<Option<Probe>> {
 pub fn probe(head: &Arc<mkv::Reader>) -> Result<Probe> {
     let starts = Demux::Mkv(head.clone()).starts();
     let r = head.full()?;
+    if r.video().is_none() {
+        let duration = (r.duration_seconds() - starts.file).max(0.0);
+        return super::base::audio_only(mkv_audio(r, &starts), duration, starts.file);
+    }
     let (v, t) = mkv_video(r)?;
     let duration = (t.duration_seconds() - starts.file).max(0.0);
     let fps = match t.default_duration.filter(|d| *d > 0) {
@@ -512,6 +516,30 @@ pub fn probe(head: &Arc<mkv::Reader>) -> Result<Probe> {
     };
     let frames = Some(t.samples.len() as u64);
     describe(r, t, (duration, fps, frames), keyframe, &starts)
+}
+
+fn mkv_audio(r: &mkv::Reader, starts: &Starts) -> Vec<AudioTrack> {
+    r.audio()
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, i)| {
+            let a = r.tracks.get(i)?;
+            let name = a.name.trim();
+            Some(AudioTrack {
+                index,
+                stream: i,
+                title: (!name.is_empty()).then(|| name.to_string()),
+                language: (!a.language.is_empty() && a.language != "und")
+                    .then(|| a.language.clone()),
+                codec: a.codec_name().to_string(),
+                channels: a.channels() as u16,
+                rate: a.sample_rate(),
+                bitrate: None,
+                default: a.default,
+                start: starts.track(i),
+            })
+        })
+        .collect()
 }
 
 fn describe(
@@ -542,28 +570,7 @@ fn describe(
             .unwrap_or((String::new(), 8)),
         _ => (String::new(), 8),
     };
-    let audio = r
-        .audio()
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, i)| {
-            let a = r.tracks.get(i)?;
-            let name = a.name.trim();
-            Some(AudioTrack {
-                index,
-                stream: i,
-                title: (!name.is_empty()).then(|| name.to_string()),
-                language: (!a.language.is_empty() && a.language != "und")
-                    .then(|| a.language.clone()),
-                codec: a.codec_name().to_string(),
-                channels: a.channels() as u16,
-                rate: a.sample_rate(),
-                bitrate: None,
-                default: a.default,
-                start: starts.track(i),
-            })
-        })
-        .collect();
+    let audio = mkv_audio(r, starts);
     Ok(Probe {
         duration,
         start: starts.file,

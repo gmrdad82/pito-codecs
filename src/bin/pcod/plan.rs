@@ -29,6 +29,7 @@ pub const PEAK_HIGHEST: f64 = 0.0;
 pub struct Loudness {
     pub integrated: f64,
     pub true_peak: f64,
+    pub linear: bool,
 }
 
 impl Loudness {
@@ -37,6 +38,7 @@ impl Loudness {
             return Ok(Loudness {
                 integrated: YOUTUBE,
                 true_peak: YOUTUBE_PEAK,
+                linear: false,
             });
         }
         text.parse()
@@ -45,6 +47,7 @@ impl Loudness {
             .map(|integrated| Loudness {
                 integrated,
                 true_peak: TRUE_PEAK,
+                linear: false,
             })
             .ok_or_else(|| format!("use a LUFS value such as {YOUTUBE}, or youtube"))
     }

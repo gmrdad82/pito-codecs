@@ -10,6 +10,7 @@
 ))]
 mod alpha;
 mod audio;
+mod bare;
 mod base;
 mod demux;
 #[cfg(all(
@@ -224,9 +225,10 @@ pub use join::{JoinAudio, JoinMethod, JoinOptions, Joined, join};
 ))]
 pub use level::{
     AAC_KBPS, DEFAULT_TRUE_PEAK, HIGHEST_TRUE_PEAK, LEVEL_RATE, LOUDEST_LUFS, LOWEST_TRUE_PEAK,
-    LevelMode, LevelOptions, LevelPlan, LevelProgress, LevelStage, LevelTarget, Leveler, Levelled,
-    LoudnessStats, OPUS_KBPS, QUIETEST_LUFS, YOUTUBE_LUFS, YOUTUBE_TRUE_PEAK, level,
-    measure_loudness, plan_level, plan_level_span,
+    LevelMode, LevelOptions, LevelPlan, LevelProgress, LevelStage, LevelStyle, LevelTarget,
+    Leveler, Levelled, LevelledPcm, LoudnessStats, OPUS_KBPS, QUIETEST_LUFS, YOUTUBE_LUFS,
+    YOUTUBE_TRUE_PEAK, level, level_pcm, level_with, measure_loudness, meter_loudness, plan_level,
+    plan_level_span, plan_level_styled,
 };
 #[cfg(all(
     feature = "h264",

@@ -4,6 +4,7 @@ use std::sync::mpsc;
 
 use crate::aac::Resampler;
 
+use super::bare::{self, BareFeed};
 use super::base::{self as native, PAD, shape};
 use super::feed::Feed;
 use super::ffmpeg::Child;
@@ -51,7 +52,7 @@ impl Part {
 }
 
 struct Native {
-    feed: Feed,
+    feed: Source,
     resampler: Option<Resampler>,
     up_first: bool,
     rate: u32,
@@ -202,27 +203,79 @@ fn mix(parts: &mut [Part], rate: u32) -> Result<Option<AudioBuffer>> {
     Ok(Some(out))
 }
 
+enum Source {
+    Feed(Feed),
+    Bare(BareFeed),
+}
+
+impl Source {
+    fn rate(&self) -> u32 {
+        match self {
+            Source::Feed(f) => f.rate,
+            Source::Bare(f) => f.rate,
+        }
+    }
+
+    fn channels(&self) -> u16 {
+        match self {
+            Source::Feed(f) => f.channels,
+            Source::Bare(f) => f.channels,
+        }
+    }
+
+    fn want(&self) -> Option<usize> {
+        match self {
+            Source::Feed(f) => f.want(f64::INFINITY),
+            Source::Bare(_) => None,
+        }
+    }
+
+    fn next(&mut self, out: &mut Vec<f32>) -> Result<bool> {
+        match self {
+            Source::Feed(f) => f.next(out),
+            Source::Bare(f) => f.next(out),
+        }
+    }
+
+    fn end(&self) -> f64 {
+        match self {
+            Source::Feed(f) => f.end(),
+            Source::Bare(f) => f.end(),
+        }
+    }
+}
+
 impl Native {
     fn open(path: &Path, track: usize, from: f64, rate: u32, channels: u16) -> Result<Native> {
-        let d = native::audio_demux(path)?;
-        let i = native::audio_track(&d, track)?;
-        let pad = Sound::open(&d, i)?.pre_roll().max(PAD);
         let start = (from.max(0.0) * rate as f64).round() as usize;
-        let pad = start.min((pad * rate as f64).round() as usize);
-        let t0 = (start - pad) as f64 / rate as f64;
-        let feed = Feed::open(&d, i, t0)?;
-        if channels != feed.channels && channels > 2 {
+        let feed = match bare::sniff(path) {
+            Some(kind) => {
+                let pad = start.min((PAD * rate as f64).round() as usize);
+                let t0 = (start - pad) as f64 / rate as f64;
+                (Source::Bare(BareFeed::open(path, kind, track, t0)?), pad)
+            }
+            None => {
+                let d = native::audio_demux(path)?;
+                let i = native::audio_track(&d, track)?;
+                let pad = Sound::open(&d, i)?.pre_roll().max(PAD);
+                let pad = start.min((pad * rate as f64).round() as usize);
+                let t0 = (start - pad) as f64 / rate as f64;
+                (Source::Feed(Feed::open(&d, i, t0)?), pad)
+            }
+        };
+        let (feed, pad) = feed;
+        let (feed_rate, feed_channels) = (feed.rate(), feed.channels());
+        if channels != feed_channels && channels > 2 {
             return Err(Error::Invalid(format!(
-                "{channels} channels from a {}-channel track: ask for 1, 2 or {}",
-                feed.channels, feed.channels
+                "{channels} channels from a {feed_channels}-channel track: ask for 1, 2 or {feed_channels}"
             )));
         }
-        let up_first = channels > feed.channels;
-        let resampler = (feed.rate != rate).then(|| {
+        let up_first = channels > feed_channels;
+        let resampler = (feed_rate != rate).then(|| {
             Resampler::new(
-                feed.rate,
+                feed_rate,
                 rate,
-                if up_first { feed.channels } else { channels },
+                if up_first { feed_channels } else { channels },
             )
         });
         Ok(Native {
@@ -267,13 +320,13 @@ impl Native {
     }
 
     fn pump(&mut self) -> Result<()> {
-        let src_ch = self.feed.channels as usize;
-        let batch = self.feed.rate as usize;
+        let src_ch = self.feed.channels() as usize;
+        let batch = self.feed.rate() as usize;
         self.raw.clear();
         let mut ended = false;
         loop {
             let have = self.fed + self.raw.len() / src_ch;
-            if let Some(w) = self.feed.want(f64::INFINITY)
+            if let Some(w) = self.feed.want()
                 && have >= w
             {
                 ended = true;
@@ -287,12 +340,12 @@ impl Native {
                 break;
             }
         }
-        if ended && let Some(w) = self.feed.want(f64::INFINITY) {
+        if ended && let Some(w) = self.feed.want() {
             let keep = w.saturating_sub(self.fed) * src_ch;
             self.raw.resize(keep, 0.0);
         }
         self.fed += self.raw.len() / src_ch;
-        let mut buf = AudioBuffer::new(self.feed.rate, self.feed.channels);
+        let mut buf = AudioBuffer::new(self.feed.rate(), self.feed.channels());
         buf.samples = std::mem::take(&mut self.raw);
         let done = self.convert(buf)?;
         self.raw = Vec::with_capacity(batch * src_ch);
