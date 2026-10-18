@@ -238,6 +238,7 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
         );
         progress.clear();
         let loud = loud?;
+        loud.held()?;
         land(&part, &request.output, request.overwrite)?;
         *partial_path = None;
         return finish(
@@ -326,6 +327,9 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
         Some(Err(e)) => return Err(e.to_string().into()),
         None => None,
     };
+    if let Some(l) = &loud {
+        l.held()?;
+    }
     land(&part, &request.output, request.overwrite)?;
     *partial_path = None;
     finish(
@@ -423,7 +427,21 @@ pub struct Loud {
     pub mode: media::LevelMode,
 }
 
+pub fn ceiling_held(peak: f64, ceiling: f64) -> Result<(), Fail> {
+    if peak > ceiling + 0.005 {
+        return Err(format!(
+            "the encoded audio peaks at {peak:.2} dBTP, over the {ceiling} dBTP ceiling, so nothing was written; ask for a lower --true-peak or a higher --audio-bitrate"
+        )
+        .into());
+    }
+    Ok(())
+}
+
 impl Loud {
+    pub fn held(&self) -> Result<(), Fail> {
+        ceiling_held(self.after.true_peak, self.target.true_peak)
+    }
+
     pub fn lines(&self) -> String {
         let m = |s: &media::LoudnessStats| {
             format!(
@@ -613,7 +631,9 @@ fn join(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<String,
             );
             let _ = std::fs::remove_file(&part);
             part = levelled;
-            Some(loud?)
+            let loud = loud?;
+            loud.held()?;
+            Some(loud)
         }
         None => None,
     };

@@ -12,7 +12,7 @@ use pito_codecs::media::{
 use pito_codecs::png;
 
 use super::Fail;
-use super::convert::target_of;
+use super::convert::{ceiling_held, target_of};
 use super::plan::Loudness;
 
 const RATE: u32 = 48_000;
@@ -266,6 +266,9 @@ pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
                     "level   {:+.2} dB, {how} (target {} LUFS, ceiling {} dBTP)",
                     done.gain_db, l.integrated, l.true_peak
                 )?;
+                if let Some(e) = &done.encoded {
+                    writeln!(out, "check   {} (a trial AAC)", shown(e))?;
+                }
                 buf = done.buffer;
             }
             Some(buf)
@@ -374,6 +377,12 @@ pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
         let after = media::measure_loudness(&job.output, 0, &Prefs::default(), |_| true)
             .map_err(|e| format!("{}: {e}", job.output.display()))?;
         writeln!(out, "after   {} (the MP4's AAC)", shown(&after))?;
+        if let Some(l) = &job.loudness
+            && let Err(e) = ceiling_held(after.true_peak, l.true_peak)
+        {
+            let _ = std::fs::remove_file(&job.output);
+            return Err(format!("{}: {e}", job.output.display()).into());
+        }
     }
     Ok(())
 }

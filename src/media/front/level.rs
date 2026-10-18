@@ -23,7 +23,8 @@ pub const LOWEST_TRUE_PEAK: f64 = -9.0;
 pub const HIGHEST_TRUE_PEAK: f64 = 0.0;
 const CLOSE: f64 = 0.1;
 const TRIES: usize = 3;
-const RETRIES: usize = 2;
+const RETRIES: usize = 8;
+const MARGIN: f64 = 0.05;
 const HEADROOM: f64 = 0.3;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -456,11 +457,13 @@ pub fn level_pcm(
             Some((codec, kbps)) => Some(encoded_pcm(&out, codec, kbps)?),
             None => None,
         };
-        let peak = encoded.map_or(after.true_peak, |e| e.true_peak);
-        let over = peak - target.true_peak;
+        let over = match encoded {
+            Some(e) => e.true_peak - (target.true_peak - MARGIN),
+            None => after.true_peak - target.true_peak,
+        };
         if over > 0.0 && retries < RETRIES {
             retries += 1;
-            headroom += over + CLOSE;
+            headroom += over + CLOSE * retries as f64;
             continue;
         }
         let mode = if ceiling_db.is_some() {
@@ -1011,14 +1014,14 @@ pub fn plan_level_styled(
     let Some((codec, kbps)) = style.encoded else {
         return Ok(plan);
     };
-    for _ in 0..RETRIES {
+    for k in 1..=RETRIES {
         let trial = plan.leveler(LEVEL_RATE, 2)?;
         let got = encoded_pass(&source, trial, codec, kbps, progress)?;
-        let over = got.true_peak - target.true_peak;
-        if over.is_nan() || over <= 0.0 {
+        let over = got.true_peak - (target.true_peak - MARGIN);
+        if over.is_nan() || over <= 0.0 || k == RETRIES {
             break;
         }
-        headroom += over + CLOSE;
+        headroom += over + CLOSE * k as f64;
         plan = planned(
             &source,
             before,
@@ -1154,10 +1157,10 @@ pub fn level_with(
                 return Err(e);
             }
         };
-        let over = after.true_peak - target.true_peak;
+        let over = after.true_peak - (target.true_peak - MARGIN);
         if over > 0.0 && retries < RETRIES {
             retries += 1;
-            headroom += over + CLOSE;
+            headroom += over + CLOSE * retries as f64;
             gain = plan.gain_db;
             continue;
         }

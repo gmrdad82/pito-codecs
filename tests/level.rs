@@ -199,3 +199,115 @@ fn linear_levelling_keeps_the_range_and_the_encoded_aac_keeps_the_ceiling() {
     let encoded = kept.encoded.unwrap();
     assert!(encoded.true_peak <= target.true_peak, "{encoded:?}");
 }
+
+fn dense(seconds: usize) -> AudioBuffer {
+    let rate = 48_000usize;
+    let n = seconds * rate;
+    let drop = seconds as f64 * 0.4;
+    let mut out = vec![[0.0f64; 2]; n];
+    for (i, o) in out.iter_mut().enumerate() {
+        let t = i as f64 / rate as f64;
+        let chord = |shift: f64| {
+            [(220.0, 0.0), (277.2, 1.0), (329.6, 2.0), (440.0, 3.0)]
+                .iter()
+                .map(|(f, p)| (2.0 * PI * f * (t - shift) + p).sin())
+                .sum::<f64>()
+                / 4.0
+        };
+        let swell = if t < drop {
+            0.05 + 0.1 * t / drop
+        } else {
+            0.25
+        };
+        let sub = if t >= drop {
+            0.3 * (2.0 * PI * 41.0 * t).sin()
+        } else {
+            0.0
+        };
+        *o = [
+            chord(0.0) * swell + sub,
+            chord(300.0 / rate as f64) * swell + sub,
+        ];
+    }
+    let kick_len = rate * 35 / 100;
+    let mut phase = 0.0;
+    let kick: Vec<f64> = (0..kick_len)
+        .map(|j| {
+            let k = j as f64 / rate as f64;
+            phase += 2.0 * PI * (45.0 + 110.0 * (-k * 30.0).exp()) / rate as f64;
+            let click = if j < 48 {
+                (1.0 - j as f64 / 48.0) * (j as f64 * 2.9).sin().signum()
+            } else {
+                0.0
+            };
+            phase.sin() * (-k * 9.0).exp() + click
+        })
+        .collect();
+    let mut seed = 7u64;
+    let mut noise = || {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((seed >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+    };
+    let crash_len = rate * 3 / 2;
+    let mut last = [0.0f64; 2];
+    let crash: Vec<[f64; 2]> = (0..crash_len)
+        .map(|j| {
+            let e = (-(j as f64 / rate as f64) * 3.0).exp() * 0.6;
+            let w = [noise(), noise()];
+            let d = [w[0] - last[0], w[1] - last[1]];
+            last = w;
+            [d[0] * e, d[1] * e]
+        })
+        .collect();
+    let mut add = |at: f64, gain: f64, sound: &dyn Fn(usize) -> [f64; 2], len: usize| {
+        let i = (at * rate as f64) as usize;
+        for j in 0..len.min(n.saturating_sub(i)) {
+            let s = sound(j);
+            out[i + j][0] += gain * s[0];
+            out[i + j][1] += gain * s[1];
+        }
+    };
+    let kicked = |j: usize| [kick[j], kick[j]];
+    let mut at = drop;
+    while at < seconds as f64 - 0.4 {
+        add(at, 0.9, &kicked, kick_len);
+        at += 0.5;
+    }
+    let mut at = drop;
+    while at < seconds as f64 - 1.6 {
+        add(at, 1.0, &|j| crash[j], crash_len);
+        at += 2.0;
+    }
+    let mut at = 0.5;
+    while at < drop {
+        add(at, 0.3, &kicked, kick_len);
+        at += 2.0;
+    }
+    let mut b = AudioBuffer::new(rate as u32, 2);
+    b.samples = out
+        .iter()
+        .flat_map(|s| s.map(|v| v.clamp(-1.0, 1.0) as f32))
+        .collect();
+    b
+}
+
+#[test]
+fn a_dense_mix_keeps_the_ceiling_after_the_aac_encode() {
+    let source = dense(40);
+    let target = LevelTarget::new(-14.0);
+    for linear in [false, true] {
+        let style = LevelStyle {
+            linear,
+            encoded: Some((Codec::Aac, 192)),
+        };
+        let done = level_pcm(&source, &target, style).unwrap();
+        let encoded = done.encoded.unwrap();
+        assert!(
+            encoded.true_peak <= target.true_peak,
+            "linear {linear}: {encoded:?}, limiter at {:?}",
+            done.ceiling_db
+        );
+    }
+}
