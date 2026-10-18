@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.15.1 — 2026-10-19
+
+### Fixed
+
+- `--loudness` with `--true-peak` now holds the ceiling in the encoded AAC of a dense mix with sharp transients: the trial encode lowers the limiter up to eight times instead of twice (a film score came out at -0.68 dBTP for a -1 ceiling). pcod refuses to write an output whose encoded audio still peaks over the ceiling, and `pcod frames` prints the trial encode's loudness.
+
 ## v1.15.0 — 2026-10-18
 
 ### Added
