@@ -71,7 +71,7 @@ pub struct ConvertArgs {
     #[arg(
         long,
         value_parser = rate_of,
-        help = "The frame rate, 1 to 240: an integer, a ratio such as 24000/1001, or a decimal (23.976, 29.97 and 59.94 are 24000/1001, 30000/1001 and 60000/1001; for a folder of PNG frames, their rate)"
+        help = "The frame rate, 1 to 240: an integer, a ratio such as 24000/1001, or a decimal (23.976, 29.97, 47.952 and 59.94 are 24000/1001, 30000/1001, 48000/1001 and 60000/1001; for a folder of PNG frames, their rate)"
     )]
     pub fps: Option<(u32, u32)>,
     #[arg(
