@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.16.0 — 2026-10-19
+
+### Added
+
+- `h264::Encoder::memory(width, height, threads)` estimates the CPU H.264 encoder's peak memory for a picture size.
+
+### Changed
+
+- The CPU H.264 encoder keeps at most 1 GiB of pictures in flight, so very large frames no longer take one frame per core: a 6344x3968 encode runs 6 frame threads, and 1080p and 4K encode as fast as before.
+- `pcod frames` sizes its PNG decoders to 1 GiB (three at 6K), and refuses in one line, before encoding, when its memory estimate is over the process's address-space limit. 586 frames of 6K PNGs at CRF 14 on the CPU now peak at 3.75 GB instead of over 8 GB, flat in the frame count, at the same speed.
+- Checks and releases run on the maintainer's machines; the repository runs no GitHub Actions.
+
+### Fixed
+
+- The GIF encoder no longer overflows an integer on a frame where nothing changed, in builds with overflow checks.
+
 ## v1.15.1 — 2026-10-19
 
 ### Fixed
