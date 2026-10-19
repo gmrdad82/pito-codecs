@@ -147,7 +147,7 @@ enum Command {
         dir: PathBuf,
         #[arg(help = "The MP4 to write")]
         output: PathBuf,
-        #[arg(long, value_parser = args::rate_of, help = "Frame rate: an integer, a ratio such as 24000/1001, or a decimal (23.976, 29.97 and 59.94 are 24000/1001, 30000/1001 and 60000/1001)")]
+        #[arg(long, value_parser = args::rate_of, help = "Frame rate: an integer, a ratio such as 24000/1001, or a decimal (23.976, 29.97, 47.952 and 59.94 are 24000/1001, 30000/1001, 48000/1001 and 60000/1001)")]
         fps: (u32, u32),
         #[arg(long, help = "A PCM WAV to encode as the audio track")]
         audio: Option<PathBuf>,

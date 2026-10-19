@@ -374,66 +374,68 @@ fn ntsc_frames_keep_the_exact_rate_and_the_audio_in_sync() {
         )
         .unwrap();
     }
-    let last = (COUNT as usize - 1) * 1001 * RATE as usize / 24_000;
-    let total = COUNT as usize * 1001 * RATE as usize / 24_000;
-    let mut pcm = Vec::with_capacity((total + RATE as usize) * 4);
-    for i in 0..total + RATE as usize {
-        let v: i16 = if (last..last + 96).contains(&i) {
-            29_000
-        } else {
-            0
-        };
-        pcm.extend_from_slice(&v.to_le_bytes());
-        pcm.extend_from_slice(&v.to_le_bytes());
-    }
-    let mut wav = Vec::new();
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&(36 + pcm.len() as u32).to_le_bytes());
-    wav.extend_from_slice(b"WAVEfmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&2u16.to_le_bytes());
-    wav.extend_from_slice(&RATE.to_le_bytes());
-    wav.extend_from_slice(&(RATE * 4).to_le_bytes());
-    wav.extend_from_slice(&4u16.to_le_bytes());
-    wav.extend_from_slice(&16u16.to_le_bytes());
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
-    wav.extend_from_slice(&pcm);
-    let out = dir("ntsc");
-    let audio = out.join("pulse.wav");
-    fs::write(&audio, wav).unwrap();
-    let mp4 = out.join("ntsc.mp4");
-    ok(&run(&[
-        "frames",
-        folder.to_str().unwrap(),
-        mp4.to_str().unwrap(),
-        "--fps",
-        "23.976",
-        "--audio",
-        audio.to_str().unwrap(),
-        "--route",
-        "cpu",
-    ]));
-    let reader = pito_codecs::mp4::Reader::open(&mp4).unwrap();
-    let t = &reader.tracks[reader.video().unwrap()];
-    let ticks: u64 = t.samples.iter().map(|s| u64::from(s.duration)).sum();
-    assert_eq!(t.samples.len(), COUNT as usize);
-    assert_eq!(
-        u128::from(ticks) * 24_000,
-        u128::from(COUNT) * 1001 * u128::from(t.timescale)
-    );
-    let Some(pulse) = pulse_at(&mp4) else {
-        return;
-    };
-    assert_eq!(pulse, (last, total));
-    for ext in ["mkv", "webm"] {
-        let copy = out.join(format!("ntsc.{ext}"));
-        ok(&run(&[mp4.to_str().unwrap(), copy.to_str().unwrap()]));
-        let (at, _) = pulse_at(&copy).unwrap();
-        assert!(
-            at.abs_diff(last) <= 2,
-            "{ext}: pulse at {at}, frame at {last}"
+    for (fps, num) in [("23.976", 24_000usize), ("47.95", 48_000)] {
+        let last = (COUNT as usize - 1) * 1001 * RATE as usize / num;
+        let total = COUNT as usize * 1001 * RATE as usize / num;
+        let mut pcm = Vec::with_capacity((total + RATE as usize) * 4);
+        for i in 0..total + RATE as usize {
+            let v: i16 = if (last..last + 96).contains(&i) {
+                29_000
+            } else {
+                0
+            };
+            pcm.extend_from_slice(&v.to_le_bytes());
+            pcm.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + pcm.len() as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&RATE.to_le_bytes());
+        wav.extend_from_slice(&(RATE * 4).to_le_bytes());
+        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&pcm);
+        let out = dir(&format!("ntsc-{num}"));
+        let audio = out.join("pulse.wav");
+        fs::write(&audio, wav).unwrap();
+        let mp4 = out.join("ntsc.mp4");
+        ok(&run(&[
+            "frames",
+            folder.to_str().unwrap(),
+            mp4.to_str().unwrap(),
+            "--fps",
+            fps,
+            "--audio",
+            audio.to_str().unwrap(),
+            "--route",
+            "cpu",
+        ]));
+        let reader = pito_codecs::mp4::Reader::open(&mp4).unwrap();
+        let t = &reader.tracks[reader.video().unwrap()];
+        let ticks: u64 = t.samples.iter().map(|s| u64::from(s.duration)).sum();
+        assert_eq!(t.samples.len(), COUNT as usize);
+        assert_eq!(
+            u128::from(ticks) * num as u128,
+            u128::from(COUNT) * 1001 * u128::from(t.timescale)
         );
+        let Some(pulse) = pulse_at(&mp4) else {
+            continue;
+        };
+        assert_eq!(pulse, (last, total), "{fps}");
+        for ext in ["mkv", "webm"] {
+            let copy = out.join(format!("ntsc.{ext}"));
+            ok(&run(&[mp4.to_str().unwrap(), copy.to_str().unwrap()]));
+            let (at, _) = pulse_at(&copy).unwrap();
+            assert!(
+                at.abs_diff(last) <= 2,
+                "{fps} {ext}: pulse at {at}, frame at {last}"
+            );
+        }
     }
 }
