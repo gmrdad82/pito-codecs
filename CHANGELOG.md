@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.16.2 — 2026-10-19
+
+### Added
+
+- `pcod --fps` takes a ratio such as `24000/1001` or a decimal, as `pcod frames` does, and both read `23.976`, `29.97` and `59.94` as the exact `24000/1001`, `30000/1001` and `60000/1001`, so a 23.976 film never drifts against its 48 kHz audio.
+
+### Fixed
+
+- Converted files no longer play their audio about 21 ms late (7 ms for Opus in WebM): MP4 copies keep the AAC priming trim, MKV sources' delay carries into MP4, and MKV and WebM outputs place the priming the way ffmpeg and browsers expect.
+- MP4s written by pcod report their exact duration instead of one rounded to the millisecond.
+
 ## v1.16.1 — 2026-10-19
 
 ### Changed
