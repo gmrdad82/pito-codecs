@@ -16,6 +16,9 @@ use super::convert::{ceiling_held, target_of};
 use super::plan::Loudness;
 
 const RATE: u32 = 48_000;
+const POOL_BYTES: u64 = 1 << 30;
+const SLACK_BYTES: u64 = 1 << 30;
+const ARENA_BYTES: u64 = 64 << 20;
 
 pub struct Job {
     pub dir: PathBuf,
@@ -67,6 +70,18 @@ fn listed(dir: &Path) -> Result<Vec<PathBuf>, Fail> {
         }
     }
     Ok(files)
+}
+
+fn address_limit() -> Option<u64> {
+    let limits = std::fs::read_to_string("/proc/self/limits").ok()?;
+    let line = limits
+        .lines()
+        .find(|l| l.starts_with("Max address space"))?;
+    line.trim_start_matches("Max address space")
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
 }
 
 fn name(p: &Path) -> String {
@@ -220,6 +235,31 @@ pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
         )
         .into());
     }
+    let pixels = size.0 as u64 * size.1 as u64;
+    let per_thread = pixels * 8 + 2 * first.len() as u64 + pixels * 3;
+    let threads = job.threads.min((POOL_BYTES / per_thread) as usize).max(1);
+    let audio_bytes = match &job.audio {
+        Some(path) => std::fs::metadata(path).map_or(0, |m| m.len()) * 4,
+        None => 0,
+    };
+    let need = threads as u64 * per_thread
+        + pito_codecs::h264::Encoder::memory(size.0, size.1, 0)
+        + audio_bytes
+        + SLACK_BYTES
+        + ARENA_BYTES * std::thread::available_parallelism().map_or(4, |n| n.get()) as u64;
+    if let Some(limit) = address_limit()
+        && need > limit
+    {
+        return Err(format!(
+            "{}: {}x{} frames need about {:.1} GB of memory, over this process's {:.1} GB address-space limit",
+            job.dir.display(),
+            size.0,
+            size.1,
+            need as f64 / 1e9,
+            limit as f64 / 1e9
+        )
+        .into());
+    }
     let count = files.len();
     let (num, den) = job.fps;
     let seconds = count as f64 * den as f64 / num as f64;
@@ -230,7 +270,7 @@ pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
         size.0,
         size.1,
         trim(shown_fps),
-        job.threads
+        threads
     )?;
     let pcm = match &job.audio {
         Some(path) => {
@@ -283,7 +323,7 @@ pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
     let pool = Pool {
         files,
         size,
-        depth: job.threads * 2,
+        depth: threads * 2,
         queue: Mutex::new(Queue {
             next: 0,
             wanted: 0,
@@ -324,7 +364,7 @@ pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
         })
     };
     let made = std::thread::scope(|s| {
-        for _ in 0..job.threads.max(1) {
+        for _ in 0..threads {
             s.spawn(|| pool.work());
         }
         let result = export_frames(

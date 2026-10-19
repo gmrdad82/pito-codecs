@@ -583,7 +583,7 @@ impl Encoder {
             });
         }
         let (left, right, top, bottom) = bounds;
-        (left <= right && top <= bottom).then_some(Area {
+        (left <= right && top <= bottom).then(|| Area {
             rect: (left, top, right - left + 1, bottom - top + 1),
             whole: false,
         })

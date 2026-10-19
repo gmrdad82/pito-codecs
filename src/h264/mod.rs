@@ -185,6 +185,11 @@ impl Encoder {
         })
     }
 
+    pub fn memory(width: u32, height: u32, threads: usize) -> u64 {
+        let (mbw, mbh) = (width.div_ceil(16) as usize, height.div_ceil(16) as usize);
+        enc::budget(mbw, mbh, enc::threads_of(threads), false).bytes
+    }
+
     pub fn avcc(&self) -> Vec<u8> {
         self.inner.avcc()
     }
