@@ -82,18 +82,18 @@ pub fn listed(dir: &Path) -> Result<Vec<PathBuf>, Fail> {
     Ok(files)
 }
 
-pub fn frames(dir: &Path, fps: Option<u32>) -> Result<Media, Fail> {
+pub fn frames(dir: &Path, fps: Option<(u32, u32)>) -> Result<Media, Fail> {
     let files = listed(dir)?;
     let first = std::fs::read(&files[0]).map_err(|e| format!("{}: {e}", files[0].display()))?;
     let info = png::info(&first).map_err(|e| format!("{}: {e}", files[0].display()))?;
-    let rate = fps.unwrap_or(30).max(1);
+    let rate = fps.unwrap_or((30, 1));
     let count = files.len() as u64;
     Ok(Media {
         path: dir.to_path_buf(),
         width: info.width,
         height: info.height,
-        fps: (rate, 1),
-        seconds: Some(count as f64 / rate as f64),
+        fps: rate,
+        seconds: Some(count as f64 * f64::from(rate.1) / f64::from(rate.0.max(1))),
         frames: Some(count),
         codec: "png".into(),
         bit_depth: info.depth.max(8),
@@ -151,7 +151,7 @@ pub fn file(path: &Path) -> Result<Media, Fail> {
     })
 }
 
-pub fn open(path: &Path, fps: Option<u32>) -> Result<Media, Fail> {
+pub fn open(path: &Path, fps: Option<(u32, u32)>) -> Result<Media, Fail> {
     if path.is_dir() {
         frames(path, fps)
     } else {

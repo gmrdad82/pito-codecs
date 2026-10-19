@@ -147,7 +147,7 @@ enum Command {
         dir: PathBuf,
         #[arg(help = "The MP4 to write")]
         output: PathBuf,
-        #[arg(long, value_parser = rate_of, help = "Frame rate: an integer, a ratio such as 30000/1001, or a decimal")]
+        #[arg(long, value_parser = args::rate_of, help = "Frame rate: an integer, a ratio such as 24000/1001, or a decimal (23.976, 29.97 and 59.94 are 24000/1001, 30000/1001 and 60000/1001)")]
         fps: (u32, u32),
         #[arg(long, help = "A PCM WAV to encode as the audio track")]
         audio: Option<PathBuf>,
@@ -276,41 +276,6 @@ pub fn time_of(text: &str) -> Result<f64, String> {
         total = total * 60.0 + v;
     }
     Ok(total)
-}
-
-fn rate_of(text: &str) -> Result<(u32, u32), String> {
-    let bad = || format!("'{text}' is not a frame rate such as 60, 30000/1001 or 29.97");
-    let (num, den) = if let Some((n, d)) = text.split_once('/') {
-        (
-            n.trim().parse::<u32>().map_err(|_| bad())?,
-            d.trim().parse::<u32>().map_err(|_| bad())?,
-        )
-    } else if let Some((whole, frac)) = text.split_once('.') {
-        if frac.is_empty() || frac.len() > 3 || !frac.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(bad());
-        }
-        let den = 10u32.pow(frac.len() as u32);
-        let whole = whole.parse::<u32>().map_err(|_| bad())?;
-        let frac = frac.parse::<u32>().map_err(|_| bad())?;
-        (
-            whole
-                .checked_mul(den)
-                .and_then(|w| w.checked_add(frac))
-                .ok_or_else(bad)?,
-            den,
-        )
-    } else {
-        (text.trim().parse::<u32>().map_err(|_| bad())?, 1)
-    };
-    if num == 0 || den == 0 || num / den > 1000 {
-        return Err(bad());
-    }
-    let g = gcd(num, den);
-    Ok((num / g, den / g))
-}
-
-fn gcd(a: u32, b: u32) -> u32 {
-    if b == 0 { a.max(1) } else { gcd(b, a % b) }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]

@@ -70,9 +70,10 @@ pub struct ConvertArgs {
     pub size: Option<Size>,
     #[arg(
         long,
-        help = "The frame rate, 1 to 240 (for a folder of PNG frames, their rate)"
+        value_parser = rate_of,
+        help = "The frame rate, 1 to 240: an integer, a ratio such as 24000/1001, or a decimal (23.976, 29.97 and 59.94 are 24000/1001, 30000/1001 and 60000/1001; for a folder of PNG frames, their rate)"
     )]
-    pub fps: Option<u32>,
+    pub fps: Option<(u32, u32)>,
     #[arg(
         long,
         conflicts_with = "qp",
@@ -311,4 +312,42 @@ fn wav(
             rate: args.rate,
         }),
     }
+}
+
+pub fn rate_of(text: &str) -> Result<(u32, u32), String> {
+    let bad = || format!("'{text}' is not a frame rate such as 60, 30000/1001 or 29.97");
+    let (num, den) = if let Some((n, d)) = text.split_once('/') {
+        (
+            n.trim().parse::<u32>().map_err(|_| bad())?,
+            d.trim().parse::<u32>().map_err(|_| bad())?,
+        )
+    } else if let Some((whole, frac)) = text.split_once('.') {
+        if frac.is_empty() || frac.len() > 3 || !frac.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(bad());
+        }
+        let den = 10u32.pow(frac.len() as u32);
+        let whole = whole.parse::<u32>().map_err(|_| bad())?;
+        let frac = frac.parse::<u32>().map_err(|_| bad())?;
+        let num = whole
+            .checked_mul(den)
+            .and_then(|w| w.checked_add(frac))
+            .ok_or_else(bad)?;
+        let ntsc = f64::from(num) / f64::from(den) * 1.001;
+        if !num.is_multiple_of(den) && ntsc >= 1.0 && (ntsc - ntsc.round()).abs() < 0.005 {
+            (ntsc.round() as u32 * 1000, 1001)
+        } else {
+            (num, den)
+        }
+    } else {
+        (text.trim().parse::<u32>().map_err(|_| bad())?, 1)
+    };
+    if num == 0 || den == 0 || num / den > 1000 {
+        return Err(bad());
+    }
+    let g = gcd(num, den);
+    Ok((num / g, den / g))
+}
+
+fn gcd(a: u32, b: u32) -> u32 {
+    if b == 0 { a.max(1) } else { gcd(b, a % b) }
 }

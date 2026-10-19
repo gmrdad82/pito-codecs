@@ -916,25 +916,25 @@ struct Audio {
 
 impl Audio {
     fn open(sink: &mut Sink, enc: &Encoder, kbps: u32) -> Result<Audio> {
-        let mut priming = 0i64;
-        let dst = match (sink, enc) {
+        let (dst, priming) = match (sink, enc) {
             (Sink::Mp4(w), Encoder::Aac(e)) => {
-                priming = e.priming() as i64;
                 let mut cfg = mp4::TrackConfig::new(
                     SampleEntry::aac(e.extradata(), 2, LEVEL_RATE, kbps * 1000),
                     LEVEL_RATE,
                 );
-                cfg.media_start = Some(priming);
-                w.add_track(cfg)?
+                cfg.media_start = Some(e.priming() as i64);
+                (w.add_track(cfg)?, e.priming() as i64)
             }
             (Sink::Mkv(w), Encoder::Aac(e)) => {
-                w.add_track(mkv::TrackConfig::aac(e.extradata(), LEVEL_RATE, 2))?
+                let mut cfg = mkv::TrackConfig::aac(e.extradata(), LEVEL_RATE, 2);
+                cfg.codec_delay = e.priming() as u64 * 1_000_000_000 / u64::from(LEVEL_RATE);
+                (w.add_track(cfg)?, e.priming() as i64)
             }
             #[cfg(feature = "opus")]
-            (Sink::Mkv(w), Encoder::Opus(e)) => {
-                priming = e.pre_skip() as i64;
-                w.add_track(mkv::TrackConfig::opus(e.codec_private()))?
-            }
+            (Sink::Mkv(w), Encoder::Opus(e)) => (
+                w.add_track(mkv::TrackConfig::opus(e.codec_private()))?,
+                e.pre_skip() as i64,
+            ),
             #[cfg(feature = "opus")]
             (Sink::Mp4(_), Encoder::Opus(_)) => {
                 return Err(Error::Unsupported("Opus audio in MP4".into()));

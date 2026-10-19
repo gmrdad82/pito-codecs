@@ -101,7 +101,7 @@ pub struct Request {
     pub output: PathBuf,
     pub profile: Profile,
     pub size: Option<Size>,
-    pub fps: Option<u32>,
+    pub fps: Option<(u32, u32)>,
     pub quality: Option<u8>,
     pub tune: Option<String>,
     pub overwrite: bool,
@@ -148,12 +148,20 @@ impl Request {
                 ));
             }
         };
-        if let Some(fps) = self.fps {
-            if !(1..=240).contains(&fps) {
-                return Err(format!("fps {fps} is outside 1–240"));
+        if let Some((num, den)) = self.fps {
+            let fps = f64::from(num) / f64::from(den.max(1));
+            let shown = if den == 1 {
+                num.to_string()
+            } else {
+                format!("{num}/{den}")
+            };
+            if !(1.0..=240.0).contains(&fps) {
+                return Err(format!("fps {shown} is outside 1–240"));
             }
-            if container == Container::Gif && fps > GIF_MAX_FPS {
-                return Err(format!("a GIF plays at most {GIF_MAX_FPS} fps, not {fps}"));
+            if container == Container::Gif && fps > f64::from(GIF_MAX_FPS) {
+                return Err(format!(
+                    "a GIF plays at most {GIF_MAX_FPS} fps, not {shown}"
+                ));
             }
         }
         let fast_cannot =

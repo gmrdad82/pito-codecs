@@ -328,3 +328,109 @@ fn six_k_frames_encode_under_an_address_space_cap_or_refuse_in_one_line() {
     let p = probe(&mp4, &Prefs::default()).unwrap();
     assert_eq!((p.width, p.height, p.frames), (W, H, Some(COUNT as u64)));
 }
+
+fn pulse_at(file: &Path) -> (usize, usize) {
+    let out = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(file)
+        .args([
+            "-map",
+            "0:a",
+            "-af",
+            "aresample=async=1:first_pts=0",
+            "-ac",
+            "1",
+            "-f",
+            "f32le",
+            "-",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let samples: Vec<f32> = out
+        .stdout
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect();
+    let peak = samples.iter().fold(0f32, |m, v| m.max(v.abs()));
+    let at = samples.iter().position(|v| v.abs() > peak / 2.0).unwrap();
+    (at, samples.len())
+}
+
+#[test]
+fn ntsc_frames_keep_the_exact_rate_and_the_audio_in_sync() {
+    const COUNT: u32 = 1000;
+    const RATE: u32 = 48_000;
+    let folder = dir("ntsc-frames");
+    for n in 0..COUNT {
+        let mut img = Rgba::new(64, 64);
+        for (i, px) in img.data.chunks_exact_mut(4).enumerate() {
+            let x = i as u32 % 64;
+            px.copy_from_slice(&[(x * 4 + n) as u8, n as u8, 128, 255]);
+        }
+        fs::write(
+            folder.join(format!("{n:06}.png")),
+            pito_codecs::png::encode(&img).unwrap(),
+        )
+        .unwrap();
+    }
+    let last = (COUNT as usize - 1) * 1001 * RATE as usize / 24_000;
+    let total = COUNT as usize * 1001 * RATE as usize / 24_000;
+    let mut pcm = Vec::with_capacity((total + RATE as usize) * 4);
+    for i in 0..total + RATE as usize {
+        let v: i16 = if (last..last + 96).contains(&i) {
+            29_000
+        } else {
+            0
+        };
+        pcm.extend_from_slice(&v.to_le_bytes());
+        pcm.extend_from_slice(&v.to_le_bytes());
+    }
+    let mut wav = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + pcm.len() as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&RATE.to_le_bytes());
+    wav.extend_from_slice(&(RATE * 4).to_le_bytes());
+    wav.extend_from_slice(&4u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&pcm);
+    let out = dir("ntsc");
+    let audio = out.join("pulse.wav");
+    fs::write(&audio, wav).unwrap();
+    let mp4 = out.join("ntsc.mp4");
+    ok(&run(&[
+        "frames",
+        folder.to_str().unwrap(),
+        mp4.to_str().unwrap(),
+        "--fps",
+        "23.976",
+        "--audio",
+        audio.to_str().unwrap(),
+        "--route",
+        "cpu",
+    ]));
+    let reader = pito_codecs::mp4::Reader::open(&mp4).unwrap();
+    let t = &reader.tracks[reader.video().unwrap()];
+    let ticks: u64 = t.samples.iter().map(|s| u64::from(s.duration)).sum();
+    assert_eq!(t.samples.len(), COUNT as usize);
+    assert_eq!(
+        u128::from(ticks) * 24_000,
+        u128::from(COUNT) * 1001 * u128::from(t.timescale)
+    );
+    assert_eq!(pulse_at(&mp4), (last, total));
+    for ext in ["mkv", "webm"] {
+        let copy = out.join(format!("ntsc.{ext}"));
+        ok(&run(&[mp4.to_str().unwrap(), copy.to_str().unwrap()]));
+        let (at, _) = pulse_at(&copy);
+        assert!(
+            at.abs_diff(last) <= 2,
+            "{ext}: pulse at {at}, frame at {last}"
+        );
+    }
+}
