@@ -15,6 +15,7 @@ use super::Fail;
 use super::convert::{ceiling_held, target_of};
 use super::plan::Loudness;
 
+pub const AAC_KBPS: u32 = 192;
 const RATE: u32 = 48_000;
 const POOL_BYTES: u64 = 1 << 30;
 const SLACK_BYTES: u64 = 1 << 30;
