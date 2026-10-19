@@ -172,8 +172,12 @@ enum Command {
             help = "Keep the dynamics: gain to the target, then only a true-peak limiter at the ceiling (may land under the target)"
         )]
         linear: bool,
-        #[arg(long, default_value_t = 192, value_parser = clap::value_parser!(u32).range(32..=512), help = "The AAC bitrate in kbps, 32 to 512")]
-        audio_bitrate: u32,
+        #[arg(
+            long,
+            value_parser = clap::value_parser!(u32).range(32..=512),
+            help = "The AAC bitrate in kbps, 32 to 512 [default: 192, or 320 with --loudness]"
+        )]
+        audio_bitrate: Option<u32>,
         #[arg(
             long,
             value_enum,
@@ -452,8 +456,12 @@ fn run(command: Command) -> Result<(), Fail> {
                 output,
                 fps,
                 audio,
+                audio_kbps: audio_bitrate.unwrap_or(if loudness.is_some() {
+                    plan::AAC_KBPS
+                } else {
+                    frames::AAC_KBPS
+                }),
                 loudness: args::loudness_with(loudness, true_peak, linear),
-                audio_kbps: audio_bitrate,
                 codec: codec.codec(),
                 prefs: route.prefs(),
                 crf,

@@ -140,7 +140,7 @@ encoded 600 frames in 1.07 s: 560 fps
 wrote   trailer.mp4 (7.5 MB)
 ```
 
-`--audio-bitrate` sets the AAC rate (192 kbps by default). `--loudness` levels the WAV, with `--true-peak` and `--linear` as for a conversion, and the ceiling holds for the AAC in the MP4, not just for the WAV: AAC adds 1 to 2 dB of true peak, so pcod encodes a trial, lowers the limiter's ceiling until the decoded AAC stays under it, prints the MP4's loudness at the end, and removes the MP4 with an error if its AAC still peaks over the ceiling.
+`--audio-bitrate` sets the AAC rate: 192 kbps by default, 320 kbps with `--loudness`. `--loudness` levels the WAV, with `--true-peak` and `--linear` as for a conversion, and the ceiling holds for the AAC in the MP4, not just for the WAV: AAC adds 1 to 2 dB of true peak, so pcod encodes a trial, lowers the limiter's ceiling until the decoded AAC stays under it, prints the MP4's loudness at the end, and removes the MP4 with an error if its AAC still peaks over the ceiling. On a dense, limited master the lower rates cost loudness: AAC rings more at 192 kbps, so the ceiling holds only with the level pulled down. A generated 20 s mix of kicks, bass and pink noise, levelled with `--loudness -14 --true-peak -1 --linear`, lands at -17.6 LUFS at 192 kbps, -15.9 at 256 and -13.9 at 320, each under -1.3 dBTP. Use 320 kbps or more for loud masters.
 
 These are the same 10 seconds of the NASA clip, written out as 1080p PNG frames. The WAV can be 8, 16, 24 or 32-bit PCM or float, at any rate, mono, stereo or more channels. pcod converts it to 48 kHz stereo and cuts or pads it with silence to the length of the video. Without `--audio`, the MP4 carries a silent stereo track. A missing frame number, or a frame of another size, stops the encode:
 
