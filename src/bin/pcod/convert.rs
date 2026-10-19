@@ -136,7 +136,7 @@ fn plan(request: &Request, media: &Media) -> Result<Planned, Fail> {
         return Err("the source has no frame rate".into());
     }
     let fps = match request.fps {
-        Some(f) => (f, 1),
+        Some(f) => reduced(f.0, f.1),
         None if animated && media.fps_value() > f64::from(ANIMATED_FPS) => (ANIMATED_FPS, 1),
         None => reduced(source_fps.0, source_fps.1),
     };
@@ -585,7 +585,7 @@ fn join(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<String,
     let opts = media::JoinOptions {
         encode: !request.copy_video,
         size,
-        fps: request.fps.map(|f| (f, 1)),
+        fps: request.fps,
         video: if webm {
             media::Codec::Vp9
         } else {

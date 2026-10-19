@@ -761,10 +761,11 @@ struct AudioPlan {
     config: AudioTrackConfig,
     ticks: f64,
     work: AudioWork,
+    shift: i64,
 }
 
 enum AudioWork {
-    CopyMp4(Box<mp4::Reader>, usize, i64),
+    CopyMp4(Box<mp4::Reader>, usize),
     CopyMkv(Box<mkv::Reader>, usize, Option<u32>),
     Aac(
         media::AudioStream,
@@ -809,6 +810,7 @@ fn audio_plan(job: &Job, audio: &Audio) -> Result<AudioPlan, Fail> {
             let config = if mp4_out {
                 let mut cfg = mp4::TrackConfig::from_track(track)?;
                 cfg.edits = Vec::new();
+                cfg.media_start = Some(shift);
                 AudioTrackConfig::Mp4(cfg)
             } else {
                 let mut cfg = mkv::TrackConfig::from_mp4(track)?;
@@ -816,11 +818,11 @@ fn audio_plan(job: &Job, audio: &Audio) -> Result<AudioPlan, Fail> {
                     / u64::from(track.timescale.max(1));
                 AudioTrackConfig::Mkv(cfg)
             };
-            let shift = if mp4_out { 0 } else { shift };
             Ok(AudioPlan {
                 config,
                 ticks,
-                work: AudioWork::CopyMp4(Box::new(reader), sound.stream, shift),
+                work: AudioWork::CopyMp4(Box::new(reader), sound.stream),
+                shift: if mp4_out { shift } else { 0 },
             })
         }
         Audio::Copy { codec } => {
@@ -835,10 +837,18 @@ fn audio_plan(job: &Job, audio: &Audio) -> Result<AudioPlan, Fail> {
                 }
                 let rate = sound.rate.max(1);
                 let entry = mp4::SampleEntry::aac(asc, u32::from(sound.channels.max(1)), rate, 0);
+                let delay = i64::try_from(
+                    (u128::from(track.codec_delay) * u128::from(rate) + 500_000_000)
+                        / 1_000_000_000,
+                )
+                .unwrap_or(0);
+                let mut cfg = mp4::TrackConfig::new(entry, rate);
+                cfg.media_start = Some(delay);
                 Ok(AudioPlan {
-                    config: AudioTrackConfig::Mp4(mp4::TrackConfig::new(entry, rate)),
+                    config: AudioTrackConfig::Mp4(cfg),
                     ticks: f64::from(rate),
                     work: AudioWork::CopyMkv(Box::new(reader), sound.stream, Some(rate)),
+                    shift: delay,
                 })
             } else {
                 let tb = track.time_base;
@@ -847,6 +857,7 @@ fn audio_plan(job: &Job, audio: &Audio) -> Result<AudioPlan, Fail> {
                     config: AudioTrackConfig::Mkv(cfg),
                     ticks: f64::from(tb.den) / f64::from(tb.num.max(1)),
                     work: AudioWork::CopyMkv(Box::new(reader), sound.stream, None),
+                    shift: 0,
                 })
             }
         }
@@ -879,6 +890,7 @@ fn audio_plan(job: &Job, audio: &Audio) -> Result<AudioPlan, Fail> {
                 config,
                 ticks: f64::from(SAMPLE_RATE),
                 work: AudioWork::Aac(stream, Box::new(enc), leveler(job)?),
+                shift: if mp4_out { 0 } else { -priming },
             })
         }
         Audio::Opus { kbps } => {
@@ -892,10 +904,12 @@ fn audio_plan(job: &Job, audio: &Audio) -> Result<AudioPlan, Fail> {
             )?;
             let enc = opus::enc::Encoder::new(opus::enc::EncoderConfig::new(2, kbps * 1000))?;
             let cfg = mkv::TrackConfig::opus(enc.codec_private());
+            let shift = -i64::from(enc.pre_skip());
             Ok(AudioPlan {
                 config: AudioTrackConfig::Mkv(cfg),
                 ticks: f64::from(SAMPLE_RATE),
                 work: AudioWork::Opus(stream, Box::new(enc), leveler(job)?),
+                shift,
             })
         }
     }
@@ -910,18 +924,20 @@ fn leveler(job: &Job) -> Result<Option<Box<media::Leveler>>, Fail> {
 
 fn run_audio(
     work: AudioWork,
+    shift: i64,
     stop: &AtomicBool,
     tx: &mpsc::Sender<Result<Packet, Fail>>,
 ) -> Result<(), Fail> {
-    let send = |p: Packet| tx.send(Ok(p)).map_err(|_| Fail::from("the muxer stopped"));
+    let send = |mut p: Packet| {
+        p.pts += shift;
+        p.dts += shift;
+        tx.send(Ok(p)).map_err(|_| Fail::from("the muxer stopped"))
+    };
     match work {
-        AudioWork::CopyMp4(reader, track, shift) => {
+        AudioWork::CopyMp4(reader, track) => {
             for i in 0..reader.tracks[track].samples.len() {
                 stopped(stop)?;
-                let mut p = reader.packet(track, i)?;
-                p.pts += shift;
-                p.dts += shift;
-                send(p)?;
+                send(reader.packet(track, i)?)?;
             }
         }
         AudioWork::CopyMkv(reader, track, rate) => {
@@ -1011,6 +1027,7 @@ fn open_mux(job: &Job, track: VideoTrack, audio: Option<AudioTrackConfig>) -> Re
                     ..Default::default()
                 },
             )?;
+            writer.set_movie_timescale(SAMPLE_RATE);
             let (cfg, step, video_tb) = match track {
                 VideoTrack::Encoded(x) => {
                     let entry = mp4::SampleEntry::h264(mp4::AvcConfig::parse(&x)?, fw, fh);
@@ -1184,7 +1201,7 @@ pub fn run(job: &Job) -> Result<Done, Fail> {
             AudioTrackConfig::Mkv(mkv::TrackConfig::opus(Vec::new())),
         )
     });
-    let audio_work = audio_plan.map(|a| a.work);
+    let audio_work = audio_plan.map(|a| (a.work, a.shift));
     let gif = matches!(job.encoder, Encoder::Gif { .. });
     let steps = if gif { 3 } else { 2 };
     let palette = if gif {
@@ -1205,8 +1222,8 @@ pub fn run(job: &Job) -> Result<Done, Fail> {
         let has_audio = audio_work.is_some();
         let audio = s.spawn(move || -> Result<(), Fail> {
             match audio_work {
-                Some(w) => {
-                    let r = run_audio(w, job.stop, &atx);
+                Some((w, shift)) => {
+                    let r = run_audio(w, shift, job.stop, &atx);
                     if let Err(e) = &r {
                         let _ = atx.send(Err(e.to_string().into()));
                     }
