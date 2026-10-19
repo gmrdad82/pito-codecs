@@ -24,7 +24,9 @@ pub const HIGHEST_TRUE_PEAK: f64 = 0.0;
 const CLOSE: f64 = 0.1;
 const TRIES: usize = 3;
 const RETRIES: usize = 8;
+const NARROWS: usize = 4;
 const MARGIN: f64 = 0.05;
+const SLACK: f64 = 0.05;
 const HEADROOM: f64 = 0.3;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -434,10 +436,8 @@ pub fn level_pcm(
         return Err(silent(target));
     }
     let linear = target.integrated - before.integrated;
-    let mut headroom = HEADROOM;
     let mut gain_db = linear;
-    let mut retries = 0;
-    loop {
+    settle(|headroom| {
         let ceiling = target.true_peak - headroom;
         let ceiling_db = (before.true_peak + linear > ceiling).then_some(ceiling);
         let mut out = levelled(buffer, gain_db, ceiling_db)?;
@@ -461,17 +461,12 @@ pub fn level_pcm(
             Some(e) => e.true_peak - (target.true_peak - MARGIN),
             None => after.true_peak - target.true_peak,
         };
-        if over > 0.0 && retries < RETRIES {
-            retries += 1;
-            headroom += over + CLOSE * retries as f64;
-            continue;
-        }
         let mode = if ceiling_db.is_some() {
             LevelMode::Limited
         } else {
             LevelMode::Linear
         };
-        return Ok(LevelledPcm {
+        let levelled = LevelledPcm {
             buffer: out,
             before,
             after,
@@ -479,8 +474,61 @@ pub fn level_pcm(
             mode,
             gain_db,
             ceiling_db,
-        });
+        };
+        let limited = ceiling_db.is_some() && encoded.is_some();
+        Ok((levelled, over, limited))
+    })
+}
+
+fn settle<T>(mut trial: impl FnMut(f64) -> Result<(T, f64, bool)>) -> Result<T> {
+    let mut headroom = HEADROOM;
+    let mut over_at: Option<(f64, f64)> = None;
+    let mut under_at = (HEADROOM, 0.0);
+    let mut kept: Option<(f64, T)> = None;
+    let mut raised = 0;
+    let mut narrowed = 0;
+    loop {
+        let (value, over, limited) = trial(headroom)?;
+        if over.is_nan() {
+            return Ok(value);
+        }
+        if over > 0.0 {
+            over_at = Some((headroom, over));
+            if kept.is_none() {
+                if raised == RETRIES {
+                    return Ok(value);
+                }
+                raised += 1;
+                headroom += over + CLOSE * raised as f64;
+                continue;
+            }
+        } else {
+            if kept.as_ref().is_none_or(|(slack, _)| -over < *slack) {
+                kept = Some((-over, value));
+            }
+            under_at = (headroom, over);
+            if -over <= SLACK || (!limited && over_at.is_none()) {
+                break;
+            }
+        }
+        let next = match over_at {
+            Some(lo) => between(lo, under_at),
+            None => (under_at.0 + under_at.1 + SLACK / 2.0).max(0.0),
+        };
+        if narrowed == NARROWS || next >= under_at.0 - 0.01 {
+            break;
+        }
+        narrowed += 1;
+        headroom = next;
     }
+    kept.map(|(_, v)| v)
+        .ok_or_else(|| Error::Invalid("a levelling search kept no trial".into()))
+}
+
+fn between((h1, o1): (f64, f64), (h2, o2): (f64, f64)) -> f64 {
+    let aim = -SLACK / 2.0;
+    let t = ((o1 - aim) / (o1 - o2)).clamp(0.2, 0.8);
+    h1 + (h2 - h1) * t
 }
 
 fn encoded_pcm(buffer: &AudioBuffer, codec: Codec, kbps: u32) -> Result<LoudnessStats> {
@@ -1000,39 +1048,34 @@ pub fn plan_level_styled(
     let progress: &mut Tell = &mut progress;
     let source = Pass::open(path, track, prefs, *span)?;
     let before = meter_pass(&source, None, LevelStage::Measuring, progress)?;
-    let gain = target.integrated - before.integrated;
-    let mut headroom = HEADROOM;
-    let mut plan = planned(
-        &source,
-        before,
-        target,
-        headroom,
-        gain,
-        style.linear,
-        progress,
-    )?;
+    let mut gain = target.integrated - before.integrated;
     let Some((codec, kbps)) = style.encoded else {
-        return Ok(plan);
+        return planned(
+            &source,
+            before,
+            target,
+            HEADROOM,
+            gain,
+            style.linear,
+            progress,
+        );
     };
-    for k in 1..=RETRIES {
-        let trial = plan.leveler(LEVEL_RATE, 2)?;
-        let got = encoded_pass(&source, trial, codec, kbps, progress)?;
-        let over = got.true_peak - (target.true_peak - MARGIN);
-        if over.is_nan() || over <= 0.0 || k == RETRIES {
-            break;
-        }
-        headroom += over + CLOSE * k as f64;
-        plan = planned(
+    settle(|headroom| {
+        let plan = planned(
             &source,
             before,
             target,
             headroom,
-            plan.gain_db,
+            gain,
             style.linear,
             progress,
         )?;
-    }
-    Ok(plan)
+        gain = plan.gain_db;
+        let trial = plan.leveler(LEVEL_RATE, 2)?;
+        let got = encoded_pass(&source, trial, codec, kbps, progress)?;
+        let over = got.true_peak - (target.true_peak - MARGIN);
+        Ok((plan, over, plan.ceiling_db.is_some()))
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -1135,10 +1178,9 @@ pub fn level_with(
     let demux = Demux::open(input)?;
     let before = meter_pass(&source, None, LevelStage::Measuring, progress)?;
     let part = partial(output);
-    let mut headroom = HEADROOM;
     let mut gain = target.integrated - before.integrated;
-    let mut retries = 0;
-    loop {
+    let mut n = 0;
+    let (trial, levelled) = settle(|headroom| {
         let plan = planned(
             &source,
             before,
@@ -1148,27 +1190,15 @@ pub fn level_with(
             style.linear,
             progress,
         )?;
+        gain = plan.gain_db;
+        n += 1;
+        let trial = Trial(part.with_extension(format!("level{n}")));
         let leveler = plan.leveler(LEVEL_RATE, 2)?;
-        let written = write(&source, &demux, &part, format, kbps, leveler, progress);
-        let (after, video, video_packets, audio) = match written {
-            Ok(w) => w,
-            Err(e) => {
-                let _ = std::fs::remove_file(&part);
-                return Err(e);
-            }
-        };
+        let (after, video, video_packets, audio) =
+            write(&source, &demux, &trial.0, format, kbps, leveler, progress)?;
         let over = after.true_peak - (target.true_peak - MARGIN);
-        if over > 0.0 && retries < RETRIES {
-            retries += 1;
-            headroom += over + CLOSE * retries as f64;
-            gain = plan.gain_db;
-            continue;
-        }
-        if let Err(e) = std::fs::rename(&part, output) {
-            let _ = std::fs::remove_file(&part);
-            return Err(Error::at(output, e));
-        }
-        return Ok(Levelled {
+        let limited = plan.ceiling_db.is_some();
+        let levelled = Levelled {
             path: output.to_path_buf(),
             before,
             after,
@@ -1178,7 +1208,18 @@ pub fn level_with(
             audio_kbps: kbps,
             video,
             video_packets,
-        });
+        };
+        Ok(((trial, levelled), over, limited))
+    })?;
+    std::fs::rename(&trial.0, output).map_err(|e| Error::at(output, e))?;
+    Ok(levelled)
+}
+
+struct Trial(PathBuf);
+
+impl Drop for Trial {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
     }
 }
 
