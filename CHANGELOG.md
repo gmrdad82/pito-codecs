@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.16.3 — 2026-10-19
+
+### Added
+
+- WAV files in RF64 and BW64 (the 64-bit forms for files over 4 GB) are read like plain WAV.
+- `pcod probe --json` reports a WAV's sample format as `audio_bits` and `audio_float`, and the text probe shows the bit depth.
+
+### Fixed
+
+- `pcod probe` on an audio-only file (a WAV, for one) no longer fails with "the video stream has no width and height": the video fields are null and the audio is filled in, and the text probe names the real container instead of always saying MP4.
+- The README charts carry the measured values, so every label and ratio comes straight from the measurement.
+
+### Changed
+
+- `--fps` help and the pcod guide name 47.952 among the decimals read as exact NTSC rates (48000/1001).
+- The repository carries no Python: the fuzz seed script is plain shell and the bench tooling is Rust.
+
 ## v1.16.2 — 2026-10-19
 
 ### Added
