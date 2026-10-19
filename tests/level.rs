@@ -297,16 +297,21 @@ fn dense(seconds: usize) -> AudioBuffer {
 fn a_dense_mix_keeps_the_ceiling_after_the_aac_encode() {
     let source = dense(40);
     let target = LevelTarget::new(-14.0);
-    for linear in [false, true] {
+    for (linear, kbps) in [(false, 192), (true, 192), (false, 320), (true, 320)] {
         let style = LevelStyle {
             linear,
-            encoded: Some((Codec::Aac, 192)),
+            encoded: Some((Codec::Aac, kbps)),
         };
         let done = level_pcm(&source, &target, style).unwrap();
         let encoded = done.encoded.unwrap();
+        let floor = if kbps == 320 {
+            target.true_peak - 0.15
+        } else {
+            f64::NEG_INFINITY
+        };
         assert!(
-            encoded.true_peak <= target.true_peak,
-            "linear {linear}: {encoded:?}, limiter at {:?}",
+            (floor..=target.true_peak).contains(&encoded.true_peak),
+            "linear {linear} at {kbps} kbps: {encoded:?}, limiter at {:?}",
             done.ceiling_db
         );
     }
