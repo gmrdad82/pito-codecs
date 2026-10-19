@@ -263,3 +263,68 @@ fn a_signal_stops_the_conversion_and_leaves_nothing() {
     assert!(!output.exists());
     assert!(partials(&folder).is_empty(), "{:?}", partials(&folder));
 }
+
+#[cfg(target_os = "linux")]
+fn capped(cap: u64, args: &[&str]) -> Output {
+    Command::new("prlimit")
+        .arg(format!("--as={cap}"))
+        .arg("--core=1:1")
+        .arg("--")
+        .arg(env!("CARGO_BIN_EXE_pcod"))
+        .args(args)
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn six_k_frames_encode_under_an_address_space_cap_or_refuse_in_one_line() {
+    const W: u32 = 6344;
+    const H: u32 = 3968;
+    const COUNT: u32 = 40;
+    let folder = dir("6k-frames");
+    let mut img = Rgba::new(W, H);
+    for n in 0..COUNT {
+        for (i, px) in img.data.chunks_exact_mut(4).enumerate() {
+            let (x, y) = (i as u32 % W, i as u32 / W);
+            let moving = (x + W - n * 97) % W < 800 && (1000..1800).contains(&y);
+            px.copy_from_slice(&if moving {
+                [255 - n as u8, 40, 200, 255]
+            } else {
+                [
+                    (x * 255 / W) as u8,
+                    (y * 255 / H) as u8,
+                    ((x ^ y) >> 4) as u8,
+                    255,
+                ]
+            });
+        }
+        let png = pito_codecs::png::encode(&img).unwrap();
+        fs::write(folder.join(format!("{n:06}.png")), png).unwrap();
+    }
+    drop(img);
+    let out = dir("6k");
+    let mp4 = out.join("6k.mp4");
+    let args = [
+        "frames",
+        folder.to_str().unwrap(),
+        mp4.to_str().unwrap(),
+        "--fps",
+        "60",
+        "--crf",
+        "14",
+        "--route",
+        "cpu",
+    ];
+    let tight = capped(2_000_000_000, &args);
+    let stderr = text(&tight.stderr);
+    assert_eq!(tight.status.code(), Some(1), "{stderr}");
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(stderr.contains("address-space limit"), "{stderr}");
+    assert!(!mp4.exists());
+    let made = capped(8_000_000_000, &args);
+    ok(&made);
+    let p = probe(&mp4, &Prefs::default()).unwrap();
+    assert_eq!((p.width, p.height, p.frames), (W, H, Some(COUNT as u64)));
+}

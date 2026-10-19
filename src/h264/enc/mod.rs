@@ -300,7 +300,40 @@ pub struct Encoder {
 const LOG2_MAX_FRAME_NUM: u32 = 8;
 const LOOKAHEAD: usize = 40;
 const LOOKAHEAD_BYTES: usize = 768 << 20;
+const FLIGHT_BYTES: usize = 1 << 30;
 const LOG2_MAX_POC_LSB: u32 = 8;
+
+pub struct Budget {
+    pub frame_threads: usize,
+    pub la_depth: usize,
+    pub bytes: u64,
+}
+
+pub fn threads_of(threads: usize) -> usize {
+    if threads == 0 {
+        std::thread::available_parallelism().map_or(1, |n| n.get())
+    } else {
+        threads
+    }
+}
+
+pub fn budget(mbw: usize, mbh: usize, threads: usize, qp: bool) -> Budget {
+    let frame_bytes = (mbw * 16 + 128) * (mbh * 16 + 128) * 2;
+    let frame_threads = threads
+        .clamp(1, 64)
+        .min((FLIGHT_BYTES / (3 * frame_bytes)).max(2));
+    let la_depth = if qp {
+        0
+    } else {
+        (LOOKAHEAD_BYTES / frame_bytes).clamp(1, LOOKAHEAD)
+    };
+    let bytes = ((frame_threads + 4) * 3 + la_depth) as u64 * frame_bytes as u64;
+    Budget {
+        frame_threads,
+        la_depth,
+        bytes,
+    }
+}
 
 fn crf_level_kbps(crf: f32, mbw: usize, mbh: usize, fps: f64) -> u32 {
     let crf = if crf.is_finite() {
@@ -493,11 +526,7 @@ impl Encoder {
         };
         let sps_nal = nal::nal(3, NAL_SPS, &sps.rbsp());
         let pps_nal = nal::nal(3, NAL_PPS, &pps.rbsp());
-        let threads = if cfg.threads == 0 {
-            std::thread::available_parallelism().map_or(1, |n| n.get())
-        } else {
-            cfg.threads
-        };
+        let threads = threads_of(cfg.threads);
         let pool = Pool {
             pool: if threads > 1 {
                 rayon::ThreadPoolBuilder::new()
@@ -515,13 +544,11 @@ impl Encoder {
             cost_tab: CostTable::new(),
             lam: Lambdas::new(),
         });
-        let frame_threads = threads.clamp(1, 64);
-        let frame_bytes = (mbw * 16 + 128) * (mbh * 16 + 128) * 2;
-        let la_depth = if matches!(cfg.rate, RateControl::Qp(_)) {
-            0
-        } else {
-            (LOOKAHEAD_BYTES / frame_bytes).clamp(1, LOOKAHEAD)
-        };
+        let Budget {
+            frame_threads,
+            la_depth,
+            ..
+        } = budget(mbw, mbh, threads, matches!(cfg.rate, RateControl::Qp(_)));
         let workers = Workers::new(ctx.clone(), frame_threads)?;
         Ok(Encoder {
             ctx,
