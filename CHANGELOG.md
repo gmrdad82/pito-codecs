@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.16.1 — 2026-10-19
+
+### Changed
+
+- `pcod frames` encodes levelled audio (`--loudness`) at 320 kbps AAC by default, so dense mixes keep their loudness under the true-peak ceiling; 192 kbps stays the default without levelling.
+- Levelling lands the encoded true peak within about 0.1 dB of the ceiling instead of stopping at the first trial under it, so loud masters keep more of their level.
+
 ## v1.16.0 — 2026-10-19
 
 ### Added
