@@ -3,6 +3,8 @@ mod charts;
 #[macro_use]
 #[path = "support/fail.rs"]
 mod fail;
+#[path = "bench/docs.rs"]
+mod docs;
 
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
@@ -1741,7 +1743,23 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Res<()> {
-    let mut args = std::env::args().skip(1);
+    let given: Vec<String> = std::env::args().skip(1).collect();
+    match given.first().map(String::as_str) {
+        Some("--check") if (2..=3).contains(&given.len()) => {
+            let baseline = given
+                .get(2)
+                .map_or(".dev/bench/baseline.json", String::as_str);
+            return docs::check(Path::new(&given[1]), Path::new(baseline));
+        }
+        Some("--chart-docs") if given.len() == 3 => {
+            return docs::charts(Path::new(&given[1]), Path::new(&given[2]));
+        }
+        Some("--check" | "--chart-docs") => {
+            return Err("usage: bench --check <new results.json> [baseline.json] | bench --chart-docs <results.json> <dir>".into());
+        }
+        _ => {}
+    }
+    let mut args = given.into_iter();
     let mut runs = 3usize;
     let mut quick = false;
     let mut only = Vec::new();

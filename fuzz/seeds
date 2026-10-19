@@ -5,22 +5,22 @@ target=${1:?usage: fuzz/seeds <target>}
 dir="fuzz/corpus/$target"
 mkdir -p "$dir"
 
-hex() { python3 -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.argv[1]))' "$1"; }
+hex() { printf '%b' "$(sed 's/../\\x&/g' <<<"$1")"; }
+
+size() { printf '01%014x' "$1"; }
 
 webm_head=1a45dfa39f4286810142f7810142f2810442f381084282847765626d42878104428581021853806701ffffffffffffff114d9b74ab4dbb8b53ab841549a96653ac81804dbb8b53ab841654ae6b53ac81b34dbb8c53ab841c53bb6b53ac820351ecce0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001549a966ae2ad7b1830f42404d808b7069746f2d636f6465637357418b7069746f2d636f64656373448988408e0000000000001654ae6bf5aea3d7810173c581018381019c810022b59c83756e648685565f565039e086b08140ba8130aeced7810273c581028381029c810022b59c83756e648686415f4f50555363a2934f707573486561640102380180bb000000000056aa83632ea056bb8404c4b400e18db58840e77000000000009f8102
 
 cluster() {
-  python3 - "$@" <<'PY'
-import sys
-def size(n):
-    return bytes([1]) + n.to_bytes(7, "big")
-head = bytes.fromhex(sys.argv[1])
-blocks = [bytes.fromhex(b) for b in sys.argv[3:]] * int(sys.argv[2])
-body = bytes([0xE7, 0x81, 0x00])
-for b in blocks:
-    body += bytes([0xA3]) + size(len(b)) + b
-sys.stdout.buffer.write(head + bytes.fromhex("1F43B675") + size(len(body)) + body)
-PY
+  local head=$1 times=$2 once="" body="e78100" b i
+  shift 2
+  for b in "$@"; do
+    once+="a3$(size $((${#b} / 2)))$b"
+  done
+  for ((i = 0; i < times; i++)); do
+    body+=$once
+  done
+  hex "${head}1f43b675$(size $((${#body} / 2)))$body"
 }
 
 regressions() {
@@ -30,7 +30,11 @@ regressions() {
     mkv)
       cluster "$webm_head" 600 "81000082ff$(printf '00%.0s' $(seq 255))" > "$dir/xiph-empty.webm"
       cluster "$webm_head" 1 "81000084fe07" "8100018009" > "$dir/fixed-lacing.webm"
-      { hex "$webm_head"; python3 -c 'import sys; sys.stdout.buffer.write(bytes.fromhex("1f43b6758100") * 12000 + bytes.fromhex("1f43b67584e78100ff") * 8000)'; } > "$dir/near-miss.webm"
+      {
+        hex "$webm_head"
+        printf '\x1f\x43\xb6\x75\x81\x00%.0s' $(seq 12000)
+        printf '\x1f\x43\xb6\x75\x84\xe7\x81\x00\xff%.0s' $(seq 8000)
+      } > "$dir/near-miss.webm"
       ;;
   esac
 }
@@ -52,26 +56,45 @@ ff() { ffmpeg -hide_banner -loglevel error -nostdin -y "$@" || echo "fuzz/seeds:
 video=(-f lavfi -i "testsrc2=size=96x64:rate=12" -t 0.5)
 audio=(-f lavfi -i "sine=frequency=440:sample_rate=48000" -t 0.5)
 
+chunk_table() {
+  [ -s "$1" ] || return 1
+  local d s c e t n m copies="" i
+  d=$(od -An -v -tx1 "$1" | tr -d ' \n')
+  offset() {
+    awk -v h="$d" -v k="$(printf %s "$1" | od -An -tx1 | tr -d ' \n')" 'BEGIN {
+      o = 0
+      while ((i = index(substr(h, o + 1), k)) > 0) {
+        p = o + i - 1
+        if (p % 2 == 0) { print p / 2; exit }
+        o = p + 1
+      }
+      exit 1
+    }'
+  }
+  be() { echo $((16#${d:$(($1 * 2)):8})); }
+  put() { d=${d:0:$(($1 * 2))}$2${d:$(($1 * 2 + ${#2}))}; }
+  s=$(offset stsz) || return 1
+  put $((s + 8)) 00000001ffffffff
+  c=$(offset stsc) || return 1
+  for ((e = 0; e < $(be $((c + 8))); e++)); do
+    put $((c + 16 + e * 12)) ffffffff
+  done
+  t=$(offset trak) || return 1
+  t=$((t - 4))
+  n=$(be "$t")
+  for ((i = 0; i < 8; i++)); do
+    copies+=${d:$((t * 2)):$((n * 2))}
+  done
+  d=${d:0:$((t * 2))}$copies${d:$((t * 2))}
+  m=$(offset moov) || return 1
+  m=$((m - 4))
+  put "$m" "$(printf '%08x' $(($(be "$m") + 8 * n)))"
+  hex "$d" > "$2"
+}
+
 mp4_seeds() {
   ff "${video[@]}" "${audio[@]}" -c:v libx264 -preset ultrafast -c:a aac -movflags +faststart "$dir/h264-aac.mp4"
-  python3 - "$dir/h264-aac.mp4" "$dir/chunk-table.mp4" <<'PY' || echo "fuzz/seeds: skipped chunk-table.mp4" >&2
-import sys
-d = bytearray(open(sys.argv[1], "rb").read())
-def be(at):
-    return int.from_bytes(d[at:at + 4], "big")
-s = d.find(b"stsz")
-d[s + 8:s + 16] = bytes([0, 0, 0, 1, 255, 255, 255, 255])
-c = d.find(b"stsc")
-for e in range(be(c + 8)):
-    o = c + 16 + e * 12
-    d[o:o + 4] = b"\xff\xff\xff\xff"
-t = d.find(b"trak") - 4
-n = be(t)
-d[t:t] = bytes(d[t:t + n]) * 8
-m = d.find(b"moov") - 4
-d[m:m + 4] = (be(m) + 8 * n).to_bytes(4, "big")
-open(sys.argv[2], "wb").write(d)
-PY
+  chunk_table "$dir/h264-aac.mp4" "$dir/chunk-table.mp4" || echo "fuzz/seeds: skipped chunk-table.mp4" >&2
   ff "${video[@]}" -c:v libx264 -preset ultrafast -bf 2 -movflags frag_keyframe+empty_moov "$dir/fragmented.mp4"
   ff "${video[@]}" "${audio[@]}" -c:v libx265 -preset ultrafast -tag:v hvc1 -c:a aac "$dir/hevc-aac.mp4"
   ff "${audio[@]}" -c:a pcm_s16le -f mov "$dir/pcm.mov"
