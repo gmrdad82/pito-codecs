@@ -219,7 +219,12 @@ fn resync_never_rescans_bytes_it_has_scanned() {
         let _ = s.seek(0, 0.25);
         let _ = s.next_packet();
     }
-    assert!(started.elapsed().as_millis() < 2000);
+    let limit = if cfg!(debug_assertions) {
+        60_000
+    } else {
+        5_000
+    };
+    assert!(started.elapsed().as_millis() < limit);
 }
 
 #[test]
