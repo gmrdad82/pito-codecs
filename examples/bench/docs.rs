@@ -93,7 +93,7 @@ impl Rows {
 
 fn v(x: f64) -> Value {
     if x < 100.0 {
-        Value::from((x * 10.0).round() / 10.0)
+        Value::from(x)
     } else {
         Value::from(x.round() as i64)
     }
@@ -143,11 +143,7 @@ impl Docs<'_> {
     }
 
     fn inv(&self, id: &str, label: &str) -> Res<Bar> {
-        let r = |k: &str| -> Res<Value> {
-            Ok(Value::from(
-                (1000.0 / self.rows.num(id, k)? * 100.0).round() / 100.0,
-            ))
-        };
+        let r = |k: &str| -> Res<Value> { Ok(Value::from(1000.0 / self.rows.num(id, k)?)) };
         Ok(bar(label, vec![r("ours")?, r("ffmpeg")?], None))
     }
 

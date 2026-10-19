@@ -439,3 +439,99 @@ fn ntsc_frames_keep_the_exact_rate_and_the_audio_in_sync() {
         }
     }
 }
+
+fn wav(bits: u16, float: bool, extensible: bool, rf64: bool) -> Vec<u8> {
+    const RATE: u32 = 48_000;
+    let align = 2 * bits / 8;
+    let data = vec![0u8; RATE as usize / 2 * usize::from(align)];
+    let tag: u16 = if float { 3 } else { 1 };
+    let mut fmt = Vec::new();
+    fmt.extend_from_slice(&(if extensible { 0xfffe } else { tag }).to_le_bytes());
+    fmt.extend_from_slice(&2u16.to_le_bytes());
+    fmt.extend_from_slice(&RATE.to_le_bytes());
+    fmt.extend_from_slice(&(RATE * u32::from(align)).to_le_bytes());
+    fmt.extend_from_slice(&align.to_le_bytes());
+    fmt.extend_from_slice(&bits.to_le_bytes());
+    if extensible {
+        fmt.extend_from_slice(&22u16.to_le_bytes());
+        fmt.extend_from_slice(&bits.to_le_bytes());
+        fmt.extend_from_slice(&3u32.to_le_bytes());
+        fmt.extend_from_slice(&tag.to_le_bytes());
+        fmt.extend_from_slice(&[0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71]);
+    }
+    let mut body = Vec::new();
+    if rf64 {
+        body.extend_from_slice(b"ds64");
+        body.extend_from_slice(&28u32.to_le_bytes());
+        body.extend_from_slice(&0u64.to_le_bytes());
+        body.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        body.extend_from_slice(&(RATE as u64 / 2).to_le_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes());
+    } else if extensible {
+        body.extend_from_slice(b"JUNK");
+        body.extend_from_slice(&28u32.to_le_bytes());
+        body.extend_from_slice(&[0; 28]);
+    }
+    body.extend_from_slice(b"fmt ");
+    body.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+    body.extend_from_slice(&fmt);
+    body.extend_from_slice(b"data");
+    let size = if rf64 { u32::MAX } else { data.len() as u32 };
+    body.extend_from_slice(&size.to_le_bytes());
+    body.extend_from_slice(&data);
+    let mut file = Vec::new();
+    file.extend_from_slice(if rf64 { b"RF64" } else { b"RIFF" });
+    let riff = if rf64 {
+        u32::MAX
+    } else {
+        4 + body.len() as u32
+    };
+    file.extend_from_slice(&riff.to_le_bytes());
+    file.extend_from_slice(b"WAVE");
+    file.extend_from_slice(&body);
+    file
+}
+
+#[test]
+fn audio_only_wavs_probe_as_audio() {
+    let out = dir("probe-wav");
+    let shapes = [
+        (16, false, false, false),
+        (16, false, true, false),
+        (24, false, false, false),
+        (24, false, true, false),
+        (32, true, false, false),
+        (32, true, true, false),
+        (24, false, true, true),
+    ];
+    for (bits, float, extensible, rf64) in shapes {
+        let name = format!("{bits}-{float}-{extensible}-{rf64}");
+        let path = out.join(format!("{name}.wav"));
+        fs::write(&path, wav(bits, float, extensible, rf64)).unwrap();
+        let probed = run(&["probe", path.to_str().unwrap(), "--json"]);
+        ok(&probed);
+        let json = text(&probed.stdout);
+        let bits = bits.to_string();
+        let float = float.to_string();
+        for (key, want) in [
+            ("width", "null"),
+            ("height", "null"),
+            ("fps", "null"),
+            ("codec", "null"),
+            ("video_index", "null"),
+            ("audio", "pcm"),
+            ("audio_rate", "48000"),
+            ("audio_channels", "2"),
+            ("audio_bits", bits.as_str()),
+            ("audio_float", float.as_str()),
+            ("seconds", "0.5"),
+        ] {
+            assert_eq!(field(&json, key), Some(want), "{name} {key}: {json}");
+        }
+        let shown = run(&["probe", path.to_str().unwrap()]);
+        ok(&shown);
+        let shown = text(&shown.stdout);
+        assert!(shown.starts_with("container  WAV"), "{name}: {shown}");
+        assert!(!shown.contains("video"), "{name}: {shown}");
+    }
+}

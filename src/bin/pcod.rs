@@ -537,29 +537,54 @@ fn about(file: &Path, e: impl std::fmt::Display) -> Fail {
 fn show(out: &mut impl Write, file: &Path) -> Result<(), Fail> {
     let p = probe(file, &Prefs::default()).map_err(|e| about(file, e))?;
     let (w, h) = p.shown_size();
-    writeln!(out, "container  MP4")?;
+    let pcm = media::wav::Reader::open(file).ok().map(|r| r.layout);
+    writeln!(out, "container  {}", container(file, pcm.is_some()))?;
     writeln!(out, "duration   {:.1} s", p.duration)?;
     if p.start > 0.0 {
         writeln!(out, "start      {:.3} s", p.start)?;
     }
-    writeln!(
-        out,
-        "video      {} {} {w}x{h} {:.2} fps",
-        p.video_codec_name,
-        p.profile,
-        p.fps()
-    )?;
+    if w > 0 && h > 0 {
+        writeln!(
+            out,
+            "video      {} {} {w}x{h} {:.2} fps",
+            p.video_codec_name,
+            p.profile,
+            p.fps()
+        )?;
+    }
     if p.alpha {
         writeln!(out, "alpha      yes")?;
     }
     for a in &p.audio {
+        let bits = match pcm {
+            Some(l) if l.float() => format!(" {}-bit float", l.bits),
+            Some(l) => format!(" {}-bit", l.bits),
+            None => String::new(),
+        };
         writeln!(
             out,
-            "audio      {} {} ch {} Hz",
+            "audio      {} {} ch {} Hz{bits}",
             a.codec, a.channels, a.rate
         )?;
     }
     Ok(())
+}
+
+fn container(file: &Path, wav: bool) -> &'static str {
+    let mut head = [0u8; 4];
+    let read =
+        std::fs::File::open(file).and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head));
+    if wav {
+        "WAV"
+    } else if read.is_ok() && head == [0x1a, 0x45, 0xdf, 0xa3] {
+        "Matroska"
+    } else if read.is_ok()
+        && (head.starts_with(b"ID3") || (head[0] == 0xff && head[1] & 0xe0 == 0xe0))
+    {
+        "MP3"
+    } else {
+        "MP4"
+    }
 }
 
 fn threads_of(wanted: Option<usize>) -> usize {

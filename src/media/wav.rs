@@ -55,7 +55,14 @@ impl Layout {
 }
 
 pub fn is_wav(head: &[u8]) -> bool {
-    head.get(..4) == Some(b"RIFF") && head.get(8..12) == Some(b"WAVE")
+    matches!(head.get(..4), Some(b"RIFF" | b"RF64" | b"BW64")) && head.get(8..12) == Some(b"WAVE")
+}
+
+fn le64(b: &[u8], at: usize) -> Result<u64> {
+    b.get(at..at + 8)
+        .and_then(|s| s.try_into().ok())
+        .map(u64::from_le_bytes)
+        .ok_or_else(|| invalid("the ds64 chunk is too short"))
 }
 
 fn format(body: &[u8]) -> Result<(Sample, u16, u32, u16)> {
@@ -92,13 +99,21 @@ fn layout_of(len: u64, mut chunk: impl FnMut(u64, usize) -> Result<Vec<u8>>) -> 
     }
     let mut format_of = None;
     let mut data = None;
+    let mut wide = None;
     let mut at = 12u64;
     while at + 8 <= len {
         let h = chunk(at, 8)?;
-        let size = u64::from(le32(&h, 4)?);
+        let mut size = u64::from(le32(&h, 4)?);
+        if &h[..4] == b"data" && size == u64::from(u32::MAX) {
+            size = wide.unwrap_or(len.saturating_sub(at + 8));
+        }
         let start = at + 8;
         let end = start.saturating_add(size).min(len);
         match &h[..4] {
+            b"ds64" => {
+                let body = chunk(start, (end - start).min(28) as usize)?;
+                wide = Some(le64(&body, 8)?);
+            }
             b"fmt " => {
                 let body = chunk(start, (end - start).min(64) as usize)?;
                 format_of = Some(format(&body)?);
