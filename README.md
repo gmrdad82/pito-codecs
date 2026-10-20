@@ -18,6 +18,8 @@
 
 Every speed number on this page was measured on one machine (AMD Ryzen 9 9950X, AMD Radeon RX 9060 XT on Mesa's radeonsi VA-API driver, Linux, ffmpeg 9.0.1) on public-domain NASA footage. [How it was measured](#how-it-was-measured) gives the input, the commands and the load for each.
 
+Got questions or doubts? Ping me on Discord: https://discord.gg/XsNcn3kYzn
+
 ## Install and first use
 
 pcod, the command line over the library, comes with every [GitHub Release](https://github.com/gmrdad82/pito-codecs/releases/latest) for Linux x86-64, Windows x86-64 and macOS on Apple Silicon. These lines fetch the latest release.
