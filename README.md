@@ -59,13 +59,13 @@ pcod frames frames/ trailer.mp4 --fps 60 --audio trailer.wav
 pcod stills clip.mp4 --count 24 --cols 6 --sheet sheet.png --out stills/
 ```
 
-`SHA256SUMS` in each Release lists every archive's checksum. To build pcod from source anywhere, Linux arm64 included, with Rust 1.97 or newer: `cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag v1.16.3 pito-codecs --bin pcod`.
+`SHA256SUMS` in each Release lists every archive's checksum. To build pcod from source anywhere, Linux arm64 included, with Rust 1.97 or newer: `cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag v2.0.0 pito-codecs --bin pcod`.
 
 In a Rust project, add the library with the parts you need (all are on by default):
 
 ```toml
 [dependencies]
-pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v1.16.3", default-features = false, features = ["h264", "hevc", "vp9", "aac", "mp4", "mkv", "gpu", "filter", "opus", "ac3", "mp3", "flac", "alac"] }
+pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v2.0.0", default-features = false, features = ["h264", "hevc", "vp9", "aac", "mp4", "mkv", "gpu", "filter", "opus", "ac3", "mp3", "flac", "alac"] }
 ```
 
 and let it pick the fastest route for each job:
