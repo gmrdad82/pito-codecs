@@ -31,6 +31,8 @@ pub use remux::{copy, plan, remux, remux_mp4};
 ))]
 pub(crate) use stream::Cursor;
 pub use stream::{Block, Stream};
+#[cfg(test)]
+pub(crate) use track::fits_as_well;
 pub use track::{
     AudioInfo, Colour, ContentEncoding, Mastering, Projection, Sample, Track, VideoInfo, codec_name,
 };

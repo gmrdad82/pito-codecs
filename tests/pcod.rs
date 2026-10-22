@@ -1034,6 +1034,238 @@ fn an_id3_tagged_flac_is_labelled_flac() {
     assert!(text(&plain.stdout).starts_with("container  FLAC"));
 }
 
+const MKV_RATES: [(&str, (u32, u32)); 6] = [
+    ("23.976", (24000, 1001)),
+    ("24", (24, 1)),
+    ("25", (25, 1)),
+    ("29.97", (30000, 1001)),
+    ("30", (30, 1)),
+    ("60", (60, 1)),
+];
+
+fn counted_frames(root: &Path, count: u32, shade: u32) -> PathBuf {
+    let folder = root.join(format!("frames-{count}-{shade}"));
+    fs::create_dir_all(&folder).unwrap();
+    for n in 0..count {
+        let mut img = Rgba::new(64, 64);
+        for (i, px) in img.data.chunks_exact_mut(4).enumerate() {
+            let x = i as u32 % 64;
+            px.copy_from_slice(&[(x * 4 + n * 3) as u8, (n * 5 + shade) as u8, 96, 255]);
+        }
+        fs::write(
+            folder.join(format!("{n:04}.png")),
+            pito_codecs::png::encode(&img).unwrap(),
+        )
+        .unwrap();
+    }
+    folder
+}
+
+fn encoded(folder: &Path, out: &Path, fps: &str) {
+    ok(&run(&[
+        folder.to_str().unwrap(),
+        out.to_str().unwrap(),
+        "--fps",
+        fps,
+    ]));
+}
+
+fn without_default_duration(src: &Path, out: &Path) {
+    let r = pito_codecs::mkv::Reader::open(src).unwrap();
+    let v = r.video().unwrap();
+    let options = pito_codecs::mkv::Options {
+        webm: r.is_webm(),
+        ..pito_codecs::mkv::Options::default()
+    };
+    let mut w = pito_codecs::mkv::Writer::create_with(out, options).unwrap();
+    let mut cfg = pito_codecs::mkv::TrackConfig::from_track(&r.tracks[v]);
+    cfg.default_duration = None;
+    let t = w.add_track(cfg).unwrap();
+    for (i, s) in r.tracks[v].samples.iter().enumerate() {
+        let data = r.read(v, i).unwrap();
+        w.push_block(t, &data, s.pts, None, s.keyframe, None)
+            .unwrap();
+    }
+    w.finish().unwrap();
+    let copy = pito_codecs::mkv::Reader::open(out).unwrap();
+    assert_eq!(copy.tracks[copy.video().unwrap()].default_duration, None);
+}
+
+#[test]
+fn short_webm_and_mkv_parts_probe_at_their_exact_rates() {
+    let root = dir("mkv-rates");
+    for count in [6u32, 12, 60] {
+        let folder = counted_frames(&root, count, 0);
+        for (fps, want) in MKV_RATES {
+            for ext in ["webm", "mkv"] {
+                let part = root.join(format!("{count}-{fps}.{ext}"));
+                encoded(&folder, &part, fps);
+                let r = pito_codecs::mkv::Reader::open(&part).unwrap();
+                let t = &r.tracks[r.video().unwrap()];
+                assert!(t.default_duration.is_some());
+                assert_eq!(t.samples.len(), count as usize, "{count} at {fps} {ext}");
+                let p = probe(&part, &Prefs::default()).unwrap();
+                assert_eq!(p.fps, want, "{count} frames at {fps} in {ext}");
+                let ambiguous = count == 6 && fps == "29.97";
+                if ambiguous {
+                    continue;
+                }
+                let bare = root.join(format!("{count}-{fps}-bare.{ext}"));
+                without_default_duration(&part, &bare);
+                let p = probe(&bare, &Prefs::default()).unwrap();
+                assert_eq!(
+                    p.fps, want,
+                    "{count} frames at {fps} in {ext}, block times only"
+                );
+                assert_eq!(p.frames, Some(u64::from(count)));
+            }
+        }
+    }
+}
+
+fn joined(parts: &[&Path], out: &Path) -> String {
+    let mut args = vec!["join"];
+    args.extend(parts.iter().map(|p| p.to_str().unwrap()));
+    args.push(out.to_str().unwrap());
+    let done = run(&args);
+    ok(&done);
+    text(&done.stdout)
+}
+
+#[test]
+fn three_short_24_fps_webm_parts_join_by_copy() {
+    let root = dir("mkv-join-copy");
+    let mut parts = Vec::new();
+    let mut bare = Vec::new();
+    for k in 0..3u32 {
+        let folder = counted_frames(&root, 12, k * 40);
+        let part = root.join(format!("part-{k}.webm"));
+        encoded(&folder, &part, "24");
+        let stripped = root.join(format!("bare-{k}.webm"));
+        without_default_duration(&part, &stripped);
+        parts.push(part);
+        bare.push(stripped);
+    }
+    for (name, set) in [("ours", &parts), ("bare", &bare)] {
+        let out = root.join(format!("{name}-joined.webm"));
+        let refs: Vec<&Path> = set.iter().map(PathBuf::as_path).collect();
+        let said = joined(&refs, &out);
+        assert!(
+            said.contains("by stream copy, no re-encode"),
+            "{name}: {said}"
+        );
+        let p = probe(&out, &Prefs::default()).unwrap();
+        assert_eq!(p.fps, (24, 1), "{name}");
+        assert!((p.duration - 1.5).abs() < 0.01, "{name}: {}", p.duration);
+        let r = pito_codecs::mkv::Reader::open(&out).unwrap();
+        let t = &r.tracks[r.video().unwrap()];
+        assert_eq!(t.samples.len(), 36, "{name}");
+        let pts: Vec<i64> = t.samples.iter().map(|s| s.pts).collect();
+        assert!(pts.windows(2).all(|w| w[1] > w[0]), "{name}: {pts:?}");
+        let parted: Vec<Vec<u8>> = set
+            .iter()
+            .flat_map(|p| {
+                let r = pito_codecs::mkv::Reader::open(p).unwrap();
+                let v = r.video().unwrap();
+                (0..r.tracks[v].samples.len())
+                    .map(|i| r.read(v, i).unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let v = r.video().unwrap();
+        let whole: Vec<Vec<u8>> = (0..t.samples.len())
+            .map(|i| r.read(v, i).unwrap())
+            .collect();
+        assert_eq!(whole, parted, "{name}: the copy keeps every frame's bytes");
+    }
+}
+
+#[test]
+fn webm_parts_at_24_and_25_fps_re_encode_and_say_why() {
+    let root = dir("mkv-join-mixed");
+    let folder = counted_frames(&root, 12, 0);
+    let slow = root.join("slow.webm");
+    let fast = root.join("fast.webm");
+    encoded(&folder, &slow, "24");
+    encoded(&folder, &fast, "25");
+    let out = root.join("mixed.webm");
+    let said = joined(&[&slow, &fast], &out);
+    assert!(said.contains("by re-encoding"), "{said}");
+    assert!(
+        said.contains(&format!(
+            "{} runs at 25 fps, not 24 fps like {}",
+            fast.display(),
+            slow.display()
+        )),
+        "{said}"
+    );
+    let p = probe(&out, &Prefs::default()).unwrap();
+    assert_eq!(p.fps, (24, 1));
+    assert!(
+        (p.duration - (0.5 + 12.0 / 25.0)).abs() < 0.05,
+        "{}",
+        p.duration
+    );
+}
+
+#[test]
+fn bare_twelve_frame_webm_parts_at_close_rates_re_encode_and_say_why() {
+    let root = dir("mkv-join-close");
+    let folder = counted_frames(&root, 12, 0);
+    for (slow, fast, said_slow, said_fast) in [
+        ("23.976", "24", "23.98 fps", "24 fps"),
+        ("29.97", "30", "29.97 fps", "30 fps"),
+    ] {
+        let mut bare = Vec::new();
+        for fps in [slow, fast] {
+            let part = root.join(format!("{fps}.webm"));
+            encoded(&folder, &part, fps);
+            let stripped = root.join(format!("bare-{fps}.webm"));
+            without_default_duration(&part, &stripped);
+            bare.push(stripped);
+        }
+        let out = root.join(format!("{slow}-{fast}.webm"));
+        let said = joined(&[&bare[0], &bare[1]], &out);
+        assert!(said.contains("by re-encoding"), "{slow}/{fast}: {said}");
+        assert!(
+            said.contains(&format!(
+                "{} runs at {said_fast}, not {said_slow} like {}",
+                bare[1].display(),
+                bare[0].display()
+            )),
+            "{slow}/{fast}: {said}"
+        );
+    }
+}
+
+#[test]
+fn a_bare_six_frame_29_97_part_joins_a_29_97_part_by_copy() {
+    let root = dir("mkv-join-six");
+    let first = root.join("first.webm");
+    encoded(&counted_frames(&root, 6, 0), &first, "29.97");
+    let second = root.join("second.webm");
+    encoded(&counted_frames(&root, 6, 40), &second, "29.97");
+    let bare = root.join("second-bare.webm");
+    without_default_duration(&second, &bare);
+    assert_eq!(probe(&bare, &Prefs::default()).unwrap().fps, (30, 1));
+    let out = root.join("joined.webm");
+    let said = joined(&[&first, &bare], &out);
+    assert!(said.contains("by stream copy, no re-encode"), "{said}");
+    let p = probe(&out, &Prefs::default()).unwrap();
+    assert_eq!(p.fps, (30000, 1001));
+    let frame = 1001.0 / 30000.0;
+    assert!((p.duration - 12.0 * frame).abs() < frame, "{}", p.duration);
+    let r = pito_codecs::mkv::Reader::open(&out).unwrap();
+    let t = &r.tracks[r.video().unwrap()];
+    assert_eq!(t.samples.len(), 12);
+    let mut pts: Vec<f64> = t.samples.iter().map(|s| t.seconds(s.pts)).collect();
+    pts.sort_by(f64::total_cmp);
+    for (i, w) in pts.windows(2).enumerate() {
+        let step = w[1] - w[0];
+        assert!((step - frame).abs() < 0.0015, "step {i}: {step}");
+    }
+}
+
 fn hum_wav(amplitude: f64, seconds: usize, clicks: bool) -> Vec<u8> {
     const RATE: u32 = 48_000;
     let mut pcm = Vec::new();

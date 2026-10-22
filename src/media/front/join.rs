@@ -329,6 +329,45 @@ fn fps_of(clip: &Clip) -> Option<f64> {
     (n > 0 && d > 0).then(|| n as f64 / d as f64)
 }
 
+fn bare_track(clip: &Clip) -> Option<&mkv::Track> {
+    let Demux::Mkv(r) = &clip.demux else {
+        return None;
+    };
+    r.full()
+        .ok()?
+        .tracks
+        .get(clip.video)
+        .filter(|t| !t.default_duration.is_some_and(|d| d > 0))
+}
+
+fn same_rate(a: &Clip, b: &Clip) -> bool {
+    let (x, y) = (fps_of(a), fps_of(b));
+    rates_agree(
+        x,
+        y,
+        bare_track(a).map(|t| move |fps| x.is_some_and(|own| t.fits_as_well(fps, own))),
+        bare_track(b).map(|t| move |fps| y.is_some_and(|own| t.fits_as_well(fps, own))),
+    )
+}
+
+fn rates_agree(
+    x: Option<f64>,
+    y: Option<f64>,
+    a_fits: Option<impl Fn(f64) -> bool>,
+    b_fits: Option<impl Fn(f64) -> bool>,
+) -> bool {
+    match (x, y) {
+        (Some(x), Some(y)) if (x - y).abs() < SAME_RATE => true,
+        (Some(x), Some(y)) => {
+            (a_fits.is_some() || b_fits.is_some())
+                && a_fits.is_none_or(|f| f(y))
+                && b_fits.is_none_or(|f| f(x))
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 fn alike(media: &Clip) -> String {
     let sound = match &media.audio {
         Some(a) => format!("with {} {} at {} Hz", a.codec, layout(a.channels), a.rate),
@@ -470,12 +509,7 @@ fn differs(a: &Clip, b: &Clip) -> Option<String> {
             pb.rotation, pa.rotation
         ));
     }
-    let same_rate = match (fps_of(a), fps_of(b)) {
-        (Some(x), Some(y)) => (x - y).abs() < SAME_RATE,
-        (None, None) => true,
-        _ => false,
-    };
-    if !same_rate {
+    if !same_rate(a, b) {
         return Some(format!(
             "{other} runs at {}, not {} like {first}",
             rate_text(fps_of(b)),
@@ -574,7 +608,7 @@ fn timed(demux: &Demux, track: usize, video: bool) -> Result<(TimeBase, Vec<Time
             Ok((tb, out))
         }
         Demux::Mkv(r) => {
-            let full = r.full()?;
+            let full = r.indexed_for(track)?;
             let t = full
                 .tracks
                 .get(track)
@@ -687,9 +721,15 @@ fn plan_video(clips: &[Clip], kind: Kind) -> Result<VideoPlan> {
         } else {
             1
         };
+        let rounded = clip.matroska();
+        let length = |dur: i64| match dur {
+            d if d <= 0 => step,
+            d if rounded && (d - step).abs() <= 1 => step,
+            d => d,
+        };
         let end = times
             .iter()
-            .map(|t| t.pts.saturating_add(if t.dur > 0 { t.dur } else { step }))
+            .map(|t| t.pts.saturating_add(length(t.dur)))
             .max()
             .unwrap_or(start);
         for (i, t) in times.iter().enumerate() {
@@ -1794,6 +1834,102 @@ mod tests {
             interlaced: false,
             tools: None,
         }
+    }
+
+    fn ms_times(frames: u64, (num, den): (u64, u64)) -> Vec<i64> {
+        (0..frames)
+            .map(|k| ((k * 1000 * den * 2 + num) / (2 * num)) as i64)
+            .collect()
+    }
+
+    fn fits(times: Vec<i64>, own: f64) -> Option<impl Fn(f64) -> bool> {
+        Some(move |fps| mkv::fits_as_well(times.iter().copied(), 1e-3, fps, own))
+    }
+
+    const NONE: Option<fn(f64) -> bool> = None;
+
+    #[test]
+    fn bare_twelve_frame_parts_at_23_976_and_24_do_not_match() {
+        let (ntsc, film) = (24000.0 / 1001.0, 24.0);
+        let a = fits(ms_times(12, (24000, 1001)), ntsc);
+        let b = fits(ms_times(12, (24, 1)), film);
+        assert!(!rates_agree(Some(ntsc), Some(film), a, b));
+        let a = fits(ms_times(12, (24000, 1001)), ntsc);
+        assert!(!rates_agree(Some(ntsc), Some(film), a, NONE));
+        let b = fits(ms_times(12, (24, 1)), film);
+        assert!(!rates_agree(Some(ntsc), Some(film), NONE, b));
+        assert!(!rates_agree(Some(ntsc), Some(film), NONE, NONE));
+    }
+
+    #[test]
+    fn bare_parts_at_29_97_and_30_or_59_94_and_60_do_not_match() {
+        for frames in [12, 60] {
+            for (ntsc, whole) in [((30000, 1001), (30, 1)), ((60000, 1001), (60, 1))] {
+                let x = ntsc.0 as f64 / ntsc.1 as f64;
+                let y = whole.0 as f64;
+                let a = fits(ms_times(frames, ntsc), x);
+                let b = fits(ms_times(frames, whole), y);
+                assert!(!rates_agree(Some(x), Some(y), a, b), "{frames} at {ntsc:?}");
+                let a = fits(ms_times(frames, ntsc), x);
+                assert!(
+                    !rates_agree(Some(x), Some(y), a, NONE),
+                    "{frames} at {ntsc:?}"
+                );
+                let b = fits(ms_times(frames, whole), y);
+                assert!(
+                    !rates_agree(Some(x), Some(y), NONE, b),
+                    "{frames} at {whole:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_bare_part_whose_block_times_fit_the_other_rate_as_well_matches() {
+        let six = ms_times(6, (30000, 1001));
+        assert_eq!(six, ms_times(6, (30, 1)));
+        let ntsc = 30000.0 / 1001.0;
+        assert!(rates_agree(
+            Some(30.0),
+            Some(ntsc),
+            fits(six.clone(), 30.0),
+            NONE
+        ));
+        assert!(rates_agree(
+            Some(ntsc),
+            Some(30.0),
+            NONE,
+            fits(six.clone(), 30.0)
+        ));
+        assert!(rates_agree(
+            Some(30.0),
+            Some(ntsc),
+            fits(six.clone(), 30.0),
+            fits(six, ntsc)
+        ));
+        let film = ms_times(12, (24, 1));
+        assert!(rates_agree(
+            Some(24.0),
+            Some(24.0),
+            fits(film.clone(), 24.0),
+            fits(film, 24.0)
+        ));
+    }
+
+    #[test]
+    fn a_real_mismatch_or_a_missing_rate_never_matches() {
+        let film = fits(ms_times(12, (24, 1)), 24.0);
+        let pal = fits(ms_times(12, (25, 1)), 25.0);
+        assert!(!rates_agree(Some(24.0), Some(25.0), film, pal));
+        let film = fits(ms_times(12, (24, 1)), 24.0);
+        assert!(!rates_agree(Some(24.0), Some(24.05), film, NONE));
+        assert!(!rates_agree(Some(24.0), Some(24.05), NONE, NONE));
+        assert!(rates_agree(Some(24.0), Some(24.005), NONE, NONE));
+        assert!(rates_agree(None, None, NONE, NONE));
+        let film = fits(ms_times(12, (24, 1)), 24.0);
+        assert!(!rates_agree(Some(24.0), None, film, NONE));
+        let film = fits(ms_times(12, (24, 1)), 24.0);
+        assert!(!rates_agree(None, Some(24.0), NONE, film));
     }
 
     #[test]

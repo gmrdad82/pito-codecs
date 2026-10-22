@@ -639,6 +639,7 @@ pub struct Reader<S: ByteSource = File> {
     pub(crate) segment_end: u64,
     pub(crate) first_cluster: Option<u64>,
     full: OnceLock<std::result::Result<Box<Reader<S>>, Error>>,
+    every: OnceLock<std::result::Result<Box<Reader<S>>, Error>>,
     cue_keys: OnceLock<Option<Vec<i64>>>,
 }
 
@@ -773,6 +774,7 @@ impl<S: ByteSource> Reader<S> {
             segment_end: head.segment_end,
             first_cluster: head.first_cluster,
             full: OnceLock::new(),
+            every: OnceLock::new(),
             cue_keys: OnceLock::new(),
         })
     }
@@ -999,6 +1001,38 @@ impl Reader<File> {
                 .try_clone()
                 .map_err(Error::from)
                 .and_then(|f| Self::open_inner(f, Options::default(), true))
+                .map(Box::new)
+        });
+        match built {
+            Ok(r) => Ok(r),
+            Err(e) => Err(again(e)),
+        }
+    }
+
+    #[cfg_attr(
+        not(all(
+            feature = "h264",
+            feature = "hevc",
+            feature = "aac",
+            feature = "gpu",
+            feature = "filter",
+            feature = "vp9"
+        )),
+        allow(dead_code)
+    )]
+    pub(crate) fn indexed_for(&self, track: usize) -> Result<&Reader<File>> {
+        let video = self
+            .tracks
+            .get(track)
+            .is_none_or(|t| t.kind == crate::mp4::TrackKind::Video);
+        if self.indexed || video {
+            return self.full();
+        }
+        let built = self.every.get_or_init(|| {
+            self.source
+                .try_clone()
+                .map_err(Error::from)
+                .and_then(|f| Self::open_inner(f, Options::default(), false))
                 .map(Box::new)
         });
         match built {

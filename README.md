@@ -169,6 +169,8 @@ H.264 and H.265 encode through VA-API, VideoToolbox and NVENC, and a transcode k
 
 The CPU H.264 encoder (CABAC, B-frames, CRF, QP, CBR and VBR) has no hand-written SIMD, and libx264 is 1.2× to 3.1× faster. H.265 encodes on the GPU only, and without a GPU HEVC encoder the front falls back to H.264 and says why.
 
+At matched SSIM on a 30 s 1080p talking-head clip, measured against ffmpeg 9.0.1 with x264 and libvpx, our CPU H.264 and VP9 encoders make files 1.5 to 1.9 times larger than x264 and libvpx (3.8 to 4.8 times on screen content) and run 1.3 to 1.4 times slower than x264 medium and slow. The GPU encoders are the default route. Contributions are welcome.
+
 ![CPU H.264 encode against libx264](docs/images/chart-encode-cpu.png)
 
 ### Smart-cut export
@@ -260,6 +262,8 @@ The front tries the GPU first and our own CPU code second, for every decode and 
 | VideoToolbox | macOS | H.264, H.265, AV1 | H.264, H.265 | GitHub's Apple Silicon runners on every push: decode bit-exact with ffmpeg, encodes decoded back; AV1 (Apple M3 and later) built, untested |
 | NVENC | Linux, Windows | — | H.264, H.265 | Built and unit-tested, untested on NVIDIA hardware |
 | Media Foundation | Windows | H.264, H.265, AV1 | — | Built and unit-tested, untested on GPU hardware |
+
+The NVIDIA paths are built and unit-tested but untested on NVIDIA hardware here; contributions from people with NVIDIA cards are welcome.
 
 The CPU codecs run and are tested on every push on Linux x86-64 and arm64, Windows x86-64 and macOS on Apple Silicon, with AVX2 kernels on x86-64 and NEON or portable paths on arm64.
 

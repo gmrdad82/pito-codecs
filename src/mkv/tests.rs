@@ -471,3 +471,50 @@ fn a_track_stored_far_behind_the_video_seeks_by_its_own_times() {
         assert!((r.tracks[track].seconds(first.pts) - landed).abs() < 1e-6);
     }
 }
+
+#[test]
+fn a_head_indexes_audio_only_when_an_audio_track_is_asked_for() {
+    use crate::media::{Packet, TimeBase};
+    let path = dir().join("head-audio.mkv");
+    let ms = TimeBase::new(1, 1000);
+    let mut w = Writer::create(&path).unwrap();
+    let v = w
+        .add_track(TrackConfig::h264(
+            vec![1, 100, 0, 30, 0xff, 0xe0, 0],
+            352,
+            240,
+            ms,
+        ))
+        .unwrap();
+    let a = w
+        .add_track(TrackConfig {
+            sample_rate: 48_000,
+            channels: 2,
+            ..TrackConfig::new(TrackKind::Audio, "A_PCM/INT/LIT", ms)
+        })
+        .unwrap();
+    for k in 0..30i64 {
+        let packet = |track_byte: u8, keyframe: bool| Packet {
+            data: vec![track_byte; 64],
+            pts: k * 40,
+            dts: k * 40,
+            keyframe,
+        };
+        w.push(v, &packet(1, k % 10 == 0)).unwrap();
+        w.push(a, &packet(2, true)).unwrap();
+    }
+    w.finish().unwrap();
+    let head = Reader::open_with(&path, ReadOptions { index: false }).unwrap();
+    assert_eq!(head.full().unwrap().tracks[v].samples.len(), 30);
+    assert!(head.full().unwrap().tracks[a].samples.is_empty());
+    let every = head.indexed_for(a).unwrap();
+    assert_eq!(every.tracks[a].samples.len(), 30);
+    assert_eq!(every.tracks[a].samples[29].pts, 29 * 40);
+    let mut data = Vec::new();
+    every.read_into(a, 29, &mut data).unwrap();
+    assert_eq!(data, vec![2; 64]);
+    assert_eq!(head.indexed_for(v).unwrap().tracks[a].samples.len(), 0);
+    assert_eq!(head.indexed_for(99).unwrap().tracks[v].samples.len(), 30);
+    let whole = Reader::open(&path).unwrap();
+    assert!(std::ptr::eq(whole.indexed_for(a).unwrap(), &whole));
+}

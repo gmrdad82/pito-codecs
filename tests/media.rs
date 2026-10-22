@@ -2545,6 +2545,162 @@ fn vp9_stills_follow_the_vpcc_matrix_on_the_gpu_and_the_cpu() {
     }
 }
 
+fn matrix_still(path: &Path, matrix: &str, range: &str, height: u32) -> Rgba {
+    let out = Command::new("ffmpeg")
+        .args(["-nostdin", "-v", "error", "-i"])
+        .arg(path)
+        .args(["-map", "0:v:0", "-frames:v", "1", "-vf"])
+        .arg(format!(
+            "scale=-2:{height}:flags=bilinear:in_color_matrix={matrix}:in_range={range}"
+        ))
+        .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let width = (out.stdout.len() / 4 / height as usize) as u32;
+    Rgba {
+        width,
+        height,
+        data: out.stdout,
+    }
+}
+
+fn rewrapped(src: &Path, size: (u32, u32), vpcc: Option<u8>, full: bool, out: &Path) {
+    use pito_codecs::{mkv, mp4};
+    let r = mkv::Reader::open(src).unwrap();
+    let samples = r.tracks[0].samples.clone();
+    let mut buf = Vec::new();
+    let tb = TimeBase::new(1, 1000);
+    match vpcc {
+        None => {
+            let mut w = mkv::Writer::create(out).unwrap();
+            let t = w
+                .add_track(mkv::TrackConfig::vp9(size.0, size.1, tb))
+                .unwrap();
+            for (i, s) in samples.iter().enumerate() {
+                r.read_into(0, i, &mut buf).unwrap();
+                w.push_sample(t, &buf, i as i64 * 100, Some(100), s.keyframe)
+                    .unwrap();
+            }
+            w.finish().unwrap();
+        }
+        Some(space) => {
+            let config = mp4::VpcConfig::new((0, 8, 1), (space, full), size, (10, 1));
+            let entry = mp4::SampleEntry::vp9(config, size.0 as u16, size.1 as u16);
+            let mut w = mp4::Writer::create(out).unwrap();
+            let t = w.add_track(mp4::TrackConfig::new(entry, 1000)).unwrap();
+            for (i, s) in samples.iter().enumerate() {
+                r.read_into(0, i, &mut buf).unwrap();
+                let pts = i as i64 * 100;
+                w.push_sample(t, &buf, pts, pts, 100, s.keyframe).unwrap();
+            }
+            w.finish().unwrap();
+        }
+    }
+}
+
+#[test]
+fn vp9_tagged_only_in_its_keyframe_converts_with_the_header_matrix_and_range() {
+    let Ok(encoders) = Command::new("ffmpeg")
+        .args(["-hide_banner", "-encoders"])
+        .output()
+    else {
+        return;
+    };
+    if !String::from_utf8_lossy(&encoders.stdout).contains("libvpx-vp9") {
+        return;
+    }
+    let vp9_gpu = pito_codecs::gpu::available()
+        .iter()
+        .any(|&(c, d, _)| c == Codec::Vp9 && d == pito_codecs::gpu::Direction::Decode);
+    eprintln!("VP9 GPU decode available: {vp9_gpu}");
+    let cases = [
+        ((848, 480), "bt709", "bt709", "tv", "bt601"),
+        ((848, 480), "bt709", "bt709", "pc", "bt601"),
+        ((1920, 1080), "bt470bg", "bt601", "tv", "bt709"),
+        ((1920, 1080), "bt470bg", "bt601", "pc", "bt709"),
+    ];
+    for ((w, h), space, matrix, range, default) in cases {
+        let name = format!("vp9-key-{h}-{space}-{range}");
+        let tagged = dir().join(format!("{name}.mkv"));
+        if !tagged.exists() {
+            ffmpeg_make(
+                &tagged,
+                &[
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!("testsrc2=s={w}x{h}:r=10:d=1"),
+                    "-c:v",
+                    "libvpx-vp9",
+                    "-deadline",
+                    "realtime",
+                    "-cpu-used",
+                    "8",
+                    "-g",
+                    "10",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-colorspace",
+                    space,
+                    "-color_range",
+                    range,
+                ],
+            );
+        }
+        let full = range == "pc";
+        let bare_mkv = dir().join(format!("{name}-bare.mkv"));
+        let open_mp4 = dir().join(format!("{name}-open.mp4"));
+        rewrapped(&tagged, (w, h), None, full, &bare_mkv);
+        rewrapped(&tagged, (w, h), Some(0), false, &open_mp4);
+        let right = matrix_still(&tagged, matrix, range, 240);
+        let wrong = matrix_still(&tagged, default, "tv", 240);
+        let tags_win = dir().join(format!("{name}-tags-win.mkv"));
+        let header = if space == "bt709" { "bt601" } else { "bt709" };
+        ffmpeg_make(
+            &tags_win,
+            &[
+                "-i",
+                tagged.to_str().unwrap(),
+                "-c",
+                "copy",
+                "-bsf:v",
+                &format!("vp9_metadata=color_space={header}"),
+            ],
+        );
+        for path in [&bare_mkv, &open_mp4, &tags_win] {
+            for decode in [Choice::Cpu, Choice::Gpu] {
+                let ours = first_frame(path, 240, &route_prefs(decode.clone())).unwrap();
+                let (good, bad) = (mean_diff(&ours, &right), mean_diff(&ours, &wrong));
+                assert!(
+                    good < 6.0 && bad > good + 0.5,
+                    "{} {decode:?}: {good:.2} against {matrix}/{range}, {bad:.2} against {default}/tv",
+                    path.display()
+                );
+            }
+        }
+        if !full {
+            let other = if space == "bt709" { 1 } else { 2 };
+            let wins = dir().join(format!("{name}-wins.mp4"));
+            rewrapped(&tagged, (w, h), Some(other), true, &wins);
+            let container = matrix_still(&tagged, default, "pc", 240);
+            let ours = first_frame(&wins, 240, &route_prefs(Choice::Cpu)).unwrap();
+            let good = mean_diff(&ours, &container);
+            for (against, lost) in [("header", &right), ("size default", &wrong)] {
+                let bad = mean_diff(&ours, lost);
+                assert!(
+                    good < 6.0 && bad > good + 0.5,
+                    "{name}: the full-range {default} vpcC lost to the {against}: {good:.2} vs {bad:.2}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn av1_in_mp4_mkv_and_webm_probes_and_decodes_on_the_gpu_or_refuses_cleanly() {
     let Ok(encoders) = Command::new("ffmpeg")

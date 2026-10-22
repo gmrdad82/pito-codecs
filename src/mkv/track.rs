@@ -286,6 +286,18 @@ impl Track {
         if let Some(d) = self.default_duration.filter(|&d| d > 0) {
             return 1e9 / d as f64;
         }
+        if self.pts_order.len() == self.samples.len() {
+            if let Some(fps) = steady_rate(self.distinct_pts(), self.seconds(1)) {
+                return fps;
+            }
+        } else {
+            let mut pts: Vec<i64> = self.samples.iter().map(|s| s.pts).collect();
+            pts.sort_unstable();
+            pts.dedup();
+            if let Some(fps) = steady_rate(pts.into_iter(), self.seconds(1)) {
+                return fps;
+            }
+        }
         let n = self.samples.len();
         let span = self
             .end()
@@ -294,6 +306,28 @@ impl Track {
             0.0
         } else {
             n as f64 / self.seconds(span)
+        }
+    }
+
+    fn distinct_pts(&self) -> impl Iterator<Item = i64> + Clone + '_ {
+        let pts = |i: &u32| self.samples.get(*i as usize).map_or(0, |s| s.pts);
+        self.pts_order.first().map(pts).into_iter().chain(
+            self.pts_order
+                .windows(2)
+                .filter(move |w| pts(&w[0]) != pts(&w[1]))
+                .map(move |w| pts(&w[1])),
+        )
+    }
+
+    pub fn fits_as_well(&self, fps: f64, own: f64) -> bool {
+        let tick = self.seconds(1);
+        if self.pts_order.len() == self.samples.len() {
+            fits_as_well(self.distinct_pts(), tick, fps, own)
+        } else {
+            let mut pts: Vec<i64> = self.samples.iter().map(|s| s.pts).collect();
+            pts.sort_unstable();
+            pts.dedup();
+            fits_as_well(pts.into_iter(), tick, fps, own)
         }
     }
 
@@ -356,5 +390,205 @@ impl Track {
         let mut order: Vec<u32> = (0..self.samples.len() as u32).collect();
         order.sort_by_key(|&i| (self.samples[i as usize].pts, i));
         self.pts_order = order;
+    }
+}
+
+pub(crate) fn steady_rate<I: Iterator<Item = i64> + Clone>(pts: I, tick: f64) -> Option<f64> {
+    let first = pts.clone().next()?;
+    let (last, n) = pts.clone().fold((first, 0usize), |(_, n), p| (p, n + 1));
+    let span = last.checked_sub(first).filter(|&s| s > 0)? as f64 * tick;
+    if !tick.is_finite() || tick <= 0.0 || !span.is_finite() {
+        return None;
+    }
+    let measured = (n - 1) as f64 / span;
+    let whole = measured.round();
+    let ntsc = (measured * 1.001).round() * 1000.0 / 1001.0;
+    let snapped = [whole, ntsc]
+        .into_iter()
+        .filter(|&fps| fps >= 1.0)
+        .filter_map(|fps| rate_error(pts.clone(), tick, fps).map(|e| (e, fps)))
+        .filter(|&(e, _)| e <= 1.0)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, fps)| fps);
+    Some(snapped.unwrap_or(measured))
+}
+
+pub(crate) fn rate_error<I: Iterator<Item = i64> + Clone>(
+    mut pts: I,
+    tick: f64,
+    fps: f64,
+) -> Option<f64> {
+    if !tick.is_finite() || tick <= 0.0 || !fps.is_finite() || fps <= 0.0 {
+        return None;
+    }
+    let first = pts.next()?;
+    let frame = 1.0 / (fps * tick);
+    Some(
+        pts.enumerate()
+            .map(|(k, p)| (p.saturating_sub(first) as f64 - (k + 1) as f64 * frame).abs())
+            .fold(0.0, f64::max),
+    )
+}
+
+pub(crate) fn fits_as_well<I: Iterator<Item = i64> + Clone>(
+    pts: I,
+    tick: f64,
+    fps: f64,
+    own: f64,
+) -> bool {
+    match (
+        rate_error(pts.clone(), tick, fps),
+        rate_error(pts, tick, own),
+    ) {
+        (Some(e), Some(o)) => e <= 1.0 && e <= o.max(0.5) + 1e-6,
+        (Some(e), None) => e <= 0.5 + 1e-6,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod rate_tests {
+    use super::{fits_as_well, rate_error, steady_rate};
+
+    const RATES: [(u32, u32); 6] = [
+        (24000, 1001),
+        (24, 1),
+        (25, 1),
+        (30000, 1001),
+        (30, 1),
+        (60, 1),
+    ];
+
+    fn ms_times(frames: usize, (num, den): (u32, u32), first: i64) -> Vec<i64> {
+        (0..frames as u64)
+            .map(|k| first + ((k * 1000 * den as u64 * 2 + num as u64) / (2 * num as u64)) as i64)
+            .collect()
+    }
+
+    fn exact(fps: f64, (num, den): (u32, u32)) -> bool {
+        (fps - num as f64 / den as f64).abs() < 1e-9
+    }
+
+    #[test]
+    fn a_rate_with_no_usable_own_rate_fits_on_its_error_alone() {
+        let pts = ms_times(12, (24, 1), 0);
+        for own in [0.0, -1.0, f64::NAN] {
+            assert!(fits_as_well(pts.iter().copied(), 0.001, 24.0, own));
+            assert!(!fits_as_well(pts.iter().copied(), 0.001, 25.0, own));
+        }
+        assert!(!fits_as_well(pts.iter().copied(), 0.001, 0.0, 24.0));
+        assert!(!fits_as_well(std::iter::empty(), 0.001, 24.0, 24.0));
+    }
+
+    #[test]
+    fn millisecond_times_of_twelve_and_sixty_frames_give_the_exact_rate() {
+        for frames in [12, 60] {
+            for rate in RATES {
+                for first in [0, 7, 1_000_000] {
+                    let fps = steady_rate(ms_times(frames, rate, first).into_iter(), 1e-3).unwrap();
+                    assert!(
+                        exact(fps, rate),
+                        "{frames} frames at {rate:?} from {first}: {fps}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn six_frames_give_the_exact_rate_where_the_millisecond_times_tell_rates_apart() {
+        for rate in [(24000, 1001), (24, 1), (25, 1), (30, 1), (60, 1)] {
+            let fps = steady_rate(ms_times(6, rate, 0).into_iter(), 1e-3).unwrap();
+            assert!(exact(fps, rate), "{rate:?}: {fps}");
+        }
+        assert_eq!(ms_times(6, (30000, 1001), 0), ms_times(6, (30, 1), 0));
+    }
+
+    #[test]
+    fn the_twelve_frame_part_that_read_as_24_05_reads_as_24() {
+        let times = [0, 42, 83, 125, 167, 208, 250, 292, 333, 375, 417, 458];
+        assert_eq!(steady_rate(times.iter().copied(), 1e-3), Some(24.0));
+    }
+
+    #[test]
+    fn nanosecond_times_keep_a_standard_rate() {
+        let times: Vec<i64> = (0..10).map(|k| k * 1_001_000_000 / 30).collect();
+        let fps = steady_rate(times.iter().copied(), 1e-9).unwrap();
+        assert!(exact(fps, (30000, 1001)), "{fps}");
+    }
+
+    #[test]
+    fn uneven_times_keep_the_measured_rate() {
+        let times = [0, 40, 80, 200, 240, 280];
+        let fps = steady_rate(times.iter().copied(), 1e-3).unwrap();
+        assert!((fps - 5.0 / 0.28).abs() < 1e-9, "{fps}");
+        let odd = [0, 39, 78, 118, 157, 196, 235, 274, 314, 353];
+        let fps = steady_rate(odd.iter().copied(), 1e-3).unwrap();
+        assert!((fps - 9.0 / 0.353).abs() < 1e-9, "{fps}");
+    }
+
+    #[test]
+    fn too_few_or_bad_times_give_nothing() {
+        assert_eq!(steady_rate([].into_iter(), 1e-3), None);
+        assert_eq!(steady_rate([5].into_iter(), 1e-3), None);
+        assert_eq!(steady_rate([5, 5].into_iter(), 1e-3), None);
+        assert_eq!(steady_rate([0, 40].into_iter(), 0.0), None);
+        assert_eq!(steady_rate([0, 40].into_iter(), f64::NAN), None);
+        assert_eq!(steady_rate([0, 40].into_iter(), -1e-3), None);
+        assert_eq!(steady_rate([i64::MIN, i64::MAX].into_iter(), 1e-3), None);
+    }
+
+    #[test]
+    fn a_rate_under_one_frame_a_second_is_kept_as_measured() {
+        let fps = steady_rate([0, 2500, 5000].into_iter(), 1e-3).unwrap();
+        assert!((fps - 0.4).abs() < 1e-9, "{fps}");
+    }
+
+    #[test]
+    fn the_rate_error_is_the_worst_frame_off_its_slot_in_ticks() {
+        let film = ms_times(12, (24, 1), 5);
+        let own = rate_error(film.iter().copied(), 1e-3, 24.0).unwrap();
+        assert!(own <= 0.5, "{own}");
+        let other = rate_error(film.iter().copied(), 1e-3, 24000.0 / 1001.0).unwrap();
+        assert!(other > own, "{other} against {own}");
+        assert_eq!(rate_error([7].into_iter(), 1e-3, 24.0), Some(0.0));
+        assert_eq!(rate_error([].into_iter(), 1e-3, 24.0), None);
+        assert_eq!(rate_error([0, 42].into_iter(), 0.0, 24.0), None);
+        assert_eq!(rate_error([0, 42].into_iter(), 1e-3, 0.0), None);
+        assert_eq!(rate_error([0, 42].into_iter(), 1e-3, f64::NAN), None);
+    }
+
+    #[test]
+    fn close_rates_fit_twelve_millisecond_times_only_when_the_times_cannot_tell_them_apart() {
+        let pairs = [
+            ((24000, 1001), (24, 1)),
+            ((30000, 1001), (30, 1)),
+            ((60000, 1001), (60, 1)),
+        ];
+        for frames in [12, 60] {
+            for (a, b) in pairs {
+                let (x, y) = (a.0 as f64 / a.1 as f64, b.0 as f64 / b.1 as f64);
+                let ta = ms_times(frames, a, 0);
+                let tb = ms_times(frames, b, 0);
+                assert!(fits_as_well(ta.iter().copied(), 1e-3, x, x));
+                assert!(
+                    !fits_as_well(ta.into_iter(), 1e-3, y, x),
+                    "{frames} at {a:?}"
+                );
+                assert!(
+                    !fits_as_well(tb.into_iter(), 1e-3, x, y),
+                    "{frames} at {b:?}"
+                );
+            }
+        }
+        let six = ms_times(6, (30, 1), 0);
+        assert!(fits_as_well(
+            six.iter().copied(),
+            1e-3,
+            30000.0 / 1001.0,
+            30.0
+        ));
+        assert!(!fits_as_well(six.into_iter(), 1e-3, 25.0, 30.0));
+        assert!(!fits_as_well([0].into_iter().skip(1), 1e-3, 30.0, 30.0));
     }
 }

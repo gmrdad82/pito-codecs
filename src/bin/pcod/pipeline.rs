@@ -1190,13 +1190,19 @@ fn open_mux(job: &Job, track: VideoTrack, audio: Option<AudioTrackConfig>) -> Re
             };
             let mut writer = mkv::Writer::create_with(job.partial, options)?;
             let encoded_tb = TimeBase::new(job.fps.1, job.fps.0);
+            let frame_ns = frame_ns(job.fps);
             let (cfg, tb) = match track {
                 VideoTrack::Encoded(_) if matches!(job.encoder, Encoder::Vp9 { .. }) => {
                     let mut cfg = mkv::TrackConfig::vp9(w, h, encoded_tb);
                     cfg.alpha = job.alpha;
+                    cfg.default_duration = Some(frame_ns);
                     (cfg, encoded_tb)
                 }
-                VideoTrack::Encoded(x) => (mkv::TrackConfig::h264(x, w, h, encoded_tb), encoded_tb),
+                VideoTrack::Encoded(x) => {
+                    let mut cfg = mkv::TrackConfig::h264(x, w, h, encoded_tb);
+                    cfg.default_duration = Some(frame_ns);
+                    (cfg, encoded_tb)
+                }
                 VideoTrack::Mkv(cfg, tb) => (cfg, tb),
                 VideoTrack::Mp4(..) => return Err("an MP4 track config for Matroska".into()),
             };
@@ -1602,9 +1608,25 @@ fn write_all(path: &Path, data: &[u8]) -> Result<(), Fail> {
     std::fs::write(path, data).map_err(|e| format!("{}: {e}", path.display()).into())
 }
 
+fn frame_ns((num, den): (u32, u32)) -> u64 {
+    let num = u64::from(num.max(1));
+    ((u64::from(den) * 1_000_000_000 + num / 2) / num).max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_duration_rounds_to_the_nearest_nanosecond() {
+        assert_eq!(frame_ns((30000, 1001)), 33_366_667);
+        assert_eq!(frame_ns((24000, 1001)), 41_708_333);
+        assert_eq!(frame_ns((60000, 1001)), 16_683_333);
+        assert_eq!(frame_ns((24, 1)), 41_666_667);
+        assert_eq!(frame_ns((25, 1)), 40_000_000);
+        assert_eq!(frame_ns((0, 1)), 1_000_000_000);
+        assert_eq!(frame_ns((1, 0)), 1);
+    }
 
     #[test]
     fn a_tie_between_two_slots_goes_to_the_later_one_whatever_the_origin() {

@@ -55,6 +55,8 @@ fn tagged_look(
     Some((sar, color))
 }
 
+const KEY_LOOK: usize = 8;
+
 static MKV_HEADS: Readers<mkv::Reader> = LazyLock::new(Default::default);
 
 fn mkv_reader(path: &Path) -> Result<Arc<mkv::Reader>> {
@@ -337,7 +339,13 @@ impl Demux {
                 ))
             }
             Demux::Mkv(r) => {
-                let s = r.full().ok()?.tracks.get(track)?.samples.get(i)?;
+                let s = r
+                    .indexed_for(track)
+                    .ok()?
+                    .tracks
+                    .get(track)?
+                    .samples
+                    .get(i)?;
                 Some((s.pts, s.pts, s.keyframe))
             }
         }
@@ -347,7 +355,7 @@ impl Demux {
         match self {
             Demux::Mp4(r) => r.tracks.get(track).map_or(0, |t| t.samples.len()),
             Demux::Mkv(r) => r
-                .full()
+                .indexed_for(track)
                 .ok()
                 .and_then(|r| r.tracks.get(track))
                 .map_or(0, |t| t.samples.len()),
@@ -357,7 +365,7 @@ impl Demux {
     pub fn read_into(&self, track: usize, i: usize, buf: &mut Vec<u8>) -> Result<()> {
         match self {
             Demux::Mp4(r) => r.read_into(track, i, buf),
-            Demux::Mkv(r) => r.full()?.read_into(track, i, buf),
+            Demux::Mkv(r) => r.indexed_for(track)?.read_into(track, i, buf),
         }
     }
 
@@ -379,7 +387,7 @@ impl Demux {
                 (t.keyframe_before(at), t.presentation(at).unwrap_or(shift))
             }
             Demux::Mkv(r) => {
-                let t = mkv_track(r.full()?, track)?;
+                let t = mkv_track(r.indexed_for(track)?, track)?;
                 let at = t.sample_at(t.ticks(from)).unwrap_or(0);
                 (
                     t.keyframe_before(at),
@@ -388,6 +396,64 @@ impl Demux {
             }
         };
         Ok((key, pts.saturating_sub(shift)))
+    }
+
+    fn keyframe_vpcc(&self, track: usize) -> Option<VpcConfig> {
+        type Held = (Weak<dyn Any + Send + Sync>, Option<VpcConfig>);
+        static KEYS: LazyLock<Mutex<HashMap<(usize, usize), Held>>> =
+            LazyLock::new(Default::default);
+        let (at, any): (usize, Arc<dyn Any + Send + Sync>) = match self {
+            Demux::Mp4(r) => (Arc::as_ptr(r) as usize, r.clone()),
+            Demux::Mkv(r) => (Arc::as_ptr(r) as usize, r.clone()),
+        };
+        if let Some((w, k)) = KEYS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&(at, track))
+            && w.strong_count() > 0
+        {
+            return *k;
+        }
+        let k = self.scan_keyframe(track);
+        let mut map = KEYS.lock().unwrap_or_else(PoisonError::into_inner);
+        if map.len() >= 256 {
+            map.retain(|_, (w, _)| w.strong_count() > 0);
+        }
+        map.insert((at, track), (Arc::downgrade(&any), k));
+        k
+    }
+
+    fn scan_keyframe(&self, track: usize) -> Option<VpcConfig> {
+        let mut buf = Vec::new();
+        match self {
+            Demux::Mp4(_) => {
+                for i in 0..self.samples(track).min(KEY_LOOK) {
+                    self.read_into(track, i, &mut buf).ok()?;
+                    if let Some(c) = keyframe_config(&buf) {
+                        return Some(c);
+                    }
+                }
+                None
+            }
+            Demux::Mkv(r) => {
+                let mut blocks = r.stream();
+                let mut seen = 0;
+                for _ in 0..KEY_LOOK * r.tracks.len().max(1) {
+                    let b = blocks.next_into(&mut buf).ok()??;
+                    if b.track != track {
+                        continue;
+                    }
+                    if let Some(c) = keyframe_config(&buf) {
+                        return Some(c);
+                    }
+                    seen += 1;
+                    if seen == KEY_LOOK {
+                        break;
+                    }
+                }
+                None
+            }
+        }
     }
 
     pub fn stream(&self, track: usize) -> Result<Stream> {
@@ -400,13 +466,21 @@ impl Demux {
                     Some(CodecConfig::Vp9(c)) => Some(c),
                     _ => None,
                 };
-                let color = match vpcc {
-                    Some(c) => vpcc_color(c),
+                let key = match codec {
+                    Some(Codec::Vp9) if !vpcc.is_some_and(complete) => self.keyframe_vpcc(track),
+                    _ => None,
+                };
+                let vp9 = match (vpcc, key) {
+                    (Some(c), Some(k)) => Some(merged(c, &k)),
+                    (c, k) => c.copied().or(k),
+                };
+                let color = match vp9 {
+                    Some(c) => vpcc_color(&c),
                     None => codec.and_then(|c| color_of(c, &extradata)),
                 };
                 #[cfg(feature = "gpu")]
-                let look = match vpcc {
-                    Some(c) => vpcc_look(c),
+                let look = match vp9 {
+                    Some(c) => vpcc_look(&c),
                     None => codec.and_then(|c| crate::gpu::look(c, &extradata)),
                 };
                 Ok(Stream {
@@ -431,17 +505,19 @@ impl Demux {
                     Some(Codec::H264) => Some(AvcConfig::parse(&extradata)?),
                     _ => None,
                 };
-                let tagged = t
-                    .video
-                    .as_ref()
-                    .and_then(|v| v.colour.as_ref())
-                    .and_then(|c| Some((u8::try_from(c.matrix?).ok()?, c.full_range())))
-                    .filter(|(m, _)| *m != 2);
-                let color = tagged.or_else(|| codec.and_then(|c| color_of(c, &extradata)));
+                let colour = t.video.as_ref().and_then(|v| v.colour.as_ref());
+                let key = match codec {
+                    Some(Codec::Vp9) if !colour.is_some_and(settled) => self.keyframe_vpcc(track),
+                    _ => None,
+                };
+                let color = mkv_color(colour, key.as_ref())
+                    .or_else(|| codec.and_then(|c| color_of(c, &extradata)));
                 #[cfg(feature = "gpu")]
                 let look = tagged_look(
-                    codec.and_then(|c| crate::gpu::look(c, &extradata)),
-                    t.video.as_ref().and_then(|v| v.colour.as_ref()),
+                    key.as_ref()
+                        .and_then(vpcc_look)
+                        .or_else(|| codec.and_then(|c| crate::gpu::look(c, &extradata))),
+                    colour,
                 );
                 Ok(Stream {
                     codec,
@@ -566,11 +642,7 @@ pub fn probe(head: &Arc<mkv::Reader>) -> Result<Probe> {
     }
     let (v, t) = mkv_video(r)?;
     let duration = (t.duration_seconds() - starts.file).max(0.0);
-    let fps = match t.default_duration.filter(|d| *d > 0) {
-        Some(ns) => 1e9 / ns as f64,
-        None if duration > 0.0 => t.samples.len() as f64 / duration,
-        None => 0.0,
-    };
+    let fps = t.fps();
     let keyframe = super::variant::needs_keyframe(t.codec(), variant_config(t))
         .then(|| {
             t.samples
@@ -719,6 +791,57 @@ fn color_of(codec: Codec, extradata: &[u8]) -> Option<(u8, bool)> {
     crate::gpu::color(codec, extradata)
 }
 
+fn tagged_color(tags: Option<&mkv::Colour>) -> Option<(u8, bool)> {
+    tags.and_then(|c| Some((u8::try_from(c.matrix?).ok()?, c.full_range())))
+        .filter(|(m, _)| *m != 2)
+}
+
+fn settled(c: &mkv::Colour) -> bool {
+    let set = |v: Option<u64>| v.and_then(|v| u8::try_from(v).ok()).is_some_and(|v| v != 2);
+    matches!(c.range, Some(1 | 2)) && set(c.matrix) && set(c.primaries) && set(c.transfer)
+}
+
+fn mkv_color(tags: Option<&mkv::Colour>, key: Option<&VpcConfig>) -> Option<(u8, bool)> {
+    let Some(k) = key else {
+        return tagged_color(tags);
+    };
+    let full_range = match tags {
+        Some(c) if matches!(c.range, Some(1 | 2)) => c.full_range(),
+        _ => k.full_range,
+    };
+    let matrix_coefficients = tagged_color(tags).map_or(k.matrix_coefficients, |(m, _)| m);
+    vpcc_color(&VpcConfig {
+        full_range,
+        matrix_coefficients,
+        ..*k
+    })
+}
+
+fn complete(c: &VpcConfig) -> bool {
+    [
+        c.colour_primaries,
+        c.transfer_characteristics,
+        c.matrix_coefficients,
+    ]
+    .iter()
+    .all(|&v| v != 2)
+}
+
+fn merged(c: &VpcConfig, k: &VpcConfig) -> VpcConfig {
+    let pick = |v: u8, k: u8| if v != 2 { v } else { k };
+    VpcConfig {
+        colour_primaries: pick(c.colour_primaries, k.colour_primaries),
+        transfer_characteristics: pick(c.transfer_characteristics, k.transfer_characteristics),
+        matrix_coefficients: pick(c.matrix_coefficients, k.matrix_coefficients),
+        full_range: if c.full_range || c.matrix_coefficients != 2 {
+            c.full_range
+        } else {
+            k.full_range
+        },
+        ..*c
+    }
+}
+
 fn vpcc_color(c: &VpcConfig) -> Option<(u8, bool)> {
     (c.matrix_coefficients != 2 || c.full_range).then_some((c.matrix_coefficients, c.full_range))
 }
@@ -745,6 +868,27 @@ fn vpcc_look(c: &VpcConfig) -> Option<((u16, u16), crate::gpu::Color)> {
 
 #[cfg(not(feature = "gpu"))]
 fn color_of(_: Codec, _: &[u8]) -> Option<(u8, bool)> {
+    None
+}
+
+#[cfg(feature = "vp9")]
+fn keyframe_config(frame: &[u8]) -> Option<VpcConfig> {
+    let k = crate::vp9::keyframe_info(frame)?;
+    let chroma = match (k.subsampling_x, k.subsampling_y) {
+        (true, false) => 2,
+        (false, false) => 3,
+        _ => 1,
+    };
+    Some(VpcConfig::new(
+        (k.profile, k.bit_depth as u8, chroma),
+        (k.color.color_space, k.color.full_range),
+        (k.width, k.height),
+        (30, 1),
+    ))
+}
+
+#[cfg(not(feature = "vp9"))]
+fn keyframe_config(_: &[u8]) -> Option<VpcConfig> {
     None
 }
 
@@ -873,5 +1017,329 @@ mod tests {
         assert_eq!(foreign(&ts, u64::MAX), None);
         assert!(readable(&ts, u64::MAX).is_ok());
         assert_eq!(foreign(&ts, 1000), Some("MPEG-TS"));
+    }
+
+    #[cfg(all(feature = "vp9", feature = "gpu"))]
+    mod vp9_colour {
+        use super::*;
+        use crate::media::{Frame, PixelFormat};
+        use crate::mp4::SampleEntry;
+        use std::path::PathBuf;
+
+        const SIDE: u32 = 64;
+
+        fn scratch(name: &str) -> PathBuf {
+            let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/test/vp9color");
+            std::fs::create_dir_all(&d).unwrap();
+            d.join(format!("{}-{name}", std::process::id()))
+        }
+
+        fn keyframe(space: u8, full_range: bool) -> Vec<u8> {
+            let mut enc = crate::vp9::Encoder::new(crate::vp9::EncoderConfig {
+                width: SIDE,
+                height: SIDE,
+                gop: 1,
+                threads: 1,
+                ..Default::default()
+            })
+            .unwrap();
+            enc.set_color(space, full_range).unwrap();
+            let mut f = Frame::new(PixelFormat::Yuv420p8, SIDE, SIDE, 0, TimeBase::new(1, 30));
+            for p in &mut f.planes {
+                p.data.fill(128);
+            }
+            let mut out = enc.encode(&f).unwrap();
+            out.extend(enc.flush().unwrap());
+            out.into_iter().next().unwrap().data
+        }
+
+        fn mkv_of(name: &str, samples: &[(&[u8], bool)]) -> PathBuf {
+            let path = scratch(name);
+            let mut w = mkv::Writer::create(&path).unwrap();
+            let t = w
+                .add_track(mkv::TrackConfig::vp9(SIDE, SIDE, TimeBase::new(1, 1000)))
+                .unwrap();
+            for (i, (data, key)) in samples.iter().enumerate() {
+                w.push_sample(t, data, i as i64 * 33, Some(33), *key)
+                    .unwrap();
+            }
+            w.finish().unwrap();
+            path
+        }
+
+        fn vpcc(space: u8, full_range: bool) -> VpcConfig {
+            VpcConfig::new((0, 8, 1), (space, full_range), (SIDE, SIDE), (30, 1))
+        }
+
+        fn mp4_of(name: &str, space: (u8, bool), frame: &[u8]) -> PathBuf {
+            mp4_with(name, vpcc(space.0, space.1), frame)
+        }
+
+        fn mp4_with(name: &str, config: VpcConfig, frame: &[u8]) -> PathBuf {
+            let path = scratch(name);
+            let mut w = crate::mp4::Writer::create(&path).unwrap();
+            let t = w
+                .add_track(crate::mp4::TrackConfig::new(
+                    SampleEntry::vp9(config, SIDE as u16, SIDE as u16),
+                    1000,
+                ))
+                .unwrap();
+            w.push_sample(t, frame, 0, 0, 33, true).unwrap();
+            w.finish().unwrap();
+            path
+        }
+
+        fn colours(path: &Path) -> (Option<(u8, bool)>, Option<crate::gpu::Color>) {
+            let d = Demux::open(path).unwrap();
+            let s = d.stream(d.video().unwrap()).unwrap();
+            let _ = std::fs::remove_file(path);
+            (s.color, s.look.map(|(_, c)| c))
+        }
+
+        fn look(matrix: u8, primaries: u8, transfer: u8, full_range: bool) -> crate::gpu::Color {
+            crate::gpu::Color {
+                primaries,
+                transfer,
+                matrix,
+                full_range,
+            }
+        }
+
+        #[test]
+        fn an_untagged_matroska_vp9_takes_the_keyframe_colour() {
+            let bt709 = keyframe(2, false);
+            let (color, l) = colours(&mkv_of("709.mkv", &[(&bt709, true)]));
+            assert_eq!(color, Some((1, false)));
+            assert_eq!(l, Some(look(1, 1, 1, false)));
+            let bt601 = keyframe(1, true);
+            let (color, l) = colours(&mkv_of("601.mkv", &[(&bt601, true)]));
+            assert_eq!(color, Some((5, true)));
+            assert_eq!(l, Some(look(5, 5, 6, true)));
+        }
+
+        #[test]
+        fn an_unspecified_vpcc_falls_back_to_the_keyframe_colour() {
+            let (color, l) = colours(&mp4_of("open.mp4", (0, false), &keyframe(2, true)));
+            assert_eq!(color, Some((1, true)));
+            assert_eq!(l, Some(look(1, 1, 1, true)));
+        }
+
+        #[test]
+        fn a_vpcc_that_disagrees_with_the_keyframe_wins() {
+            let (color, l) = colours(&mp4_of("wins.mp4", (1, false), &keyframe(2, true)));
+            assert_eq!(color, Some((5, false)));
+            assert_eq!(l, Some(look(5, 5, 6, false)));
+        }
+
+        #[test]
+        fn unknown_and_reserved_keyframe_spaces_leave_the_size_default() {
+            for space in [0, 6] {
+                let frame = keyframe(space, false);
+                let (color, l) = colours(&mkv_of(&format!("cs{space}.mkv"), &[(&frame, true)]));
+                assert_eq!((color, l), (None, None), "color space {space}");
+            }
+            let frame = keyframe(6, true);
+            let (color, _) = colours(&mkv_of("cs6-full.mkv", &[(&frame, true)]));
+            assert_eq!(color, Some((2, true)));
+        }
+
+        #[test]
+        fn a_stream_without_a_readable_keyframe_still_opens_untagged() {
+            let junk = [0xffu8; 32];
+            let (color, l) = colours(&mkv_of("junk.mkv", &[(&junk, true), (&junk, false)]));
+            assert_eq!((color, l), (None, None));
+            let late = keyframe(2, false);
+            let (color, _) = colours(&mkv_of("late.mkv", &[(&junk, false), (&late, true)]));
+            assert_eq!(color, Some((1, false)));
+        }
+
+        #[test]
+        fn the_keyframe_is_looked_for_only_in_the_first_samples() {
+            let junk = [0xffu8; 32];
+            let late = keyframe(2, false);
+            let mut samples: Vec<(&[u8], bool)> = vec![(&junk, false); KEY_LOOK];
+            samples.push((&late, true));
+            let (color, _) = colours(&mkv_of("too-late.mkv", &samples));
+            assert_eq!(color, None);
+        }
+
+        #[test]
+        fn a_matroska_range_tag_overrides_the_keyframe_range_only() {
+            let key = VpcConfig::new((0, 8, 1), (2, false), (SIDE, SIDE), (30, 1));
+            let full = mkv::Colour {
+                range: Some(2),
+                ..Default::default()
+            };
+            assert_eq!(mkv_color(Some(&full), Some(&key)), Some((1, true)));
+            let open = mkv::Colour {
+                range: Some(0),
+                ..Default::default()
+            };
+            assert_eq!(mkv_color(Some(&open), Some(&key)), Some((1, false)));
+            assert_eq!(mkv_color(None, Some(&key)), Some((1, false)));
+        }
+
+        #[test]
+        fn a_range_only_vpcc_takes_the_matrix_from_the_keyframe() {
+            let path = mp4_of("range.mp4", (0, true), &keyframe(2, false));
+            let v = crate::media::front::look::video_look(&path).unwrap();
+            assert_eq!(v.color, look(1, 1, 1, true));
+            let (color, l) = colours(&path);
+            assert_eq!(color, Some((1, true)));
+            assert_eq!(l, Some(look(1, 1, 1, true)));
+        }
+
+        #[test]
+        fn vpcc_primaries_and_transfer_survive_the_keyframe_matrix() {
+            let pq = VpcConfig {
+                colour_primaries: 9,
+                transfer_characteristics: 16,
+                ..vpcc(0, false)
+            };
+            let (color, l) = colours(&mp4_with("pq.mp4", pq, &keyframe(2, true)));
+            assert_eq!(color, Some((1, true)));
+            assert_eq!(l, Some(look(1, 9, 16, true)));
+        }
+
+        #[test]
+        fn merged_fills_only_what_the_vpcc_leaves_unspecified() {
+            let key = vpcc(1, true);
+            assert_eq!(merged(&vpcc(2, false), &key), vpcc(2, false));
+            let open = merged(&vpcc(0, false), &key);
+            assert_eq!(open, key);
+            let full = merged(&vpcc(0, true), &vpcc(2, false));
+            assert_eq!((full.matrix_coefficients, full.full_range), (1, true));
+            assert!(complete(&vpcc(2, false)));
+            assert!(!complete(&vpcc(0, false)));
+        }
+
+        #[test]
+        fn a_matroska_matrix_tag_wins_over_the_keyframe_on_both_routes() {
+            let key = keyframe_config(&keyframe(2, true)).unwrap();
+            let tags = mkv::Colour {
+                matrix: Some(5),
+                ..Default::default()
+            };
+            assert_eq!(mkv_color(Some(&tags), Some(&key)), Some((5, true)));
+            assert_eq!(
+                tagged_look(vpcc_look(&key), Some(&tags)),
+                Some(((1, 1), look(5, 1, 1, true)))
+            );
+            let limited = mkv::Colour {
+                matrix: Some(5),
+                range: Some(1),
+                ..Default::default()
+            };
+            assert_eq!(mkv_color(Some(&limited), Some(&key)), Some((5, false)));
+            assert_eq!(
+                tagged_look(vpcc_look(&key), Some(&limited)),
+                Some(((1, 1), look(5, 1, 1, false)))
+            );
+            assert_eq!(mkv_color(Some(&limited), None), Some((5, false)));
+        }
+
+        #[test]
+        fn fully_tagged_matroska_colour_skips_the_keyframe() {
+            let all = mkv::Colour {
+                matrix: Some(1),
+                primaries: Some(1),
+                transfer: Some(1),
+                range: Some(1),
+                ..Default::default()
+            };
+            assert!(settled(&all));
+            for open in [
+                mkv::Colour {
+                    range: Some(0),
+                    ..all.clone()
+                },
+                mkv::Colour {
+                    range: None,
+                    ..all.clone()
+                },
+                mkv::Colour {
+                    matrix: Some(2),
+                    ..all.clone()
+                },
+                mkv::Colour {
+                    primaries: None,
+                    ..all.clone()
+                },
+                mkv::Colour {
+                    transfer: Some(300),
+                    ..all.clone()
+                },
+            ] {
+                assert!(!settled(&open), "{open:?}");
+            }
+            let key = keyframe_config(&keyframe(1, true)).unwrap();
+            assert_eq!(
+                mkv_color(Some(&all), Some(&key)),
+                mkv_color(Some(&all), None)
+            );
+            assert_eq!(
+                tagged_look(vpcc_look(&key), Some(&all)).map(|(_, c)| c),
+                tagged_look(None, Some(&all)).map(|(_, c)| c)
+            );
+            assert_eq!(
+                tagged_look(None, Some(&all)).map(|(sar, _)| sar),
+                Some((0, 0))
+            );
+        }
+
+        #[test]
+        fn the_keyframe_colour_is_read_once_per_reader() {
+            let path = mkv_of("once.mkv", &[(&keyframe(2, false), true)]);
+            let d = Demux::open(&path).unwrap();
+            let track = d.video().unwrap();
+            assert_eq!(d.stream(track).unwrap().color, Some((1, false)));
+            std::fs::write(&path, b"").unwrap();
+            assert_eq!(d.stream(track).unwrap().color, Some((1, false)));
+            let _ = std::fs::remove_file(&path);
+        }
+
+        fn rgb(profile: u8) -> Vec<u8> {
+            let mut frame = keyframe(2, false);
+            frame[0] |= (profile & 1) << 5;
+            frame[4] = (frame[4] & 0x0f) | 0xe0;
+            frame
+        }
+
+        #[test]
+        fn rgb_keyframes_map_to_identity_full_range_or_are_refused() {
+            assert_eq!(keyframe_config(&rgb(0)), None);
+            let c = keyframe_config(&rgb(1)).unwrap();
+            assert_eq!(
+                (
+                    c.profile,
+                    c.chroma_subsampling,
+                    c.matrix_coefficients,
+                    c.full_range
+                ),
+                (1, 3, 0, true)
+            );
+            let (color, l) = colours(&mkv_of("rgb.mkv", &[(&rgb(1), true)]));
+            assert_eq!(color, Some((0, true)));
+            assert_eq!(l, Some(look(0, 1, 13, true)));
+            let (color, l) = colours(&mkv_of("rgb0.mkv", &[(&rgb(0), true)]));
+            assert_eq!((color, l), (None, None));
+        }
+
+        #[test]
+        fn keyframe_config_maps_libvpx_spaces_and_refuses_junk() {
+            assert_eq!(keyframe_config(&[0xff; 32]), None);
+            assert_eq!(keyframe_config(&[]), None);
+            let c = keyframe_config(&keyframe(5, false)).unwrap();
+            assert_eq!(
+                (
+                    c.colour_primaries,
+                    c.transfer_characteristics,
+                    c.matrix_coefficients
+                ),
+                (9, 2, 9)
+            );
+            let c = keyframe_config(&keyframe(3, true)).unwrap();
+            assert_eq!((c.matrix_coefficients, c.full_range), (6, true));
+        }
     }
 }
