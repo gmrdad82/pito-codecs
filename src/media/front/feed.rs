@@ -25,6 +25,8 @@ pub struct Feed {
     skipped: usize,
     buf: Vec<u8>,
     pcm: Vec<f32>,
+    first_at: f64,
+    decoded: u64,
     at: At,
 }
 
@@ -90,6 +92,8 @@ impl Feed {
             skipped: 0,
             buf: Vec::new(),
             pcm: Vec::new(),
+            first_at: start,
+            decoded: 0,
             at,
         };
         if feed.origin.is_none() {
@@ -171,6 +175,7 @@ impl Feed {
                 };
                 let s = self.skip_from(start);
                 self.skip = Some(s);
+                self.first_at = start;
                 self.lead = self.lead_to(start);
                 s
             }
@@ -178,6 +183,12 @@ impl Feed {
         if self.lead > 0 && got == self.channels {
             out.resize(out.len() + self.lead * ch, 0.0);
             self.lead = 0;
+        }
+        self.decoded += frames as u64;
+        if let At::Mkv(l) = &mut self.at
+            && self.sound.counts_frames()
+        {
+            l.tail = Some(self.first_at + self.decoded as f64 / self.rate.max(1) as f64);
         }
         let drop = skip.saturating_sub(self.skipped).min(frames);
         self.skipped += drop;
@@ -204,6 +215,8 @@ struct Lazy {
     last_dur: i64,
     end_ticks: i64,
     eof: bool,
+    taken: i64,
+    tail: Option<f64>,
 }
 
 impl Lazy {
@@ -232,6 +245,8 @@ impl Lazy {
             last_dur: 0,
             end_ticks: 0,
             eof: false,
+            taken: 0,
+            tail: None,
         };
         let Some(first) = l.pull()? else {
             return Ok((l, 0.0, None));
@@ -417,9 +432,10 @@ impl Lazy {
             Some(b) => Some(b),
             None => self.pull()?,
         };
-        let Some((_, data)) = next else {
+        let Some((b, data)) = next else {
             return Ok(None);
         };
+        self.taken = b.pts;
         if let Some(c) = self.clock.as_mut() {
             c.pos += sound.pcm_frames(data.len() as u32).unwrap_or(0);
         }
@@ -432,27 +448,51 @@ impl Lazy {
         }
         match &self.clock {
             Some(c) => (c.origin + c.pos as f64 / sound.rate().max(1) as f64).max(0.0),
-            None => self
-                .r
-                .tracks
-                .get(self.i)
-                .map_or(0.0, |t| t.seconds(self.end_ticks).max(0.0)),
+            None => self.r.tracks.get(self.i).map_or(0.0, |t| match self.tail {
+                Some(e) => e.max(0.0),
+                None => t.seconds(self.end_ticks).max(0.0),
+            }),
         }
     }
 }
 
 pub fn mkv_end(r: &Arc<mkv::Reader>, i: usize) -> Result<f64> {
     let d = Demux::Mkv(r.clone());
-    let sound = Sound::open(&d, i)?;
+    let mut sound = Sound::open(&d, i)?;
     let last_cue = r
         .cues
         .last()
         .and_then(|c| r.tracks.get(i).map(|t| t.seconds(c.time as i64)))
         .unwrap_or(0.0);
     let guess = r.duration_seconds().max(last_cue);
-    let (mut l, _, _) = Lazy::open(r.clone(), i, (guess - TAIL).max(0.0), &sound)?;
+    let (mut l, _, origin) = Lazy::open(r.clone(), i, (guess - TAIL).max(0.0), &sound)?;
+    let mut prev: Option<Vec<u8>> = None;
+    let mut last: Option<Vec<u8>> = None;
     while let Some(data) = l.take(&sound)? {
-        l.spare.push(data);
+        if let Some(old) = std::mem::replace(&mut prev, last.replace(data)) {
+            l.spare.push(old);
+        }
+    }
+    if sound.counts_frames()
+        && let Some(data) = last
+        && let Some(t) = r.tracks.get(i)
+    {
+        let rate = sound.rate().max(1) as f64;
+        let mut pcm = Vec::new();
+        let full = prev.and_then(|p| frames_of(&mut sound, &p, &mut pcm));
+        if let Some(n) = frames_of(&mut sound, &data, &mut pcm) {
+            let at = t.seconds(l.taken);
+            let at = match (origin, full) {
+                (Some(o), Some(f)) => on_grid(at, o, f as f64 / rate),
+                _ => at,
+            };
+            l.tail = Some(at + n as f64 / rate);
+        }
     }
     Ok(l.end(&sound))
+}
+
+fn frames_of(sound: &mut Sound, data: &[u8], pcm: &mut Vec<f32>) -> Option<u64> {
+    let ch = sound.decode(data, pcm).ok()?;
+    Some((pcm.len() / ch.max(1) as usize) as u64)
 }

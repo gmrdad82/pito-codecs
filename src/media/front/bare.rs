@@ -13,6 +13,8 @@ pub enum Bare {
     Wav,
     #[cfg(feature = "mp3")]
     Mp3,
+    #[cfg(feature = "flac")]
+    Flac,
     #[cfg(feature = "opus")]
     Opus,
     Ogg(&'static str),
@@ -30,6 +32,16 @@ pub fn sniff(path: &Path) -> Option<Bare> {
     }
     if wav::is_wav(&head[..got]) {
         return Some(Bare::Wav);
+    }
+    #[cfg(feature = "flac")]
+    {
+        let named = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("flac"));
+        if head[..got].starts_with(b"fLaC") || (named && head[..got].starts_with(b"ID3")) {
+            return Some(Bare::Flac);
+        }
     }
     #[cfg(feature = "opus")]
     if crate::opus::ogg::sniff(&head[..got])
@@ -90,7 +102,7 @@ fn opus(path: &Path) -> Result<AudioBuffer> {
 }
 
 pub fn probe(path: &Path, kind: Bare) -> Result<Probe> {
-    let (codec, channels, rate, bitrate, duration) = match kind {
+    let (codec, channels, rate, bitrate, duration, bits) = match kind {
         Bare::Wav => {
             let l = wav::Reader::open(path)?.layout;
             let bits = u32::from(l.bits);
@@ -103,6 +115,7 @@ pub fn probe(path: &Path, kind: Bare) -> Result<Probe> {
                     .checked_mul(u32::from(l.channels))
                     .and_then(|v| v.checked_mul(bits)),
                 l.seconds(),
+                0,
             )
         }
         #[cfg(feature = "mp3")]
@@ -111,7 +124,27 @@ pub fn probe(path: &Path, kind: Bare) -> Result<Probe> {
             let seconds = b.frames() as f64 / f64::from(b.rate.max(1));
             let bytes = std::fs::metadata(path).map_or(0, |m| m.len());
             let bitrate = (seconds > 0.0).then(|| (bytes as f64 * 8.0 / seconds) as u32);
-            ("mp3", b.channels, b.rate, bitrate, seconds)
+            ("mp3", b.channels, b.rate, bitrate, seconds, 0)
+        }
+        #[cfg(feature = "flac")]
+        Bare::Flac => {
+            let i = crate::flac::read_info(path)?;
+            let frames = if i.bits > 31 {
+                i.samples
+            } else {
+                crate::flac::Reader::open(path)?.total()?
+            };
+            let seconds = frames as f64 / f64::from(i.rate.max(1));
+            let bytes = std::fs::metadata(path).map_or(0, |m| m.len());
+            let bitrate = (seconds > 0.0).then(|| (bytes as f64 * 8.0 / seconds) as u32);
+            (
+                "flac",
+                u16::from(i.channels),
+                i.rate,
+                bitrate,
+                seconds,
+                i.bits,
+            )
         }
         #[cfg(feature = "opus")]
         Bare::Opus => {
@@ -119,7 +152,14 @@ pub fn probe(path: &Path, kind: Bare) -> Result<Probe> {
             let ogg = crate::opus::ogg::OggOpus::parse(&data)?;
             let seconds = ogg.samples() as f64 / 48_000.0;
             let bitrate = (seconds > 0.0).then(|| (data.len() as f64 * 8.0 / seconds) as u32);
-            ("opus", ogg.head.channels as u16, 48_000, bitrate, seconds)
+            (
+                "opus",
+                ogg.head.channels as u16,
+                48_000,
+                bitrate,
+                seconds,
+                0,
+            )
         }
         Bare::Ogg(name) => return Err(refuse(name)),
     };
@@ -147,6 +187,8 @@ pub fn probe(path: &Path, kind: Bare) -> Result<Probe> {
             bitrate,
             default: true,
             start: Some(0.0),
+            bits,
+            refused: None,
         }],
         alpha: false,
     })
@@ -154,6 +196,8 @@ pub fn probe(path: &Path, kind: Bare) -> Result<Probe> {
 
 enum Src {
     Wav(Box<wav::Reader>),
+    #[cfg(feature = "flac")]
+    Flac(Box<crate::flac::Reader<File>>),
     Memory(AudioBuffer, usize),
 }
 
@@ -189,6 +233,17 @@ impl BareFeed {
                     src: Src::Memory(b, 0),
                 }
             }
+            #[cfg(feature = "flac")]
+            Bare::Flac => {
+                let mut r = crate::flac::Reader::open(path)?;
+                let i = *r.info();
+                BareFeed {
+                    rate: i.rate,
+                    channels: u16::from(i.channels),
+                    frames: r.total()?,
+                    src: Src::Flac(Box::new(r)),
+                }
+            }
             #[cfg(feature = "opus")]
             Bare::Opus => {
                 let b = opus(path)?;
@@ -208,9 +263,13 @@ impl BareFeed {
             )));
         }
         let first = ((from.max(0.0) * f64::from(feed.rate)).round() as u64).min(feed.frames);
-        match &mut feed.src {
-            Src::Wav(r) => r.seek(first),
-            Src::Memory(_, at) => *at = first as usize,
+        if first > 0 {
+            match &mut feed.src {
+                Src::Wav(r) => r.seek(first),
+                #[cfg(feature = "flac")]
+                Src::Flac(r) => r.seek(first)?,
+                Src::Memory(_, at) => *at = first as usize,
+            }
         }
         Ok(feed)
     }
@@ -222,6 +281,8 @@ impl BareFeed {
     pub fn next(&mut self, out: &mut Vec<f32>) -> Result<bool> {
         match &mut self.src {
             Src::Wav(r) => Ok(r.read(BATCH, out)? > 0),
+            #[cfg(feature = "flac")]
+            Src::Flac(r) => Ok(r.read_f32(out)? > 0),
             Src::Memory(b, at) => {
                 let ch = usize::from(b.channels);
                 let total = b.samples.len() / ch;

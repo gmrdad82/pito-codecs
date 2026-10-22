@@ -682,10 +682,15 @@ fn show(out: &mut impl Write, file: &Path) -> Result<(), Fail> {
             Some(l) => format!(" {}-bit", l.bits),
             None => String::new(),
         };
+        let codec = if a.native() {
+            a.codec.clone()
+        } else {
+            a.variant()
+        };
         writeln!(
             out,
             "audio      {} {} ch {} Hz{bits}",
-            a.codec, a.channels, a.rate
+            codec, a.channels, a.rate
         )?;
     }
     Ok(())
@@ -699,6 +704,15 @@ fn container(file: &Path, wav: bool) -> &'static str {
         "WAV"
     } else if read.is_ok() && head == [0x1a, 0x45, 0xdf, 0xa3] {
         "Matroska"
+    } else if read.is_ok()
+        && (&head == b"fLaC"
+            || (head.starts_with(b"ID3")
+                && file
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("flac"))))
+    {
+        "FLAC"
     } else if read.is_ok()
         && (head.starts_with(b"ID3") || (head[0] == 0xff && head[1] & 0xe0 == 0xe0))
     {

@@ -62,6 +62,7 @@ impl CodecConfig {
             CodecConfig::Pcm(_) => "pcm".into(),
             CodecConfig::Other(f) if &f.0 == b"ac-3" => "ac3".into(),
             CodecConfig::Other(f) if &f.0 == b"ec-3" => "eac3".into(),
+            CodecConfig::Other(f) if &f.0 == b"fLaC" => "flac".into(),
             CodecConfig::Other(f) => f.to_string_lossy().trim().to_string(),
         }
     }

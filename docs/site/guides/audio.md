@@ -9,7 +9,7 @@ The `media` front decodes audio tracks to 32-bit float PCM at the rate and chann
 
 ## Which codecs
 
-AAC-LC, Opus (SILK, CELT, hybrid and multistream), AC-3, E-AC-3, MP3, MP2, MP1 and PCM, from MP4, MOV, MKV and WebM. `AudioTrack::native()` says whether pito-codecs decodes a track itself. A track in another codec (FLAC, Vorbis, DTS, ALAC) decodes only through the user's ffmpeg, when the app's `Prefs` pick it.
+AAC-LC, Opus (SILK, CELT, hybrid and multistream), AC-3, E-AC-3, MP3, MP2, MP1, FLAC and PCM, from MP4, MOV, MKV and WebM. `AudioTrack::native()` says whether pito-codecs decodes a track itself. A track in another codec (Vorbis, DTS, ALAC) decodes only through the user's ffmpeg, when the app's `Prefs` pick it.
 
 ```rust
 use pito_codecs::media::{Prefs, probe};
@@ -30,6 +30,8 @@ Track numbers count audio tracks only, from 0.
 Build with `default-features = false, features = ["audio", "opus", "ac3", "mp3"]` to get the probe, `audio_pcm_range`, `audio_stream` and `audio_mix_stream` with no video decoder, GPU code or filters; leave out the codecs you don't need.
 
 A bare `.mp3` file, outside a container, decodes with `mp3::decode_file(&bytes)`: it skips ID3v2, ID3v1 and APE tags, and trims the encoder delay and padding its LAME or Xing header gives, so the samples match ffmpeg's gapless decode. `mp3::vbr_tag` reads that header from a first frame for a caller that decodes frame by frame with `mp3::Decoder`.
+
+A bare `.flac` file decodes with `flac::decode_file(&bytes)`, or streams frame by frame with `flac::Reader`, whose `seek` lands on the exact sample through the file's seek table or, without one, by bisection over the frames. `flac::Decoder::from_config` decodes the packets of an MKV or MP4 FLAC track from its CodecPrivate or `dfLa` box.
 
 ## A time range
 

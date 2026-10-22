@@ -153,12 +153,16 @@ pub enum Sound {
     Opus(Box<crate::opus::Decoder>),
     #[cfg(feature = "mp3")]
     Mp3(Box<crate::mp3::Decoder>),
+    #[cfg(feature = "flac")]
+    Flac(Box<crate::flac::Decoder>),
+    #[cfg(feature = "alac")]
+    Alac(Box<crate::alac::Decoder>),
     Pcm(Pcm),
 }
 
 fn unsupported(name: &str) -> Error {
     Error::Unsupported(format!(
-        "our audio decoders read AAC, AC-3, E-AC-3, Opus, MP3 and PCM, not {}",
+        "our audio decoders read AAC, AC-3, E-AC-3, Opus, MP3, FLAC, ALAC and PCM, not {}",
         if name.is_empty() {
             "this track's codec"
         } else {
@@ -187,8 +191,7 @@ fn mkv_pcm(t: &crate::mkv::Track) -> Result<Pcm> {
     )
 }
 
-#[cfg(feature = "opus")]
-fn dops(e: &crate::mp4::SampleEntry) -> Option<&[u8]> {
+pub(super) fn child<'a>(e: &'a crate::mp4::SampleEntry, kind: &[u8; 4]) -> Option<&'a [u8]> {
     let extra = match e.audio.as_ref().map_or(0, |a| a.qt_version) {
         1 => 16,
         2 => 36,
@@ -200,7 +203,7 @@ fn dops(e: &crate::mp4::SampleEntry) -> Option<&[u8]> {
         if size < 8 || size > rest.len() {
             return None;
         }
-        if rest.get(4..8)? == b"dOps" {
+        if rest.get(4..8)? == kind {
             return rest.get(8..size);
         }
         rest = rest.get(size..)?;
@@ -252,14 +255,30 @@ impl Sound {
                         let a = e.audio.clone().unwrap_or_default();
                         Ok(Sound::mp3(a.sample_rate, a.channels as u64))
                     }
+                    #[cfg(feature = "alac")]
+                    CodecConfig::Other(f) if &f.0 == b"alac" => {
+                        let cookie = crate::alac::entry_cookie(e).ok_or_else(|| {
+                            Error::Invalid("ALAC track without its magic cookie".to_string())
+                        })?;
+                        Ok(Sound::Alac(Box::new(crate::alac::Decoder::new(cookie)?)))
+                    }
                     #[cfg(feature = "opus")]
                     CodecConfig::Other(f) if &f.0 == b"Opus" => {
-                        let head = dops(e).ok_or_else(|| {
+                        let head = child(e, b"dOps").ok_or_else(|| {
                             Error::Invalid("Opus track without a dOps box".to_string())
                         })?;
                         let head = crate::opus::OpusHead::from_dops(head)?;
                         Ok(Sound::Opus(Box::new(crate::opus::Decoder::from_head(
                             head, 48000,
+                        )?)))
+                    }
+                    #[cfg(feature = "flac")]
+                    CodecConfig::Other(f) if &f.0 == b"fLaC" => {
+                        let config = child(e, b"dfLa").ok_or_else(|| {
+                            Error::Invalid("FLAC track without a dfLa box".to_string())
+                        })?;
+                        Ok(Sound::Flac(Box::new(crate::flac::Decoder::from_config(
+                            config,
                         )?)))
                     }
                     other => Err(unsupported(&other.name())),
@@ -282,6 +301,18 @@ impl Sound {
                         &t.codec_private,
                     )?))),
                     "pcm" => Ok(Sound::Pcm(mkv_pcm(t)?)),
+                    #[cfg(feature = "flac")]
+                    "flac" => Ok(Sound::Flac(Box::new(crate::flac::Decoder::from_config(
+                        &t.codec_private,
+                    )?))),
+                    #[cfg(feature = "alac")]
+                    "alac" if t.codec_private.is_empty() => Err(Error::Invalid(
+                        "ALAC track without its magic cookie".to_string(),
+                    )),
+                    #[cfg(feature = "alac")]
+                    "alac" => Ok(Sound::Alac(Box::new(crate::alac::Decoder::new(
+                        &t.codec_private,
+                    )?))),
                     #[cfg(feature = "ac3")]
                     "ac3" | "eac3" => Ok(Sound::Ac3(Box::new(crate::ac3::Decoder::new(
                         t.sample_rate(),
@@ -307,6 +338,10 @@ impl Sound {
             Sound::Opus(d) => d.sample_rate(),
             #[cfg(feature = "mp3")]
             Sound::Mp3(d) => d.rate(),
+            #[cfg(feature = "flac")]
+            Sound::Flac(d) => d.rate(),
+            #[cfg(feature = "alac")]
+            Sound::Alac(d) => d.rate(),
             Sound::Pcm(p) => p.rate,
         }
     }
@@ -320,7 +355,21 @@ impl Sound {
             Sound::Opus(d) => d.channels() as u16,
             #[cfg(feature = "mp3")]
             Sound::Mp3(d) => d.channels(),
+            #[cfg(feature = "flac")]
+            Sound::Flac(d) => d.channels(),
+            #[cfg(feature = "alac")]
+            Sound::Alac(d) => d.channels(),
             Sound::Pcm(p) => p.channels,
+        }
+    }
+
+    pub fn counts_frames(&self) -> bool {
+        match self {
+            #[cfg(feature = "flac")]
+            Sound::Flac(_) => true,
+            #[cfg(feature = "alac")]
+            Sound::Alac(_) => true,
+            _ => false,
         }
     }
 
@@ -334,6 +383,10 @@ impl Sound {
             Sound::Opus(_) => None,
             #[cfg(feature = "mp3")]
             Sound::Mp3(_) => None,
+            #[cfg(feature = "flac")]
+            Sound::Flac(_) => None,
+            #[cfg(feature = "alac")]
+            Sound::Alac(_) => None,
         }
     }
 
@@ -345,6 +398,10 @@ impl Sound {
             Sound::Ac3(d) => 1536.0 / d.rate().max(1) as f64,
             #[cfg(feature = "mp3")]
             Sound::Mp3(_) => 0.2,
+            #[cfg(feature = "flac")]
+            Sound::Flac(_) => 0.0,
+            #[cfg(feature = "alac")]
+            Sound::Alac(_) => 0.0,
             Sound::Aac(_) | Sound::Pcm(_) => 0.0,
         }
     }
@@ -370,6 +427,16 @@ impl Sound {
             #[cfg(feature = "mp3")]
             Sound::Mp3(d) => {
                 d.decode_packet(data, out)?;
+                Ok(d.channels())
+            }
+            #[cfg(feature = "flac")]
+            Sound::Flac(d) => {
+                d.decode_packet(data, out)?;
+                Ok(d.channels())
+            }
+            #[cfg(feature = "alac")]
+            Sound::Alac(d) => {
+                d.decode_into(data, out)?;
                 Ok(d.channels())
             }
             Sound::Pcm(p) => {

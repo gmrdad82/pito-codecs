@@ -164,6 +164,7 @@ pub fn codec_name(codec_id: &str) -> &str {
         "A_OPUS" => "opus",
         "A_VORBIS" => "vorbis",
         "A_FLAC" => "flac",
+        "A_ALAC" => "alac",
         "A_AC3" => "ac3",
         "A_EAC3" => "eac3",
         "A_MPEG/L3" => "mp3",

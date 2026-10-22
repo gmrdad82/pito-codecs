@@ -525,18 +525,25 @@ fn mkv_audio(r: &mkv::Reader, starts: &Starts) -> Vec<AudioTrack> {
         .filter_map(|(index, i)| {
             let a = r.tracks.get(i)?;
             let name = a.name.trim();
+            let (codec, rate, refused) = super::probe::mkv_audio_codec(a);
             Some(AudioTrack {
                 index,
                 stream: i,
                 title: (!name.is_empty()).then(|| name.to_string()),
                 language: (!a.language.is_empty() && a.language != "und")
                     .then(|| a.language.clone()),
-                codec: a.codec_name().to_string(),
+                codec,
                 channels: a.channels() as u16,
-                rate: a.sample_rate(),
+                rate,
                 bitrate: None,
                 default: a.default,
                 start: starts.track(i),
+                bits: if a.codec_name() == "flac" {
+                    super::probe::flac_bits(&a.codec_private)
+                } else {
+                    0
+                },
+                refused,
             })
         })
         .collect()

@@ -49,11 +49,11 @@ Add it to a Rust project's `Cargo.toml`. Every part is on by default:
 pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "@VERSION@" }
 ```
 
-Each part is a feature: `media`, `h264`, `hevc`, `vp9`, `aac`, `ac3`, `mp3`, `opus`, `mp4`, `mkv`, `gpu`, `filter`, `gif`, `webp`, and `cli` for pcod alone. The `media` front (`probe`, `first_frame`, `export` and the rest) needs `h264`, `hevc`, `vp9`, `aac`, `mp4`, `mkv`, `gpu` and `filter`; a library user who wants nothing else turns `cli` off so clap is never built:
+Each part is a feature: `media`, `h264`, `hevc`, `vp9`, `aac`, `ac3`, `mp3`, `flac`, `opus`, `mp4`, `mkv`, `gpu`, `filter`, `gif`, `webp`, and `cli` for pcod alone. The `media` front (`probe`, `first_frame`, `export` and the rest) needs `h264`, `hevc`, `vp9`, `aac`, `mp4`, `mkv`, `gpu` and `filter`; a library user who wants nothing else turns `cli` off so clap is never built:
 
 ```toml
 [dependencies]
-pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "@VERSION@", default-features = false, features = ["h264", "hevc", "vp9", "aac", "mp4", "mkv", "gpu", "filter", "opus", "ac3", "mp3"] }
+pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "@VERSION@", default-features = false, features = ["h264", "hevc", "vp9", "aac", "mp4", "mkv", "gpu", "filter", "opus", "ac3", "mp3", "flac"] }
 ```
 
 The GPU route needs nothing extra: libva is loaded at run time on Linux (Mesa's or Intel's driver), VideoToolbox is part of macOS and Media Foundation part of Windows. Without them everything decodes and encodes on the CPU.

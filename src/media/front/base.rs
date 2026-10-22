@@ -187,6 +187,7 @@ pub fn probe(path: &Path) -> Result<Probe> {
             let a = &r.tracks[i];
             let name = a.name.trim();
             let lower = name.to_lowercase();
+            let (codec, rate, refused) = super::probe::mp4_audio_codec(a);
             AudioTrack {
                 index,
                 stream: i,
@@ -194,12 +195,18 @@ pub fn probe(path: &Path) -> Result<Probe> {
                     .then(|| name.to_string()),
                 language: (!a.language.is_empty() && a.language != "und")
                     .then(|| a.language.clone()),
-                codec: a.config().map(|c| c.name()).unwrap_or_default(),
+                codec,
                 channels: a.channels() as u16,
-                rate: a.sample_rate(),
+                rate,
                 bitrate: Some(a.bitrate()).filter(|b| *b > 0),
                 default: a.enabled,
                 start: starts.track(i),
+                bits: a
+                    .entry()
+                    .filter(|e| e.codec.name() == "flac")
+                    .and_then(|e| super::sound::child(e, b"dfLa"))
+                    .map_or(0, super::probe::flac_bits),
+                refused,
             }
         })
         .collect();
@@ -340,6 +347,9 @@ pub fn audio_range(
     rate: u32,
     channels: u16,
 ) -> Result<AudioBuffer> {
+    if let Some(kind) = super::bare::sniff(path) {
+        return bare_range(path, kind, track, from, to, rate, channels);
+    }
     let d = audio_demux(path)?;
     let i = audio_track(&d, track)?;
     let sound = Sound::open(&d, i)?;
@@ -376,6 +386,33 @@ pub fn audio_range(
         out.samples.extend_from_slice(&p.samples);
     }
     Ok(out)
+}
+
+fn bare_range(
+    path: &Path,
+    kind: super::bare::Bare,
+    track: usize,
+    from: f64,
+    to: f64,
+    rate: u32,
+    channels: u16,
+) -> Result<AudioBuffer> {
+    let mut feed = super::bare::BareFeed::open(path, kind, track, from)?;
+    let feed_rate = feed.rate as f64;
+    let at = |t: f64| (t * feed_rate).round() as usize;
+    let want = to
+        .is_finite()
+        .then(|| at(to).saturating_sub(at(from.max(0.0))));
+    let mut raw = AudioBuffer::new(feed.rate, feed.channels);
+    while want.is_none_or(|w| raw.frames() < w) && feed.next(&mut raw.samples)? {}
+    if let Some(w) = want {
+        raw.samples.truncate(w * raw.channels as usize);
+    }
+    if channels > raw.channels {
+        shape(at_rate(raw, rate), channels)
+    } else {
+        Ok(at_rate(shape(raw, channels)?, rate))
+    }
 }
 
 fn piece(

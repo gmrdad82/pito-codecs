@@ -12,8 +12,13 @@ pub mod aac;
 
 #[cfg(feature = "ac3")]
 pub mod ac3;
+#[cfg(feature = "alac")]
+pub mod alac;
 #[cfg(feature = "mp3")]
 pub mod mp3;
+
+#[cfg(feature = "flac")]
+pub mod flac;
 
 #[cfg(feature = "mp4")]
 pub mod mp4;

@@ -1,0 +1,7 @@
+s16_stereo_44k 199709441e7cd236
+s24_mono_96k_exhaustive a4967239872e0b4d
+s16_block1001_lpc32 9fb6bebe7c515f29
+s24_wasted_bits 1c3c08cb06dc7d10
+u8_mono_8k 2e4f70d0b6830830
+s16_six_channels 6bbcd4c1f4724281
+s16_block577_independent 501d138b2d8c4bb5

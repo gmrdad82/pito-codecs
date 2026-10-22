@@ -4,7 +4,7 @@
 
 [![Version](https://img.shields.io/github/v/tag/gmrdad82/pito-codecs)](https://github.com/gmrdad82/pito-codecs/tags)
 
-**Video and audio codecs in pure Rust, on the CPU and the GPU, with no ffmpeg inside.** H.264, H.265, VP9, AV1 decode, AAC, AC-3, E-AC-3, Opus and MP3; MP4, MOV, MKV and WebM; GIF and WebP. One MIT Cargo package, a feature per part, two direct dependencies and no C linked.
+**Video and audio codecs in pure Rust, on the CPU and the GPU, with no ffmpeg inside.** H.264, H.265, VP9, AV1 decode, AAC, AC-3, E-AC-3, Opus, MP3, FLAC and ALAC; MP4, MOV, MKV and WebM; GIF and WebP. One MIT Cargo package, a feature per part, two direct dependencies and no C linked.
 
 - **First frame 12× to 28× faster than ffmpeg:** 4.2 ms against 85.2 ms for a 1440p H.264 file on the CPU.
 - **AV1 on the card and the processor:** first frame 1.6× to 4.4× faster than ffmpeg with dav1d, every frame bit-exact with dav1d.
@@ -65,7 +65,7 @@ In a Rust project, add the library with the parts you need (all are on by defaul
 
 ```toml
 [dependencies]
-pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v1.16.3", default-features = false, features = ["h264", "hevc", "vp9", "aac", "mp4", "mkv", "gpu", "filter", "opus", "ac3", "mp3"] }
+pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v1.16.3", default-features = false, features = ["h264", "hevc", "vp9", "aac", "mp4", "mkv", "gpu", "filter", "opus", "ac3", "mp3", "flac", "alac"] }
 ```
 
 and let it pick the fastest route for each job:
@@ -79,7 +79,7 @@ let still = first_frame("clip.mp4".as_ref(), 240, &prefs)?;
 println!("{}x{} at {}/{} fps, first frame {}x{}", info.width, info.height, info.fps.0, info.fps.1, still.width, still.height);
 ```
 
-For audio alone, `features = ["audio", "opus", "ac3", "mp3"]` builds the probe, `audio_pcm_range` and `audio_stream` with no video decoder, GPU code or filters.
+For audio alone, `features = ["audio", "opus", "ac3", "mp3"]` builds the probe (FLAC and ALAC come with `audio`), `audio_pcm_range` and `audio_stream` with no video decoder, GPU code or filters.
 
 The GPU route needs nothing extra: libva is loaded at run time on Linux (Mesa's or Intel's driver), VideoToolbox is part of macOS and Media Foundation part of Windows. Without them everything decodes and encodes on the CPU. On Windows, H.265 decode through Media Foundation needs Microsoft's HEVC Video Extensions, and N editions need the Media Feature Pack.
 
@@ -205,7 +205,7 @@ On the CPU, a caption change costs what its painted area costs: building the lay
 
 ### Audio
 
-AAC-LC decode and encode, Opus decode and encode (CELT; SILK and hybrid speech encode are experimental), and AC-3, E-AC-3, MP3, MP2, MP1 and PCM decode, from MP4, MOV, MKV and WebM. `audio_pcm_range` returns any time range as PCM, sample-exact; `audio_stream` hands it over in one-second blocks; `audio_mix_stream` mixes several tracks with a gain each. Loudness (EBU R128) and a true-peak limiter come with it.
+AAC-LC decode and encode, Opus decode and encode (CELT; SILK and hybrid speech encode are experimental), and AC-3, E-AC-3, MP3, MP2, MP1, FLAC, ALAC and PCM decode, from MP4, MOV, M4A, MKV and WebM; a bare `.flac` file reads and seeks to the exact sample with `flac::Reader`. `audio_pcm_range` returns any time range as PCM, sample-exact; `audio_stream` hands it over in one-second blocks; `audio_mix_stream` mixes several tracks with a gain each. Loudness (EBU R128) and a true-peak limiter come with it.
 
 An MKV seek lands on each audio track by that track's own timestamps, even when a remux stored the track minutes away from the video it plays with: on a 2-hour recording whose second PCM track sat 400 to 770 s behind the video in the file, 2 s of that track at 2000 s and 4000 s now read in 4 to 6 ms, where 1.6.1 took 0.4 to 1.9 s.
 
@@ -238,6 +238,8 @@ Scaling (bilinear, bicubic, Lanczos) runs 1.6× to 2.1× faster than ffmpeg's sw
 | AC-3 and E-AC-3 | Mono to 5.1 at 32, 44.1 and 48 kHz with coupling and rematrixing, within 2e-5 of ffmpeg's float decoder. Spectral extension, AHT and 7.1 through E-AC-3 dependent substreams are built but untested, since ffmpeg's encoder makes none of them; enhanced coupling and the reduced sample rates are refused. | — |
 | Opus | SILK, CELT, hybrid and multistream; the RFC 8251 conformance vectors decode to the reference's final range on every packet. | CELT, VBR and CBR, 6 to 510 kbps. **Experimental:** SILK and hybrid speech decode clean in libopus but sound worse than libopus at low rates. |
 | MP3, MP2, MP1 | MPEG-1, 2 and 2.5 audio, layers I, II and III, mono and stereo, CBR and VBR, within about 1e-6 of ffmpeg's mp3float. | — |
+| FLAC | 4 to 31-bit, mono to 8 channels, fixed and variable block sizes, every subframe and stereo mode, escape-coded partitions; bit-exact with libFLAC. In .flac, MKV and MP4; a file cut short plays up to the cut. 32-bit streams are refused, and the probe marks them not native as "32-bit FLAC". `examples/flac.rs` prints its decode speed, with `--against-flac` beside the reference decoder. | — |
+| ALAC | 16, 20, 24 and 32-bit, mono to 8 channels, in MP4, MOV, M4A and MKV, ported from Apple's reference decoder; 16 and 24-bit streams from ffmpeg's encoder decode bit-exact to its input, and 20 and 32-bit are checked on hand-built streams. Surround comes out in WAVE order, as from the AAC decoder. | — |
 | MP4 and MOV | Tracks, sample tables, rotation, edit lists, fragmented files. | MP4 or MOV, faststart or fragmented; remux of a time range without re-encoding. |
 | MKV and WebM | Tracks, lacing, Cues, seeking; VP9 with alpha. | H.264, HEVC, VP9, Opus and AAC; VP9 with alpha as libvpx writes it (a second VP9 stream in BlockAdditional, AlphaMode on the track); WebM's codec rules enforced; remux. |
 | GIF | GIF87a and 89a, interlace, disposal, transparency, loops. | Oklab palettes, ordered, Floyd-Steinberg or Sierra-2-4A dither; each frame stores only the rectangle that changed beyond a noise tolerance, and a slow change over a fifth of the frame redraws it whole. |
@@ -245,7 +247,7 @@ Scaling (bilinear, bicubic, Lanczos) runs 1.6× to 2.1× faster than ffmpeg's sw
 | PNG | Grey, grey and alpha, RGB, RGBA and palette with tRNS, 1 to 16-bit, Adam7, all five filters; to 8-bit RGBA, equal to ffmpeg's decode. | — |
 | WAV | PCM 8, 16, 24 and 32-bit, float 32 and 64-bit, any rate and channel count. | — |
 
-Not covered: DTS, FLAC, Vorbis, ALAC, AV1 encode, ProRes, DNxHD, MPEG-2 and VP8 video, and subtitle tracks.
+Not covered: DTS, Vorbis, AV1 encode, ProRes, DNxHD, MPEG-2 and VP8 video, and subtitle tracks.
 
 ## GPUs and systems
 
@@ -458,7 +460,7 @@ Issues are welcome at [github.com/gmrdad82/pito-codecs/issues](https://github.co
 
 ## Credits
 
-Parts are adapted from [FilmCraft](https://github.com/storytold/filmcraft) (MIT OR Apache-2.0, taken under MIT) and from libwebp (BSD-3-Clause), oxideav-ac3 (MIT) and minimp3 (CC0). The VA-API and NVENC declarations follow the MIT-licensed libva and NVIDIA headers. Permissive projects such as libvpx and libopus (BSD-3-Clause) may be ported with their notices; the GPL and LGPL ones (FFmpeg, x264, x265, libde265) are never copied, and ffmpeg serves only as the test oracle and the benchmark reference. The ITU-T H.264 and H.265 Recommendations, ATSC A/52, the VP9 specification, RFC 6716, RFC 6386, the GIF89a specification and the ISO MP4 and AAC standards are the sources. Origins are listed in [INSPIRATION.md](INSPIRATION.md) and their notices in [NOTICE](NOTICE). The demo and benchmark clips are public-domain NASA footage from PITO MD's fixture sets.
+Parts are adapted from [FilmCraft](https://github.com/storytold/filmcraft) (MIT OR Apache-2.0, taken under MIT) and from libwebp (BSD-3-Clause), oxideav-ac3 (MIT), minimp3 (CC0), libFLAC (BSD-3-Clause), Claxon (Apache-2.0) and Apple's ALAC (Apache-2.0). The VA-API and NVENC declarations follow the MIT-licensed libva and NVIDIA headers. Permissive projects such as libvpx and libopus (BSD-3-Clause) may be ported with their notices; the GPL and LGPL ones (FFmpeg, x264, x265, libde265) are never copied, and ffmpeg serves only as the test oracle and the benchmark reference. The ITU-T H.264 and H.265 Recommendations, ATSC A/52, the VP9 specification, RFC 6716, RFC 6386, the GIF89a specification and the ISO MP4 and AAC standards are the sources. Origins are listed in [INSPIRATION.md](INSPIRATION.md) and their notices in [NOTICE](NOTICE). The demo and benchmark clips are public-domain NASA footage from PITO MD's fixture sets.
 
 ## Licence
 

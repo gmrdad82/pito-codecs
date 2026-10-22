@@ -53,14 +53,19 @@ impl Probe {
 
     pub fn unsupported(&self) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
-        let video = (!self.video_native()).then_some(self.video_codec_name.as_str());
+        let none = self.video_codec.is_none() && self.video_codec_name.is_empty();
+        let video = (!none && !self.video_native()).then_some(self.video_codec_name.as_str());
         let audio = self
             .audio
             .iter()
             .filter(|a| !a.native())
-            .map(|a| a.codec.as_str());
-        for name in video.into_iter().chain(audio) {
-            let name = if name.is_empty() { "unknown" } else { name };
+            .map(|a| a.variant());
+        for name in video.map(str::to_string).into_iter().chain(audio) {
+            let name = if name.is_empty() {
+                "unknown"
+            } else {
+                name.as_str()
+            };
             if !names.iter().any(|n| n == name) {
                 names.push(name.to_string());
             }
@@ -81,9 +86,21 @@ pub struct AudioTrack {
     pub bitrate: Option<u32>,
     pub default: bool,
     pub start: Option<f64>,
+    pub bits: u8,
+    pub refused: Option<String>,
 }
 
 impl AudioTrack {
+    pub fn variant(&self) -> String {
+        if let Some(r) = &self.refused {
+            r.clone()
+        } else if self.bits > 0 && self.codec.eq_ignore_ascii_case("flac") {
+            format!("{}-bit FLAC", self.bits)
+        } else {
+            self.codec.clone()
+        }
+    }
+
     pub fn native(&self) -> bool {
         let native: &[&str] = if cfg!(feature = "opus") {
             &["aac", "opus", "pcm"]
@@ -100,12 +117,70 @@ impl AudioTrack {
         } else {
             &[]
         };
-        native
-            .iter()
-            .chain(ac3)
-            .chain(mp3)
-            .any(|c| self.codec.eq_ignore_ascii_case(c))
+        let flac: &[&str] = if cfg!(feature = "flac") {
+            &["flac"]
+        } else {
+            &[]
+        };
+        let alac: &[&str] = if cfg!(feature = "alac") {
+            &["alac"]
+        } else {
+            &[]
+        };
+        let refused =
+            self.refused.is_some() || (self.codec.eq_ignore_ascii_case("flac") && self.bits > 31);
+        !refused
+            && native
+                .iter()
+                .chain(ac3)
+                .chain(mp3)
+                .chain(flac)
+                .chain(alac)
+                .any(|c| self.codec.eq_ignore_ascii_case(c))
     }
+}
+
+#[cfg(feature = "alac")]
+fn alac(cookie: Option<&[u8]>, rate: u32) -> (String, u32, Option<String>) {
+    match crate::alac::refused(cookie) {
+        Some(variant) => ("alac".into(), rate, Some(variant)),
+        None => {
+            let cookie_rate = cookie
+                .and_then(|c| crate::alac::Config::parse(c).ok())
+                .map_or(rate, |c| c.sample_rate);
+            ("alac".into(), cookie_rate, None)
+        }
+    }
+}
+
+pub(super) fn mp4_audio_codec(t: &crate::mp4::Track) -> (String, u32, Option<String>) {
+    let name = t.config().map(|c| c.name()).unwrap_or_default();
+    #[cfg(feature = "alac")]
+    if name == "alac" {
+        return alac(
+            t.entry().and_then(crate::alac::entry_cookie),
+            t.sample_rate(),
+        );
+    }
+    #[cfg(feature = "flac")]
+    if name == "flac"
+        && let Some(i) = t
+            .entry()
+            .and_then(|e| super::sound::child(e, b"dfLa"))
+            .and_then(|c| crate::flac::config(c).ok())
+    {
+        return (name, i.rate, None);
+    }
+    (name, t.sample_rate(), None)
+}
+
+pub(super) fn mkv_audio_codec(t: &crate::mkv::Track) -> (String, u32, Option<String>) {
+    let name = t.codec_name();
+    #[cfg(feature = "alac")]
+    if name == "alac" {
+        return alac(Some(&t.codec_private), t.sample_rate());
+    }
+    (name.to_string(), t.sample_rate(), None)
 }
 
 #[derive(Default)]
@@ -290,6 +365,8 @@ fn from_flat(m: &BTreeMap<String, String>) -> Result<Probe> {
             bitrate: num(s, "bit_rate").map(|b| b as u32),
             default: get(s, "disposition.default").map(String::as_str) == Some("1"),
             start: num(s, "start_time").filter(|t| t.is_finite()),
+            bits: 0,
+            refused: None,
         })
         .collect();
     let start = m
@@ -315,4 +392,14 @@ fn from_flat(m: &BTreeMap<String, String>) -> Result<Probe> {
         alpha: get(video, "tags.alpha_mode").map(String::as_str) == Some("1")
             || pix.starts_with("yuva"),
     })
+}
+
+#[cfg(feature = "flac")]
+pub(super) fn flac_bits(config: &[u8]) -> u8 {
+    crate::flac::config(config).map_or(0, |i| i.bits)
+}
+
+#[cfg(not(feature = "flac"))]
+pub(super) fn flac_bits(_: &[u8]) -> u8 {
+    0
 }

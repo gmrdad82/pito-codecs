@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use pito_codecs::media::{Prefs, Rgba, probe};
+use pito_codecs::media::{Prefs, Rgba, audio_pcm_range, probe};
 
 fn dir(name: &str) -> PathBuf {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -634,6 +634,19 @@ fn opus_output_round_trips_through_our_decoder() {
         assert_eq!(p.audio.len(), 1);
         assert_eq!(p.audio[0].codec, "opus");
         assert!((p.duration - 2.0).abs() < 1e-6, "{name}: {}", p.duration);
+        let ch = channels as u16;
+        let prefs = Prefs::default();
+        let whole = audio_pcm_range(&path, 0, 0.0, f64::INFINITY, 48_000, ch, &prefs).unwrap();
+        assert_eq!(whole.samples, decoded.samples, "{name}");
+        let part = audio_pcm_range(&path, 0, 0.5, 1.25, 48_000, ch, &prefs).unwrap();
+        assert_eq!(
+            part.samples,
+            decoded.samples[24_000 * channels..60_000 * channels],
+            "{name}"
+        );
+        let tail = audio_pcm_range(&path, 0, 1.5, 9.0, 48_000, ch, &prefs).unwrap();
+        assert_eq!(tail.samples, decoded.samples[72_000 * channels..], "{name}");
+        assert!(audio_pcm_range(&path, 1, 0.0, 1.0, 48_000, ch, &prefs).is_err());
     }
     assert!(sizes[2] < sizes[1] && sizes[1] < sizes[0], "{sizes:?}");
     let again = run(&[
@@ -862,6 +875,10 @@ fn ogg_that_is_not_opus_is_refused_by_name() {
         fs::write(&path, data).unwrap();
         let err = probe(&path, &Prefs::default()).unwrap_err().to_string();
         assert!(err.contains(want), "{name}: {err}");
+        let err = audio_pcm_range(&path, 0, 0.0, 1.0, 48_000, 2, &Prefs::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(want), "{name}: {err}");
         for args in [
             vec!["probe", path.to_str().unwrap()],
             vec![
@@ -878,4 +895,32 @@ fn ogg_that_is_not_opus_is_refused_by_name() {
             assert_eq!(stderr.lines().count(), 1, "{args:?}: {stderr}");
         }
     }
+}
+
+#[test]
+fn an_id3_tagged_flac_is_labelled_flac() {
+    let out = dir("id3-flac");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/flac/s16_stereo_44k.flac");
+    let mut data = b"ID3\x03\x00\x00\x00\x00\x01\x05".to_vec();
+    data.extend(std::iter::repeat_n(0u8, 133));
+    data.extend_from_slice(&fs::read(&fixture).unwrap());
+    for (name, label) in [
+        ("tagged.flac", "container  FLAC"),
+        ("tagged.FLAC", "container  FLAC"),
+    ] {
+        let path = out.join(name);
+        fs::write(&path, &data).unwrap();
+        let shown = run(&["probe", path.to_str().unwrap()]);
+        ok(&shown);
+        let shown = text(&shown.stdout);
+        assert!(shown.starts_with(label), "{name}: {shown}");
+        assert!(
+            shown.contains("audio      flac 2 ch 44100 Hz"),
+            "{name}: {shown}"
+        );
+    }
+    let plain = run(&["probe", fixture.to_str().unwrap()]);
+    ok(&plain);
+    assert!(text(&plain.stdout).starts_with("container  FLAC"));
 }

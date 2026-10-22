@@ -8,14 +8,16 @@ license = "MIT"
 repository = "https://github.com/gmrdad82/pito-codecs"
 
 [features]
-default = ["media", "audio", "h264", "hevc", "aac", "ac3", "mp4", "gpu", "filter", "opus", "vp9", "webp", "mkv", "gif", "mp3", "png", "cli", "av1"]
+default = ["media", "audio", "h264", "hevc", "aac", "ac3", "mp4", "gpu", "filter", "opus", "vp9", "webp", "mkv", "gif", "mp3", "flac", "png", "cli", "av1", "alac"]
 media = []
 h264 = ["media", "dep:rayon"]
 hevc = ["media", "dep:rayon"]
 aac = ["media"]
-audio = ["media", "aac", "mkv", "mp4", "dep:rayon"]
+audio = ["media", "aac", "mkv", "mp4", "alac", "flac", "dep:rayon"]
 ac3 = ["media"]
 mp3 = ["media"]
+flac = ["media"]
+alac = ["media"]
 mp4 = ["media"]
 gpu = [
     "media",
@@ -35,7 +37,7 @@ av1 = ["media"]
 webp = ["media", "filter", "dep:rayon"]
 gif = ["filter", "dep:rayon"]
 png = ["media"]
-cli = ["media", "h264", "hevc", "aac", "ac3", "mp4", "gpu", "filter", "mkv", "vp9", "png", "opus", "gif", "webp", "dep:clap"]
+cli = ["media", "h264", "hevc", "aac", "ac3", "mp4", "gpu", "filter", "mkv", "vp9", "png", "opus", "gif", "webp", "alac", "flac", "dep:clap"]
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 libloading = { version = "0.8", optional = true }
@@ -88,6 +90,14 @@ required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter", "mk
 [[example]]
 name = "mp3"
 required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter", "mkv", "vp9", "mp3"]
+
+[[example]]
+name = "flac"
+required-features = ["audio", "flac"]
+
+[[example]]
+name = "alac"
+required-features = ["media", "audio", "alac", "mp4", "mkv"]
 
 [[example]]
 name = "readme_shots"
