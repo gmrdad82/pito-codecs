@@ -15,6 +15,7 @@ pub struct Block {
     pub pts: i64,
     pub duration: u32,
     pub keyframe: bool,
+    pub discard: i64,
 }
 
 const BISECT: u64 = 8 << 20;
@@ -65,6 +66,7 @@ fn block(f: &FrameRef) -> Block {
         pts: f.pts,
         duration: f.duration,
         keyframe: f.keyframe,
+        discard: f.discard,
     }
 }
 

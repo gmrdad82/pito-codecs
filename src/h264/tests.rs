@@ -3,13 +3,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-fn dir() -> PathBuf {
+pub(super) fn dir() -> PathBuf {
     let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/test/h264");
     std::fs::create_dir_all(&d).unwrap();
     d
 }
 
-fn ffmpeg_present() -> bool {
+pub(super) fn ffmpeg_present() -> bool {
     let ok = Command::new("ffmpeg")
         .arg("-version")
         .output()
@@ -43,7 +43,7 @@ fn run(args: &[&str]) {
     );
 }
 
-fn ffmpeg_yuv(input: &Path) -> Vec<u8> {
+pub(super) fn ffmpeg_yuv(input: &Path) -> Vec<u8> {
     let out = Command::new("ffmpeg")
         .args(["-v", "error", "-i"])
         .arg(input)
@@ -81,7 +81,7 @@ fn x264(name: &str, size: &str, frames: u32, opts: &[&str]) -> PathBuf {
     path
 }
 
-fn raw(frames: &[Frame]) -> Vec<u8> {
+pub(super) fn raw(frames: &[Frame]) -> Vec<u8> {
     let mut out = Vec::new();
     for f in frames {
         for p in &f.planes {
@@ -136,7 +136,7 @@ fn access_units(data: &[u8]) -> Vec<&[u8]> {
     starts.windows(2).map(|w| &data[w[0]..w[1]]).collect()
 }
 
-fn assert_same(ours: &[u8], theirs: &[u8], frame_size: usize, what: &str) {
+pub(super) fn assert_same(ours: &[u8], theirs: &[u8], frame_size: usize, what: &str) {
     assert_eq!(
         ours.len() / frame_size,
         theirs.len() / frame_size,
@@ -283,7 +283,7 @@ fn source_frames(src: &Path, w: u32, h: u32, frames: u32) -> Vec<Frame> {
         .collect()
 }
 
-fn psnr(a: &[u8], b: &[u8]) -> f64 {
+pub(super) fn psnr(a: &[u8], b: &[u8]) -> f64 {
     let se: f64 = a
         .iter()
         .zip(b)
@@ -297,7 +297,7 @@ fn psnr(a: &[u8], b: &[u8]) -> f64 {
     }
 }
 
-fn to_annexb(avcc: &[u8], packets: &[Packet]) -> Vec<u8> {
+pub(super) fn to_annexb(avcc: &[u8], packets: &[Packet]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut pos = 6;
     for _ in 0..2 {

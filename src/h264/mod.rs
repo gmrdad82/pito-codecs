@@ -5,6 +5,8 @@ mod enc;
 
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+mod tests_enc;
 
 use crate::media::{self, Error, Frame, Packet, PixelFormat, Plane, Result, TimeBase};
 

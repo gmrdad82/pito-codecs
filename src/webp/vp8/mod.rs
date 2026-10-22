@@ -1,4 +1,6 @@
 mod bits;
+#[cfg(test)]
+mod bits_edges;
 mod dec;
 mod dsp;
 mod enc;

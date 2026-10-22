@@ -1,3 +1,6 @@
+mod crc;
+#[cfg(test)]
+mod edges;
 mod encode;
 mod filter;
 mod inflate;
@@ -5,6 +8,7 @@ mod inflate;
 mod tests;
 
 use crate::media::{self, Error, Result};
+use crc::crc;
 pub use encode::encode;
 use filter::{Simd, unfilter};
 
@@ -101,6 +105,9 @@ fn header(data: &[u8]) -> Result<Info> {
         1 => true,
         n => return Err(invalid(format!("unknown interlace method {n}"))),
     };
+    if data.get(29..33).and_then(|c| be32(c, 0).ok()) != Some(crc(&[&data[12..29]])) {
+        return Err(invalid("a bad CRC on IHDR"));
+    }
     Ok(Info {
         width,
         height,
@@ -193,6 +200,21 @@ impl Decoder {
             let body = data
                 .get(at + 8..at + 8 + len)
                 .ok_or_else(|| invalid("a chunk runs past the end of the file"))?;
+            let sum = data.get(at + 8 + len..at + 12 + len);
+            let critical = kind[0].is_ascii_uppercase();
+            if critical || matches!(kind, b"tRNS") {
+                let ok = sum.is_some_and(|s| be32(s, 0).ok() == Some(crc(&[kind, body])));
+                if !ok && critical {
+                    return Err(invalid(format!(
+                        "a bad CRC on {}",
+                        String::from_utf8_lossy(kind)
+                    )));
+                }
+                if !ok {
+                    at = at + 12 + len;
+                    continue;
+                }
+            }
             at = at + 12 + len;
             match kind {
                 b"IDAT" => {

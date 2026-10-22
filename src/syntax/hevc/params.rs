@@ -93,6 +93,24 @@ impl Vps {
     pub fn parse(rbsp: &[u8]) -> Result<Vps> {
         let mut r = BitReader::new(rbsp);
         let id = r.read_bits(4)? as u8;
+        r.skip(2 + 6)?;
+        let max_sub_layers_minus1 = r.read_bits(3)?;
+        ensure!(
+            max_sub_layers_minus1 <= 6,
+            "vps_max_sub_layers_minus1 out of range"
+        );
+        r.skip(1 + 16)?;
+        profile_idc(&mut r, max_sub_layers_minus1)?;
+        let first = if r.read_flag()? {
+            0
+        } else {
+            max_sub_layers_minus1
+        };
+        for _ in first..=max_sub_layers_minus1 {
+            r.read_ue()?;
+            r.read_ue()?;
+            r.read_ue()?;
+        }
         Ok(Vps { id })
     }
 }
@@ -1098,6 +1116,53 @@ mod tests {
             s1: Vec::new(),
         };
         StRps::parse(&mut BitReader::new(&data), 1, &[base], 2)
+    }
+
+    fn vps(max_sub_layers_minus1: u32) -> Vec<u8> {
+        let mut w = BitWriter::new();
+        w.write_bits(3, 4);
+        w.write_bits(3, 2);
+        w.write_bits(0, 6);
+        w.write_bits(max_sub_layers_minus1, 3);
+        w.write_bit(true);
+        w.write_bits(0xffff, 16);
+        w.write_bits(1, 8);
+        for _ in 0..11 {
+            w.write_bits(0, 8);
+        }
+        if max_sub_layers_minus1 > 0 {
+            w.write_bits(0, 16);
+        }
+        w.write_bit(true);
+        for _ in 0..=max_sub_layers_minus1.min(7) {
+            w.write_ue(4);
+            w.write_ue(2);
+            w.write_ue(0);
+        }
+        w.write_bits(0, 6);
+        w.write_ue(0);
+        w.write_bits(0, 2);
+        w.rbsp_trailing();
+        w.finish()
+    }
+
+    #[test]
+    fn a_truncated_or_damaged_vps_is_an_error() {
+        for msl in [0, 2, 6] {
+            let full = vps(msl);
+            assert_eq!(Vps::parse(&full).expect("whole VPS").id, 3);
+            let needed = 4 + 12 + if msl > 0 { 2 } else { 0 };
+            for cut in 0..needed {
+                assert!(
+                    matches!(
+                        Vps::parse(&full[..cut]),
+                        Err(Error::Bitstream(crate::syntax::bits::BitError::Eof))
+                    ),
+                    "{msl} sub-layers, cut to {cut}"
+                );
+            }
+        }
+        assert!(Vps::parse(&vps(7)).is_err());
     }
 
     #[test]

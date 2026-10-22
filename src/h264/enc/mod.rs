@@ -350,7 +350,7 @@ impl Encoder {
     fn options(&self) -> String {
         let c = &self.cfg;
         let rate = match c.rate {
-            RateControl::Qp(q) => format!("rc=cqp qp={q}"),
+            RateControl::Qp(q) => format!("rc=cqp qp={}", q.min(51)),
             RateControl::Crf(f) => format!("rc=crf crf={:.1}", f.clamp(0.0, 51.0)),
             RateControl::Cbr { kbps } => format!("rc=cbr bitrate={kbps}"),
             RateControl::Vbr {
@@ -406,6 +406,23 @@ impl Encoder {
         let fps = cfg.fps_num as f64 / cfg.fps_den as f64;
         let cabac = cfg.profile != Profile::Baseline;
         let high = cfg.profile == Profile::High;
+        if matches!(cfg.rate, RateControl::Vbr { max_kbps: 0, .. }) {
+            return Err(Error::InvalidConfig(
+                "maximum bitrate must be non-zero".into(),
+            ));
+        }
+        let top = nal::max_kbps(high);
+        match &mut cfg.rate {
+            RateControl::Cbr { kbps } => *kbps = (*kbps).min(top),
+            RateControl::Vbr {
+                target_kbps,
+                max_kbps,
+            } => {
+                *max_kbps = (*max_kbps).min(top);
+                *target_kbps = (*target_kbps).min(*max_kbps);
+            }
+            _ => {}
+        }
         let params = match cfg.preset {
             Preset::Speed => EncParams {
                 mbw,
@@ -466,18 +483,11 @@ impl Encoder {
             RateControl::Vbr {
                 target_kbps,
                 max_kbps,
-            } => {
-                let buffer = max_kbps.checked_mul(2).ok_or_else(|| {
-                    Error::InvalidConfig(
-                        "VBR buffer rate exceeds the supported integer range".into(),
-                    )
-                })?;
-                (
-                    Some(*max_kbps),
-                    RcKind::Abr { kbps: *target_kbps },
-                    (Some(*max_kbps), Some(buffer)),
-                )
-            }
+            } => (
+                Some(*max_kbps),
+                RcKind::Abr { kbps: *target_kbps },
+                (Some(*max_kbps), Some(*max_kbps * 2)),
+            ),
         };
         if matches!(
             cfg.rate,
@@ -1038,21 +1048,18 @@ impl Encoder {
     }
 
     fn collect(&mut self, max_in_flight: usize, out: &mut Vec<Packet>) -> Result<(), Error> {
-        loop {
-            let in_flight = (self.seq - self.next_out) as usize;
-            let next = if in_flight > max_in_flight {
-                match self.workers.done.recv() {
-                    Ok(d) => Some(d),
-                    Err(_) => return Err(Error::Failed("the frame threads stopped".into())),
-                }
-            } else {
-                self.workers.done.try_recv().ok()
-            };
-            let Some(d) = next else { break };
-            self.finished.insert(d.job.seq, d);
-            while let Some(d) = self.finished.remove(&self.next_out) {
+        let target = self.seq.saturating_sub(max_in_flight as u64);
+        while self.next_out < target {
+            if let Some(d) = self.finished.remove(&self.next_out) {
                 self.next_out += 1;
                 self.finish_frame(d, out)?;
+                continue;
+            }
+            match self.workers.done.recv() {
+                Ok(d) => {
+                    self.finished.insert(d.job.seq, d);
+                }
+                Err(_) => return Err(Error::Failed("the frame threads stopped".into())),
             }
         }
         Ok(())

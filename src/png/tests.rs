@@ -21,7 +21,7 @@ fn encode(
     file
 }
 
-fn expected(file: &[u8]) -> Vec<u8> {
+pub(super) fn expected(file: &[u8]) -> Vec<u8> {
     let mut dec = reference::Decoder::new(file);
     dec.set_transformations(
         reference::Transformations::EXPAND

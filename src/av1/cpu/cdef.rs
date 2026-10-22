@@ -187,9 +187,12 @@ fn padding<BD: BitDepth>(
 
     for (i, y) in (y_start..2).enumerate() {
         let top = top + i as isize * stride;
-        let top = top.data.slice_as::<_, BD::Pixel>((top.offset.., ..x_end));
+        let from = top.offset.wrapping_add(x_start);
+        let top = top
+            .data
+            .slice_as::<_, BD::Pixel>((from.., ..x_end - x_start));
         for x in x_start..x_end {
-            tmp[x + y * TMP_STRIDE] = top[x].as_::<i16>();
+            tmp[x + y * TMP_STRIDE] = top[x - x_start].as_::<i16>();
         }
     }
     for y in 0..h {
@@ -209,12 +212,13 @@ fn padding<BD: BitDepth>(
         let tmp = &mut tmp[y * TMP_STRIDE..];
         let bottom = bottom + i as isize * stride;
 
+        let from = bottom.offset.wrapping_add(x_start);
         let bottom = match bottom.data {
-            PicOrBuf::Pic(pic) => &*pic.slice::<BD, _>((bottom.offset.., ..x_end)),
-            PicOrBuf::Buf(buf) => &*buf.slice_as((bottom.offset.., ..x_end)),
+            PicOrBuf::Pic(pic) => &*pic.slice::<BD, _>((from.., ..x_end - x_start)),
+            PicOrBuf::Buf(buf) => &*buf.slice_as((from.., ..x_end - x_start)),
         };
         for x in x_start..x_end {
-            tmp[x] = bottom[x].as_::<i16>();
+            tmp[x] = bottom[x - x_start].as_::<i16>();
         }
     }
 }
@@ -503,5 +507,65 @@ impl Rav1dCdefDSPContext {
 
     pub const fn new<BD: BitDepth>(flags: CpuFlags) -> Self {
         Self::default::<BD>().init::<BD>(flags)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::av1::cpu::include::common::bitdepth::BitDepth8;
+    use crate::av1::cpu::include::dav1d::picture::Rav1dPictureDataComponent;
+    use crate::av1::cpu::strided::WithStride;
+
+    #[test]
+    fn padding_leaves_the_line_left_of_a_frame_edge_to_other_workers() {
+        let mut line = AlignedVec64::<u8>::default();
+        line.resize(256, 7);
+        let line = DisjointMut::new(line);
+        let mut bottom = AlignedVec64::<u8>::default();
+        bottom.resize(256, 5);
+        let bottom = DisjointMut::new(bottom);
+        let mut pixels = AlignedVec64::<u8>::default();
+        pixels.resize(4096, 9);
+        let pic = Rav1dPictureDataComponent::wrap_buf::<BitDepth8>(&mut pixels, 64);
+        let held = line.mut_slice_as::<_, u8>((60.., ..4));
+        let held_below = bottom.mut_slice_as::<_, u8>((60.., ..4));
+        let mut tmp = [0; TMP_STRIDE * TMP_STRIDE];
+        let left = [[3u8; 2]; 8];
+        let edges =
+            CdefEdgeFlags::HAVE_TOP | CdefEdgeFlags::HAVE_BOTTOM | CdefEdgeFlags::HAVE_RIGHT;
+        padding::<BitDepth8>(
+            &mut tmp,
+            WithOffset {
+                data: &pic,
+                offset: 128,
+            },
+            &left,
+            WithOffset {
+                data: &line,
+                offset: 64,
+            },
+            WithOffset {
+                data: PicOrBuf::Buf(WithStride {
+                    buf: &bottom,
+                    stride: 64,
+                }),
+                offset: 64,
+            },
+            8,
+            8,
+            edges,
+        );
+        drop((held, held_below));
+        for y in 0..12 {
+            let row = &tmp[y * TMP_STRIDE..][..12];
+            let want = match y {
+                0 | 1 => 7,
+                10 | 11 => 5,
+                _ => 9,
+            };
+            assert!(row[..2].iter().all(|&v| v == i16::MIN), "row {y}: {row:?}");
+            assert!(row[2..].iter().all(|&v| v == want), "row {y}: {row:?}");
+        }
     }
 }

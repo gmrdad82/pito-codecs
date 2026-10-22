@@ -101,6 +101,8 @@ mp4_seeds() {
   ff "${audio[@]}" -c:a pcm_s24be -f mov "$dir/pcm24.mov"
   ff "${audio[@]}" -c:a libopus -strict -2 "$dir/opus.mp4"
   ff "${video[@]}" -c:v libx264 -preset ultrafast -vf "transpose=1" -metadata:s:v rotate=90 "$dir/rotated.mp4"
+  ff "${video[@]}" "${audio[@]}" -c:v libx264 -preset ultrafast -c:a aac -movflags frag_keyframe+default_base_moof "$dir/fragmented-av.mp4"
+  ff "${audio[@]}" -ac 6 -c:a eac3 "$dir/eac3.mp4"
 }
 
 mkv_seeds() {
@@ -109,6 +111,9 @@ mkv_seeds() {
   ff "${video[@]}" "${audio[@]}" -c:v libx265 -preset ultrafast -c:a pcm_s16le "$dir/hevc-pcm.mkv"
   ff "${audio[@]}" -c:a aac "$dir/aac.mka"
   ff "${video[@]}" -c:v libx264 -preset ultrafast -bf 2 -reserve_index_space 0 -cues_to_front 1 "$dir/cues-front.mkv"
+  ff -f lavfi -i "testsrc2=size=96x64:rate=12,format=yuva420p,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='mod(X*5+N*9,256)'" -t 0.5 -c:v libvpx-vp9 -deadline realtime -cpu-used 8 -pix_fmt yuva420p "$dir/vp9-alpha.webm"
+  ff "${video[@]}" "${audio[@]}" -c:v libvpx-vp9 -deadline realtime -cpu-used 8 -c:a libopus -live 1 -f webm "$dir/live.webm"
+  ff "${audio[@]}" -ac 6 -c:a ac3 "$dir/ac3-51.mka"
 }
 
 case "$target" in

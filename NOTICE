@@ -447,6 +447,31 @@ The Adler-32 in src/png/inflate.rs follows adler2 2.0.1
 licensed 0BSD OR MIT OR Apache-2.0; it is used under the 0BSD terms, which ask
 for no notice, and is credited here.
 
+The CRC-32 in src/png/crc.rs follows the slice-by-16 baseline of crc32fast
+1.5.2 (https://github.com/srijs/rust-crc32fast, commit
+7eb0b8a2c9b246d27dc4cb5a53d3fc3b43a4bb83), dual-licensed MIT OR Apache-2.0; the
+MIT terms are taken here, under this notice:
+
+Copyright (c) 2018 Sam Rijs, Alex Crichton and contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 The AV1 decode structures in src/gpu/vaapi/av1.rs are transcribed from libva's
 va_dec_av1.h (libva 2.23, https://github.com/intel/libva), Copyright (c) 2019
 Intel Corporation, under the same MIT terms as the libva notice above.

@@ -176,28 +176,39 @@ fn sps_sized(
     width: u32,
     height: u32,
 ) -> Vec<u8> {
+    sps_tuned(pcm_loop_filter_disabled, window, width, height, ("", 0))
+}
+
+fn sps_tuned(
+    pcm_loop_filter_disabled: bool,
+    window: Option<[u32; 4]>,
+    width: u32,
+    height: u32,
+    (field, value): (&str, u32),
+) -> Vec<u8> {
+    let tuned = |name: &str, default: u32| if name == field { value } else { default };
     let mut w = BitWriter::new();
     w.write_bits(0, 4);
     w.write_bits(0, 3);
     w.write_bits(1, 1);
     ptl(&mut w);
     w.write_ue(0);
-    w.write_ue(1);
+    w.write_ue(tuned("chroma_format_idc", 1));
     w.write_ue(width);
     w.write_ue(height);
     w.write_bit(window.is_some());
     for v in window.into_iter().flatten() {
         w.write_ue(v);
     }
+    w.write_ue(tuned("bit_depth_luma_minus8", 0));
     w.write_ue(0);
-    w.write_ue(0);
-    w.write_ue(4);
+    w.write_ue(tuned("log2_max_pic_order_cnt_lsb_minus4", 4));
     w.write_bits(1, 1);
     w.write_ue(4);
     w.write_ue(0);
     w.write_ue(0);
-    w.write_ue(0);
-    w.write_ue(1);
+    w.write_ue(tuned("log2_min_luma_coding_block_size_minus3", 0));
+    w.write_ue(tuned("log2_diff_max_min_luma_coding_block_size", 1));
     w.write_ue(0);
     w.write_ue(2);
     w.write_ue(0);
@@ -211,7 +222,7 @@ fn sps_sized(
     w.write_ue(0);
     w.write_ue(1);
     w.write_bits(pcm_loop_filter_disabled as u32, 1);
-    w.write_ue(0);
+    w.write_ue(tuned("num_short_term_ref_pic_sets", 0));
     w.write_bits(1, 1);
     w.write_ue(0);
     w.write_bits(0, 1);
@@ -793,4 +804,279 @@ fn pictures_above_the_largest_level_are_refused() {
     assert!(parse(8192, 4352).is_ok());
     assert!(parse(8192, 4368).is_err());
     assert!(parse(16384, 16384).is_err());
+}
+
+fn packet(data: Vec<u8>) -> crate::media::Packet {
+    crate::media::Packet {
+        data,
+        pts: 0,
+        dts: 0,
+        keyframe: true,
+    }
+}
+
+fn first_error(stream: &[u8], threads: usize) -> Option<String> {
+    let mut dec = Decoder::with_threads(threads);
+    let a = dec.decode(&packet(stream.to_vec())).err();
+    let b = dec.flush().err();
+    a.or(b).map(|e| e.to_string())
+}
+
+fn replaced(stream: &[u8], part: &[u8], with: &[u8]) -> Vec<u8> {
+    let at = stream
+        .windows(part.len())
+        .position(|w| w == part)
+        .expect("part not in the stream");
+    [&stream[..at], with, &stream[at + part.len()..]].concat()
+}
+
+fn params() -> Vec<u8> {
+    [vps(), sps(true), pps(0, &None, false), pps(1, &None, true)].concat()
+}
+
+fn expect_error(name: &str, stream: &[u8], wording: &str) {
+    for threads in [1, 4] {
+        let e = first_error(stream, threads)
+            .unwrap_or_else(|| panic!("{name} ({threads} threads): decoded without an error"));
+        assert!(
+            e.contains(wording) && !e.contains("internal error"),
+            "{name} ({threads} threads): {e}"
+        );
+    }
+}
+
+#[test]
+fn a_pps_naming_a_missing_sps_is_an_error() {
+    let (stream, _) = sequence(&None, true, whole(WC * HC));
+    expect_error(
+        "no SPS",
+        &replaced(&stream, &sps(true), &[]),
+        "missing parameter set: SPS 0",
+    );
+}
+
+#[test]
+fn a_slice_before_any_parameter_set_is_an_error_and_the_decoder_recovers() {
+    let (stream, expect) = sequence(&None, true, whole(WC * HC));
+    let head = params();
+    assert!(stream.starts_with(&head));
+    let slices = stream[head.len()..].to_vec();
+    expect_error("slices first", &slices, "missing parameter set: PPS 0");
+    for threads in [1, 4] {
+        let mut dec = Decoder::with_threads(threads);
+        assert!(dec.decode(&packet(slices.clone())).is_err());
+        let mut pics = dec
+            .decode(&packet(stream.clone()))
+            .expect("decode after the error");
+        pics.extend(dec.flush().expect("flush after the error"));
+        assert_eq!(pics.len(), expect.len(), "{threads} threads");
+        for (i, (p, e)) in pics.iter().zip(&expect).enumerate() {
+            for (plane, want) in [&e.y, &e.u, &e.v].into_iter().enumerate() {
+                assert!(
+                    &p.planes[plane].data == want,
+                    "{threads} threads: picture {i}, plane {plane}"
+                );
+            }
+        }
+    }
+}
+
+fn slice_naming(pps_id: u32) -> Vec<u8> {
+    let mut w = BitWriter::new();
+    w.write_bit(true);
+    w.write_bit(false);
+    w.write_ue(pps_id);
+    w.write_bits(0, 7);
+    w.rbsp_trailing();
+    nal(19, &w.finish())
+}
+
+#[test]
+fn out_of_range_syntax_values_are_errors() {
+    let (stream, _) = sequence(&None, true, whole(WC * HC));
+    let good = sps(true);
+    for (name, width, wording) in [
+        ("zero width", 0, "out of range"),
+        ("width off the CB grid", W as u32 + 4, "MinCbSizeY"),
+    ] {
+        let bad = sps_sized(true, None, width, H as u32);
+        expect_error(name, &replaced(&stream, &good, &bad), wording);
+    }
+    expect_error(
+        "PPS id 64",
+        &replaced(&stream, &pps(0, &None, false), &pps(64, &None, false)),
+        "pps_pic_parameter_set_id out of range",
+    );
+    let head = params();
+    expect_error(
+        "slice PPS id 64",
+        &[head.clone(), slice_naming(64)].concat(),
+        "slice_pic_parameter_set_id out of range",
+    );
+    expect_error(
+        "slice naming an absent PPS",
+        &[head.clone(), slice_naming(7)].concat(),
+        "missing parameter set: PPS 7",
+    );
+    let mut forbidden = slice_naming(0);
+    forbidden[4] |= 0x80;
+    expect_error(
+        "forbidden_zero_bit",
+        &[head.clone(), forbidden].concat(),
+        "forbidden_zero_bit",
+    );
+    let mut tid0 = slice_naming(0);
+    tid0[5] = 0;
+    expect_error(
+        "temporal id 0",
+        &[head, tid0].concat(),
+        "nuh_temporal_id_plus1",
+    );
+}
+
+#[test]
+fn truncated_synthetic_nal_units_fail_without_panics() {
+    let (stream, _) = sequence(&None, true, whole(WC * HC));
+    let nals: Vec<Vec<u8>> = crate::syntax::bits::annexb_nals(&stream)
+        .into_iter()
+        .map(<[u8]>::to_vec)
+        .collect();
+    for (k, n) in nals.iter().enumerate() {
+        for cut in [2, n.len() / 2, n.len() - 1] {
+            if cut < 2 || cut >= n.len() {
+                continue;
+            }
+            let mut s = Vec::new();
+            for (j, m) in nals.iter().enumerate() {
+                s.extend([0, 0, 0, 1]);
+                s.extend_from_slice(if j == k { &m[..cut] } else { m });
+            }
+            for threads in [1, 4] {
+                if let Some(e) = first_error(&s, threads) {
+                    assert!(
+                        !e.contains("internal error"),
+                        "NAL {k} cut to {cut} ({threads} threads): {e}"
+                    );
+                } else {
+                    assert!(
+                        cut > n.len() / 2 || k > 3,
+                        "NAL {k} cut to {cut} ({threads} threads) decoded without an error"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn out_of_range_sps_values_are_errors() {
+    let (stream, _) = sequence(&None, true, whole(WC * HC));
+    let good = sps(true);
+    for (field, value, wording) in [
+        ("chroma_format_idc", 4, "chroma_format_idc out of range"),
+        ("chroma_format_idc", 2, "only 4:2:0"),
+        ("bit_depth_luma_minus8", 4, "bit depth 12/8"),
+        ("bit_depth_luma_minus8", 9, "bit depth out of range"),
+        (
+            "log2_max_pic_order_cnt_lsb_minus4",
+            13,
+            "log2_max_pic_order_cnt_lsb_minus4 out of range",
+        ),
+        (
+            "log2_min_luma_coding_block_size_minus3",
+            4,
+            "CTB size out of range",
+        ),
+        (
+            "log2_diff_max_min_luma_coding_block_size",
+            4,
+            "CTB size out of range",
+        ),
+        (
+            "num_short_term_ref_pic_sets",
+            65,
+            "num_short_term_ref_pic_sets out of range",
+        ),
+    ] {
+        let bad = sps_tuned(true, None, W as u32, H as u32, (field, value));
+        expect_error(
+            &format!("{field} {value}"),
+            &replaced(&stream, &good, &bad),
+            wording,
+        );
+    }
+}
+
+#[test]
+fn a_slice_segment_address_past_the_picture_is_an_error() {
+    let (stream, _) = sequence(&None, true, whole(WC * HC));
+    assert_eq!(WC * HC, 24);
+    let mut w = BitWriter::new();
+    w.write_bit(false);
+    w.write_ue(0);
+    w.write_bit(false);
+    w.write_bits(31, 5);
+    w.write_ue(2);
+    w.rbsp_trailing();
+    expect_error(
+        "slice_segment_address 31 of 24",
+        &[stream, nal(1, &w.finish())].concat(),
+        "slice_segment_address out of range",
+    );
+}
+
+#[test]
+fn sixteen_active_references_are_an_error() {
+    let (stream, _) = sequence(&None, true, whole(WC * HC));
+    let mut w = BitWriter::new();
+    w.write_bit(true);
+    w.write_ue(0);
+    w.write_ue(1);
+    w.write_bits(1, 8);
+    w.write_bit(false);
+    w.write_ue(1);
+    w.write_ue(0);
+    w.write_ue(0);
+    w.write_bit(true);
+    w.write_ue(0);
+    w.write_bit(true);
+    w.write_ue(15);
+    w.write_ue(0);
+    w.write_se(0);
+    w.rbsp_trailing();
+    expect_error(
+        "num_ref_idx_l0_active_minus1 15",
+        &[stream, nal(1, &w.finish())].concat(),
+        "num_ref_idx_active out of range",
+    );
+}
+
+#[test]
+fn more_entry_points_than_ctbs_are_an_error() {
+    let tiles: Tiles = Some((vec![3, 3], vec![2, 2], false, true));
+    let mut w = BitWriter::new();
+    w.write_bit(true);
+    w.write_bit(false);
+    w.write_ue(0);
+    w.write_ue(2);
+    w.write_se(0);
+    w.write_bit(true);
+    w.write_ue(WC as u32 * HC as u32 + 1);
+    w.write_ue(0);
+    for _ in 0..=WC * HC {
+        w.write_bit(false);
+    }
+    w.rbsp_trailing();
+    let stream = [
+        vps(),
+        sps(true),
+        pps(0, &tiles, false),
+        nal(19, &w.finish()),
+    ]
+    .concat();
+    expect_error(
+        "num_entry_point_offsets 25 of 24",
+        &stream,
+        "num_entry_point_offsets out of range",
+    );
 }

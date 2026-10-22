@@ -1,6 +1,8 @@
 #![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 
 pub mod alpha;
+#[cfg(test)]
+mod alpha_edges;
 pub(crate) mod bits;
 pub(crate) mod boolcoder;
 pub(crate) mod decoder;

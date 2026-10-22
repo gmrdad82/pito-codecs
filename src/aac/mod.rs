@@ -9,6 +9,8 @@ mod huffman_tables;
 mod ics;
 mod mdct;
 mod pcm;
+#[cfg(test)]
+mod pcm_edges;
 mod tables;
 mod tns;
 

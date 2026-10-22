@@ -132,7 +132,7 @@ impl RateControl {
                 if pred <= fill * 0.8 || qp >= 51.0 {
                     break;
                 }
-                qp += 0.5;
+                qp = (qp + 0.5).min(51.0);
             }
         }
         qp
@@ -171,5 +171,178 @@ impl RateControl {
                 self.vbv_fill = 0.0;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gop(n: usize, cut: Option<usize>) -> Vec<(SliceType, f64)> {
+        (0..n)
+            .map(|i| {
+                let scale = if cut.is_some_and(|c| i >= c) {
+                    20.0
+                } else {
+                    1.0
+                };
+                let t = if i % 30 == 0 || cut == Some(i) {
+                    SliceType::I
+                } else if i % 3 == 0 {
+                    SliceType::P
+                } else {
+                    SliceType::B
+                };
+                let c = match t {
+                    SliceType::I => 4e4,
+                    SliceType::P => 1e4,
+                    SliceType::B => 6e3,
+                };
+                (t, c * scale)
+            })
+            .collect()
+    }
+
+    fn drive(rc: &mut RateControl, frames: &[(SliceType, f64)], k: f64) -> (Vec<f64>, u64) {
+        let mut qps = Vec::new();
+        let mut total = 0;
+        for &(t, cplx) in frames {
+            let qp = rc.frame_qp(t, cplx);
+            let bits = (k * cplx.max(1.0) / qp2qscale(qp)) as u64;
+            rc.update(t, qp, cplx, bits);
+            qps.push(qp);
+            total += bits;
+        }
+        (qps, total)
+    }
+
+    fn in_range(qps: &[f64]) -> bool {
+        qps.iter()
+            .all(|q| q.is_finite() && (0.0..=51.0).contains(q))
+    }
+
+    #[test]
+    fn qscale_and_qp_are_inverse() {
+        assert!((qp2qscale(12.0) - 0.85).abs() < 1e-12);
+        for qp in 0..=51 {
+            let back = qscale2qp(qp2qscale(qp as f64));
+            assert!((back - qp as f64).abs() < 1e-9, "qp {qp} came back {back}");
+        }
+        assert!((qp2qscale(18.0) / qp2qscale(12.0) - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn constant_qp_offsets_b_frames_and_clamps() {
+        let mut rc = RateControl::new(RcKind::Qp(30), 30.0, None, None);
+        assert_eq!(rc.frame_qp(SliceType::I, 5.0), 30.0);
+        assert_eq!(rc.frame_qp(SliceType::P, 5.0), 30.0);
+        assert_eq!(rc.frame_qp(SliceType::B, 5.0), 32.0);
+        let mut top = RateControl::new(RcKind::Qp(51), 30.0, None, None);
+        assert_eq!(top.frame_qp(SliceType::B, 5.0), 51.0);
+        let mut zero = RateControl::new(RcKind::Qp(0), 30.0, None, None);
+        assert_eq!(zero.frame_qp(SliceType::I, f64::NAN), 0.0);
+    }
+
+    #[test]
+    fn crf_offsets_by_type_and_clamps() {
+        let mut rc = RateControl::new(RcKind::Crf(23.0), 30.0, None, None);
+        assert_eq!(rc.frame_qp(SliceType::I, 1e4), 24.0);
+        assert_eq!(rc.frame_qp(SliceType::P, 1e4), 26.0);
+        assert_eq!(rc.frame_qp(SliceType::B, 1e4), 27.5);
+        let mut hi = RateControl::new(RcKind::Crf(51.0), 30.0, None, None);
+        assert_eq!(hi.frame_qp(SliceType::B, 1e4), 51.0);
+        let mut lo = RateControl::new(RcKind::Crf(-10.0), 30.0, None, None);
+        assert_eq!(lo.frame_qp(SliceType::I, 1e4), 0.0);
+    }
+
+    #[test]
+    fn abr_lands_within_ten_percent_of_target() {
+        for kbps in [300, 1000, 4000] {
+            let mut rc = RateControl::new(RcKind::Abr { kbps }, 30.0, None, None);
+            let frames = gop(75, None);
+            let (qps, bits) = drive(&mut rc, &frames, 14.0);
+            assert!(in_range(&qps), "{kbps} kbps: {qps:?}");
+            let got = bits as f64 * 30.0 / 75.0 / 1000.0;
+            let err = (got / kbps as f64 - 1.0).abs();
+            assert!(err < 0.10, "{kbps} kbps target, {got:.0} kbps produced");
+        }
+    }
+
+    #[test]
+    fn abr_raises_qp_on_a_scene_cut_and_stays_in_range() {
+        let mut rc = RateControl::new(RcKind::Abr { kbps: 1000 }, 30.0, None, None);
+        let (qps, _) = drive(&mut rc, &gop(75, Some(40)), 14.0);
+        assert!(in_range(&qps), "{qps:?}");
+        assert!(
+            qps[42] > qps[39],
+            "qp before the cut {} after {}",
+            qps[39],
+            qps[42]
+        );
+    }
+
+    #[test]
+    fn abr_on_a_flat_clip_stays_in_range_and_under_budget() {
+        let mut rc = RateControl::new(RcKind::Abr { kbps: 1000 }, 30.0, None, None);
+        let flat: Vec<_> = gop(90, None).into_iter().map(|(t, _)| (t, 0.0)).collect();
+        let (qps, bits) = drive(&mut rc, &flat, 14.0);
+        assert!(in_range(&qps), "{qps:?}");
+        let budget = 1000.0 * 1000.0 * 90.0 / 30.0;
+        assert!(
+            (bits as f64) <= budget,
+            "{bits} bits over a {budget} bit budget"
+        );
+        assert!(qps[60..].iter().all(|&q| q <= qps[0]), "{:?}", &qps[60..]);
+    }
+
+    #[test]
+    fn abr_extreme_targets_clamp_to_the_qp_range() {
+        let mut low = RateControl::new(RcKind::Abr { kbps: 1 }, 30.0, None, None);
+        let (qps, _) = drive(&mut low, &gop(60, None), 14.0);
+        assert!(in_range(&qps));
+        assert!(qps[20..].iter().all(|&q| q == 51.0), "{:?}", &qps[20..]);
+        let mut high = RateControl::new(RcKind::Abr { kbps: u32::MAX }, 30.0, None, None);
+        let (qps, _) = drive(&mut high, &gop(60, None), 14.0);
+        assert!(qps.iter().all(|&q| q == 1.0), "{qps:?}");
+        let mut zero_bits = RateControl::new(RcKind::Abr { kbps: 500 }, 30.0, None, None);
+        let (qps, _) = drive(&mut zero_bits, &gop(40, None), 0.0);
+        assert!(in_range(&qps), "{qps:?}");
+    }
+
+    #[test]
+    fn vbv_raises_qp_but_never_past_51() {
+        let mut cplx = 1.0;
+        let mut raised = 0;
+        while cplx < 1e10 {
+            let mut plain = RateControl::new(RcKind::Abr { kbps: 1000 }, 30.0, None, None);
+            let mut vbv = RateControl::new(RcKind::Abr { kbps: 1000 }, 30.0, Some(1000), Some(50));
+            let a = plain.frame_qp(SliceType::I, cplx);
+            let b = vbv.frame_qp(SliceType::I, cplx);
+            assert!(b >= a, "cplx {cplx}: vbv {b} below plain {a}");
+            assert!((1.0..=51.0).contains(&b), "cplx {cplx}: vbv qp {b}");
+            if b > a {
+                raised += 1;
+            }
+            cplx *= 1.07;
+        }
+        assert!(raised > 0, "the buffer never bit");
+    }
+
+    #[test]
+    fn vbv_fill_drains_and_refills_without_going_negative() {
+        let mut rc = RateControl::new(RcKind::Abr { kbps: 800 }, 25.0, Some(800), Some(400));
+        for i in 0..50 {
+            let t = if i % 25 == 0 {
+                SliceType::I
+            } else {
+                SliceType::P
+            };
+            let qp = rc.frame_qp(t, 2e4);
+            assert!((1.0..=51.0).contains(&qp));
+            let bits = if i < 10 { 2_000_000 } else { 100 };
+            rc.update(t, qp, 2e4, bits);
+            assert!(rc.vbv_fill >= 0.0 && rc.vbv_fill <= rc.vbv_size);
+        }
+        assert_eq!(rc.vbv_fill, rc.vbv_size);
     }
 }

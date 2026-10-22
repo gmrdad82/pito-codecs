@@ -5,6 +5,8 @@ mod limiter;
 mod linear;
 mod loudness;
 mod mix;
+#[cfg(test)]
+mod mix_edges;
 mod overlay;
 mod packed;
 mod plane;

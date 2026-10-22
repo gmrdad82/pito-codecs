@@ -138,3 +138,146 @@ pub fn pos_class4(i: usize) -> usize {
 pub fn chroma_qp(qpi: i32) -> u8 {
     dec::QPC_TABLE[qpi.clamp(0, 51) as usize]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prefix_free(codes: &[(u8, u8)]) {
+        let mut kraft = 0.0;
+        for (i, &(la, va)) in codes.iter().enumerate() {
+            assert!(la > 0 && la <= 16, "code {i} has length {la}");
+            kraft += 0.5f64.powi(la as i32);
+            for &(lb, vb) in &codes[i + 1..] {
+                let l = la.min(lb);
+                assert_ne!(
+                    va as u32 >> (la - l),
+                    vb as u32 >> (lb - l),
+                    "{la}:{va:b} and {lb}:{vb:b} share a prefix"
+                );
+            }
+        }
+        assert!(kraft <= 1.0 + 1e-12, "Kraft sum {kraft}");
+    }
+
+    #[test]
+    fn tables_hold_the_standard_codes() {
+        let tok = |t: usize, total: usize, t1: usize| {
+            (
+                COEFF_TOKEN_LEN[t][total][t1],
+                COEFF_TOKEN_CODE[t][total][t1],
+            )
+        };
+        assert_eq!(tok(0, 0, 0), code("1"));
+        assert_eq!(tok(0, 1, 0), code("000101"));
+        assert_eq!(tok(0, 1, 1), code("01"));
+        assert_eq!(tok(0, 2, 0), code("00000111"));
+        assert_eq!(tok(0, 2, 1), code("000100"));
+        assert_eq!(tok(0, 2, 2), code("001"));
+        assert_eq!(tok(0, 3, 3), code("00011"));
+        assert_eq!(tok(1, 0, 0), code("11"));
+        assert_eq!(tok(1, 1, 1), code("10"));
+        assert_eq!(tok(1, 2, 2), code("011"));
+        assert_eq!(tok(2, 0, 0), code("1111"));
+        assert_eq!(tok(2, 1, 1), code("1110"));
+        let cdc = |total: usize, t1: usize| {
+            (
+                COEFF_TOKEN_CDC_LEN[total][t1],
+                COEFF_TOKEN_CDC_CODE[total][t1],
+            )
+        };
+        assert_eq!(cdc(0, 0), code("01"));
+        assert_eq!(cdc(1, 1), code("1"));
+        assert_eq!(cdc(1, 0), code("000111"));
+        assert_eq!(TOTAL_ZEROS[0][0], code("1"));
+        assert_eq!(TOTAL_ZEROS[0][15], code("000000001"));
+        assert_eq!(TOTAL_ZEROS[1][0], code("111"));
+        assert_eq!(RUN_BEFORE[0][1], code("0"));
+        assert_eq!(RUN_BEFORE[6][0], code("111"));
+        assert_eq!(RUN_BEFORE[6][14], code("00000000001"));
+        assert_eq!((CBP_INTRA_TO_CODE[47], CBP_INTER_TO_CODE[0]), (0, 0));
+        assert_eq!((CBP_INTRA_TO_CODE[31], CBP_INTER_TO_CODE[16]), (1, 1));
+        assert_eq!(
+            ZIGZAG4,
+            [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15]
+        );
+    }
+
+    #[test]
+    fn coeff_tokens_are_prefix_free_per_table() {
+        let (len, val) = coeff_token();
+        for t in 0..3 {
+            let mut codes = Vec::new();
+            for total in 0..=16 {
+                for t1 in 0..=total.min(3) {
+                    codes.push((len[t][total][t1], val[t][total][t1]));
+                }
+            }
+            assert_eq!(codes.len(), 62);
+            prefix_free(&codes);
+        }
+        let (len, val) = chroma_dc_token();
+        let mut codes = Vec::new();
+        for total in 0..=4 {
+            for t1 in 0..=total.min(3) {
+                codes.push((len[total][t1], val[total][t1]));
+            }
+        }
+        assert_eq!(codes.len(), 14);
+        prefix_free(&codes);
+    }
+
+    #[test]
+    fn total_zeros_and_run_before_rows_are_prefix_free() {
+        for (r, row) in TOTAL_ZEROS.iter().enumerate() {
+            prefix_free(&row[..16 - (r + 1) + 1]);
+        }
+        for (r, row) in TOTAL_ZEROS_CDC.iter().enumerate() {
+            prefix_free(&row[..4 - (r + 1) + 1]);
+        }
+        for (r, row) in RUN_BEFORE.iter().enumerate() {
+            let n = if r < 6 { r + 2 } else { 15 };
+            prefix_free(&row[..n]);
+        }
+    }
+
+    #[test]
+    fn cbp_maps_are_bijections() {
+        for (cbp, &code) in CBP_INTRA_TO_CODE.iter().enumerate() {
+            assert_eq!(CBP_ME[code as usize].0 as usize, cbp);
+        }
+        for (cbp, &code) in CBP_INTER_TO_CODE.iter().enumerate() {
+            assert_eq!(CBP_ME[code as usize].1 as usize, cbp);
+        }
+    }
+
+    #[test]
+    fn scan_tables_are_permutations_and_agree() {
+        let mut seen = [false; 64];
+        for &i in &ZIGZAG8 {
+            assert!(!seen[i]);
+            seen[i] = true;
+        }
+        let mut seen = [false; 16];
+        for &i in &ZIGZAG4 {
+            assert!(!seen[i]);
+            seen[i] = true;
+        }
+        for (blk, &(x, y)) in BLK4_XY.iter().enumerate() {
+            assert!(x < 4 && y < 4);
+            assert_eq!(RASTER_TO_BLK4[y * 4 + x], blk);
+        }
+    }
+
+    #[test]
+    fn position_classes_and_chroma_qp() {
+        let classes: Vec<usize> = (0..16).map(pos_class4).collect();
+        assert_eq!(classes, [0, 2, 0, 2, 2, 1, 2, 1, 0, 2, 0, 2, 2, 1, 2, 1]);
+        assert_eq!(chroma_qp(-7), chroma_qp(0));
+        assert_eq!(chroma_qp(0), 0);
+        assert_eq!(chroma_qp(29), 29);
+        assert_eq!(chroma_qp(30), 29);
+        assert_eq!(chroma_qp(51), 39);
+        assert_eq!(chroma_qp(99), 39);
+    }
+}

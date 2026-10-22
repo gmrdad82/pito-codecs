@@ -2,20 +2,20 @@ use super::*;
 use std::path::PathBuf;
 use std::process::Command;
 
-fn dir() -> PathBuf {
+pub(super) fn dir() -> PathBuf {
     let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp/test-ac3");
     std::fs::create_dir_all(&d).unwrap();
     d
 }
 
-fn ffmpeg() -> bool {
+pub(super) fn ffmpeg() -> bool {
     Command::new("ffmpeg")
         .arg("-version")
         .output()
         .is_ok_and(|o| o.status.success())
 }
 
-fn signal(rate: u32, channels: u16, seconds: f32) -> Vec<u8> {
+pub(super) fn signal(rate: u32, channels: u16, seconds: f32) -> Vec<u8> {
     let n = (rate as f32 * seconds) as usize;
     let mut seed = 0x1234_5678u32;
     let mut out = Vec::with_capacity(n * channels as usize * 4);
@@ -81,7 +81,7 @@ fn frames(data: &[u8]) -> Vec<&[u8]> {
     out
 }
 
-fn without_dither_flags(path: &PathBuf) -> (PathBuf, usize) {
+pub(super) fn without_dither_flags(path: &PathBuf) -> (PathBuf, usize) {
     let data = std::fs::read(path).unwrap();
     let i = info(&data).unwrap();
     let mut d = Decoder::new(i.rate, i.channels);
@@ -106,7 +106,7 @@ fn without_dither_flags(path: &PathBuf) -> (PathBuf, usize) {
     (out, cleared)
 }
 
-fn ours(path: &PathBuf, dither: bool) -> (Vec<f32>, u16) {
+pub(super) fn ours(path: &PathBuf, dither: bool) -> (Vec<f32>, u16) {
     let data = std::fs::read(path).unwrap();
     let i = info(&data).unwrap();
     let mut d = Decoder::new(i.rate, i.channels);
@@ -122,7 +122,7 @@ fn ours(path: &PathBuf, dither: bool) -> (Vec<f32>, u16) {
     (out, d.channels())
 }
 
-fn max_diff(a: &[f32], b: &[f32]) -> f32 {
+pub(super) fn max_diff(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len());
     a.iter()
         .zip(b)
@@ -145,7 +145,7 @@ fn crc16(data: &[u8]) -> u16 {
     crc
 }
 
-fn with_dither_flags(path: &PathBuf) -> PathBuf {
+pub(super) fn with_dither_flags(path: &PathBuf) -> PathBuf {
     let data = std::fs::read(path).unwrap();
     let i = info(&data).unwrap();
     let mut d = Decoder::new(i.rate, i.channels);

@@ -239,7 +239,7 @@ fn phases() {
         let mut p = Parser::new(data).unwrap();
         let mut row = RowData::new(p.hdr.mb_w);
         for my in 0..p.hdr.height.div_ceil(16) {
-            p.row(my, &mut row);
+            p.row(my, &mut row).unwrap();
             row.coeffs.fill(0);
         }
     });
@@ -250,7 +250,7 @@ fn phases() {
         let mut row = RowData::new(f.mb_w);
         let (ys, uvs) = (f.ys, f.uvs);
         for my in 0..f.mb_h {
-            p.row(my, &mut row);
+            p.row(my, &mut row).unwrap();
             let y = &mut f.y[my * 16 * ys..(my + 1) * 16 * ys];
             let u = &mut f.u[my * 8 * uvs..(my + 1) * 8 * uvs];
             let v = &mut f.v[my * 8 * uvs..(my + 1) * 8 * uvs];

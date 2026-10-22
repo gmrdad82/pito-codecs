@@ -120,6 +120,7 @@ pub struct Sample {
     pub pts: i64,
     pub duration: u32,
     pub keyframe: bool,
+    pub discard: i64,
     pub cluster: u32,
     pub block: u64,
     pub lace: u16,

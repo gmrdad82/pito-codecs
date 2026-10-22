@@ -140,9 +140,30 @@ fn reader_matches_ffprobe_packets() {
             "frag_keyframe+empty_moov",
         ],
     );
-    for path in [mp4, mov, frag] {
+    let based = generate(
+        "fragmented-base.mp4",
+        2,
+        &[
+            "-c:v",
+            "libx264",
+            "-bf",
+            "2",
+            "-g",
+            "15",
+            "-movflags",
+            "frag_keyframe+default_base_moof",
+        ],
+    );
+    for path in [mp4, mov, frag, based] {
         let r = Reader::open(&path).unwrap();
         assert_eq!(r.quicktime, path.extension().unwrap() == "mov");
+        assert_eq!(
+            r.fragmented,
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("fragmented")
+        );
         for (i, t) in r.tracks.iter().enumerate() {
             let listed = probe(
                 &path,

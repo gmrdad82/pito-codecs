@@ -109,6 +109,7 @@ pub struct AlphaDecoder {
     colors: VecDeque<Frame>,
     alphas: VecDeque<Frame>,
     missing: Vec<i64>,
+    broken: bool,
 }
 
 impl Default for AlphaDecoder {
@@ -130,6 +131,7 @@ impl AlphaDecoder {
             colors: VecDeque::new(),
             alphas: VecDeque::new(),
             missing: Vec::new(),
+            broken: false,
         }
     }
 
@@ -144,6 +146,7 @@ impl AlphaDecoder {
         self.colors.clear();
         self.alphas.clear();
         self.missing.clear();
+        self.broken = false;
     }
 
     pub fn decode(
@@ -151,6 +154,11 @@ impl AlphaDecoder {
         packet: &Packet,
         alpha: Option<&[u8]>,
     ) -> Result<Vec<(Frame, Option<Plane>)>> {
+        let alpha = alpha.filter(|a| !a.is_empty() && (packet.keyframe || !self.broken));
+        if alpha.is_none() && !self.broken {
+            self.settle();
+        }
+        self.broken = alpha.is_none();
         let (color, other) = (&mut self.color, &mut self.alpha);
         let (c, a) = match alpha {
             Some(data) => {
@@ -174,9 +182,13 @@ impl AlphaDecoder {
                 (color.decode(packet), None)
             }
         };
+        if matches!(a, Some(Err(_))) {
+            self.broken = true;
+            self.settle();
+        }
         self.colors.extend(c?);
-        if let Some(a) = a {
-            self.alphas.extend(a?);
+        if let Some(Ok(a)) = a {
+            self.alphas.extend(a);
         }
         self.matched(false)
     }
@@ -185,11 +197,20 @@ impl AlphaDecoder {
         let c = self.color.flush();
         let a = self.alpha.flush();
         self.colors.extend(c?);
-        self.alphas.extend(a?);
+        if let Ok(a) = a {
+            self.alphas.extend(a);
+        }
         let out = self.matched(true);
         self.missing.clear();
         self.alphas.clear();
         out
+    }
+
+    fn settle(&mut self) {
+        if let Ok(a) = self.alpha.flush() {
+            self.alphas.extend(a);
+        }
+        self.alpha.reset();
     }
 
     fn matched(&mut self, last: bool) -> Result<Vec<(Frame, Option<Plane>)>> {
@@ -208,7 +229,7 @@ impl AlphaDecoder {
             let plane = match self.alphas.front().map(|a| a.pts) {
                 Some(p) if p == pts => self.alphas.pop_front().map(|a| a.planes),
                 Some(_) => None,
-                None if last => None,
+                None if last || self.broken => None,
                 None => break,
             };
             let Some(f) = self.colors.pop_front() else {

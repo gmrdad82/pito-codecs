@@ -4,7 +4,7 @@ use super::filter::{self, Strength};
 use super::tables::*;
 use super::yuv;
 use crate::media::{Error, Result};
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 pub type Probs = [[[[u8; 11]; 3]; 17]; 4];
 
@@ -111,6 +111,9 @@ pub fn header(data: &[u8]) -> Result<Header<'_>> {
             }
         }
     }
+    if br.eof() {
+        return Err(invalid("cannot parse segment header"));
+    }
     let simple = br.flag();
     let level = br.literal(6) as i32;
     let sharpness = br.literal(3) as u8;
@@ -130,6 +133,9 @@ pub fn header(data: &[u8]) -> Result<Header<'_>> {
                 mode_delta = v;
             }
         }
+    }
+    if br.eof() {
+        return Err(invalid("cannot parse filter header"));
     }
     let nparts = 1usize << br.literal(2);
     let base_q = br.literal(7) as i32;
@@ -163,6 +169,9 @@ pub fn header(data: &[u8]) -> Result<Header<'_>> {
             let s = &tail[3 * p..3 * p + 3];
             s[0] as usize | (s[1] as usize) << 8 | (s[2] as usize) << 16
         } else {
+            if at >= tail.len() {
+                return Err(invalid("cannot parse partitions"));
+            }
             tail.len().saturating_sub(at)
         };
         let start = at.min(tail.len());
@@ -418,11 +427,12 @@ impl Modes<'_> {
         }
     }
 
-    pub fn row(&mut self, out: &mut [MbData]) {
+    pub fn row(&mut self, out: &mut [MbData]) -> bool {
         let mut intra_l = [0u8; 4];
         for (mx, d) in out.iter_mut().enumerate() {
             d.mb = self.mb(&mut intra_l, mx);
         }
+        !self.br.eof()
     }
 }
 
@@ -577,7 +587,7 @@ impl Tokens<'_> {
         br: &mut BoolDecoder,
         above: &mut A,
         out: &mut RowData,
-    ) {
+    ) -> bool {
         let mut nz_l = 0u32;
         for (mx, d) in out.mbs.iter_mut().enumerate() {
             let mb = d.mb;
@@ -604,16 +614,17 @@ impl Tokens<'_> {
             d.ac = ac;
             d.strength = strength;
         }
+        !br.eof()
     }
 
-    pub fn row(&mut self, my: usize, out: &mut RowData) {
+    pub fn row(&mut self, my: usize, out: &mut RowData) -> bool {
         let part = my % self.parts.len();
         Self::mb_row(
             &self.tables,
             &mut self.parts[part],
             self.nz_t.as_mut_slice(),
             out,
-        );
+        )
     }
 }
 
@@ -648,9 +659,14 @@ impl<'a> Parser<'a> {
         })
     }
 
-    pub fn row(&mut self, my: usize, out: &mut RowData) {
-        self.modes.row(&mut out.mbs);
-        self.tokens.row(my, out);
+    pub fn row(&mut self, my: usize, out: &mut RowData) -> Result<()> {
+        if !self.modes.row(&mut out.mbs) {
+            return Err(invalid("premature end of partition 0"));
+        }
+        if !self.tokens.row(my, out) {
+            return Err(invalid("premature end of file"));
+        }
+        Ok(())
     }
 }
 
@@ -932,7 +948,7 @@ pub fn decode_rgba(data: &[u8], out: &mut [u8]) -> Result<()> {
     if threads < 3 || mb_w * mb_h < 300 {
         let mut row = RowData::new(mb_w);
         for (my, (a, b, band)) in bands.into_iter().enumerate() {
-            parser.row(my, &mut row);
+            parser.row(my, &mut row)?;
             unsafe {
                 sh.recon(&mut recon, my, &mut row);
                 sh.filter_row(my, &row.mbs);
@@ -954,7 +970,10 @@ pub fn decode_rgba(data: &[u8], out: &mut [u8]) -> Result<()> {
     }
     let nz: Vec<AtomicU32> = (0..mb_w).map(|_| AtomicU32::new(0)).collect();
     let progress: Vec<AtomicUsize> = (0..mb_h).map(|_| AtomicUsize::new(0)).collect();
+    let short_modes = AtomicBool::new(false);
+    let short_tokens = AtomicBool::new(false);
     let (tables, nz, progress) = (&tables, &nz[..], &progress[..]);
+    let short = &short_tokens;
     std::thread::scope(|s| {
         use std::sync::mpsc::channel;
         let (free_tx, free_rx) = channel::<RowData>();
@@ -976,7 +995,9 @@ pub fn decode_rgba(data: &[u8], out: &mut [u8]) -> Result<()> {
                         mine: &progress[my],
                     };
                     let br = &mut group[(my % nparts) / workers];
-                    Tokens::mb_row(tables, br, &mut wave, &mut row);
+                    if !Tokens::mb_row(tables, br, &mut wave, &mut row) {
+                        short.store(true, Ordering::Relaxed);
+                    }
                     if full_tx.send((my, row)).is_err() {
                         break;
                     }
@@ -1010,13 +1031,21 @@ pub fn decode_rgba(data: &[u8], out: &mut [u8]) -> Result<()> {
         });
         for my in 0..mb_h {
             let Ok(mut row) = free_rx.recv() else { break };
-            modes.row(&mut row.mbs);
+            if !modes.row(&mut row.mbs) {
+                short_modes.store(true, Ordering::Relaxed);
+            }
             if work[(my % nparts) % workers].send((my, row)).is_err() {
                 break;
             }
         }
         drop(work);
     });
+    if short_modes.into_inner() {
+        return Err(invalid("premature end of partition 0"));
+    }
+    if short_tokens.into_inner() {
+        return Err(invalid("premature end of file"));
+    }
     Ok(())
 }
 
@@ -1037,7 +1066,7 @@ pub fn decode(data: &[u8]) -> Result<Frame> {
         simple: parser.hdr.simple,
     };
     for my in 0..f.mb_h {
-        parser.row(my, &mut row);
+        parser.row(my, &mut row)?;
         unsafe {
             sh.recon(&mut recon, my, &mut row);
             sh.filter_row(my, &row.mbs);

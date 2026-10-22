@@ -2,7 +2,7 @@ mod cabac;
 mod cabac_mb;
 #[rustfmt::skip]
 pub(super) mod cabac_tables;
-mod cavlc;
+pub(super) mod cavlc;
 #[rustfmt::skip]
 pub(super) mod cavlc_tables;
 mod deblock;

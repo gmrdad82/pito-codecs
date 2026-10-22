@@ -7,6 +7,7 @@ mod tests;
 #[cfg(all(test, target_arch = "x86_64"))]
 thread_local! {
     static OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(all(test, target_arch = "x86_64"))]
@@ -14,11 +15,17 @@ pub(crate) fn force_off(off: bool) {
     OFF.set(off);
 }
 
+#[cfg(all(test, target_arch = "x86_64"))]
+pub(crate) fn forced_checks() -> u64 {
+    FORCED.get()
+}
+
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 pub(crate) fn on() -> bool {
     #[cfg(test)]
     if OFF.get() {
+        FORCED.set(FORCED.get() + 1);
         return false;
     }
     crate::media::isa::avx2()

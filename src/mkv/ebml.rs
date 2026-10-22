@@ -103,6 +103,16 @@ pub fn uint(data: &[u8]) -> u64 {
     data.iter().take(8).fold(0u64, |a, &b| (a << 8) | b as u64)
 }
 
+pub fn sint(data: &[u8]) -> i64 {
+    let d = &data[..data.len().min(8)];
+    match d.first() {
+        None => 0,
+        Some(&b) => d[1..]
+            .iter()
+            .fold(b as i8 as i64, |a, &b| (a << 8) | b as i64),
+    }
+}
+
 pub fn float(data: &[u8]) -> Option<f64> {
     match data.len() {
         0 => Some(0.0),

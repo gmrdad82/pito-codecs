@@ -251,3 +251,154 @@ pub fn write_mb(w: &mut BitWriter, nb: &NbCtx, c: &MbCode) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::h264::dec::cavlc::residual_block;
+    use crate::syntax::bits::BitReader;
+
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> u32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 33) as u32
+        }
+    }
+
+    fn block(rng: &mut Lcg, len: usize, style: usize) -> Vec<i16> {
+        let mut c = vec![0i16; len];
+        for v in c.iter_mut() {
+            *v = match style {
+                0 => 0,
+                1 => [0, 0, 0, 1, -1][rng.next() as usize % 5],
+                2 => [0, 1, -1, 2, -3, 5][rng.next() as usize % 6],
+                3 => (rng.next() % 41) as i16 - 20,
+                4 => (rng.next() % (2 * MAX_LEVEL as u32 + 1)) as i16 - MAX_LEVEL as i16,
+                5 => [0, 0, 3000, -3000, 1, -1, 4095][rng.next() as usize % 7],
+                _ => 1,
+            };
+        }
+        c
+    }
+
+    fn round_trip(coeffs: &[i16], nc: i32) {
+        let mut w = BitWriter::new();
+        let total = write_residual(&mut w, coeffs, nc);
+        let bits = w.bit_len();
+        let mut data = w.finish();
+        data.extend_from_slice(&[0; 8]);
+        let mut r = BitReader::new(&data);
+        let mut out = [0i32; 16];
+        let n = coeffs.len();
+        let got = residual_block(&mut r, &mut out, 0, n - 1, n, nc)
+            .unwrap_or_else(|e| panic!("nc {nc} {coeffs:?}: {e}"));
+        assert_eq!(got, total, "nc {nc} {coeffs:?}: total");
+        assert_eq!(
+            total as usize,
+            coeffs.iter().filter(|&&v| v != 0).count(),
+            "nc {nc} {coeffs:?}: count"
+        );
+        assert_eq!(r.position(), bits, "nc {nc} {coeffs:?}: bits read");
+        for i in 0..n {
+            assert_eq!(out[i], coeffs[i] as i32, "nc {nc} {coeffs:?}: coeff {i}");
+        }
+    }
+
+    #[test]
+    fn residual_blocks_parse_back_in_the_decoder() {
+        let mut rng = Lcg(11);
+        for nc in [-1, 0, 1, 2, 3, 4, 5, 7, 8, 9, 16] {
+            let lens: &[usize] = if nc == -1 { &[4] } else { &[16, 15] };
+            for &len in lens {
+                for style in 0..7 {
+                    for _ in 0..60 {
+                        let mut c = block(&mut rng, len, style);
+                        if style == 6 {
+                            let keep = rng.next() as usize % (len + 1);
+                            for v in c.iter_mut().skip(keep) {
+                                *v = 0;
+                            }
+                        }
+                        round_trip(&c, nc);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_total_and_trailing_ones_pair_round_trips() {
+        for nc in [-1, 0, 2, 4, 8] {
+            let len = if nc == -1 { 4 } else { 16 };
+            for total in 0..=len {
+                for t1 in 0..=total.min(3) {
+                    for spread in [false, true] {
+                        let mut c = vec![0i16; len];
+                        let at: Vec<usize> = if spread && total < len {
+                            (0..total).map(|k| k * len / total.max(1)).collect()
+                        } else {
+                            (0..total).collect()
+                        };
+                        for (k, &p) in at.iter().enumerate() {
+                            let from_top = total - 1 - k;
+                            c[p] = if from_top < t1 {
+                                if k % 2 == 0 { 1 } else { -1 }
+                            } else {
+                                2 + k as i16
+                            };
+                        }
+                        round_trip(&c, nc);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn escape_codes_cover_every_suffix_length() {
+        for nc in [0, 4, 8] {
+            for big in [14, 15, 16, 29, 30, 31, 100, 2047, 2048, 4095, 8000, 16000] {
+                for sign in [1i16, -1] {
+                    let mut c = vec![0i16; 16];
+                    c[0] = sign * big;
+                    round_trip(&c, nc);
+                    let mut many = [sign * big; 16];
+                    many[15] = 1;
+                    round_trip(&many, nc);
+                    let mut rising = [0i16; 16];
+                    for (k, v) in rising.iter_mut().enumerate() {
+                        *v = sign * (1 + (k as i32 * big as i32 / 16) as i16);
+                    }
+                    round_trip(&rising, nc);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn empty_blocks_cost_a_token_and_return_zero() {
+        for (nc, len) in [(-1, 4usize), (0, 16), (3, 15), (6, 16), (12, 16)] {
+            let mut w = BitWriter::new();
+            assert_eq!(write_residual(&mut w, &vec![0; len], nc), 0);
+            assert!(w.bit_len() > 0);
+            if nc >= 8 {
+                assert_eq!(w.bit_len(), 6);
+            }
+        }
+    }
+
+    #[test]
+    fn neighbour_counts_average_round_up() {
+        assert_eq!(nc_of(None, None), 0);
+        assert_eq!(nc_of(Some(5), None), 5);
+        assert_eq!(nc_of(None, Some(7)), 7);
+        assert_eq!(nc_of(Some(2), Some(3)), 3);
+        assert_eq!(nc_of(Some(16), Some(16)), 16);
+        assert_eq!(nc_of(Some(0), Some(1)), 1);
+    }
+}

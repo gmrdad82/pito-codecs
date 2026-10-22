@@ -5,6 +5,7 @@ pub struct BoolDecoder<'a> {
     value: u64,
     range: u32,
     bits: i32,
+    eof: bool,
 }
 
 impl<'a> BoolDecoder<'a> {
@@ -15,6 +16,7 @@ impl<'a> BoolDecoder<'a> {
             value: 0,
             range: 254,
             bits: -8,
+            eof: false,
         };
         d.load();
         d
@@ -40,11 +42,16 @@ impl<'a> BoolDecoder<'a> {
                 self.pos += 1;
                 self.data[self.pos - 1]
             } else {
+                self.eof = true;
                 0
             };
             self.value = (self.value << 8) | byte as u64;
             self.bits += 8;
         }
+    }
+
+    pub fn eof(&self) -> bool {
+        self.eof
     }
 
     #[inline(always)]

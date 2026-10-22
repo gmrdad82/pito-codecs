@@ -1,6 +1,7 @@
 use crate::media::{self, Error, Result};
 
 use super::SIGNATURE;
+use super::crc::crc;
 use super::inflate::adler32;
 
 const LENGTHS: [u8; 286] = [
@@ -73,36 +74,6 @@ const fn codes(lengths: &[u8; 286]) -> [u16; 286] {
         len += 1;
     }
     codes
-}
-
-const CRC: [u32; 256] = {
-    let mut table = [0u32; 256];
-    let mut n = 0;
-    while n < 256 {
-        let mut c = n as u32;
-        let mut k = 0;
-        while k < 8 {
-            c = if c & 1 != 0 {
-                0xedb8_8320 ^ (c >> 1)
-            } else {
-                c >> 1
-            };
-            k += 1;
-        }
-        table[n] = c;
-        n += 1;
-    }
-    table
-};
-
-fn crc(parts: &[&[u8]]) -> u32 {
-    let mut c = 0xffff_ffffu32;
-    for part in parts {
-        for &b in *part {
-            c = CRC[((c ^ b as u32) & 0xff) as usize] ^ (c >> 8);
-        }
-    }
-    c ^ 0xffff_ffff
 }
 
 struct Deflate {

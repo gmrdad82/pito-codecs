@@ -179,7 +179,7 @@ impl<'a> GetBits<'a> {
 
     #[inline]
     pub const fn pos(&self) -> usize {
-        self.index * u8::BITS as usize - self.bits_left as usize
+        (self.index as isize * u8::BITS as isize - self.bits_left as isize) as usize
     }
 
     pub const fn byte_pos(&self) -> usize {

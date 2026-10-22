@@ -197,6 +197,11 @@ impl<'a, S: ByteSource + ?Sized> Io<'a, S> {
         Ok(ebml::uint(self.peek(h.data_start(), n)?))
     }
 
+    pub(crate) fn sint(&mut self, h: &Hdr, end: u64) -> Result<i64> {
+        let n = end.saturating_sub(h.data_start()).min(8) as usize;
+        Ok(ebml::sint(self.peek(h.data_start(), n)?))
+    }
+
     pub(crate) fn resync(&mut self, from: u64, limit: u64) -> Result<Option<u64>> {
         let memo = self
             .cache
@@ -311,6 +316,7 @@ pub(crate) struct BlockRef {
     pub(crate) ts: i64,
     pub(crate) duration: Option<u64>,
     pub(crate) keyframe: bool,
+    pub(crate) discard: i64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -321,6 +327,7 @@ pub(crate) struct FrameRef {
     pub(crate) pts: i64,
     pub(crate) duration: u32,
     pub(crate) keyframe: bool,
+    pub(crate) discard: i64,
     pub(crate) block: u64,
     pub(crate) lace: u16,
 }
@@ -400,12 +407,13 @@ pub(crate) fn parse_block_elem<S: ByteSource + ?Sized>(
                 ts: cluster_ts.saturating_add(rel as i64),
                 duration: None,
                 keyframe: flags & 0x80 != 0,
+                discard: 0,
             }))
         }
         BLOCK_GROUP => {
             let mut pos = ds;
             let mut block = None;
-            let (mut duration, mut has_ref) = (None, false);
+            let (mut duration, mut has_ref, mut discard) = (None, false, 0);
             while pos < end {
                 let Some(c) = io.header(pos, end)? else {
                     break;
@@ -418,6 +426,7 @@ pub(crate) fn parse_block_elem<S: ByteSource + ?Sized>(
                     }
                     BLOCK_DURATION => duration = Some(io.uint(&c, ce)?),
                     REFERENCE_BLOCK => has_ref = true,
+                    DISCARD_PADDING => discard = io.sint(&c, ce)?,
                     _ => {}
                 }
                 pos = ce;
@@ -431,6 +440,7 @@ pub(crate) fn parse_block_elem<S: ByteSource + ?Sized>(
                 ts: cluster_ts.saturating_add(rel as i64),
                 duration,
                 keyframe: !has_ref,
+                discard,
             }))
         }
         _ => Ok(None),
@@ -539,6 +549,11 @@ pub(crate) fn expand(
             pts: ticks(base + start).saturating_sub(delay),
             duration: duration as u32,
             keyframe: b.keyframe,
+            discard: match b.discard {
+                d if d < 0 && i == 0 => d,
+                d if d > 0 && i as u64 + 1 == n => d,
+                _ => 0,
+            },
             block: b.offset,
             lace: i as u16,
         });
@@ -1147,6 +1162,7 @@ impl Walker {
                                     pts: f.pts,
                                     duration: f.duration,
                                     keyframe: f.keyframe,
+                                    discard: f.discard,
                                     cluster,
                                     block: f.block,
                                     lace: f.lace,

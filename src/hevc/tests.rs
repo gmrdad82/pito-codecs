@@ -1,8 +1,11 @@
 use super::{Decoder, Hvcc};
 use crate::media::{Frame, Packet, PixelFormat};
-use crate::syntax::bits::annexb_nals;
+use crate::syntax::bits::{annexb_nals, unescape_rbsp};
+use crate::syntax::hevc::params::{Pps, ScalingList, Sps};
+use crate::syntax::hevc::slice::{NalHeader, SliceHeader};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -201,6 +204,7 @@ fn final_path(name: &str) -> PathBuf {
 
 fn ff(args: &[&str], input: &Path, mid: &[&str], output: &Path) {
     let out = Command::new("ffmpeg")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
         .args(["-hide_banner", "-loglevel", "error", "-y"])
         .args(args)
         .arg("-i")
@@ -220,12 +224,176 @@ fn pix_fmt(ten_bit: bool) -> &'static str {
     if ten_bit { "yuv420p10le" } else { "yuv420p" }
 }
 
+fn libx265(context: &str) -> bool {
+    static HAS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let ok = *HAS.get_or_init(|| {
+        Command::new("ffmpeg")
+            .args(["-hide_banner", "-encoders"])
+            .output()
+            .is_ok_and(|o| {
+                o.status.success()
+                    && String::from_utf8_lossy(&o.stdout)
+                        .split_whitespace()
+                        .any(|w| w == "libx265")
+            })
+    });
+    if !ok {
+        eprintln!("SKIPPED ({context}): this ffmpeg has no libx265 encoder");
+    }
+    ok
+}
+
+const SCALING_FILE: &str = "@scaling-list";
+
+const X265_RECON: &str = "@x265-recon";
+
+fn x265_cli(context: &str) -> bool {
+    let ok = Command::new("x265")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !ok {
+        eprintln!("SKIPPED ({context}): no x265 command for its own reconstruction");
+    }
+    ok
+}
+
+fn x265_recon(f: &Fixture, hevc: &Path, yuv: &Path) -> bool {
+    if hevc.exists() && yuv.exists() {
+        return true;
+    }
+    if !x265_cli(f.name) {
+        return false;
+    }
+    let raw = scratch(&format!("{}.raw.yuv", f.name));
+    let (tmp_hevc, tmp_yuv) = (
+        scratch(&format!("{}.hevc", f.name)),
+        scratch(&format!("{}.yuv", f.name)),
+    );
+    let mut src = format!(
+        "{}=size={}x{}:rate=25,format={}",
+        f.source,
+        f.width,
+        f.height,
+        pix_fmt(f.ten_bit)
+    );
+    if !f.filter.is_empty() {
+        src = format!("{src},{}", f.filter);
+    }
+    let frames = f.frames.to_string();
+    ff(
+        &["-f", "lavfi"],
+        Path::new(&src),
+        &[
+            "-frames:v",
+            &frames,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            pix_fmt(f.ten_bit),
+        ],
+        &raw,
+    );
+    let depth = if f.ten_bit { "10" } else { "8" };
+    let mut cmd = Command::new("x265");
+    cmd.args(["--log-level", "error", "--input"])
+        .arg(&raw)
+        .args(["--input-res", &format!("{}x{}", f.width, f.height)])
+        .args(["--fps", "25", "--frames", &frames])
+        .args([
+            "--input-depth",
+            depth,
+            "--output-depth",
+            depth,
+            "--recon-depth",
+            depth,
+        ]);
+    for kv in f.args[1..].iter().flat_map(|a| a.split(':')) {
+        let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+        cmd.arg(format!("--{k}"));
+        if !v.is_empty() {
+            cmd.arg(v);
+        }
+    }
+    let out = cmd
+        .arg("--recon")
+        .arg(&tmp_yuv)
+        .arg("-o")
+        .arg(&tmp_hevc)
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_file(&raw);
+    assert!(
+        out.status.success(),
+        "{}: x265 failed: {}",
+        f.name,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::rename(&tmp_hevc, hevc).unwrap();
+    std::fs::rename(&tmp_yuv, yuv).unwrap();
+    true
+}
+
+fn scaling_list_text() -> String {
+    let sizes = [("4X4", 16), ("8X8", 64), ("16X16", 64), ("32X32", 64)];
+    let lists = [
+        "INTRA{}_LUMA",
+        "INTRA{}_CHROMAU",
+        "INTRA{}_CHROMAV",
+        "INTER{}_LUMA",
+        "INTER{}_CHROMAU",
+        "INTER{}_CHROMAV",
+    ];
+    let mut text = String::new();
+    for (s, (size, n)) in sizes.iter().enumerate() {
+        for (l, list) in lists.iter().enumerate() {
+            let name = list.replace("{}", size);
+            let seed = if l == 5 { 4 } else { l };
+            let coeffs: Vec<String> = (0..*n)
+                .map(|i| (8 + s * 3 + seed * 2 + (i * (seed + 1)) % 23).to_string())
+                .collect();
+            text += &format!("{name} =\n{}\n", coeffs.join(","));
+            if s >= 2 {
+                text += &format!("{name}_DC =\n{}\n", 10 + s + seed);
+            }
+        }
+    }
+    text
+}
+
+fn scaling_list_file() {
+    let path = final_path("scaling_list.txt");
+    let text = scaling_list_text();
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(&text[..]) {
+        let tmp = scratch("scaling_list.txt");
+        std::fs::write(&tmp, &text).unwrap();
+        std::fs::rename(&tmp, &path).unwrap();
+    }
+}
+
+fn cache_name(f: &Fixture) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (
+        f.source, f.width, f.height, f.frames, f.filter, f.ten_bit, f.args,
+    )
+        .hash(&mut h);
+    if f.args.iter().any(|a| a.contains(SCALING_FILE)) {
+        scaling_list_text().hash(&mut h);
+    }
+    format!("{}-{:016x}", f.name, h.finish())
+}
+
 fn ensure(f: &Fixture) -> Option<(PathBuf, PathBuf)> {
-    if !ffmpeg(f.name) {
+    if !ffmpeg(f.name) || !libx265(f.name) {
         return None;
     }
-    let hevc = final_path(&format!("{}.hevc", f.name));
-    let yuv = final_path(&format!("{}.yuv", f.name));
+    let cached = cache_name(f);
+    let hevc = final_path(&format!("{cached}.hevc"));
+    let yuv = final_path(&format!("{cached}.yuv"));
+    if f.args.first() == Some(&X265_RECON) {
+        return x265_recon(f, &hevc, &yuv).then_some((hevc, yuv));
+    }
     if !hevc.exists() {
         let tmp = scratch(&format!("{}.hevc", f.name));
         let mut src = format!(
@@ -250,7 +418,12 @@ fn ensure(f: &Fixture) -> Option<(PathBuf, PathBuf)> {
         let params;
         let mut args = f.args.to_vec();
         if let Some(i) = args.iter().position(|a| *a == "-x265-params") {
-            params = format!("{}:log-level=error", args[i + 1]);
+            let mut given = args[i + 1].to_string();
+            if given.contains(SCALING_FILE) {
+                scaling_list_file();
+                given = given.replace(SCALING_FILE, "tmp/fixtures/hevc/scaling_list.txt");
+            }
+            params = format!("{given}:log-level=error");
             args[i + 1] = &params;
         } else {
             args.extend(["-x265-params", "log-level=error"]);
@@ -626,4 +799,479 @@ fn check_file(file: &str, data: &[u8]) {
         "{file}: frame count differs from ffmpeg"
     );
     println!("{file}: {} frames bit-exact against ffmpeg", frames.len());
+}
+
+const SMALL: (u32, u32) = (128, 96);
+
+const FEATURES: &[Fixture] = &[
+    fx(
+        "wpp_crop_66x70",
+        "testsrc2",
+        (66, 70),
+        10,
+        NOISE,
+        false,
+        &["-x265-params", "ctu=16:bframes=3"],
+    ),
+    fx(
+        "wpp_slices_main10",
+        "testsrc2",
+        SMALL,
+        8,
+        NOISE,
+        true,
+        &["-x265-params", "ctu=16:slices=3"],
+    ),
+    fx(
+        "long_b_runs",
+        "testsrc2",
+        SMALL,
+        34,
+        NOISE,
+        false,
+        &["-x265-params", "bframes=16:b-pyramid=1:b-adapt=0:ref=6"],
+    ),
+    fx(
+        "pyramid_weightb_main10",
+        "testsrc2",
+        SMALL,
+        20,
+        "fade=in:0:16",
+        true,
+        &[
+            "-x265-params",
+            "bframes=8:b-pyramid=1:ref=5:weightp=1:weightb=1",
+        ],
+    ),
+    fx(
+        "weightp_8bit",
+        "testsrc2",
+        SMALL,
+        12,
+        "fade=in:0:10",
+        false,
+        &["-x265-params", "bframes=2:weightp=1:weightb=1"],
+    ),
+    fx(
+        "scaling_tskip_main10",
+        "testsrc2",
+        SMALL,
+        8,
+        NOISE,
+        true,
+        &["-x265-params", "scaling-list=default:tskip=1:rdoq-level=0"],
+    ),
+    fx(
+        "cu_qp_chroma_offsets",
+        "testsrc2",
+        SMALL,
+        8,
+        NOISE,
+        false,
+        &[
+            X265_RECON,
+            "ctu=16:aq-mode=3:qg-size=8:cbqpoffs=-4:crqpoffs=5",
+        ],
+    ),
+    fx(
+        "intra_tools",
+        "mandelbrot",
+        SMALL,
+        8,
+        NOISE,
+        false,
+        &[
+            "-x265-params",
+            "constrained-intra=1:signhide=0:temporal-mvp=0:strong-intra-smoothing=0:max-merge=1:sao=0:deblock=-6,6:amp=1:rect=1:tu-intra-depth=4:tu-inter-depth=4",
+        ],
+    ),
+    fx(
+        "cu_lossless",
+        "testsrc2",
+        SMALL,
+        6,
+        NOISE,
+        false,
+        &["-x265-params", "cu-lossless=1"],
+    ),
+    fx(
+        "one_ctb_no_deblock",
+        "testsrc2",
+        (64, 64),
+        6,
+        NOISE,
+        false,
+        &["-x265-params", "ctu=64:no-deblock=1"],
+    ),
+    fx(
+        "scaling_list_file",
+        "testsrc2",
+        SMALL,
+        6,
+        NOISE,
+        false,
+        &["-x265-params", "scaling-list=@scaling-list:rdoq-level=0"],
+    ),
+];
+
+const OPEN_GOP_CUT: Fixture = fx(
+    "open_gop_cut",
+    "testsrc2",
+    SMALL,
+    30,
+    NOISE,
+    false,
+    &[
+        "-x265-params",
+        "keyint=8:min-keyint=8:open-gop=1:bframes=3:repeat-headers=1",
+    ],
+);
+
+fn units_of(data: &[u8]) -> Vec<Vec<u8>> {
+    access_units(data).into_iter().map(<[u8]>::to_vec).collect()
+}
+
+fn feature(name: &str) -> &'static Fixture {
+    FEATURES
+        .iter()
+        .find(|f| f.name == name)
+        .unwrap_or_else(|| panic!("no feature fixture named {name}"))
+}
+
+struct Facts {
+    sps: Sps,
+    pps: Pps,
+    max_slices: usize,
+    explicit_weights: bool,
+}
+
+fn facts(hevc: &Path) -> Facts {
+    let data = std::fs::read(hevc).unwrap();
+    let (mut sps, mut pps): (Option<Arc<Sps>>, Option<Arc<Pps>>) = (None, None);
+    let (mut slices, mut max_slices, mut explicit_weights) = (0, 0, false);
+    let mut prev: Option<SliceHeader> = None;
+    for nal in annexb_nals(&data) {
+        let hdr = NalHeader::parse(nal).unwrap();
+        let rbsp = unescape_rbsp(&nal[2..]);
+        match hdr.nal_type {
+            33 => sps = Some(Arc::new(Sps::parse(&rbsp).unwrap())),
+            34 => pps = Some(Arc::new(Pps::parse(&rbsp).unwrap())),
+            0..=9 | 16..=21 => {
+                let (p, s) = (pps.clone().unwrap(), sps.clone().unwrap());
+                let (sh, _, _) =
+                    SliceHeader::parse(&rbsp, hdr, |_| Ok((p, s)), prev.as_ref()).unwrap();
+                if sh.first_slice_segment_in_pic {
+                    slices = 0;
+                }
+                slices += 1;
+                max_slices = max_slices.max(slices);
+                explicit_weights |= sh
+                    .pwt
+                    .iter()
+                    .flat_map(|t| t.l.iter().flatten())
+                    .any(|e| e.luma_flag || e.chroma_flag);
+                prev = Some(sh);
+            }
+            _ => {}
+        }
+    }
+    Facts {
+        sps: Arc::unwrap_or_clone(sps.expect("no SPS")),
+        pps: Arc::unwrap_or_clone(pps.expect("no PPS")),
+        max_slices,
+        explicit_weights,
+    }
+}
+
+fn assert_feature(name: &str, x: &Facts) {
+    let (sps, pps) = (&x.sps, &x.pps);
+    let carried: Vec<(&str, bool)> = match name {
+        "wpp_crop_66x70" => vec![
+            ("entropy_coding_sync", pps.entropy_coding_sync),
+            ("conformance window", sps.conf_win != (0, 0, 0, 0)),
+        ],
+        "wpp_slices_main10" => vec![
+            ("entropy_coding_sync", pps.entropy_coding_sync),
+            ("several slices", x.max_slices > 1),
+            ("10-bit", sps.bit_depth_luma == 10),
+        ],
+        "long_b_runs" => vec![("reorder", sps.max_num_reorder >= 2)],
+        "pyramid_weightb_main10" => vec![
+            ("weighted_pred", pps.weighted_pred),
+            ("weighted_bipred", pps.weighted_bipred),
+            ("explicit weights", x.explicit_weights),
+            ("reorder", sps.max_num_reorder >= 2),
+            ("10-bit", sps.bit_depth_luma == 10),
+        ],
+        "weightp_8bit" => vec![
+            ("weighted_pred", pps.weighted_pred),
+            ("explicit weights", x.explicit_weights),
+        ],
+        "scaling_tskip_main10" => vec![
+            ("scaling_list_enabled", sps.scaling_list_enabled),
+            ("transform_skip", pps.transform_skip),
+            ("10-bit", sps.bit_depth_luma == 10),
+        ],
+        "scaling_list_file" => vec![
+            ("scaling_list_enabled", sps.scaling_list_enabled),
+            (
+                "explicit lists",
+                sps.scaling_list
+                    .as_ref()
+                    .or(pps.scaling_list.as_ref())
+                    .is_some_and(|l| l.lists != ScalingList::default_lists().lists),
+            ),
+        ],
+        "cu_qp_chroma_offsets" => vec![
+            ("cu_qp_delta", pps.cu_qp_delta_enabled),
+            ("cb_qp_offset", pps.cb_qp_offset == -4),
+            ("cr_qp_offset", pps.cr_qp_offset == 5),
+        ],
+        "intra_tools" => vec![
+            ("constrained_intra_pred", pps.constrained_intra_pred),
+            ("no sign hiding", !pps.sign_data_hiding),
+            ("no temporal mvp", !sps.temporal_mvp),
+            ("no strong smoothing", !sps.strong_intra_smoothing),
+            ("no sao", !sps.sao),
+            ("amp", sps.amp),
+        ],
+        "cu_lossless" => vec![("transquant_bypass", pps.transquant_bypass)],
+        "one_ctb_no_deblock" => vec![
+            ("64x64 CTB", sps.log2_ctb == 6),
+            ("deblocking off", pps.deblocking_disabled),
+        ],
+        _ => panic!("{name}: no feature check"),
+    };
+    for (what, ok) in carried {
+        assert!(ok, "{name}: the stream does not carry {what}");
+    }
+}
+
+#[test]
+fn feature_streams_bit_exact_against_ffmpeg() {
+    for f in FEATURES {
+        let Some((hevc, yuv)) = ensure(f) else {
+            continue;
+        };
+        assert_feature(f.name, &facts(&hevc));
+        let units = units_of(&std::fs::read(hevc).unwrap());
+        let reference = std::fs::read(yuv).unwrap();
+        for threads in [1, 4] {
+            let frames = decode_units(&mut Decoder::with_threads(threads), &units);
+            compare(
+                &format!("{} ({threads} threads)", f.name),
+                &frames,
+                &reference,
+                f,
+            );
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn scalar_path_bit_exact_against_ffmpeg() {
+    for f in CONFORMANCE
+        .iter()
+        .chain(FEATURES)
+        .chain(std::iter::once(&OPEN_GOP_CUT))
+    {
+        let Some((hevc, yuv)) = ensure(f) else {
+            continue;
+        };
+        let units = units_of(&std::fs::read(hevc).unwrap());
+        super::simd::force_off(true);
+        let before = super::simd::forced_checks();
+        let frames = decode_units(&mut Decoder::with_threads(1), &units);
+        let checks = super::simd::forced_checks() - before;
+        super::simd::force_off(false);
+        assert!(
+            checks > 0,
+            "{}: the one-thread decode never asked for SIMD on the test's thread, so the scalar path was not forced",
+            f.name
+        );
+        compare(
+            &format!("{} (scalar)", f.name),
+            &frames,
+            &std::fs::read(yuv).unwrap(),
+            f,
+        );
+    }
+}
+
+fn first_vcl_type(au: &[u8]) -> Option<u8> {
+    annexb_nals(au)
+        .into_iter()
+        .map(|n| (n[0] >> 1) & 0x3f)
+        .find(|&t| t < 32)
+}
+
+struct Scratch(Vec<PathBuf>);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        for p in &self.0 {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+#[test]
+fn open_gop_cut_at_a_cra_drops_its_rasl_pictures() {
+    let f = &OPEN_GOP_CUT;
+    let Some((hevc, _)) = ensure(f) else { return };
+    let data = std::fs::read(hevc).unwrap();
+    let aus = access_units(&data);
+    let cra = (1..aus.len())
+        .find(|&i| first_vcl_type(aus[i]) == Some(21))
+        .expect("open_gop_cut: no CRA after the first picture");
+    let rasl = aus[cra + 1..]
+        .iter()
+        .map(|au| first_vcl_type(au))
+        .take_while(|t| !matches!(t, Some(16..=23)))
+        .filter(|t| matches!(t, Some(8 | 9)))
+        .count();
+    assert!(rasl > 0, "open_gop_cut: the cut CRA leads no RASL pictures");
+    let tail = scratch("open_gop_cut_tail.hevc");
+    let yuv = scratch("open_gop_cut_tail.yuv");
+    let _guard = Scratch(vec![tail.clone(), yuv.clone()]);
+    std::fs::write(&tail, aus[cra..].concat()).unwrap();
+    ff(
+        &[],
+        &tail,
+        &[
+            "-fps_mode",
+            "passthrough",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            pix_fmt(false),
+        ],
+        &yuv,
+    );
+    let reference = std::fs::read(&yuv).unwrap();
+    let units: Vec<Vec<u8>> = aus[cra..].iter().map(|au| au.to_vec()).collect();
+    for threads in [1, 4] {
+        let frames = decode_units(&mut Decoder::with_threads(threads), &units);
+        assert_eq!(
+            frames.len(),
+            units.len() - rasl,
+            "open_gop_cut ({threads} threads): RASL pictures of the first CRA were output"
+        );
+        compare(
+            &format!("open_gop_cut ({threads} threads)"),
+            &frames,
+            &reference,
+            f,
+        );
+    }
+}
+
+fn decode_errors(units: &[Vec<u8>], threads: usize) -> Vec<String> {
+    let mut dec = Decoder::with_threads(threads);
+    let mut errors = Vec::new();
+    for (i, u) in units.iter().enumerate() {
+        if let Err(e) = dec.decode(&packet(u.clone(), i)) {
+            errors.push(e.to_string());
+        }
+    }
+    if let Err(e) = dec.flush() {
+        errors.push(e.to_string());
+    }
+    errors
+}
+
+#[test]
+fn truncated_nal_units_are_errors_not_panics() {
+    let f = feature("wpp_slices_main10");
+    let Some((hevc, _)) = ensure(f) else { return };
+    let data = std::fs::read(hevc).unwrap();
+    let mut units = units_of(&data);
+    units.truncate(4);
+    let head = annexb_nals(&units[0])
+        .into_iter()
+        .map(<[u8]>::to_vec)
+        .collect::<Vec<_>>();
+    let mut checked = 0;
+    for (k, nal) in head.iter().enumerate() {
+        let t = (nal[0] >> 1) & 0x3f;
+        for cut in [2, 3, nal.len() / 2, nal.len() - 1] {
+            if cut < 2 || cut >= nal.len() {
+                continue;
+            }
+            let mut first = Vec::new();
+            for (j, n) in head.iter().enumerate() {
+                first.extend([0, 0, 0, 1]);
+                first.extend_from_slice(if j == k { &n[..cut] } else { n });
+            }
+            let mut damaged = units.clone();
+            damaged[0] = first;
+            for threads in [1, 4] {
+                let errors = decode_errors(&damaged, threads);
+                let what = format!("NAL {k} (type {t}, {} bytes) cut to {cut}", nal.len());
+                assert!(
+                    errors.iter().all(|e| !e.contains("internal error")),
+                    "{what}: a panic was caught: {errors:?}"
+                );
+                let must_fail = match t {
+                    32..=34 => cut <= nal.len() / 2,
+                    0..=31 => cut <= 3 || (cut == nal.len() / 2 && nal.len() > 64),
+                    _ => false,
+                };
+                if must_fail {
+                    assert!(!errors.is_empty(), "{what}: decoded without an error");
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert!(checked >= 12, "only {checked} truncations were checked");
+}
+
+#[test]
+fn a_dropped_reference_picture_is_replaced_without_a_panic() {
+    for name in ["long_b_runs", "pyramid_weightb_main10"] {
+        let f = feature(name);
+        let Some((hevc, _)) = ensure(f) else { continue };
+        let mut units = units_of(&std::fs::read(hevc).unwrap());
+        assert!(
+            matches!(first_vcl_type(&units[0]), Some(16..=21)),
+            "{name}: the stream does not start at an IRAP"
+        );
+        assert!(
+            first_vcl_type(&units[1]) == Some(1),
+            "{name}: the second access unit is not a trailing reference picture"
+        );
+        units.remove(1);
+        let format = if f.ten_bit {
+            PixelFormat::Yuv420p10
+        } else {
+            PixelFormat::Yuv420p8
+        };
+        for threads in [1, 4] {
+            let mut dec = Decoder::with_threads(threads);
+            let mut frames = Vec::new();
+            let mut errors = Vec::new();
+            for (i, u) in units.iter().enumerate() {
+                match dec.decode(&packet(u.clone(), i)) {
+                    Ok(out) => frames.extend(out),
+                    Err(e) => errors.push(e.to_string()),
+                }
+            }
+            match dec.flush() {
+                Ok(out) => frames.extend(out),
+                Err(e) => errors.push(e.to_string()),
+            }
+            let what = format!("{name} without its first P picture ({threads} threads)");
+            assert!(errors.is_empty(), "{what}: {errors:?}");
+            assert_eq!(frames.len(), units.len(), "{what}: picture count");
+            for (i, frame) in frames.iter().enumerate() {
+                assert_eq!(
+                    (frame.format, frame.width, frame.height),
+                    (format, f.width, f.height),
+                    "{what}: picture {i}"
+                );
+            }
+        }
+    }
 }

@@ -8,6 +8,8 @@ mod track;
 mod writer;
 
 #[cfg(test)]
+mod edges;
+#[cfg(test)]
 mod malformed;
 #[cfg(test)]
 mod tests;
