@@ -30,7 +30,12 @@ pub fn sse(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u32 
     check(a, sa, b, sb, w, h);
     #[cfg(target_arch = "x86_64")]
     if crate::media::isa::avx2() && w >= 16 {
-        return unsafe { sse_avx2(a, sa, b, sb, w, h) };
+        let w16 = w & !15;
+        let head = unsafe { sse_avx2(a, sa, b, sb, w16, h) };
+        if w16 == w {
+            return head;
+        }
+        return head + sse_scalar(&a[w16..], sa, &b[w16..], sb, w - w16, h);
     }
     sse_scalar(a, sa, b, sb, w, h)
 }

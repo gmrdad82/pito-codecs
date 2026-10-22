@@ -182,7 +182,8 @@ fn inter_matches_decoder() {
                 filter,
                 &mut ours,
                 bw,
-            );
+            )
+            .unwrap();
             assert_eq!(
                 ours, theirs,
                 "{bw}x{bh} at ({x16},{y16})/16 filter {filter} border {}",
@@ -252,7 +253,7 @@ fn motion_search_finds_a_subpel_shift() {
     let mut src = vec![0u8; bs * bs];
     let x16 = ((bx as isize) << 4) + 2 * truth.col as isize;
     let y16 = ((by as isize) << 4) + 2 * truth.row as isize;
-    inter::mc(&reference.plane(), x16, y16, bs, bs, EIGHTTAP, &mut src, bs);
+    inter::mc(&reference.plane(), x16, y16, bs, bs, EIGHTTAP, &mut src, bs).unwrap();
     let cost = MvCost::new(MvProbs::default());
     let s = Search {
         src: &src,
@@ -272,7 +273,7 @@ fn motion_search_finds_a_subpel_shift() {
         filter: EIGHTTAP,
         half: None,
     };
-    let m = s.run(&[Mv::ZERO]);
+    let m = s.run(&[Mv::ZERO]).unwrap();
     assert_eq!(m.mv, truth, "{m:?}");
 }
 
@@ -383,7 +384,7 @@ fn bench() {
                                 Subpel::Quarter
                             },
                         };
-                        std::hint::black_box(best_inter(&c, &mut scratch));
+                        std::hint::black_box(best_inter(&c, &mut scratch).unwrap());
                         n += 1;
                     }
                 }
@@ -466,7 +467,8 @@ fn bench() {
                 EIGHTTAP,
                 &mut pred,
                 64,
-            );
+            )
+            .unwrap();
         }
         let s = t.elapsed().as_secs_f64();
         let mpix = (iters * bs * bs) as f64 / s / 1e6;
@@ -513,7 +515,7 @@ fn half_pel_planes_match_mc_and_leave_the_search_unchanged() {
             for (fx, fy) in [(8, 0), (0, 8), (8, 8)] {
                 let (x16, y16) = (x * 16 + fx, y * 16 + fy);
                 let mut want = vec![0u8; bs * bs];
-                inter::mc(&plane, x16, y16, bs, bs, filter, &mut want, bs);
+                inter::mc(&plane, x16, y16, bs, bs, filter, &mut want, bs).unwrap();
                 let (p, ps) = hp.at(x16, y16).unwrap();
                 for i in 0..bs {
                     assert_eq!(
@@ -525,4 +527,215 @@ fn half_pel_planes_match_mc_and_leave_the_search_unchanged() {
             }
         }
     }
+}
+
+#[test]
+fn predictor_reports_an_unsupported_size_instead_of_panicking() {
+    let mut rng = Rng(0x5eed);
+    let (w, h) = (128usize, 128usize);
+    let reference = Padded::new(&texture(&mut rng, w, h), w, h, 96);
+    let mut dst = vec![0u8; 64 * 64];
+    for (bw, bh) in [
+        (56, 64),
+        (24, 32),
+        (40, 8),
+        (0, 8),
+        (3, 4),
+        (128, 8),
+        (8, 0),
+        (8, 65),
+    ] {
+        for (x16, y16) in [(0, 0), (16 * 8 + 5, 16 * 4 + 3), (-16 * 90, 16 * 200)] {
+            let r = inter::mc(&reference.plane(), x16, y16, bw, bh, EIGHTTAP, &mut dst, 64);
+            let e = r.expect_err("unsupported size predicted");
+            assert!(e.to_string().contains(&format!("{bw}x{bh}")), "{e}");
+        }
+    }
+    for (bw, bh) in [(4, 1), (8, 8), (16, 24), (32, 56), (64, 64)] {
+        inter::mc(
+            &reference.plane(),
+            16 * 8 + 5,
+            16 * 4 + 3,
+            bw,
+            bh,
+            EIGHTTAP,
+            &mut dst,
+            64,
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn predictor_reports_a_short_destination() {
+    let mut rng = Rng(7);
+    let (w, h) = (64usize, 64usize);
+    let reference = Padded::new(&texture(&mut rng, w, h), w, h, 96);
+    let mut small = vec![0u8; 64 * 63];
+    assert!(inter::mc(&reference.plane(), 0, 0, 64, 64, EIGHTTAP, &mut small, 64).is_err());
+    assert!(inter::mc(&reference.plane(), 5, 3, 64, 64, EIGHTTAP, &mut small, 64).is_err());
+    let mut narrow = vec![0u8; 64 * 64];
+    assert!(inter::mc(&reference.plane(), 0, 0, 32, 8, EIGHTTAP, &mut narrow, 16).is_err());
+    let src = vec![0u8; 100];
+    let mut dst = vec![0u8; 64];
+    assert!(inter::filter_block(&src, 15, 0, 8, 8, EIGHTTAP, 3, 3, &mut dst, 8).is_err());
+    let big = vec![0u8; 71 * 71];
+    assert!(inter::filter_block(&big, 71, 0, 8, 8, EIGHTTAP, 16, 0, &mut dst, 8).is_err());
+    inter::filter_block(&big, 71, 0, 8, 8, EIGHTTAP, 3, 3, &mut dst, 8).unwrap();
+}
+
+#[test]
+fn predict_plane_reports_missing_references_and_vectors() {
+    let mut rng = Rng(11);
+    let (w, h) = (64usize, 64usize);
+    let reference = Padded::new(&texture(&mut rng, w, h), w, h, 96);
+    let pos = inter::BlockPos {
+        mi_row: 0,
+        mi_col: 0,
+        bsize: BLOCK_8X8,
+        mi_rows: 8,
+        mi_cols: 8,
+    };
+    let mut dst = vec![0u8; 64 * 64];
+    let plane = reference.plane();
+    assert!(inter::predict_plane(&[plane], &[], &pos, 0, EIGHTTAP, &mut dst, 64).is_err());
+    assert!(inter::predict_plane(&[], &[Mv::ZERO], &pos, 0, EIGHTTAP, &mut dst, 64).is_err());
+    let two = [Mv::ZERO, Mv::new(4, 4)];
+    assert!(inter::predict_plane(&[plane], &two, &pos, 0, EIGHTTAP, &mut dst, 64).is_err());
+    let bad = inter::BlockPos { bsize: 13, ..pos };
+    assert!(inter::predict_plane(&[plane], &[Mv::ZERO], &bad, 0, EIGHTTAP, &mut dst, 64).is_err());
+    let mut short = vec![0u8; 10];
+    assert!(
+        inter::predict_plane(&[plane, plane], &two, &pos, 0, EIGHTTAP, &mut short, 64).is_err()
+    );
+    inter::predict_plane(&[plane, plane], &two, &pos, 0, EIGHTTAP, &mut dst, 64).unwrap();
+    assert!(
+        inter::predict_block(
+            &[],
+            &[Mv::ZERO],
+            &pos,
+            EIGHTTAP,
+            [&mut [], &mut [], &mut []],
+            [8; 3]
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn edge_blocks_predict_their_visible_columns_as_a_full_block_does() {
+    let mut rng = Rng(0xed6e);
+    let (w, h) = (120usize, 72usize);
+    let reference = Padded::new(&texture(&mut rng, w, h), w, h, 32);
+    let plane = reference.plane();
+    let mut full = vec![0u8; 64 * 64];
+    let mut part = vec![0u8; 64 * 64];
+    let mut paths = [0usize; 2];
+    for visible in [4, 8, 12, 16, 20, 24, 28, 40, 48, 56] {
+        let pw = inter::pred_width(visible);
+        assert!(pw >= visible && pw <= 64, "{visible} -> {pw}");
+        for bh in [8, 32, 64] {
+            for (dx, dy) in [(0, 0), (5, 0), (0, 7), (9, 11), (-40, -20), (60, 30)] {
+                for (fx, fy) in [(0, 0), (5, 0), (0, 7), (9, 11)] {
+                    let x0: isize = 64 + dx;
+                    let y0: isize = dy;
+                    let edge = !plane.inside(x0 - 3, y0 - 3, 64 + 7, bh + 7);
+                    paths[edge as usize] += 1;
+                    let (x16, y16) = (x0 * 16 + fx, y0 * 16 + fy);
+                    for filter in [EIGHTTAP, EIGHTTAP_SMOOTH, EIGHTTAP_SHARP] {
+                        inter::mc(&plane, x16, y16, 64, bh, filter, &mut full, 64).unwrap();
+                        part.fill(0xa5);
+                        inter::mc(&plane, x16, y16, pw, bh, filter, &mut part, 64).unwrap();
+                        for i in 0..bh {
+                            assert_eq!(
+                                part[i * 64..i * 64 + visible],
+                                full[i * 64..i * 64 + visible],
+                                "visible {visible} pw {pw} h {bh} at ({x16},{y16}) filter {filter} row {i}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(paths[0] > 0 && paths[1] > 0, "{paths:?}");
+}
+
+#[test]
+fn motion_search_on_a_right_edge_block_keeps_to_the_visible_columns() {
+    let (w, h) = (120usize, 64usize);
+    let mut smooth = vec![0u8; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let fx = x as f64 / 9.0;
+            let fy = y as f64 / 7.0;
+            smooth[y * w + x] = (128.0 + 60.0 * (fx.sin() + (fy + fx * 0.3).cos())) as u8;
+        }
+    }
+    let reference = Padded::new(&smooth, w, h, 96);
+    let truth = Mv::new(-4, 6);
+    let (bx, by, vis) = (64usize, 0usize, 56usize);
+    let mut full = vec![0u8; 64 * 64];
+    let x16 = ((bx as isize) << 4) + 2 * truth.col as isize;
+    let y16 = ((by as isize) << 4) + 2 * truth.row as isize;
+    inter::mc(
+        &reference.plane(),
+        x16,
+        y16,
+        64,
+        64,
+        EIGHTTAP,
+        &mut full,
+        64,
+    )
+    .unwrap();
+    let mut src = vec![0u8; vis * 64];
+    for y in 0..64 {
+        src[y * vis..y * vis + vis].copy_from_slice(&full[y * 64..y * 64 + vis]);
+    }
+    let cost = MvCost::new(MvProbs::default());
+    let s = Search {
+        src: &src,
+        src_stride: vis,
+        reference: reference.plane(),
+        x: bx,
+        y: by,
+        w: vis,
+        h: 64,
+        limits: inter::MvLimits::new(by / 8, bx / 8, BLOCK_64X64, h / 8, w / 8),
+        mv_cost: &cost,
+        ref_mv: Mv::ZERO,
+        allow_hp: true,
+        sad_per_bit: sad_per_bit(400),
+        range: 16,
+        subpel: Subpel::Full,
+        filter: EIGHTTAP,
+        half: None,
+    };
+    let m = s.run(&[Mv::ZERO]).unwrap();
+    assert_eq!(m.mv, truth, "{m:?}");
+    assert_eq!(m.dist, 0);
+}
+
+#[test]
+fn sse_counts_only_the_columns_it_is_given() {
+    let mut rng = Rng(3);
+    let a = texture(&mut rng, 64, 64);
+    let b = texture(&mut rng, 64, 64);
+    for w in [8, 16, 24, 28, 40, 48, 56, 64] {
+        for h in [4, 8, 28, 64] {
+            assert_eq!(
+                dist::sse(&a, 64, &b, 64, w, h),
+                dist::sse_scalar(&a, 64, &b, 64, w, h),
+                "{w}x{h}"
+            );
+        }
+    }
+    let mut c = a.clone();
+    for y in 0..64 {
+        for x in 24..64 {
+            c[y * 64 + x] = a[y * 64 + x] ^ 0xff;
+        }
+    }
+    assert_eq!(dist::sse(&a, 64, &c, 64, 24, 64), 0);
 }

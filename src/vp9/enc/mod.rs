@@ -208,7 +208,18 @@ impl Encoder {
         let data = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.encode_picture(&src, key)
         })) {
-            Ok(d) => d,
+            Ok(Ok(d)) => d,
+            Ok(Err(e)) => {
+                self.broken = true;
+                let why = match e {
+                    Error::Unsupported(s) | Error::Invalid(s) | Error::Backend(s) => s,
+                    e => e.to_string(),
+                };
+                return Err(Error::Backend(format!(
+                    "vp9 encoder: frame {} failed: {why}",
+                    self.index
+                )));
+            }
             Err(e) => {
                 self.broken = true;
                 let why = e
@@ -241,7 +252,7 @@ impl Encoder {
         self.recon_out.as_deref()
     }
 
-    fn encode_picture(&mut self, src: &Picture, key: bool) -> Vec<u8> {
+    fn encode_picture(&mut self, src: &Picture, key: bool) -> Result<Vec<u8>> {
         let (mi_rows, mi_cols) = (self.mi_rows, self.mi_cols);
         if key {
             let fc = FrameContext::default();
@@ -360,6 +371,12 @@ impl Encoder {
                     SbEncoder::encode(&env, &shared, ws, &mut co, tile, row.sb_row, sb_col);
                 }
             });
+        }
+        if let Some(e) = self.workers.iter_mut().find_map(|w| w.err.take()) {
+            for w in &mut self.workers {
+                w.err = None;
+            }
+            return Err(e);
         }
         let lf_level = plan.filter_level;
         loop_filter(&mut recon, &mi, lf_level, &seg);
@@ -518,7 +535,7 @@ impl Encoder {
         }
         self.recon_out = Some(recon);
         self.prev_mi = Some(mi);
-        out
+        Ok(out)
     }
 }
 

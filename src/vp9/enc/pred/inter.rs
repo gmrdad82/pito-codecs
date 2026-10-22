@@ -1,5 +1,6 @@
 use super::*;
 use crate::media::isa::dispatch;
+use crate::media::{Error, Result};
 use crate::vp9::spec_tables::SUBPEL_FILTERS;
 
 const WIN: usize = 64 + 7;
@@ -19,7 +20,8 @@ pub fn mc(
     filter: u8,
     dst: &mut [u8],
     ds: usize,
-) {
+) -> Result<()> {
+    check_size(w, h)?;
     let (x0, y0) = (x16 >> 4, y16 >> 4);
     let (fx, fy) = ((x16 & 15) as usize, (y16 & 15) as usize);
     if r.inside(x0 - 3, y0 - 3, w + 7, h + 7) {
@@ -34,9 +36,9 @@ pub fn mc(
             fy,
             dst,
             ds,
-        );
+        )
     } else {
-        mc_edge(r, x0, y0, w, h, filter, fx, fy, dst, ds);
+        mc_edge(r, x0, y0, w, h, filter, fx, fy, dst, ds)
     }
 }
 
@@ -52,7 +54,7 @@ fn mc_edge(
     fy: usize,
     dst: &mut [u8],
     ds: usize,
-) {
+) -> Result<()> {
     let mut win = [0u8; WIN * WIN + 16];
     let b = r.border as isize;
     let (lx, ly) = (r.width as isize - 1 + b, r.height as isize - 1 + b);
@@ -65,7 +67,7 @@ fn mc_edge(
             *v = r.data[(base + xx) as usize];
         }
     }
-    filter_block(&win, WIN, 0, w, h, filter, fx, fy, dst, ds);
+    filter_block(&win, WIN, 0, w, h, filter, fx, fy, dst, ds)
 }
 
 pub fn filter_block(
@@ -79,10 +81,20 @@ pub fn filter_block(
     fy: usize,
     dst: &mut [u8],
     ds: usize,
-) {
-    assert!(matches!(w, 4 | 8 | 16 | 32 | 64) && h > 0 && h <= 64);
-    assert!(src.len() >= so + (h + 6) * ss + w + 7);
-    assert!(dst.len() >= (h - 1) * ds + w);
+) -> Result<()> {
+    check_size(w, h)?;
+    if fx > 15
+        || fy > 15
+        || src.len() < so + (h + 6) * ss + w + 7
+        || ds < w
+        || dst.len() < (h - 1) * ds + w
+    {
+        return Err(Error::Invalid(format!(
+            "{w}x{h} prediction at subpel {fx},{fy} overruns a {} byte source or a {} byte destination at stride {ds}",
+            src.len(),
+            dst.len()
+        )));
+    }
     match (fx, fy) {
         (0, 0) => {
             for i in 0..h {
@@ -113,6 +125,20 @@ pub fn filter_block(
             }
         }
     }
+    Ok(())
+}
+
+pub fn check_size(w: usize, h: usize) -> Result<()> {
+    if matches!(w, 4 | 8 | 16 | 32 | 64) && (1..=64).contains(&h) {
+        return Ok(());
+    }
+    Err(Error::Invalid(format!(
+        "no {w}x{h} inter prediction, widths are 4, 8, 16, 32 or 64 and heights 1 to 64"
+    )))
+}
+
+pub fn pred_width(visible: usize) -> usize {
+    visible.next_power_of_two().clamp(4, 64)
 }
 
 pub(super) fn h_pass(
@@ -344,7 +370,15 @@ pub fn predict_plane(
     filter: u8,
     dst: &mut [u8],
     ds: usize,
-) {
+) -> Result<()> {
+    if mvs.is_empty() || refs.len() < mvs.len().min(2) || p.bsize as usize >= BLOCK_W.len() {
+        return Err(Error::Invalid(format!(
+            "inter prediction of block size {} from {} references and {} motion vectors",
+            p.bsize,
+            refs.len(),
+            mvs.len()
+        )));
+    }
     let (sx, sy) = if plane > 0 { (1, 1) } else { (0, 0) };
     let w = (BLOCK_W[p.bsize as usize] >> sx).max(4);
     let h = (BLOCK_H[p.bsize as usize] >> sy).max(4);
@@ -352,7 +386,7 @@ pub fn predict_plane(
     let y = ((p.mi_row * 8) >> sy) as isize;
     let (r0, c0) = clamped_mv16(p, mvs[0], sx, sy);
     if mvs.len() < 2 {
-        mc(
+        return mc(
             &refs[0],
             (x << 4) + c0,
             (y << 4) + r0,
@@ -362,7 +396,6 @@ pub fn predict_plane(
             dst,
             ds,
         );
-        return;
     }
     let mut a = [0u8; 64 * 64];
     let mut b = [0u8; 64 * 64];
@@ -375,7 +408,7 @@ pub fn predict_plane(
         filter,
         &mut a,
         w,
-    );
+    )?;
     let (r1, c1) = clamped_mv16(p, mvs[1], sx, sy);
     mc(
         &refs[1],
@@ -386,8 +419,15 @@ pub fn predict_plane(
         filter,
         &mut b,
         w,
-    );
+    )?;
+    if dst.len() < (h - 1) * ds + w {
+        return Err(Error::Invalid(format!(
+            "a {w}x{h} prediction overruns a {} byte destination at stride {ds}",
+            dst.len()
+        )));
+    }
     average(&a, &b, w, h, dst, ds);
+    Ok(())
 }
 
 pub fn predict_block(
@@ -397,9 +437,15 @@ pub fn predict_block(
     filter: u8,
     dst: [&mut [u8]; 3],
     ds: [usize; 3],
-) {
+) -> Result<()> {
+    if refs.is_empty() {
+        return Err(Error::Invalid(
+            "inter prediction without a reference".into(),
+        ));
+    }
     for (plane, d) in dst.into_iter().enumerate() {
         let r: [Plane; 2] = [refs[0][plane], refs[refs.len() - 1][plane]];
-        predict_plane(&r[..mvs.len().min(2)], mvs, p, plane, filter, d, ds[plane]);
+        predict_plane(&r[..mvs.len().min(2)], mvs, p, plane, filter, d, ds[plane])?;
     }
+    Ok(())
 }

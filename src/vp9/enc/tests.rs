@@ -320,3 +320,213 @@ fn bench_encoder() {
         frames.len() as f64 / secs
     );
 }
+
+fn moving(w: u32, h: u32, i: u32) -> Frame {
+    let mut f = Frame::new(PixelFormat::Yuv420p8, w, h, i as i64, TimeBase::new(1, 25));
+    let (dx, dy) = (3 * i as i64, 2 * i as i64);
+    for (p, plane) in f.planes.iter_mut().enumerate() {
+        let s = if p == 0 { 1 } else { 2 };
+        for y in 0..plane.height {
+            for x in 0..plane.width {
+                let gx = (x as i64 * s - dx) as f64;
+                let gy = (y as i64 * s - dy) as f64;
+                let wave = 50.0 * ((gx / 23.0).sin() + (gy / 17.0 + gx / 41.0).cos());
+                let base = 128.0 + wave + if p == 0 { 0.0 } else { 20.0 * p as f64 - 30.0 };
+                plane.data[y * plane.stride + x] = base.clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    f
+}
+
+fn edge_strips(s: &Frame, d: &Frame) -> Vec<(String, Vec<u8>, Vec<u8>)> {
+    let mut out = Vec::new();
+    for p in 0..3 {
+        let (a, b) = (&s.planes[p], &d.planes[p]);
+        let n = if p == 0 { 64 } else { 32 };
+        let (pw, ph) = (a.width, a.height);
+        let (x0, y0) = (pw / n * n, ph / n * n);
+        let take =
+            |f: &crate::media::Plane, xs: std::ops::Range<usize>, ys: std::ops::Range<usize>| {
+                let mut v = Vec::new();
+                for y in ys {
+                    v.extend_from_slice(&f.data[y * f.stride + xs.start..y * f.stride + xs.end]);
+                }
+                v
+            };
+        if x0 < pw {
+            out.push((
+                format!("plane {p} right {}", pw - x0),
+                take(a, x0..pw, 0..ph),
+                take(b, x0..pw, 0..ph),
+            ));
+        }
+        if y0 < ph {
+            out.push((
+                format!("plane {p} bottom {}", ph - y0),
+                take(a, 0..pw, y0..ph),
+                take(b, 0..pw, y0..ph),
+            ));
+        }
+    }
+    out
+}
+
+fn edge_encode(w: u32, h: u32, frames: u32, threads: usize) -> (Vec<Frame>, Vec<Packet>) {
+    let mut enc = Encoder::new(EncoderConfig {
+        width: w,
+        height: h,
+        rate: Rate::Q(60),
+        gop: 30,
+        threads,
+        ..EncoderConfig::default()
+    })
+    .unwrap();
+    let src: Vec<Frame> = (0..frames).map(|i| moving(w, h, i)).collect();
+    let mut packets = Vec::new();
+    for (i, f) in src.iter().enumerate() {
+        let out = enc
+            .encode(f)
+            .unwrap_or_else(|e| panic!("{w}x{h} frame {i}: {e}"));
+        assert_eq!(out.len(), 1, "{w}x{h} frame {i}");
+        assert_eq!(out[0].keyframe, i == 0, "{w}x{h} frame {i}");
+        packets.extend(out);
+    }
+    (src, packets)
+}
+
+#[test]
+fn sizes_off_the_superblock_grid_encode_and_decode_back() {
+    let sizes = [
+        (1080, 1920),
+        (1080, 1080),
+        (200, 120),
+        (66, 66),
+        (8, 8),
+        (1080, 200),
+        (7, 7),
+        (5, 3),
+        (4, 4),
+        (2, 9),
+        (1, 1),
+    ];
+    for (w, h) in sizes {
+        for threads in [1, 4] {
+            let (src, packets) = edge_encode(w, h, 4, threads);
+            let mut dec = crate::vp9::Decoder::new();
+            let mut out = Vec::new();
+            for p in &packets {
+                out.extend(dec.decode(p).unwrap_or_else(|e| panic!("{w}x{h}: {e}")));
+            }
+            out.extend(dec.flush().unwrap());
+            assert_eq!(out.len(), src.len(), "{w}x{h}");
+            for (i, (d, s)) in out.iter().zip(&src).enumerate() {
+                assert_eq!((d.width, d.height), (w, h), "{w}x{h} frame {i}");
+                let p = psnr(&raw(std::slice::from_ref(s)), &raw(std::slice::from_ref(d)));
+                assert!(p > 30.0, "{w}x{h} frame {i} threads {threads}: PSNR {p:.2}");
+                for (edge, a, b) in edge_strips(s, d) {
+                    let p = psnr(&a, &b);
+                    assert!(
+                        p > 30.0,
+                        "{w}x{h} frame {i} threads {threads} {edge}: PSNR {p:.2}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn ffmpeg_decodes_sizes_off_the_superblock_grid() {
+    if !ffmpeg_present() {
+        return;
+    }
+    for (w, h) in [(1080, 1920), (1080, 1080), (200, 120), (66, 66), (8, 8)] {
+        let (src, packets) = edge_encode(w, h, 3, 0);
+        let data: Vec<Vec<u8>> = packets.into_iter().map(|p| p.data).collect();
+        let path = dir().join(format!("edge-{w}x{h}.ivf"));
+        std::fs::write(&path, ivf(w, h, &data)).unwrap();
+        let src = raw(&src);
+        for libvpx in [false, true] {
+            let got = ffmpeg_decode(&path, libvpx);
+            assert_eq!(got.len(), src.len(), "{w}x{h} libvpx {libvpx}");
+            let p = psnr(&src, &got);
+            assert!(p > 30.0, "{w}x{h} libvpx {libvpx}: PSNR {p:.2}");
+        }
+    }
+}
+
+#[test]
+fn edge_encode_matches_our_reconstruction() {
+    for (w, h) in [(1080, 200), (66, 66), (200, 120)] {
+        let mut enc = Encoder::new(EncoderConfig {
+            width: w,
+            height: h,
+            rate: Rate::Q(60),
+            gop: 30,
+            threads: 1,
+            ..EncoderConfig::default()
+        })
+        .unwrap();
+        let mut dec = crate::vp9::Decoder::new();
+        let (mut recon, mut got) = (Vec::new(), Vec::new());
+        for i in 0..3 {
+            for p in enc.encode(&moving(w, h, i)).unwrap() {
+                got.extend(dec.decode(&p).unwrap());
+            }
+            recon.extend(crop(enc.recon().unwrap()));
+        }
+        got.extend(dec.flush().unwrap());
+        assert_eq!(got.len(), 3, "{w}x{h}");
+        assert!(
+            raw(&got) == recon,
+            "{w}x{h}: our decoder differs from the reconstruction"
+        );
+    }
+}
+
+#[test]
+fn a_block_that_fails_in_a_worker_fails_the_frame_and_the_encoder() {
+    for (threads, fail_frame, at) in [(1, 1, (8, 8)), (4, 1, (8, 16)), (4, 0, (0, 0))] {
+        let (w, h) = (200, 120);
+        let mut enc = Encoder::new(EncoderConfig {
+            width: w,
+            height: h,
+            rate: Rate::Q(60),
+            gop: 30,
+            threads,
+            ..EncoderConfig::default()
+        })
+        .unwrap();
+        for i in 0..fail_frame {
+            enc.encode(&moving(w, h, i)).unwrap();
+        }
+        for ws in &mut enc.workers {
+            ws.fail_at = Some(at);
+        }
+        let e = enc
+            .encode(&moving(w, h, fail_frame))
+            .expect_err("a failed block still produced a frame")
+            .to_string();
+        assert_eq!(
+            e,
+            format!(
+                "backend: vp9 encoder: frame {fail_frame} failed: block {},{} failed on purpose",
+                at.0, at.1
+            ),
+            "threads {threads}"
+        );
+        assert!(
+            enc.workers.iter().all(|ws| ws.err.is_none()),
+            "threads {threads}"
+        );
+        for ws in &mut enc.workers {
+            ws.fail_at = None;
+        }
+        let again = enc
+            .encode(&moving(w, h, fail_frame + 1))
+            .expect_err("a broken encoder encoded")
+            .to_string();
+        assert!(again.contains("an earlier frame failed"), "{again}");
+    }
+}

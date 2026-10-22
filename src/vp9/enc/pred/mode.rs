@@ -5,6 +5,7 @@ use super::intra::{EdgeFlags, Edges};
 use super::motion::{Search, Subpel, sad_per_bit};
 use super::mvcost::MvCost;
 use super::*;
+use crate::media::{Error, Result};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Decision {
@@ -202,10 +203,15 @@ pub fn best_intra_4x4(
     left: [u8; 2],
     sub_rate: &dyn Fn(u8, u8, u8) -> u32,
     scratch: &mut [IntraScratch; 2],
-) -> Decision {
+) -> Result<Decision> {
     let spb = sad_per_bit(c.lambda);
     let b = &c.luma;
-    assert!(b.w == 8 && b.h == 8 && b.tx_size == 0);
+    if b.w != 8 || b.h != 8 || b.tx_size != 0 {
+        return Err(Error::Invalid(format!(
+            "4x4 intra search of a {}x{} block at transform size {}",
+            b.w, b.h, b.tx_size
+        )));
+    }
     let s = &mut scratch[0];
     s.fill(b);
     let mut modes = [DC_PRED; 4];
@@ -234,7 +240,7 @@ pub fn best_intra_4x4(
         yr += best.2;
     }
     let uv = best_uv(c, modes[3], spb, scratch);
-    intra_decision(modes[3], modes, uv, yd, yr, spb)
+    Ok(intra_decision(modes[3], modes, uv, yd, yr, spb))
 }
 
 #[derive(Clone, Copy)]
@@ -286,7 +292,8 @@ fn predict_satd(
     refs: &[&InterRef],
     mvs: &[Mv],
     scratch: &mut InterScratch,
-) -> u32 {
+) -> Result<u32> {
+    let pw = inter::pred_width(c.w);
     let (x, y) = ((c.pos.mi_col * 8) as isize, (c.pos.mi_row * 8) as isize);
     let at = |mv: Mv| {
         let m = limits.clamp(mv);
@@ -297,24 +304,24 @@ fn predict_satd(
         &refs[0].luma,
         x0,
         y0,
-        c.w,
+        pw,
         c.h,
         c.filter,
         &mut scratch.pred,
         64,
-    );
+    )?;
     if refs.len() > 1 {
         let (x1, y1) = at(mvs[1]);
         inter::mc(
             &refs[1].luma,
             x1,
             y1,
-            c.w,
+            pw,
             c.h,
             c.filter,
             &mut scratch.pred2,
             64,
-        );
+        )?;
         for i in 0..c.h {
             let r = i * 64..i * 64 + c.w;
             inter::average(
@@ -326,12 +333,12 @@ fn predict_satd(
                 c.w,
             );
         }
-        return dist::satd(c.src, c.src_stride, &scratch.avg, 64, c.w, c.h);
+        return Ok(dist::satd(c.src, c.src_stride, &scratch.avg, 64, c.w, c.h));
     }
-    dist::satd(c.src, c.src_stride, &scratch.pred, 64, c.w, c.h)
+    Ok(dist::satd(c.src, c.src_stride, &scratch.pred, 64, c.w, c.h))
 }
 
-pub fn best_inter(c: &InterChoice, scratch: &mut InterScratch) -> Decision {
+pub fn best_inter(c: &InterChoice, scratch: &mut InterScratch) -> Result<Decision> {
     best_inter_with(c, &[], scratch)
 }
 
@@ -339,7 +346,7 @@ pub fn best_inter_with(
     c: &InterChoice,
     compound: &[CompoundPair],
     scratch: &mut InterScratch,
-) -> Decision {
+) -> Result<Decision> {
     if scratch.pred.is_empty() {
         scratch.pred = vec![0; 64 * 64];
         scratch.pred2 = vec![0; 64 * 64];
@@ -389,7 +396,7 @@ pub fn best_inter_with(
                 continue;
             }
             tried[k] = mv;
-            let d = predict_satd(c, &limits, &[r], &[mv], scratch);
+            let d = predict_satd(c, &limits, &[r], &[mv], scratch)?;
             offer(
                 mode,
                 frames,
@@ -424,10 +431,10 @@ pub fn best_inter_with(
             filter: c.filter,
             half: r.half,
         };
-        let m = s.run_with(
-            &cands[..n],
-            (&mut scratch.pred[..64 * 64]).try_into().unwrap(),
-        );
+        let Ok(pred) = (&mut scratch.pred[..]).try_into() else {
+            return Err(Error::Invalid("inter scratch is not 64x64".into()));
+        };
+        let m = s.run_with(&cands[..n], pred)?;
         if let Some(f) = found.get_mut(i) {
             *f = (m.mv, m.rate);
         }
@@ -450,7 +457,7 @@ pub fn best_inter_with(
             (NEARMV, [a.near, b.near], 0),
             (NEWMV, [found[i].0, found[k].0], found[i].1 + found[k].1),
         ] {
-            let d = predict_satd(c, &limits, &[a, b], &mvs, scratch);
+            let d = predict_satd(c, &limits, &[a, b], &mvs, scratch)?;
             offer(
                 mode,
                 frames,
@@ -460,7 +467,7 @@ pub fn best_inter_with(
             );
         }
     }
-    out
+    Ok(out)
 }
 
 pub fn best_filter(
@@ -468,7 +475,7 @@ pub fn best_filter(
     d: &Decision,
     filter_rates: &[u32; 3],
     scratch: &mut InterScratch,
-) -> (u8, u32, u64) {
+) -> Result<(u8, u32, u64)> {
     if scratch.pred.is_empty() {
         *scratch = InterScratch {
             pred: vec![0; 64 * 64],
@@ -481,7 +488,7 @@ pub fn best_filter(
     let limits = MvLimits::new(p.mi_row, p.mi_col, p.bsize, p.mi_rows, p.mi_cols);
     let find = |f: i8| c.refs.iter().find(|r| r.frame == f);
     let Some(a) = find(d.ref_frame[0]) else {
-        return (d.interp_filter, d.dist, u64::MAX);
+        return Ok((d.interp_filter, d.dist, u64::MAX));
     };
     let b = if d.ref_frame[1] > INTRA_FRAME {
         find(d.ref_frame[1])
@@ -492,13 +499,13 @@ pub fn best_filter(
     for f in [EIGHTTAP, EIGHTTAP_SMOOTH, EIGHTTAP_SHARP] {
         let cf = InterChoice { filter: f, ..*c };
         let dist = match b {
-            Some(b) => predict_satd(&cf, &limits, &[a, b], &d.mv, scratch),
-            None => predict_satd(&cf, &limits, &[a], &d.mv[..1], scratch),
+            Some(b) => predict_satd(&cf, &limits, &[a, b], &d.mv, scratch)?,
+            None => predict_satd(&cf, &limits, &[a], &d.mv[..1], scratch)?,
         };
         let j = cost(dist, filter_rates[f as usize], spb);
         if j < best.2 {
             best = (f, dist, j);
         }
     }
-    best
+    Ok(best)
 }

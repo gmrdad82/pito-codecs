@@ -11,6 +11,7 @@ use super::pred::mvcost::MvCost;
 use super::pred::{self, Plane};
 use super::tables::*;
 use super::tx::{self, Quant};
+use crate::media::Error;
 use crate::vp9::tile::single_ref_p1_ctx;
 
 pub struct Speed {
@@ -110,6 +111,9 @@ pub struct Workspace {
     snaps: Vec<Snapshot>,
     intra: [IntraScratch; 2],
     inter: InterScratch,
+    pub err: Option<Error>,
+    #[cfg(test)]
+    pub fail_at: Option<(usize, usize)>,
 }
 
 impl Default for Workspace {
@@ -125,6 +129,9 @@ impl Default for Workspace {
             snaps: (0..4).map(|_| Snapshot::default()).collect(),
             intra: Default::default(),
             inter: InterScratch::default(),
+            err: None,
+            #[cfg(test)]
+            fail_at: None,
         }
     }
 }
@@ -176,6 +183,9 @@ impl<'a> SbEncoder<'a> {
             sb_c,
             seg: 0,
         };
+        if e.ws.err.is_some() {
+            return;
+        }
         e.load();
         e.partition(sb_r * 8, sb_c * 8, BLOCK_64X64, 0);
         e.store();
@@ -242,7 +252,11 @@ impl<'a> SbEncoder<'a> {
 
     fn partition(&mut self, r: usize, c: usize, bsize: u8, depth: usize) -> u64 {
         let env = self.env;
-        if r >= env.mi_rows || c >= env.mi_cols {
+        #[cfg(test)]
+        if self.ws.fail_at == Some((r, c)) {
+            self.fail(Error::Invalid(format!("block {r},{c} failed on purpose")));
+        }
+        if r >= env.mi_rows || c >= env.mi_cols || self.ws.err.is_some() {
             return 0;
         }
         let half = NUM_8X8_WIDE[bsize as usize] as usize >> 1;
@@ -676,7 +690,7 @@ impl<'a> SbEncoder<'a> {
             let (bx, by) = ((c * 8) >> s, (r * 8) >> s);
             let w = &mut self.ws.win[p];
             let o = w.at(p, bx, by);
-            inter::predict_plane(
+            if let Err(e) = inter::predict_plane(
                 &[plane_of(rf, p)],
                 &[pmv(mv)],
                 &pos,
@@ -684,7 +698,10 @@ impl<'a> SbEncoder<'a> {
                 env.filter,
                 &mut w.buf[o..],
                 WIN[p],
-            );
+            ) {
+                self.fail(e);
+                return;
+            }
         }
     }
 
@@ -753,7 +770,17 @@ impl<'a> SbEncoder<'a> {
             range: env.speed.range,
             subpel: env.speed.subpel,
         };
-        Some(mode::best_inter(&choice, &mut self.ws.inter))
+        match mode::best_inter(&choice, &mut self.ws.inter) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                self.fail(e);
+                None
+            }
+        }
+    }
+
+    fn fail(&mut self, e: Error) {
+        self.ws.err.get_or_insert(e);
     }
 
     fn best_intra(

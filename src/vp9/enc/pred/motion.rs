@@ -3,6 +3,7 @@ use super::halfpel::HalfPel;
 use super::inter::{self, MvLimits};
 use super::mvcost::MvCost;
 use super::*;
+use crate::media::Result;
 
 pub fn sad_per_bit(lambda: u32) -> u32 {
     (0.247 * (lambda as f64).sqrt() + 2.41).round() as u32
@@ -184,7 +185,7 @@ impl Search<'_> {
         (br, bc, best)
     }
 
-    fn subpel_cost(&self, mv: Mv, pred: &mut [u8; 64 * 64]) -> u32 {
+    fn subpel_cost(&self, mv: Mv, pred: &mut [u8; 64 * 64]) -> Result<u32> {
         let x16 = ((self.x as isize) << 4) + 2 * mv.col as isize;
         let y16 = ((self.y as isize) << 4) + 2 * mv.row as isize;
         if let Some(hp) = self.half
@@ -192,29 +193,31 @@ impl Search<'_> {
             && hp.covers(x16 >> 4, y16 >> 4, self.w, self.h)
             && let Some((p, ps)) = hp.at(x16, y16)
         {
-            return dist::satd(self.src, self.src_stride, p, ps, self.w, self.h) + self.penalty(mv);
+            return Ok(
+                dist::satd(self.src, self.src_stride, p, ps, self.w, self.h) + self.penalty(mv)
+            );
         }
         inter::mc(
             &self.reference,
             x16,
             y16,
-            self.w,
+            inter::pred_width(self.w),
             self.h,
             self.filter,
             pred,
-            self.w,
-        );
-        dist::satd(self.src, self.src_stride, pred, self.w, self.w, self.h) + self.penalty(mv)
+            64,
+        )?;
+        Ok(dist::satd(self.src, self.src_stride, pred, 64, self.w, self.h) + self.penalty(mv))
     }
 
-    pub fn run(&self, candidates: &[Mv]) -> MotionResult {
+    pub fn run(&self, candidates: &[Mv]) -> Result<MotionResult> {
         self.run_with(candidates, &mut [0u8; 64 * 64])
     }
 
-    pub fn run_with(&self, candidates: &[Mv], pred: &mut [u8; 64 * 64]) -> MotionResult {
+    pub fn run_with(&self, candidates: &[Mv], pred: &mut [u8; 64 * 64]) -> Result<MotionResult> {
         let (r, c, _) = self.full_pel(candidates);
         let mut best_mv = Mv::new((r * 8) as i16, (c * 8) as i16);
-        let mut best = self.subpel_cost(best_mv, pred);
+        let mut best = self.subpel_cost(best_mv, pred)?;
         let mut steps: &[i16] = match self.subpel {
             Subpel::None => &[],
             Subpel::Half => &[4],
@@ -232,7 +235,7 @@ impl Search<'_> {
                 if !self.limits.contains(m) {
                     continue;
                 }
-                let v = self.subpel_cost(m, pred);
+                let v = self.subpel_cost(m, pred)?;
                 cross[k] = v;
                 if v < best {
                     (best, best_mv) = (v, m);
@@ -242,17 +245,17 @@ impl Search<'_> {
             let dc = if cross[1] < cross[2] { -s } else { s };
             let m = Mv::new(center.row + dr, center.col + dc);
             if self.limits.contains(m) {
-                let v = self.subpel_cost(m, pred);
+                let v = self.subpel_cost(m, pred)?;
                 if v < best {
                     (best, best_mv) = (v, m);
                 }
             }
         }
         let rate = self.mv_bits(best_mv);
-        MotionResult {
+        Ok(MotionResult {
             mv: best_mv,
             dist: best - self.penalty(best_mv),
             rate,
-        }
+        })
     }
 }
