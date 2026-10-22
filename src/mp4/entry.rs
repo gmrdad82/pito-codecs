@@ -828,7 +828,29 @@ fn descriptor(c: &mut Cur) -> Result<(u8, usize)> {
     Ok((tag, len))
 }
 
+struct DecoderConfig {
+    oti: u8,
+    buffer_size: u32,
+    max_bitrate: u32,
+    avg_bitrate: u32,
+    asc: Vec<u8>,
+}
+
 fn parse_esds(p: &[u8]) -> Result<CodecConfig> {
+    let d = decoder_config(p)?;
+    Ok(match d.oti {
+        0x69 | 0x6B => CodecConfig::Mp3,
+        _ => {
+            let mut a = AacConfig::from_asc(d.asc);
+            a.max_bitrate = d.max_bitrate;
+            a.avg_bitrate = d.avg_bitrate;
+            a.buffer_size = d.buffer_size;
+            CodecConfig::Aac(a)
+        }
+    })
+}
+
+fn decoder_config(p: &[u8]) -> Result<DecoderConfig> {
     let mut c = Cur::new(p, "esds");
     c.full_header()?;
     let (tag, len) = descriptor(&mut c)?;
@@ -872,15 +894,12 @@ fn parse_esds(p: &[u8]) -> Result<CodecConfig> {
                 break;
             }
         }
-        return Ok(match oti {
-            0x69 | 0x6B => CodecConfig::Mp3,
-            _ => {
-                let mut a = AacConfig::from_asc(asc);
-                a.max_bitrate = max_bitrate;
-                a.avg_bitrate = avg_bitrate;
-                a.buffer_size = buffer_size;
-                CodecConfig::Aac(a)
-            }
+        return Ok(DecoderConfig {
+            oti,
+            buffer_size,
+            max_bitrate,
+            avg_bitrate,
+            asc,
         });
     }
     Err(Error::Invalid(
@@ -921,6 +940,14 @@ fn esds_payload(asc: &[u8], max_bitrate: u32, avg_bitrate: u32, buffer_size: u32
 }
 
 impl SampleEntry {
+    pub fn object_type(&self) -> Option<u8> {
+        self.video?;
+        let esds = boxes(self.raw.get(78..)?)
+            .map_while(|b| b.ok())
+            .find(|b| b.kind == b"esds")?;
+        decoder_config(esds.payload).ok().map(|d| d.oti)
+    }
+
     pub fn ac3_channels(&self) -> Option<u32> {
         let extra = match self.audio.as_ref()?.qt_version {
             1 => 16,

@@ -9,7 +9,7 @@ The `media` front decodes audio tracks to 32-bit float PCM at the rate and chann
 
 ## Which codecs
 
-AAC-LC, Opus (SILK, CELT, hybrid and multistream), AC-3, E-AC-3, MP3, MP2, MP1, FLAC and PCM, from MP4, MOV, MKV and WebM. `AudioTrack::native()` says whether pito-codecs decodes a track itself. A track in another codec (Vorbis, DTS, ALAC) decodes only through the user's ffmpeg, when the app's `Prefs` pick it.
+AAC-LC, Opus (SILK, CELT, hybrid and multistream), AC-3, E-AC-3, MP3, MP2, MP1, FLAC, ALAC and PCM, from MP4, MOV, MKV and WebM, plus bare `.wav`, `.mp3`, `.flac` and Ogg Opus files. `AudioTrack::native()` says whether pito-codecs decodes a track itself. A track in another codec (Vorbis, DTS, TrueHD) or a variant no decoder takes (32-bit FLAC) is refused with one line naming it (`unsupported: Vorbis audio is not supported`), and so is an Ogg stream other than Opus (`unsupported: Ogg Vorbis audio is not supported`).
 
 ```rust
 use pito_codecs::media::{Prefs, probe};

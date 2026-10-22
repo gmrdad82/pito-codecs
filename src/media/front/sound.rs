@@ -162,11 +162,10 @@ pub enum Sound {
 
 fn unsupported(name: &str) -> Error {
     Error::Unsupported(format!(
-        "our audio decoders read AAC, AC-3, E-AC-3, Opus, MP3, FLAC, ALAC and PCM, not {}",
-        if name.is_empty() {
-            "this track's codec"
-        } else {
-            name
+        "{} audio is not supported",
+        match super::probe::plain(name) {
+            "" => "unknown",
+            name => name,
         }
     ))
 }

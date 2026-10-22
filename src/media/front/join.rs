@@ -6,7 +6,7 @@ use super::mux::{RATE, aac_encoder};
 use super::route::Prefs;
 use super::shape::{color_of, display};
 use super::stream::native_stream;
-use super::video::{Source, frame_at, source};
+use super::video::{Source, copied, frame_at};
 use crate::gpu::Color;
 use crate::media::{AudioBuffer, Codec, Error, Packet, Result, Route, TimeBase};
 use crate::mkv;
@@ -141,7 +141,7 @@ struct Clip {
     path: PathBuf,
     name: String,
     src: Source,
-    demux: Option<Demux>,
+    demux: Demux,
     video: usize,
     sar: (u16, u16),
     color: Color,
@@ -153,20 +153,14 @@ struct Clip {
 impl Clip {
     fn load(path: &Path, prefs: &Prefs) -> Result<Clip> {
         let name = path.display().to_string();
-        let src = source(path, prefs).map_err(|e| about(&name, e))?;
+        let src = copied(path, prefs).map_err(|e| about(&name, e))?;
         let demux = src.demux.clone();
         let (sar, color) = color_of(&src);
-        let (video, extradata, entries) = match &demux {
-            Some(d) => {
-                let v = d.video().map_err(|e| about(&name, e))?;
-                let st = d.stream(v).map_err(|e| about(&name, e))?;
-                let entries = d
-                    .mp4()
-                    .map_or(1, |r| r.tracks.get(v).map_or(1, |t| t.entries.len()));
-                (v, st.extradata, entries)
-            }
-            None => (0, Vec::new(), 1),
-        };
+        let video = demux.video().map_err(|e| about(&name, e))?;
+        let extradata = demux.stream(video).map_err(|e| about(&name, e))?.extradata;
+        let entries = demux
+            .mp4()
+            .map_or(1, |r| r.tracks.get(video).map_or(1, |t| t.entries.len()));
         let audio = src.probe.audio.first().map(|a| Sound {
             ordinal: a.index,
             track: a.stream,
@@ -174,8 +168,8 @@ impl Clip {
             rate: a.rate,
             channels: a.channels,
             extradata: demux
-                .as_ref()
-                .and_then(|d| d.stream(a.stream).ok())
+                .stream(a.stream)
+                .ok()
                 .map(|s| s.extradata)
                 .unwrap_or_default(),
         });
@@ -198,20 +192,11 @@ impl Clip {
     }
 
     fn matroska(&self) -> bool {
-        matches!(self.demux, Some(Demux::Mkv(_)))
-    }
-
-    fn demux(&self) -> Result<&Demux> {
-        self.demux.as_ref().ok_or_else(|| {
-            Error::Unsupported(format!(
-                "{}: our MP4 and MKV readers can't open it",
-                self.name
-            ))
-        })
+        matches!(self.demux, Demux::Mkv(_))
     }
 }
 
-fn about(name: &str, e: Error) -> Error {
+pub(super) fn about(name: &str, e: Error) -> Error {
     match e {
         Error::Invalid(s) => Error::Invalid(format!("{name}: {s}")),
         Error::Unsupported(s) => Error::Unsupported(format!("{name}: {s}")),
@@ -268,7 +253,12 @@ pub fn join(
     }
     match copyable(&clips, kind, &opts) {
         Ok(reason) => copy(&clips, out, kind, &opts, reason, &mut progress),
-        Err(reason) => encode(&clips, out, kind, &opts, reason, &mut progress),
+        Err(reason) => {
+            for c in &clips {
+                c.src.probe.decodable().map_err(|e| about(&c.name, e))?;
+            }
+            encode(&clips, out, kind, &opts, reason, &mut progress)
+        }
     }
 }
 
@@ -282,12 +272,6 @@ fn copyable(clips: &[Clip], kind: Kind, opts: &JoinOptions) -> std::result::Resu
             ".{} doesn't carry {}",
             kind_ext(kind),
             first.codec()
-        ));
-    }
-    if let Some(c) = clips.iter().find(|c| c.demux.is_none()) {
-        return Err(format!(
-            "our MP4 and MKV readers can't index {} to copy it",
-            c.name
         ));
     }
     if let Some(c) = clips.iter().find(|c| c.entries > 1) {
@@ -683,7 +667,7 @@ fn plan_video(clips: &[Clip], kind: Kind) -> Result<VideoPlan> {
     let mut last: Option<i64> = None;
     let mut tb_out = None;
     for (c, clip) in clips.iter().enumerate() {
-        let demux = clip.demux()?;
+        let demux = &clip.demux;
         let (tb, times) = timed(demux, clip.video, true).map_err(|e| about(&clip.name, e))?;
         let out = *tb_out.get_or_insert(out_tb(tb, kind));
         let Some(start) = times.iter().map(|t| t.pts).min() else {
@@ -743,7 +727,7 @@ fn plan_audio(clips: &[Clip], video: &VideoPlan, kind: Kind) -> Result<Lane> {
             per_clip.push(Vec::new());
             continue;
         };
-        let demux = clip.demux()?;
+        let demux = &clip.demux;
         let (tb, times) = timed(demux, sound.track, false).map_err(|e| about(&clip.name, e))?;
         let out = *tb_out.get_or_insert(match (kind.matroska(), clip.matroska()) {
             (false, true) => TimeBase::new(1, sound.rate.max(1)),
@@ -938,7 +922,7 @@ enum Writer {
 }
 
 fn vp9_entry(clip: &Clip) -> Result<SampleEntry> {
-    let demux = clip.demux()?;
+    let demux = &clip.demux;
     let mut buf = Vec::new();
     let mut info = None;
     for k in 0..demux.samples(clip.video) {
@@ -968,7 +952,7 @@ fn vp9_entry(clip: &Clip) -> Result<SampleEntry> {
 }
 
 fn mp4_video(clip: &Clip, tb: TimeBase) -> Result<mp4::TrackConfig> {
-    if let Some(Demux::Mp4(r)) = &clip.demux {
+    if let Demux::Mp4(r) = &clip.demux {
         let t = r
             .tracks
             .get(clip.video)
@@ -997,14 +981,14 @@ fn mp4_video(clip: &Clip, tb: TimeBase) -> Result<mp4::TrackConfig> {
 
 fn mkv_video(clip: &Clip, tb: TimeBase) -> Result<mkv::TrackConfig> {
     match &clip.demux {
-        Some(Demux::Mkv(r)) => {
+        Demux::Mkv(r) => {
             let t = r
                 .tracks
                 .get(clip.video)
                 .ok_or_else(|| Error::Invalid(format!("{}: no video track", clip.name)))?;
             Ok(mkv::TrackConfig::from_track(t))
         }
-        Some(Demux::Mp4(r)) => {
+        Demux::Mp4(r) => {
             let t = r
                 .tracks
                 .get(clip.video)
@@ -1019,10 +1003,6 @@ fn mkv_video(clip: &Clip, tb: TimeBase) -> Result<mkv::TrackConfig> {
             cfg.time_base = tb;
             Ok(cfg)
         }
-        None => Err(Error::Unsupported(format!(
-            "{}: our MP4 and MKV readers can't open it",
-            clip.name
-        ))),
     }
 }
 
@@ -1031,7 +1011,7 @@ fn mp4_audio(clip: &Clip, tb: TimeBase) -> Result<mp4::TrackConfig> {
         .audio
         .as_ref()
         .ok_or_else(|| Error::Invalid(format!("{} has no audio", clip.name)))?;
-    if let Some(Demux::Mp4(r)) = &clip.demux {
+    if let Demux::Mp4(r) = &clip.demux {
         let t = r
             .tracks
             .get(sound.track)
@@ -1055,14 +1035,14 @@ fn mkv_audio(clip: &Clip, tb: TimeBase) -> Result<mkv::TrackConfig> {
         .as_ref()
         .ok_or_else(|| Error::Invalid(format!("{} has no audio", clip.name)))?;
     match &clip.demux {
-        Some(Demux::Mkv(r)) => {
+        Demux::Mkv(r) => {
             let t = r
                 .tracks
                 .get(sound.track)
                 .ok_or_else(|| Error::Invalid(format!("{}: no audio track", clip.name)))?;
             Ok(mkv::TrackConfig::from_track(t))
         }
-        Some(Demux::Mp4(r)) => {
+        Demux::Mp4(r) => {
             let t = r
                 .tracks
                 .get(sound.track)
@@ -1071,10 +1051,6 @@ fn mkv_audio(clip: &Clip, tb: TimeBase) -> Result<mkv::TrackConfig> {
             cfg.time_base = tb;
             Ok(cfg)
         }
-        None => Err(Error::Unsupported(format!(
-            "{}: our MP4 and MKV readers can't open it",
-            clip.name
-        ))),
     }
 }
 
@@ -1182,7 +1158,7 @@ fn write(
         };
         match p.from {
             From::Clip { clip, track, index } => {
-                clips[clip].demux()?.read_into(track, index, &mut pk.data)?;
+                clips[clip].demux.read_into(track, index, &mut pk.data)?;
             }
             From::Encoded { at, len } => {
                 let Audio::Encoded(e) = audio else {
@@ -1804,6 +1780,9 @@ mod tests {
             frames,
             audio: Vec::new(),
             alpha: false,
+            chroma: None,
+            interlaced: false,
+            tools: None,
         }
     }
 

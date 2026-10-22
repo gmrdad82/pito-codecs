@@ -131,13 +131,8 @@ impl Resident {
     }
 
     pub(super) fn open(&mut self, job: &Job, si: usize, from: i64) -> Option<native::Frames> {
-        let opened = match job.sources[si].demux() {
-            Ok(d) => {
-                let d = d.clone();
-                self.frames(job, si, &d, from)
-            }
-            Err(e) => Err(e),
-        };
+        let d = job.sources[si].demux.clone();
+        let opened = self.frames(job, si, &d, from);
         match opened {
             Ok(f) if f.route() == Route::Gpu => Some(f),
             Ok(_) => {

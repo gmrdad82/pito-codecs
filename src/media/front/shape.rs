@@ -27,9 +27,10 @@ impl Pull for Video {
 }
 
 pub(super) fn color_of(src: &Source) -> ((u16, u16), Color) {
-    src.demux
-        .as_ref()
-        .and_then(|d| d.stream(d.video().ok()?).ok()?.look)
+    let d = &src.demux;
+    d.video()
+        .ok()
+        .and_then(|v| d.stream(v).ok()?.look)
         .unwrap_or(((1, 1), Color::UNKNOWN))
 }
 

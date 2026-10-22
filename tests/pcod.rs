@@ -533,6 +533,10 @@ fn audio_only_wavs_probe_as_audio() {
             ("audio_bits", bits.as_str()),
             ("audio_float", float.as_str()),
             ("seconds", "0.5"),
+            ("pix_fmt", "null"),
+            ("chroma", "null"),
+            ("interlaced", "null"),
+            ("variant", "null"),
         ] {
             assert_eq!(field(&json, key), Some(want), "{name} {key}: {json}");
         }
@@ -541,6 +545,103 @@ fn audio_only_wavs_probe_as_audio() {
         let shown = text(&shown.stdout);
         assert!(shown.starts_with("container  WAV"), "{name}: {shown}");
         assert!(!shown.contains("video"), "{name}: {shown}");
+    }
+}
+
+fn has_encoder(name: &str) -> bool {
+    Command::new("ffmpeg")
+        .args(["-hide_banner", "-encoders"])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(name))
+}
+
+type Shape = (
+    &'static str,
+    &'static [&'static str],
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+);
+
+#[test]
+fn probe_json_and_text_name_the_video_variant() {
+    if !has_encoder("libx264") {
+        eprintln!("no ffmpeg with libx264 on PATH: skipped");
+        return;
+    }
+    let out = dir("probe-variant");
+    let shapes: [Shape; 4] = [
+        (
+            "high422-10",
+            &["-pix_fmt", "yuv422p10le", "-profile:v", "high422"],
+            "4:2:2",
+            "false",
+            "10-bit 4:2:2 H.264",
+            "yuv422p10le",
+        ),
+        (
+            "high422-8",
+            &["-pix_fmt", "yuv422p", "-profile:v", "high422"],
+            "4:2:2",
+            "false",
+            "8-bit 4:2:2 H.264",
+            "yuv422p",
+        ),
+        (
+            "high",
+            &["-pix_fmt", "yuv420p", "-profile:v", "high"],
+            "4:2:0",
+            "false",
+            "8-bit 4:2:0 H.264",
+            "yuv420p",
+        ),
+        (
+            "interlaced",
+            &[
+                "-pix_fmt",
+                "yuv420p",
+                "-flags",
+                "+ildct+ilme",
+                "-x264opts",
+                "tff=1",
+            ],
+            "4:2:0",
+            "true",
+            "interlaced 8-bit 4:2:0 H.264",
+            "yuv420p",
+        ),
+    ];
+    for (name, args, chroma, interlaced, variant, pix_fmt) in shapes {
+        let path = out.join(format!("{name}.mp4"));
+        let made = Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("testsrc2=s=352x240:r=30:d=0.5")
+            .args(["-c:v", "libx264"])
+            .args(args)
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(made.success(), "{name}");
+        let probed = run(&["probe", path.to_str().unwrap(), "--json"]);
+        ok(&probed);
+        let json = text(&probed.stdout);
+        for (key, want) in [
+            ("codec", "h264"),
+            ("chroma", chroma),
+            ("interlaced", interlaced),
+            ("variant", variant),
+            ("pix_fmt", pix_fmt),
+        ] {
+            assert_eq!(field(&json, key), Some(want), "{name} {key}: {json}");
+        }
+        let shown = run(&["probe", path.to_str().unwrap()]);
+        ok(&shown);
+        let shown = text(&shown.stdout);
+        assert!(
+            shown.lines().any(|l| l == format!("variant    {variant}")),
+            "{name}: {shown}"
+        );
     }
 }
 
@@ -862,12 +963,20 @@ fn ogg_that_is_not_opus_is_refused_by_name() {
     let mut flac = b"\x7fFLAC".to_vec();
     flac.resize(30, 0);
     let cases = [
-        ("talk.ogg", ogg_page(&vorbis), "Ogg Vorbis is not decoded"),
-        ("talk.oga", ogg_page(&flac), "Ogg FLAC is not decoded"),
+        (
+            "talk.ogg",
+            ogg_page(&vorbis),
+            "Ogg Vorbis audio is not supported",
+        ),
+        (
+            "talk.oga",
+            ogg_page(&flac),
+            "Ogg FLAC audio is not supported",
+        ),
         (
             "odd.ogg",
             ogg_page(&[9; 30]),
-            "this Ogg stream is not decoded",
+            "unknown Ogg audio is not supported",
         ),
     ];
     for (name, data, want) in cases {

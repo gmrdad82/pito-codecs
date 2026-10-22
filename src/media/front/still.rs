@@ -8,7 +8,7 @@ use crate::mkv;
 use super::demux::{Demux, mkv_head};
 use super::native;
 use super::picture::Color;
-use super::probe::keyframes;
+use super::probe::{keyframes, probe};
 use super::route::{Caps, Prefs, pick_decode};
 use super::video::{Source, source};
 use crate::media::{Codec, Error, Result, Rgba, Route};
@@ -133,9 +133,15 @@ const _: fn() = || {
 impl Stills {
     pub fn open(path: &Path, height: u32, prefs: &Prefs) -> Result<Stills> {
         let kind = match mkv_head(path) {
-            Ok(Some(r)) if super::alpha::has_alpha(&r) => Kind::Alpha(r),
+            Ok(Some(r)) if super::alpha::has_alpha(&r) => {
+                probe(path, prefs)?.decodable()?;
+                Kind::Alpha(r)
+            }
             Ok(Some(r)) => match mkv_route(&r, prefs) {
-                Some(route) => Kind::Mkv { r, route },
+                Some(route) => {
+                    probe(path, prefs)?.decodable()?;
+                    Kind::Mkv { r, route }
+                }
                 None => file(path, prefs)?,
             },
             _ => file(path, prefs)?,
@@ -286,10 +292,7 @@ impl Stills {
         let wanted: Vec<f64> = times.iter().map(|t| snap(keys, *t)).collect();
         let jobs: Vec<Vec<f64>> = first_seen(&wanted).into_iter().map(|t| vec![t]).collect();
         let height = self.height;
-        let reader = match src.route {
-            Route::Cpu | Route::Gpu => src.mp4(),
-            Route::Ffmpeg => None,
-        };
+        let reader = src.mp4();
         self.spread(
             &jobs,
             src.route,
@@ -306,7 +309,7 @@ impl Stills {
                 let t = batch.first().copied().ok_or_else(failed)?;
                 Ok(vec![match (reader, w.dec.as_mut()) {
                     (Some(r), Ok(d)) => native::still(r, d, t, height)?,
-                    _ => still(src, t, height)?,
+                    _ => return Err(src.native()),
                 }])
             },
             &wanted,
@@ -428,29 +431,9 @@ impl Stills {
         let wanted: Vec<f64> = times.iter().map(|at| at.max(0.0)).collect();
         let unique = sorted(times);
         let height = self.height;
-        let reader = match (src.route, src.mp4()) {
-            (Route::Ffmpeg, _) => {
-                let jobs: Vec<Vec<f64>> = unique.iter().map(|u| vec![*u]).collect();
-                self.spread(
-                    &jobs,
-                    Route::Ffmpeg,
-                    None,
-                    |rt| Worker {
-                        key: (rt, false, 0),
-                        dec: Err(src.native()),
-                        cur: None,
-                    },
-                    |_, batch| {
-                        let at = batch.first().copied().ok_or_else(failed)?;
-                        Ok(vec![ffmpeg_still(src, at, height, true)?])
-                    },
-                    &wanted,
-                    emit,
-                );
-                return Ok(());
-            }
-            (_, Some(r)) => r.clone(),
-            (_, None) => return Err(src.native()),
+        let reader = match src.mp4() {
+            Some(r) => r.clone(),
+            None => return Err(src.native()),
         };
         let d = Demux::Mp4(reader.clone());
         let v = d.video()?;
@@ -609,7 +592,7 @@ fn mkv_route(r: &mkv::Reader, prefs: &Prefs) -> Option<Route> {
         return None;
     }
     let picked = pick_decode(codec, prefs, &Caps::for_decode(prefs)).ok()?;
-    (picked.route != Route::Ffmpeg).then_some(picked.route)
+    Some(picked.route)
 }
 
 fn failed() -> Error {
@@ -646,53 +629,4 @@ fn tagged(d: &Demux, track: usize) -> Color {
         .and_then(|s| s.color)
         .unwrap_or((2, false));
     Color { matrix, full_range }
-}
-
-fn still(src: &Source, key: f64, height: u32) -> Result<Rgba> {
-    ffmpeg_still(src, key, height, false)
-}
-
-fn ffmpeg_still(src: &Source, key: f64, height: u32, exact: bool) -> Result<Rgba> {
-    if src.route != Route::Ffmpeg {
-        return Err(src.native());
-    }
-    let f = src.ffmpeg()?;
-    let mut args = f.decoder_args(src.ffmpeg_codec.as_deref());
-    args.extend(["-threads".into(), "2".into()]);
-    if !exact {
-        args.extend(["-skip_frame".into(), "nokey".into()]);
-    }
-    if key > 0.0 {
-        let at = if exact { key } else { (key - 0.0005).max(0.0) };
-        args.extend(["-ss".into(), format!("{at:.6}")]);
-    }
-    args.extend([
-        "-i".into(),
-        src.path.display().to_string(),
-        "-map".into(),
-        "0:v:0".into(),
-        "-frames:v".into(),
-        "1".into(),
-        "-vf".into(),
-        format!("scale=-2:{}:flags=bilinear", height.max(2)),
-        "-f".into(),
-        "rawvideo".into(),
-        "-pix_fmt".into(),
-        "rgba".into(),
-        "-".into(),
-    ]);
-    let data = f.run_args(&args)?;
-    let h = height.max(2);
-    let w = (data.len() / 4 / h as usize) as u32;
-    if w == 0 || data.len() != w as usize * h as usize * 4 {
-        return Err(Error::Backend(format!(
-            "ffmpeg gave {} bytes for a still {h} high",
-            data.len()
-        )));
-    }
-    Ok(Rgba {
-        width: w,
-        height: h,
-        data,
-    })
 }

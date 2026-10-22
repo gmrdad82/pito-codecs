@@ -41,7 +41,7 @@ pcod mix.wav master.wav --loudness -14 --linear     # -14 LUFS, the dynamics kep
 
 ### Scripts and agents
 
-With stderr a pipe or a file, pcod draws no progress line, so stdout carries only the result: the output's path (and how a join was made), or one JSON manifest with `--json`, with each file's sha256 and size, the parameters and the time it took. `--no-progress` turns the line off on a terminal. `pcod probe <input> --json` prints what pcod reads from a file, with the same keys as the probe of pconv, the converter pcod replaced,.
+With stderr a pipe or a file, pcod draws no progress line, so stdout carries only the result: the output's path (and how a join was made), or one JSON manifest with `--json`, with each file's sha256 and size, the parameters and the time it took. `--no-progress` turns the line off on a terminal. `pcod probe <input> --json` prints what pcod reads from a file, with the same keys as the probe of pconv, the converter pcod replaced, plus `chroma` ("4:2:0", "4:2:2", "4:4:4", "4:4:0" or "4:0:0"), `interlaced` and `variant`, the plain name of the video such as "10-bit 4:2:2 H.264". All three are `null` without video; when the stream's parameters can't be read, `chroma` is `null` and `interlaced` reads `false`.
 
 Exit codes: `0` it worked; `1` refused or failed, with one line on stderr starting `pcod: `; `2` the command line is wrong, answered the way clap answers; `128` plus the signal number when Ctrl-C, SIGTERM or SIGHUP stopped it (130 for Ctrl-C on Windows).
 
@@ -77,6 +77,7 @@ pcod probe clip.mp4
 container  MP4
 duration   10.0 s
 video      h264 High 1920x1080 59.94 fps
+variant    8-bit 4:2:0 H.264
 audio      aac 2 ch 48000 Hz
 ```
 

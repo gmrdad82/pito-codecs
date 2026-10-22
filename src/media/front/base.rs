@@ -5,7 +5,7 @@ use std::time::SystemTime;
 
 use rayon::prelude::*;
 
-use crate::mp4::{CodecConfig, Reader, Track};
+use crate::mp4::{CodecConfig, Reader, SampleEntry, Track};
 
 use super::demux::{self, Demux};
 use super::feed::Feed;
@@ -230,6 +230,14 @@ pub fn probe(path: &Path) -> Result<Probe> {
         Some(CodecConfig::Av1(c)) => (c.profile_name(), c.bit_depth()),
         _ => (String::new(), 8),
     };
+    let config = t.extradata().unwrap_or_default();
+    let keyframe = super::variant::needs_keyframe(t.codec(), &config)
+        .then(|| {
+            let k = t.keyframes().first().copied().unwrap_or(0);
+            r.read(v, k as usize).ok()
+        })
+        .flatten();
+    let shape = super::variant::of(t.codec(), &config, keyframe.as_deref()).unwrap_or_default();
     let lead = starts.track(v).map_or(0.0, |s| (s - starts.file).max(0.0));
     Ok(Probe {
         duration: lead + t.duration_seconds(),
@@ -240,13 +248,29 @@ pub fn probe(path: &Path) -> Result<Probe> {
         height,
         rotation: t.rotation(),
         video_codec: t.codec(),
-        video_codec_name: t.config().map(|c| c.name()).unwrap_or_default(),
+        video_codec_name: t.entry().map(video_name).unwrap_or_default(),
         profile,
-        bit_depth,
+        bit_depth: if shape.bit_depth > 0 {
+            shape.bit_depth
+        } else {
+            bit_depth
+        },
+        chroma: shape.chroma,
+        interlaced: shape.interlaced,
+        tools: shape.tools,
         frames: Some(t.samples.len() as u64),
         audio,
         alpha: false,
     })
+}
+
+fn video_name(e: &SampleEntry) -> String {
+    match (&e.format.0, e.object_type()) {
+        (b"mp4v", Some(0x60..=0x65)) => "mpeg2video".into(),
+        (b"mp4v", Some(0x6a)) => "mpeg1video".into(),
+        (b"mp4v", Some(0x6c)) => "mjpeg".into(),
+        _ => e.codec.name(),
+    }
 }
 
 pub(super) fn audio_only(audio: Vec<AudioTrack>, duration: f64, start: f64) -> Result<Probe> {
@@ -265,6 +289,9 @@ pub(super) fn audio_only(audio: Vec<AudioTrack>, duration: f64, start: f64) -> R
         video_codec_name: String::new(),
         profile: String::new(),
         bit_depth: 0,
+        chroma: None,
+        interlaced: false,
+        tools: None,
         frames: None,
         audio,
         alpha: false,

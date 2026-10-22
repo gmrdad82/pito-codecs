@@ -672,6 +672,10 @@ fn show(out: &mut impl Write, file: &Path) -> Result<(), Fail> {
             p.profile,
             p.fps()
         )?;
+        let variant = p.video_variant();
+        if !variant.is_empty() {
+            writeln!(out, "variant    {variant}")?;
+        }
     }
     if p.alpha {
         writeln!(out, "alpha      yes")?;

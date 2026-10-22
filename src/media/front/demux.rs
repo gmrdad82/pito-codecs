@@ -71,11 +71,65 @@ pub fn mkv_head(path: &Path) -> Result<Option<Arc<mkv::Reader>>> {
 }
 
 fn is_matroska(path: &Path) -> bool {
-    let mut magic = [0u8; 4];
-    std::fs::File::open(path)
-        .and_then(|mut f| f.read_exact(&mut magic))
-        .is_ok()
-        && magic == [0x1a, 0x45, 0xdf, 0xa3]
+    head(path, 4).starts_with(&MATROSKA)
+}
+
+const MATROSKA: [u8; 4] = [0x1a, 0x45, 0xdf, 0xa3];
+
+const ASF: [u8; 16] = [
+    0x30, 0x26, 0xb2, 0x75, 0x8e, 0x66, 0xcf, 0x11, 0xa6, 0xd9, 0x00, 0xaa, 0x00, 0x62, 0xce, 0x6c,
+];
+
+const NOT_OURS: &str = "this file is not an MP4, MOV, MKV or WebM file";
+
+fn head(path: &Path, len: u64) -> Vec<u8> {
+    let mut head = Vec::new();
+    if let Ok(f) = std::fs::File::open(path) {
+        let _ = f.take(len).read_to_end(&mut head);
+    }
+    head
+}
+
+fn foreign(head: &[u8], len: u64) -> Option<&'static str> {
+    let at = |i: usize, magic: &[u8]| head.get(i..i + magic.len()) == Some(magic);
+    let synced =
+        |first: usize, step: usize| (0..3).all(|k| head.get(first + k * step) == Some(&0x47));
+    if at(0, b"RIFF") && at(8, b"AVI ") {
+        Some("AVI")
+    } else if (synced(0, 188) || synced(4, 192)) && !boxed(head, len) {
+        Some("MPEG-TS")
+    } else if at(0, b"FLV\x01") {
+        Some("FLV")
+    } else if at(0, &[0, 0, 1, 0xba]) && !boxed(head, len) {
+        Some("MPEG-PS")
+    } else if at(0, &ASF) {
+        Some("ASF (WMV or WMA)")
+    } else {
+        None
+    }
+}
+
+fn boxed(head: &[u8], len: u64) -> bool {
+    let size = head
+        .get(..4)
+        .map_or(0, |s| u32::from_be_bytes([s[0], s[1], s[2], s[3]]) as u64);
+    let sized = size <= 1 || (8..=len).contains(&size);
+    sized
+        && head
+            .get(4..8)
+            .is_some_and(|t| t.iter().all(|b| b.is_ascii_graphic() || *b == b' '))
+}
+
+fn readable(head: &[u8], len: u64) -> Result<()> {
+    if let Some(name) = foreign(head, len) {
+        return Err(Error::Unsupported(format!(
+            "{name} files are not supported"
+        )));
+    }
+    if head.len() >= 8 && !head.starts_with(&MATROSKA) && !boxed(head, len) {
+        return Err(Error::Unsupported(NOT_OURS.to_string()));
+    }
+    Ok(())
 }
 
 fn mp4_track(r: &Reader, i: usize) -> Result<&Track> {
@@ -240,7 +294,10 @@ impl Demux {
     }
 
     pub fn open(path: &Path) -> Result<Demux> {
-        if is_matroska(path) {
+        let head = head(path, 512);
+        let len = std::fs::metadata(path).map_or(u64::MAX, |m| m.len());
+        readable(&head, len)?;
+        if head.starts_with(&MATROSKA) {
             mkv_reader(path).map(Demux::Mkv)
         } else {
             native::reader(path).map(Demux::Mp4)
@@ -437,12 +494,20 @@ fn video_end(stream: &mut mkv::Stream<'_, std::fs::File>, v: usize) -> Result<Op
     Ok(end)
 }
 
+fn variant_config(t: &mkv::Track) -> &[u8] {
+    match t.codec() {
+        Some(Codec::Vp9) => &[],
+        _ => &t.codec_private,
+    }
+}
+
 pub fn probe_head(r: &Arc<mkv::Reader>) -> Result<Option<Probe>> {
     let (v, t) = mkv_video(r)?;
     let Some(ns) = t.default_duration.filter(|d| *d > 0) else {
         return Ok(None);
     };
     let last = r.cues.iter().rev().find(|c| c.track == t.number);
+    let wants = super::variant::needs_keyframe(t.codec(), variant_config(t));
     let mut stream = r.stream();
     let mut data = Vec::new();
     let mut first: Option<Vec<u8>> = None;
@@ -455,7 +520,7 @@ pub fn probe_head(r: &Arc<mkv::Reader>) -> Result<Option<Probe>> {
         if b.track != v {
             continue;
         }
-        if first.is_none() && b.keyframe && t.codec() == Some(Codec::Vp9) {
+        if first.is_none() && b.keyframe && wants {
             first = Some(data.clone());
         }
         start = start.min(b.pts);
@@ -506,14 +571,14 @@ pub fn probe(head: &Arc<mkv::Reader>) -> Result<Probe> {
         None if duration > 0.0 => t.samples.len() as f64 / duration,
         None => 0.0,
     };
-    let keyframe = match t.codec() {
-        Some(Codec::Vp9) => t
-            .samples
-            .iter()
-            .position(|s| s.keyframe)
-            .and_then(|i| r.read(v, i).ok()),
-        _ => None,
-    };
+    let keyframe = super::variant::needs_keyframe(t.codec(), variant_config(t))
+        .then(|| {
+            t.samples
+                .iter()
+                .position(|s| s.keyframe)
+                .and_then(|i| r.read(v, i).ok())
+        })
+        .flatten();
     let frames = Some(t.samples.len() as u64);
     describe(r, t, (duration, fps, frames), keyframe, &starts)
 }
@@ -577,6 +642,8 @@ fn describe(
             .unwrap_or((String::new(), 8)),
         _ => (String::new(), 8),
     };
+    let shape =
+        super::variant::of(t.codec(), variant_config(t), keyframe.as_deref()).unwrap_or_default();
     let audio = mkv_audio(r, starts);
     Ok(Probe {
         duration,
@@ -587,13 +654,31 @@ fn describe(
         height,
         rotation: t.rotation(),
         video_codec: t.codec(),
-        video_codec_name: t.codec_name().to_string(),
+        video_codec_name: video_name(t),
         profile,
-        bit_depth,
+        bit_depth: if shape.bit_depth > 0 {
+            shape.bit_depth
+        } else {
+            bit_depth
+        },
+        chroma: shape.chroma,
+        interlaced: shape.interlaced,
+        tools: shape.tools,
         frames,
         audio,
         alpha: t.alpha(),
     })
+}
+
+fn video_name(t: &mkv::Track) -> String {
+    let vfw = t
+        .codec_private
+        .get(16..20)
+        .filter(|f| t.codec_id == "V_MS/VFW/FOURCC" && f.iter().all(u8::is_ascii_graphic));
+    match vfw {
+        Some(f) => String::from_utf8_lossy(f).into_owned(),
+        None => t.codec_name().to_string(),
+    }
 }
 
 pub fn frame_count(path: &Path) -> Result<u64> {
@@ -672,4 +757,121 @@ fn vp9_profile(frame: &[u8]) -> Option<(String, u8)> {
 #[cfg(not(feature = "vp9"))]
 fn vp9_profile(_: &[u8]) -> Option<(String, u8)> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn refusal(head: &[u8]) -> String {
+        readable(head, u64::MAX).unwrap_err().to_string()
+    }
+
+    fn ts(first: usize, step: usize) -> Vec<u8> {
+        let mut head = vec![0u8; 512];
+        for k in 0..3 {
+            head[first + k * step] = 0x47;
+        }
+        head
+    }
+
+    #[test]
+    fn containers_no_reader_takes_are_named_in_one_line() {
+        let mut avi = b"RIFF\x24\x10\x00\x00AVI LIST".to_vec();
+        avi.resize(64, 0);
+        let mut asf = ASF.to_vec();
+        asf.resize(64, 0);
+        let cases: [(Vec<u8>, &str); 6] = [
+            (avi, "AVI"),
+            (ts(0, 188), "MPEG-TS"),
+            (ts(4, 192), "MPEG-TS"),
+            (b"FLV\x01\x05\x00\x00\x00\x09".to_vec(), "FLV"),
+            (vec![0, 0, 1, 0xba, 0x44, 0, 4, 0, 4, 1], "MPEG-PS"),
+            (asf, "ASF"),
+        ];
+        for (head, name) in cases {
+            let found = foreign(&head, u64::MAX).unwrap_or_default();
+            assert!(found.starts_with(name), "{found}");
+            let e = refusal(&head);
+            assert_eq!(e, format!("unsupported: {found} files are not supported"));
+            assert!(!e.to_lowercase().contains("ffmpeg"), "{e}");
+        }
+    }
+
+    #[test]
+    fn a_file_that_is_no_box_stream_is_refused_plainly() {
+        let mut ogg = b"OggS\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00".to_vec();
+        ogg.resize(64, 0);
+        let mut wav = b"RIFF\x24\x10\x00\x00WAVEfmt ".to_vec();
+        wav.resize(64, 0);
+        for head in [
+            ogg,
+            wav,
+            vec![0, 0, 0, 1, 0x67, 0x42, 0, 0x1e],
+            vec![0xff; 64],
+        ] {
+            assert_eq!(foreign(&head, u64::MAX), None);
+            assert_eq!(refusal(&head), format!("unsupported: {NOT_OURS}"));
+        }
+    }
+
+    #[test]
+    fn mp4_mov_and_matroska_heads_pass_and_short_files_reach_the_reader() {
+        let heads: [&[u8]; 6] = [
+            b"\x00\x00\x00\x20ftypisom\x00\x00\x02\x00",
+            b"\x00\x00\x00\x08free\x00\x00\x00\x08mdat",
+            b"\x00\x00\x00\x08wide\x00\x00\x00\x08mdat",
+            b"\x00\x00\x00\x01mdat\x00\x00\x00\x00\x00\x00\x00\x10",
+            &[0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x86, 0x81, 0x01],
+            b"\x00\x00\x00",
+        ];
+        for head in heads {
+            assert!(readable(head, u64::MAX).is_ok(), "{head:?}");
+        }
+        assert!(readable(&[], 0).is_ok());
+        let ftyp = b"\x00\x00\x00\x20ftypisom\x00\x00\x02\x00";
+        assert!(readable(ftyp, 32).is_ok());
+        assert_eq!(
+            readable(ftyp, 31).unwrap_err().to_string(),
+            format!("unsupported: {NOT_OURS}")
+        );
+        assert_eq!(
+            readable(b"\x00\x00\x00\x04ftypisom", u64::MAX)
+                .unwrap_err()
+                .to_string(),
+            format!("unsupported: {NOT_OURS}")
+        );
+        let words = b"these words are not a movie";
+        assert_eq!(
+            readable(words, words.len() as u64).unwrap_err().to_string(),
+            format!("unsupported: {NOT_OURS}")
+        );
+    }
+
+    #[test]
+    fn a_single_sync_byte_is_not_mpeg_ts() {
+        let mut head = vec![0u8; 512];
+        head[0] = 0x47;
+        head[188] = 0x47;
+        assert_eq!(foreign(&head, u64::MAX), None);
+    }
+
+    #[test]
+    fn a_box_whose_size_reads_as_mpeg_ps_or_ts_magic_is_still_a_box() {
+        let mut ps = vec![0, 0, 1, 0xba];
+        ps.extend_from_slice(b"free");
+        ps.resize(442, 0);
+        ps.extend_from_slice(b"\x00\x00\x00\x08mdat");
+        let len = ps.len() as u64;
+        assert_eq!(foreign(&ps, len), None);
+        assert!(readable(&ps, len).is_ok());
+        assert_eq!(foreign(&ps[..100], 100), Some("MPEG-PS"));
+        let pack = [0, 0, 1, 0xba, 0x44, 0, 4, 0, 4, 1];
+        assert_eq!(foreign(&pack, u64::MAX), Some("MPEG-PS"));
+        let mut ts = ts(0, 188);
+        ts[4..8].copy_from_slice(b"skip");
+        assert_eq!(foreign(&ts, u64::MAX), None);
+        assert!(readable(&ts, u64::MAX).is_ok());
+        assert_eq!(foreign(&ts, 1000), Some("MPEG-TS"));
+    }
 }

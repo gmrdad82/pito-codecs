@@ -19,15 +19,15 @@ use pito_codecs::media::{
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
+const USAGE: &str = "usage: media_speed <file> [auto|cpu|gpu|probe|cuts [n]|spans <h264|vp9> <from-to>...|scale <check> [arg]|frames [auto|cpu] [n]] | media_speed captions";
+
 fn main() -> ExitCode {
     fail::run("media_speed", run)
 }
 
 fn run() -> Res<()> {
     let mut args = std::env::args().skip(1);
-    let path = PathBuf::from(args.next().ok_or(
-        "usage: media_speed <file> [ffmpeg|auto|cpu|gpu|probe|cuts [n]|spans <h264|vp9> <from-to>...|scale <check> [arg]|frames [auto|cpu] [n]] | media_speed captions",
-    )?);
+    let path = PathBuf::from(args.next().ok_or(USAGE)?);
     if path.as_os_str() == "captions" {
         return captions();
     }
@@ -196,13 +196,13 @@ fn run() -> Res<()> {
         return cuts(&path, n);
     }
     let prefs = match mode.as_deref() {
-        Some("auto") => Prefs::default(),
         Some("cpu") => Prefs {
             decode: Choice::Cpu,
             encode: Choice::Cpu,
             ..Prefs::default()
         },
-        _ => Prefs::ffmpeg(),
+        Some("auto") | None => Prefs::default(),
+        Some(other) => return Err(format!("unknown mode {other}; {USAGE}").into()),
     };
     let t = Instant::now();
     let p = probe(&path, &prefs)?;

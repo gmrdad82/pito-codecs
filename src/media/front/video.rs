@@ -1,4 +1,3 @@
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -6,11 +5,10 @@ use crate::gpu::{GpuFrame, GpuScaler};
 use crate::mp4::Reader;
 
 use super::demux::Demux;
-use super::ffmpeg::{Child, Ffmpeg, pix_fmt};
 use super::native;
 use super::picture::{Color, even, fit_width, resize};
 use super::probe::{Probe, probe};
-use super::route::{Caps, Choice, Prefs, pick_decode};
+use super::route::{Caps, Prefs, pick_decode};
 use crate::media::{Error, Frame, PixelFormat, Result, Route, TimeBase};
 
 #[derive(Clone)]
@@ -19,9 +17,7 @@ pub struct Source {
     pub probe: Probe,
     pub route: Route,
     pub reasons: Vec<String>,
-    pub ffmpeg: Option<Ffmpeg>,
-    pub ffmpeg_codec: Option<String>,
-    pub demux: Option<Demux>,
+    pub demux: Demux,
 }
 
 impl std::fmt::Debug for Video {
@@ -31,57 +27,26 @@ impl std::fmt::Debug for Video {
 }
 
 pub fn source(path: &Path, prefs: &Prefs) -> Result<Source> {
+    let src = copied(path, prefs)?;
+    src.probe.decodable()?;
+    Ok(src)
+}
+
+pub(super) fn copied(path: &Path, prefs: &Prefs) -> Result<Source> {
     let probe = probe(path, prefs)?;
-    let caps = Caps::for_decode(prefs);
-    let demux = Demux::open(path).ok();
-    let (mut route, mut reasons, mut ffmpeg_codec) = match probe.video_codec {
-        Some(codec) => {
-            let p = pick_decode(codec, prefs, &caps)?;
-            (p.route, p.reasons, p.ffmpeg_codec)
-        }
-        None => match (&prefs.decode, &caps.ffmpeg) {
-            (Choice::Ffmpeg(u), Some(_)) => (Route::Ffmpeg, Vec::new(), u.codec.clone()),
-            _ => {
-                return Err(Error::Unsupported(format!(
-                    "{} video decodes only through ffmpeg picked in the settings",
-                    probe.video_codec_name
-                )));
-            }
-        },
-    };
-    if route != Route::Ffmpeg && demux.is_none() {
-        match (&caps.ffmpeg, &prefs.decode) {
-            (Some(_), Choice::Ffmpeg(u)) => {
-                reasons.push("our MP4 and MKV readers can't open this file".to_string());
-                route = Route::Ffmpeg;
-                ffmpeg_codec = u.codec.clone();
-            }
-            _ => {
-                return Err(Error::Unsupported(
-                    "our MP4 and MKV readers can't open this file; pick ffmpeg in the settings to read it"
-                        .to_string(),
-                ));
-            }
-        }
-    }
+    let codec = probe.known_video()?;
+    let picked = pick_decode(codec, prefs, &Caps::for_decode(prefs))?;
+    let demux = Demux::open(path)?;
     Ok(Source {
         path: path.to_path_buf(),
         probe,
-        route,
-        reasons,
-        ffmpeg: caps.ffmpeg,
-        ffmpeg_codec,
+        route: picked.route,
+        reasons: picked.reasons,
         demux,
     })
 }
 
 impl Source {
-    pub fn ffmpeg(&self) -> Result<&Ffmpeg> {
-        self.ffmpeg
-            .as_ref()
-            .ok_or_else(|| Error::Unsupported("ffmpeg is not picked in the settings".to_string()))
-    }
-
     pub fn native(&self) -> Error {
         Error::Unsupported(format!(
             "the {} route for {} is not in this build",
@@ -89,21 +54,16 @@ impl Source {
         ))
     }
 
-    pub fn demux(&self) -> Result<&Demux> {
-        self.demux.as_ref().ok_or_else(|| {
-            Error::Unsupported("our MP4 and MKV readers can't open this file".to_string())
-        })
+    pub fn demux(&self) -> &Demux {
+        &self.demux
     }
 
     pub fn mp4(&self) -> Option<&Arc<Reader>> {
-        self.demux.as_ref().and_then(Demux::mp4)
+        self.demux.mp4()
     }
 }
 
-enum Inner {
-    Ffmpeg { child: Child, next: i64, got: u64 },
-    Native(Box<native::Frames>, (u32, u32)),
-}
+struct Inner(Box<native::Frames>, (u32, u32));
 
 pub struct Video {
     inner: Inner,
@@ -133,135 +93,43 @@ pub fn open(
     fps: Option<(u32, u32)>,
 ) -> Result<Video> {
     let p = &src.probe;
-    match src.route {
-        Route::Cpu | Route::Gpu => {
-            let decoded = native::Frames::open(src.demux()?.clone(), from, src.route)?;
-            let mut reasons = src.reasons.clone();
-            reasons.extend(decoded.reason.clone());
-            return Ok(native_video(
-                decoded,
-                reasons,
-                size.unwrap_or((p.width, p.height)),
-                fps.unwrap_or(p.fps),
-                format_of(p),
-                frames,
-            ));
-        }
-        Route::Ffmpeg => {}
-    }
-    let f = src.ffmpeg()?;
-    let format = format_of(p);
-    let (width, out_height) = size.unwrap_or((p.width, p.height));
-    if width == 0 || out_height == 0 {
-        return Err(Error::Invalid(format!("a picture of {width}x{out_height}")));
-    }
-    let fps = fps.unwrap_or(p.fps);
-    let mut args: Vec<String> = f.decoder_args(src.ffmpeg_codec.as_deref());
-    args.extend([
-        "-noautorotate".into(),
-        "-ss".into(),
-        format!("{:.6}", from.max(0.0)),
-        "-i".into(),
-        src.path.display().to_string(),
-        "-map".into(),
-        "0:v:0".into(),
-        "-fps_mode".into(),
-        "cfr".into(),
-        "-r".into(),
-        format!("{}/{}", fps.0, fps.1),
-    ]);
-    if let Some(n) = frames {
-        args.extend(["-frames:v".into(), n.to_string()]);
-    }
-    if (width, out_height) != (p.width, p.height) {
-        args.extend([
-            "-vf".into(),
-            format!("scale={width}:{out_height}:flags=area"),
-        ]);
-    }
-    args.extend([
-        "-f".into(),
-        "rawvideo".into(),
-        "-pix_fmt".into(),
-        pix_fmt(format).into(),
-        "-".into(),
-    ]);
-    let child = f.spawn(&args, false, true)?;
-    Ok(Video {
-        inner: Inner::Ffmpeg {
-            child,
-            next: frame_at(from.max(0.0), fps),
-            got: 0,
-        },
-        route: Route::Ffmpeg,
-        reasons: src.reasons.clone(),
-        width,
-        height: out_height,
-        format,
-        time_base: TimeBase::new(fps.1, fps.0),
-        left: frames,
-    })
+    let decoded = native::Frames::open(src.demux.clone(), from, src.route)?;
+    let mut reasons = src.reasons.clone();
+    reasons.extend(decoded.reason.clone());
+    Ok(native_video(
+        decoded,
+        reasons,
+        size.unwrap_or((p.width, p.height)),
+        fps.unwrap_or(p.fps),
+        format_of(p),
+        frames,
+    ))
 }
 
 impl Video {
-    pub(super) fn advance(&mut self, from: f64, frames: u64) -> Result<bool> {
-        match &mut self.inner {
-            Inner::Native(decoded, _) => {
-                decoded.advance(from)?;
-                self.left = Some(frames);
-                Ok(true)
-            }
-            Inner::Ffmpeg { .. } => Ok(false),
-        }
+    pub(super) fn advance(&mut self, from: f64, frames: u64) -> Result<()> {
+        self.inner.0.advance(from)?;
+        self.left = Some(frames);
+        Ok(())
     }
 
     pub fn recycle(&mut self, frame: Frame) {
-        if let Inner::Native(frames, _) = &mut self.inner {
-            frames.recycle(frame);
-        }
+        self.inner.0.recycle(frame);
     }
 
     fn read(&mut self) -> Result<Option<Frame>> {
         if self.left == Some(0) {
             return Ok(None);
         }
-        let (child, next, got) = match &mut self.inner {
-            Inner::Ffmpeg { child, next, got } => (child, next, got),
-            Inner::Native(frames, fps) => {
-                let Some(mut frame) = frames.next_frame()? else {
-                    return Ok(None);
-                };
-                frame.pts = frame_at(frames.seconds(frame.pts), *fps);
-                frame.time_base = self.time_base;
-                if (frame.width, frame.height) != (self.width, self.height) {
-                    frame = resize(&frame, self.width, self.height);
-                }
-                if let Some(n) = self.left.as_mut() {
-                    *n -= 1;
-                }
-                return Ok(Some(frame));
-            }
-        };
-        let mut frame = Frame::new(self.format, self.width, self.height, *next, self.time_base);
-        let Some(out) = child.stdout.as_mut() else {
+        let Inner(frames, fps) = &mut self.inner;
+        let Some(mut frame) = frames.next_frame()? else {
             return Ok(None);
         };
-        for (i, plane) in frame.planes.iter_mut().enumerate() {
-            match out.read_exact(&mut plane.data) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof && i == 0 => {
-                    self.left = Some(0);
-                    let err = child.stderr_now();
-                    if !err.is_empty() && *got == 0 {
-                        return Err(Error::Backend(format!("ffmpeg: {err}")));
-                    }
-                    return Ok(None);
-                }
-                Err(e) => return Err(Error::Io(e)),
-            }
+        frame.pts = frame_at(frames.seconds(frame.pts), *fps);
+        frame.time_base = self.time_base;
+        if (frame.width, frame.height) != (self.width, self.height) {
+            frame = resize(&frame, self.width, self.height);
         }
-        *next += 1;
-        *got += 1;
         if let Some(n) = self.left.as_mut() {
             *n -= 1;
         }
@@ -350,10 +218,8 @@ pub(super) fn frame_at(seconds: f64, fps: (u32, u32)) -> i64 {
 }
 
 fn stream_color(src: &Source) -> Color {
-    let found = src
-        .demux
-        .as_ref()
-        .and_then(|d| d.stream(d.video().ok()?).ok()?.color);
+    let d = &src.demux;
+    let found = d.video().ok().and_then(|v| d.stream(v).ok()?.color);
     let (matrix, full_range) = found.unwrap_or((2, false));
     Color { matrix, full_range }
 }
@@ -374,7 +240,7 @@ pub fn decode_video_gpu(
     let color = stream_color(&src);
     let format = format_of(p);
     if src.route == Route::Gpu {
-        let frames = native::Frames::open(src.demux()?.clone(), from, Route::Gpu)?;
+        let frames = native::Frames::open(src.demux.clone(), from, Route::Gpu)?;
         let mut reasons = src.reasons.clone();
         reasons.extend(frames.reason.clone());
         if frames.route() == Route::Gpu {
@@ -424,7 +290,7 @@ fn native_video(
 ) -> Video {
     Video {
         route: frames.route(),
-        inner: Inner::Native(Box::new(frames), fps),
+        inner: Inner(Box::new(frames), fps),
         reasons,
         width: size.0,
         height: size.1,

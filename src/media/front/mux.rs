@@ -11,12 +11,10 @@ use crate::mp4::{
     Av1Config, AvcConfig, HevcConfig, SampleEntry, TrackConfig, VpcConfig, Writer, rotation_matrix,
 };
 
-use super::audio::ffmpeg_pcm;
 use super::demux::Demux;
 use super::export::{
     ExportOptions, Job, Part, Progress, Stage, Tell, WRITTEN, reencode, reencode_open, reencode_run,
 };
-use super::ffmpeg::Ffmpeg;
 use super::native::{self, threads, video_track};
 use super::resident::Resident;
 use super::route::{Picked, Prefs};
@@ -471,12 +469,9 @@ fn encode_edge(
         }
     }
     if !on_gpu {
-        let reused = match feeds.cpu.as_mut() {
+        match feeds.cpu.as_mut() {
             Some(v) => v.advance(job.seconds(from), frames.max(0) as u64)?,
-            None => false,
-        };
-        if !reused {
-            feeds.cpu = Some(reencode_open(&quiet, si, from, frames)?);
+            None => feeds.cpu = Some(reencode_open(&quiet, si, from, frames)?),
         }
         let v = feeds
             .cpu
@@ -563,7 +558,7 @@ fn vp9_edge(
     threads: usize,
     budget: &Budget,
 ) -> Result<Edge> {
-    let key = vp9_keyframe(job.sources[si].demux()?)?;
+    let key = vp9_keyframe(job.sources[si].demux())?;
     let color = (key.color.color_space, key.color.full_range);
     let frames = frames.max(1);
     let chunks = ((frames + CHUNK - 1) / CHUNK).clamp(1, threads.max(1) as i64);
@@ -656,37 +651,23 @@ fn vp9_edge(
     })
 }
 
-enum Lane {
-    Stream(super::stream::AudioStream, Vec<f32>),
-    Whole(Vec<f32>, usize),
-}
+struct Lane(super::stream::AudioStream, Vec<f32>);
 
 impl Lane {
     fn add(&mut self, out: &mut [f32], gain: f32) -> Result<()> {
         let want = out.len();
-        let got: &[f32] = match self {
-            Lane::Stream(s, pending) => {
-                while pending.len() < want {
-                    match s.next() {
-                        Some(b) => pending.extend_from_slice(&b?.samples),
-                        None => break,
-                    }
-                }
-                pending.get(..want.min(pending.len())).unwrap_or_default()
+        let Lane(s, pending) = self;
+        while pending.len() < want {
+            match s.next() {
+                Some(b) => pending.extend_from_slice(&b?.samples),
+                None => break,
             }
-            Lane::Whole(all, at) => all
-                .get(*at..(*at + want).min(all.len()))
-                .unwrap_or_default(),
-        };
+        }
+        let got = pending.get(..want.min(pending.len())).unwrap_or_default();
         for (o, s) in out.iter_mut().zip(got) {
             *o += s * gain;
         }
-        match self {
-            Lane::Stream(_, pending) => {
-                pending.drain(..want.min(pending.len()));
-            }
-            Lane::Whole(_, at) => *at += want,
-        }
+        pending.drain(..want.min(pending.len()));
         Ok(())
     }
 }
@@ -694,7 +675,6 @@ impl Lane {
 fn mix(
     job: &Job,
     gains: &[f32],
-    ffmpeg: Option<&Ffmpeg>,
     enc: &mut crate::aac::Encoder,
     stop: &AtomicBool,
 ) -> Result<(Spill, u64)> {
@@ -709,7 +689,6 @@ fn mix(
         let src = &job.sources[job.index[i]];
         let (a, b) = job.span(piece);
         let start = job.seconds(a);
-        let dur = job.seconds(b - a);
         let first = (job.seconds(at) * RATE as f64).round() as usize;
         at += b - a;
         let n = ((job.seconds(at) * RATE as f64).round() as usize).saturating_sub(first);
@@ -720,21 +699,8 @@ fn mix(
             if g <= 0.0 {
                 continue;
             }
-            let ours = match &src.demux {
-                Some(_) => super::stream::native_stream(&src.path, t.index, start, RATE, 2),
-                None => Err(Error::Unsupported(
-                    "this file's audio needs ffmpeg picked in the settings".to_string(),
-                )),
-            };
-            let lane = match (ours, ffmpeg) {
-                (Ok(s), _) => Lane::Stream(s, Vec::new()),
-                (Err(_), Some(f)) => Lane::Whole(
-                    ffmpeg_pcm(f, &src.path, t.index, Some(start), Some(dur), RATE, 2)?.samples,
-                    0,
-                ),
-                (Err(e), None) => return Err(e),
-            };
-            lanes.push((lane, g));
+            let s = super::stream::native_stream(&src.path, t.index, start, RATE, 2)?;
+            lanes.push((Lane(s, Vec::new()), g));
         }
         let mut left = n;
         while left > 0 {
@@ -758,7 +724,7 @@ fn mix(
 pub(super) type Premix<'a> = &'a mut (dyn FnMut(usize, usize) -> Result<AudioBuffer> + Send);
 
 pub(super) enum Sound<'a> {
-    Tracks(Option<&'a Ffmpeg>),
+    Tracks,
     Premixed(Premix<'a>),
 }
 
@@ -918,20 +884,6 @@ fn audio_track(
     })
 }
 
-pub(super) fn premixed_m4a(
-    job: &Job,
-    audio: Premix,
-    kbps: u32,
-    stop: &AtomicBool,
-    path: &Path,
-) -> Result<()> {
-    let mut enc = aac_encoder(kbps)?;
-    let (packets, total) = premixed(job, audio, &mut enc, stop)?;
-    let mut w = Writer::create(path)?;
-    audio_track(&mut w, &enc, kbps, packets, Some(total))?;
-    w.finish().map(|_| ())
-}
-
 pub(super) fn run(
     job: &mut Job,
     video: &Picked,
@@ -951,9 +903,7 @@ pub(super) fn run(
     let (copied, encoded, mux, reasons, audio) = std::thread::scope(|s| -> Result<_> {
         let (aj, gains, stop_ref, aac) = (&audio_job, &gains, &stop, &mut aac);
         let audio = s.spawn(move || match sound {
-            Sound::Tracks(ffmpeg) => {
-                mix(aj, gains, ffmpeg, aac, stop_ref).map(|(p, n)| (p, Some(n)))
-            }
+            Sound::Tracks => mix(aj, gains, aac, stop_ref).map(|(p, n)| (p, Some(n))),
             Sound::Premixed(p) => premixed(aj, p, aac, stop_ref).map(|(p, n)| (p, Some(n))),
         });
         let video = if smart {
@@ -1165,7 +1115,7 @@ struct Gop<'a> {
 
 impl<'a> Gop<'a> {
     fn at(job: &'a Job<'_>, si: usize, from: i64) -> Result<Self> {
-        let demux = job.sources[si].demux()?;
+        let demux = job.sources[si].demux();
         let track = demux.video()?;
         let (start, _) = demux.seek(track, job.seconds(from) + job.seconds(1) / 2.0)?;
         Ok(Gop {
@@ -1277,9 +1227,6 @@ impl Planner {
     }
 
     fn copyable(&mut self, job: &Job, si: usize, from: i64, frames: i64) -> Result<bool> {
-        if job.sources[si].demux.is_none() {
-            return Ok(true);
-        }
         let g = Gop::at(job, si, from)?;
         if !self.opens_cleanly(si, &g, from)? {
             return Ok(false);
@@ -1343,11 +1290,7 @@ impl Planner {
                 }
             }
             Part::Encode { from, frames } if prefix && keys.contains(&from) => {
-                let j = if job.sources[si].demux.is_some() {
-                    self.closed_prefix(job, si, from, frames)?
-                } else {
-                    0
-                };
+                let j = self.closed_prefix(job, si, from, frames)?;
                 let mut split = Vec::new();
                 if j > 0 {
                     split.push(Part::Copy { from, frames: j });
@@ -1417,6 +1360,14 @@ impl Writing {
     }
 }
 
+pub(super) fn copied_whole(job: &Job) -> Result<bool> {
+    let mut planner = Planner::default();
+    let (plan, _) = job.plan(&Prefs::default(), |si, part, keys| {
+        planner.split(job, (si, part), keys, true)
+    })?;
+    Ok(plan.iter().all(|(_, p)| matches!(p, Part::Copy { .. })))
+}
+
 fn smart_video(
     job: &Job,
     video: &Picked,
@@ -1434,6 +1385,9 @@ fn smart_video(
     let edges: Vec<usize> = (0..plan.len())
         .filter(|&i| matches!(plan[i].1, Part::Encode { .. }))
         .collect();
+    for &i in &edges {
+        job.decodable(plan[i].0)?;
+    }
     let rank: HashMap<usize, usize> = edges.iter().enumerate().map(|(r, &i)| (i, r)).collect();
     let mut last_use: HashMap<usize, usize> = HashMap::new();
     for (n, &i) in order.iter().enumerate() {
@@ -1458,10 +1412,7 @@ fn smart_video(
         };
         let joins = shares
             && tail.is_some_and(|(psi, end)| {
-                psi == si
-                    && from >= end
-                    && job.sources[si].demux.is_some()
-                    && key(si, from).is_some_and(|k| k <= end)
+                psi == si && from >= end && key(si, from).is_some_and(|k| k <= end)
             });
         match groups.last_mut() {
             Some(g) if joins => g.push(r),
@@ -1676,7 +1627,7 @@ fn copy_entry(job: &Job, si: usize) -> Result<(Vec<u8>, SampleEntry)> {
             .ok_or_else(|| Error::Invalid("video track without an entry".into()))?;
         return Ok((t.extradata().unwrap_or_default(), entry));
     }
-    let demux = src.demux()?;
+    let demux = src.demux();
     let st = demux.stream(demux.video()?)?;
     let codec = st
         .codec
@@ -1733,22 +1684,4 @@ fn copy_times(
         t.1 = o - shift;
     }
     Ok(())
-}
-
-pub(super) fn gop_mp4(job: &Job, si: usize, from: i64, frames: i64, path: &Path) -> Result<()> {
-    let fd = job.fps.1 as i64 * 64;
-    let mut entries = Entries::default();
-    let (key, entry) = copy_entry(job, si)?;
-    entries.id(key, entry);
-    let mut mux = open_mux(0, entries, job.fps.0.saturating_mul(64), fd, path)?;
-    let g = Gop::at(job, si, from)?;
-    let (mut times, mut order_pts) = (Vec::new(), Vec::new());
-    copy_times(&g, frames, &mut times, &mut order_pts)?;
-    let mut buf = Vec::new();
-    for (k, &(pts, dts, key)) in (g.start..).zip(&times) {
-        g.demux.read_into(g.track, k, &mut buf)?;
-        mux.push(&buf, pts.saturating_mul(fd), dts.saturating_mul(fd), key, 0)?;
-    }
-    mux.close()?;
-    mux.w.finish().map(|_| ())
 }

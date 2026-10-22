@@ -1,7 +1,4 @@
-use std::path::PathBuf;
-
 use super::base as native;
-use super::ffmpeg::Ffmpeg;
 use crate::media::{Codec, Direction, Error, Result, Route};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -10,13 +7,6 @@ pub enum Choice {
     Auto,
     Gpu,
     Cpu,
-    Ffmpeg(UserFfmpeg),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct UserFfmpeg {
-    pub path: Option<PathBuf>,
-    pub codec: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,25 +32,6 @@ impl Default for Prefs {
     }
 }
 
-impl Prefs {
-    pub fn ffmpeg() -> Self {
-        Self {
-            decode: Choice::Ffmpeg(UserFfmpeg::default()),
-            encode: Choice::Ffmpeg(UserFfmpeg::default()),
-            ..Self::default()
-        }
-    }
-
-    pub fn user_ffmpeg(&self) -> Option<&UserFfmpeg> {
-        [&self.decode, &self.encode]
-            .into_iter()
-            .find_map(|c| match c {
-                Choice::Ffmpeg(u) => Some(u),
-                _ => None,
-            })
-    }
-}
-
 const CPU_PICKED: &str = "the settings pick the CPU";
 
 fn reaches_gpu(choice: &Choice) -> bool {
@@ -72,52 +43,38 @@ pub struct Caps {
     pub gpu: Vec<(Codec, Direction)>,
     pub gpu_missing: Option<String>,
     pub cpu: Vec<(Codec, Direction)>,
-    pub ffmpeg: Option<Ffmpeg>,
-    pub ffmpeg_missing: Option<String>,
 }
 
 impl Caps {
     pub fn detect(prefs: &Prefs) -> Self {
-        Caps::probing(
-            prefs,
-            reaches_gpu(&prefs.decode) || reaches_gpu(&prefs.encode),
-        )
+        Caps::probing(reaches_gpu(&prefs.decode) || reaches_gpu(&prefs.encode))
     }
 
     pub fn for_decode(prefs: &Prefs) -> Self {
-        Caps::probing(prefs, reaches_gpu(&prefs.decode))
+        Caps::probing(reaches_gpu(&prefs.decode))
     }
 
-    pub fn for_audio(prefs: &Prefs) -> Self {
-        Caps::probing(prefs, false)
+    pub fn for_audio(_: &Prefs) -> Self {
+        Caps::probing(false)
     }
 
-    fn probing(prefs: &Prefs, gpu: bool) -> Self {
+    fn probing(gpu: bool) -> Self {
         let (gpu, gpu_missing) = if gpu {
             native::gpu()
         } else {
             (Vec::new(), Some(CPU_PICKED.to_string()))
         };
-        let mut caps = Caps {
+        Caps {
             gpu,
             gpu_missing,
             cpu: native::cpu(),
-            ..Caps::default()
-        };
-        if let Some(user) = prefs.user_ffmpeg() {
-            match Ffmpeg::find(user.path.as_deref()) {
-                Ok(f) => caps.ffmpeg = Some(f),
-                Err(e) => caps.ffmpeg_missing = Some(e.to_string()),
-            }
         }
-        caps
     }
 
     fn has(&self, route: Route, codec: Codec, dir: Direction) -> bool {
         match route {
             Route::Gpu => self.gpu.contains(&(codec, dir)),
             Route::Cpu => self.cpu.contains(&(codec, dir)),
-            Route::Ffmpeg => self.ffmpeg.as_ref().is_some_and(|f| f.can(codec, dir)),
         }
     }
 
@@ -135,11 +92,6 @@ impl Caps {
                 "HEVC encodes on the GPU only".to_string()
             }
             Route::Cpu => format!("no CPU {codec} {what} in this build"),
-            Route::Ffmpeg => match (&self.ffmpeg, &self.ffmpeg_missing) {
-                (Some(f), _) => format!("{} has no {codec} {what}", f.path.display()),
-                (None, Some(why)) => why.clone(),
-                (None, None) => "ffmpeg is not picked in the settings".to_string(),
-            },
         }
     }
 }
@@ -148,7 +100,6 @@ impl Caps {
 pub struct Picked {
     pub route: Route,
     pub codec: Codec,
-    pub ffmpeg_codec: Option<String>,
     pub reasons: Vec<String>,
 }
 
@@ -164,38 +115,26 @@ impl Picked {
 }
 
 pub fn pick_decode(codec: Codec, prefs: &Prefs, caps: &Caps) -> Result<Picked> {
-    let (order, ffmpeg_codec): (&[Route], _) = match &prefs.decode {
-        Choice::Auto | Choice::Gpu => (&[Route::Gpu, Route::Cpu], None),
-        Choice::Cpu => (&[Route::Cpu], None),
-        Choice::Ffmpeg(user) => (&[Route::Ffmpeg, Route::Gpu, Route::Cpu], user.codec.clone()),
+    let order: &[Route] = match &prefs.decode {
+        Choice::Auto | Choice::Gpu => &[Route::Gpu, Route::Cpu],
+        Choice::Cpu => &[Route::Cpu],
     };
     let tries = order.iter().map(|&r| (r, codec)).collect();
-    pick(codec, Direction::Decode, tries, ffmpeg_codec, caps)
+    pick(codec, Direction::Decode, tries, caps)
 }
 
 pub fn pick_encode(codec: Codec, prefs: &Prefs, caps: &Caps) -> Result<Picked> {
-    let (tries, ffmpeg_codec) = match &prefs.encode {
-        Choice::Ffmpeg(user) => {
-            let mut tries = vec![(Route::Ffmpeg, codec)];
-            tries.extend(native_order(codec, prefs, &[Route::Gpu, Route::Cpu]));
-            (tries, user.codec.clone())
-        }
-        Choice::Auto | Choice::Gpu => (native_order(codec, prefs, &[Route::Gpu, Route::Cpu]), None),
-        Choice::Cpu => (native_order(codec, prefs, &[Route::Cpu]), None),
+    let tries = match &prefs.encode {
+        Choice::Auto | Choice::Gpu => native_order(codec, prefs, &[Route::Gpu, Route::Cpu]),
+        Choice::Cpu => native_order(codec, prefs, &[Route::Cpu]),
     };
-    pick(codec, Direction::Encode, tries, ffmpeg_codec, caps)
+    pick(codec, Direction::Encode, tries, caps)
 }
 
-fn pick(
-    codec: Codec,
-    dir: Direction,
-    tries: Vec<(Route, Codec)>,
-    ffmpeg_codec: Option<String>,
-    caps: &Caps,
-) -> Result<Picked> {
+fn pick(codec: Codec, dir: Direction, tries: Vec<(Route, Codec)>, caps: &Caps) -> Result<Picked> {
     let mut reasons = Vec::new();
     for (route, c) in tries {
-        if c == Codec::Av1 && dir == Direction::Encode && route != Route::Ffmpeg {
+        if c == Codec::Av1 && dir == Direction::Encode {
             let why = format!("AV1 encode isn't offered on the {route}");
             if !reasons.contains(&why) {
                 reasons.push(why);
@@ -213,11 +152,6 @@ fn pick(
             return Ok(Picked {
                 route,
                 codec: c,
-                ffmpeg_codec: if route == Route::Ffmpeg {
-                    ffmpeg_codec
-                } else {
-                    None
-                },
                 reasons,
             });
         }
@@ -267,7 +201,6 @@ mod tests {
             gpu: gpu.to_vec(),
             gpu_missing: None,
             cpu: cpu.to_vec(),
-            ..Caps::default()
         }
     }
 
@@ -327,11 +260,28 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_ffmpeg_falls_back_to_our_routes_saying_why() {
-        let mut c = caps(&[], &[(Codec::H264, D)]);
-        c.ffmpeg_missing = Some("no ffmpeg at /nowhere/ffmpeg".into());
-        let p = pick_decode(Codec::H264, &Prefs::ffmpeg(), &c).unwrap();
-        assert_eq!(p.route, Route::Cpu);
-        assert_eq!(p.reasons[0], "no ffmpeg at /nowhere/ffmpeg");
+    fn the_default_prefs_refuse_in_one_line_with_no_ffmpeg_hint() {
+        let prefs = Prefs::default();
+        assert_eq!(
+            (&prefs.decode, &prefs.encode),
+            (&Choice::Auto, &Choice::Auto)
+        );
+        let all = [Codec::H264, Codec::Hevc, Codec::Vp9, Codec::Av1, Codec::Aac];
+        let both: Vec<(Codec, Direction)> = all.iter().flat_map(|&c| [(c, D), (c, E)]).collect();
+        let rich = caps(&both, &both);
+        let bare = caps(&[], &[]);
+        for codec in all {
+            for refused in [
+                pick_decode(codec, &prefs, &bare),
+                pick_encode(codec, &prefs, &bare),
+            ] {
+                let e = refused.unwrap_err().to_string();
+                assert!(!e.to_lowercase().contains("ffmpeg"), "{e}");
+                assert_eq!(e.lines().count(), 1, "{e}");
+                assert!(e.contains(&codec.to_string()), "{e}");
+            }
+        }
+        let p = pick_decode(Codec::H264, &prefs, &rich).unwrap();
+        assert_eq!((p.route, p.reasons.len()), (Route::Gpu, 0));
     }
 }

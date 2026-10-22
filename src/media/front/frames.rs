@@ -27,19 +27,10 @@ fn samples_at(frames: u64, fps: (u32, u32)) -> u64 {
     u64::try_from((2 * num + den) / (2 * den)).unwrap_or(u64::MAX)
 }
 
-fn native_prefs(prefs: &Prefs, reasons: &mut Vec<String>) -> Prefs {
-    let encode = match &prefs.encode {
-        Choice::Ffmpeg(_) => {
-            reasons.push(
-                "frames made by the caller are encoded by our own encoders, not ffmpeg".to_string(),
-            );
-            Choice::Auto
-        }
-        c => c.clone(),
-    };
+fn native_prefs(prefs: &Prefs) -> Prefs {
     Prefs {
         decode: Choice::Auto,
-        encode,
+        encode: prefs.encode.clone(),
         hevc_encode_fallback: prefs.hevc_encode_fallback.clone(),
     }
 }
@@ -104,7 +95,7 @@ pub fn export_frames(
         )));
     }
     let mut reasons = Vec::new();
-    let prefs = native_prefs(&opts.prefs, &mut reasons);
+    let prefs = native_prefs(&opts.prefs);
     let caps = Caps::detect(&prefs);
     let mut video = pick_encode(opts.video, &prefs, &caps)?;
     let shape = (size, fps, PixelFormat::Yuv420p8);

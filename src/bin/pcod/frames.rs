@@ -399,7 +399,6 @@ pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
     let route = match done.video.route {
         Route::Gpu => "GPU",
         Route::Cpu => "CPU",
-        Route::Ffmpeg => "ffmpeg",
     };
     writeln!(out, "encode  {} {route}", done.video.codec)?;
     writeln!(

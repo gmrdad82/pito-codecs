@@ -24,13 +24,13 @@ println!(
 h264 1920x1080 at 60000/1001 fps, 10.0 s, 1 audio track(s)
 ```
 
-`Probe` also carries the profile, bit depth, rotation (`shown_size()` gives the size as displayed), the frame count when the container knows it, and an `AudioTrack` per audio track with its codec, channels, rate, language and title. `unsupported()` names any codec in the file that pito-codecs can't decode.
+`Probe` also carries the profile, bit depth, `chroma` (a `Chroma`: 4:2:0, 4:2:2, 4:4:4, 4:4:0 or monochrome, `None` when the stream's parameters couldn't be read), `interlaced`, rotation (`shown_size()` gives the size as displayed), the frame count when the container knows it, and an `AudioTrack` per audio track with its codec, channels, rate, language and title. `video_variant()` names the video plainly, such as "10-bit 4:2:2 H.264" or "interlaced 8-bit 4:2:0 H.264", read from the stored parameter sets or the first keyframe. `video_native()` is true only when a route here decodes that variant, and `unsupported()` names the variant it refuses, or any codec in the file that pito-codecs can't decode, so an app can refuse at probe in one line. The decode and still calls refuse such a file when they open it, before any frame, with the same name (`unsupported: 10-bit 4:2:2 H.264 video is not supported`); a file with no video track returns `invalid data: no video track`. `export` and `join` still take a variant they only stream-copy (pieces cut on its keyframes, no overlay, fit or size change) and refuse it, before writing anything, the moment a piece needs a decode; with clips from more than one file the line starts with the file's path.
 
 Every time in the media front counts from the file's start, as ffmpeg's input times do: time 0 is the earliest start over the file's streams, `duration` runs from there to the end, and the times you pass to stills, `decode_video`, `decode_video_gpu`, the audio calls and export pieces, and the frame `pts` you get back, are on that clock. A file cut with its original timestamps kept (`-copyts`) therefore reads like any other. `start` gives the absolute time of time 0 in seconds, and `video_start` and each `AudioTrack`'s `start` give that stream's own first time when the reader knows it; an audio track that starts after time 0 reads as silence until its first sample.
 
 ## Routes
 
-Every decode and encode runs on one of three routes, `Route::Gpu`, `Route::Cpu` or `Route::Ffmpeg`. The order is always the GPU first, then our own CPU code; ffmpeg is used only when the app's settings pick it and finds it installed. `Prefs` holds those settings:
+Every decode and encode runs on one of two routes, `Route::Gpu` or `Route::Cpu`, both pito-codecs' own code; nothing calls ffmpeg. The order is the GPU first, then the CPU. `Prefs` holds the settings:
 
 ```rust
 pub struct Prefs {
@@ -39,12 +39,11 @@ pub struct Prefs {
     pub hevc_encode_fallback: Vec<Fallback>,
 }
 
-pub enum Choice { Auto, Gpu, Cpu, Ffmpeg(UserFfmpeg) }
+pub enum Choice { Auto, Gpu, Cpu }
 ```
 
 - `Choice::Auto` (the default) and `Choice::Gpu` try the GPU, then the CPU.
 - `Choice::Cpu` stays on the CPU.
-- `Choice::Ffmpeg(UserFfmpeg { path, codec })` runs the user's own ffmpeg first, with an optional encoder name such as `libx264`, and falls back to the GPU and the CPU when it is missing or can't do the job. `Prefs::ffmpeg()` picks it for both directions.
 - `hevc_encode_fallback` says where an HEVC encode goes when no GPU HEVC encoder is there: H.264 on the GPU, then H.264 on the CPU, by default. An empty list makes such an encode fail instead.
 
 ## Ask which route a job takes

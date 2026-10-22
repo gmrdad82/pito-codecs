@@ -61,4 +61,4 @@ let done = export_frames(
 - **Audio:** called about once a second of video, from a thread of its own, with the number of frames so far and the number of 48 kHz samples that cover them since the last call. Return exactly that many interleaved stereo samples, `samples * 2` floats.
 - **Progress:** as for `export`; returning `false` cancels.
 
-`ExportOptions.video` may be `Codec::H264` or `Codec::Hevc`, and `ExportOptions.overlay` draws a layer on the frames as in [Overlays and captions](../overlays/). A user's ffmpeg is never used here: the reasons say that frames made by the caller are encoded by our own encoders.
+`ExportOptions.video` may be `Codec::H264` or `Codec::Hevc`, and `ExportOptions.overlay` draws a layer on the frames as in [Overlays and captions](../overlays/).

@@ -9,7 +9,7 @@ use super::export::{ExportOptions, Exported, MAX_FPS, Progress, Stage, WRITTEN};
 use super::frames::Canvas;
 use super::native::{rational, threads};
 use super::picture::{Color, rotate, scale_to_height, to_rgba_color};
-use super::route::{Choice, Picked};
+use super::route::Picked;
 use super::still::Seek;
 use super::video::frame_at;
 use crate::filter::{ColorSpec, Matrix, Range, rgba_to_yuv};
@@ -106,10 +106,6 @@ pub fn export_rgba(
     }
     let webm = webm_of(out)?;
     let mut reasons = Vec::new();
-    if matches!(opts.prefs.encode, Choice::Ffmpeg(_)) {
-        reasons
-            .push("frames made by the caller are encoded by our own encoders, not ffmpeg".into());
-    }
     if opts.overlay.is_some() {
         reasons.push("the overlay is not drawn on RGBA frames".into());
     }
@@ -261,7 +257,6 @@ pub fn export_rgba(
         video: Picked {
             route: Route::Cpu,
             codec: Codec::Vp9,
-            ffmpeg_codec: None,
             reasons: Vec::new(),
         },
         reasons,

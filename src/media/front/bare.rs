@@ -74,19 +74,19 @@ pub fn sniff(path: &Path) -> Option<Bare> {
 
 fn ogg_name(body: &[u8]) -> &'static str {
     [
-        (&b"OpusHead"[..], "Ogg Opus"),
-        (b"\x01vorbis", "Ogg Vorbis"),
-        (b"\x7fFLAC", "Ogg FLAC"),
-        (b"\x80theora", "Ogg Theora"),
-        (b"Speex   ", "Ogg Speex"),
+        (&b"OpusHead"[..], "Ogg Opus audio"),
+        (b"\x01vorbis", "Ogg Vorbis audio"),
+        (b"\x7fFLAC", "Ogg FLAC audio"),
+        (b"\x80theora", "Ogg Theora video"),
+        (b"Speex   ", "Ogg Speex audio"),
     ]
     .into_iter()
     .find(|(magic, _)| body.starts_with(magic))
-    .map_or("this Ogg stream", |(_, name)| name)
+    .map_or("unknown Ogg audio", |(_, name)| name)
 }
 
 fn refuse(name: &str) -> Error {
-    Error::Unsupported(format!("{name} is not decoded"))
+    Error::Unsupported(format!("{name} is not supported"))
 }
 
 #[cfg(feature = "mp3")]
@@ -175,6 +175,9 @@ pub fn probe(path: &Path, kind: Bare) -> Result<Probe> {
         video_codec_name: String::new(),
         profile: String::new(),
         bit_depth: 0,
+        chroma: None,
+        interlaced: false,
+        tools: None,
         frames: None,
         audio: vec![AudioTrack {
             index: 0,

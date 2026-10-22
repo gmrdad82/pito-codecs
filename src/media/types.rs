@@ -17,7 +17,6 @@ pub enum Codec {
 pub enum Route {
     Gpu,
     Cpu,
-    Ffmpeg,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -47,7 +46,6 @@ impl fmt::Display for Route {
         f.write_str(match self {
             Route::Gpu => "GPU",
             Route::Cpu => "CPU",
-            Route::Ffmpeg => "ffmpeg",
         })
     }
 }

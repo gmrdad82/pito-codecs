@@ -126,8 +126,11 @@ impl Decoder {
                 Ok(Decoder::Av1(Box::new(dec)))
             }
             _ => Err(Error::Unsupported(format!(
-                "our decoders read H.264, HEVC, VP9 and AV1, not {}",
-                st.name
+                "{} video is not supported",
+                match super::probe::plain(&st.name) {
+                    "" => "unknown",
+                    name => name,
+                }
             ))),
         }
     }

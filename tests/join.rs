@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use pito_codecs::media::{JoinMethod, JoinOptions, join};
+use pito_codecs::media::{JoinMethod, JoinOptions, Prefs, join, probe};
 
 fn dir() -> PathBuf {
     let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/test-media");
@@ -178,4 +178,92 @@ fn a_join_copies_matching_clips_and_letterboxes_the_rest_with_silence() {
     };
     assert!(loud(0.5, 1.5) > 0.05);
     assert!(loud(2.2, 2.9) < 0.001);
+}
+
+fn has_encoder(name: &str) -> bool {
+    Command::new("ffmpeg")
+        .args(["-hide_banner", "-encoders"])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(name))
+}
+
+fn h264_clip(name: &str, pix: &str, profile: &str) -> Option<PathBuf> {
+    let path = dir().join(name);
+    ffmpeg(
+        &path,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=352x240:r=30:d=1",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            pix,
+            "-profile:v",
+            profile,
+        ],
+    )
+    .then_some(path)
+}
+
+#[test]
+fn a_10_bit_4_2_2_h264_joins_by_copy_and_is_refused_by_name_when_it_must_be_re_encoded() {
+    if !has_encoder("libx264") {
+        eprintln!("no ffmpeg with libx264 on PATH: skipped");
+        return;
+    }
+    let (Some(deep), Some(plain)) = (
+        h264_clip("join-h264-422-10.mp4", "yuv422p10le", "high422"),
+        h264_clip("join-h264-420-8.mp4", "yuv420p", "high"),
+    ) else {
+        eprintln!("ffmpeg could not make the clips: skipped");
+        return;
+    };
+    let prefs = Prefs::default();
+    let copied = dir().join("join-h264-422-10-copied.mp4");
+    let j = join(
+        &[deep.clone(), deep.clone()],
+        &copied,
+        JoinOptions::default(),
+        |_| true,
+    )
+    .unwrap();
+    assert_eq!(j.method, JoinMethod::Copy, "{}", j.reason);
+    let one = video_samples(&deep);
+    let all = video_samples(&copied);
+    assert_eq!(all.len(), one.len() * 2);
+    assert!(all.chunks(one.len()).all(|c| c == one.as_slice()));
+    let p = probe(&copied, &prefs).unwrap();
+    assert_eq!(p.video_variant(), "10-bit 4:2:2 H.264");
+    assert!(!p.video_native());
+
+    let name = deep.display().to_string();
+    for (inputs, opts) in [
+        ([plain.clone(), deep.clone()], JoinOptions::default()),
+        (
+            [deep.clone(), deep.clone()],
+            JoinOptions {
+                encode: true,
+                ..JoinOptions::default()
+            },
+        ),
+    ] {
+        let out = dir().join("join-h264-422-10-refused.mp4");
+        let _ = std::fs::remove_file(&out);
+        let e = join(&inputs, &out, opts, |_| true).unwrap_err().to_string();
+        assert_eq!(
+            e,
+            format!("unsupported: {name}: 10-bit 4:2:2 H.264 video is not supported")
+        );
+        assert!(
+            !e.replace(env!("CARGO_MANIFEST_DIR"), "")
+                .to_lowercase()
+                .contains("ffmpeg"),
+            "{e}"
+        );
+        assert!(!out.exists());
+    }
 }

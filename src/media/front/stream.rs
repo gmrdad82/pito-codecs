@@ -1,4 +1,3 @@
-use std::io::Read;
 use std::path::Path;
 use std::sync::mpsc;
 
@@ -7,11 +6,10 @@ use crate::aac::Resampler;
 use super::bare::{self, BareFeed};
 use super::base::{self as native, PAD, shape};
 use super::feed::Feed;
-use super::ffmpeg::Child;
-use super::probe::{container_ffmpeg, probe};
-use super::route::{Caps, Prefs, pick_decode};
+use super::probe::probe;
+use super::route::Prefs;
 use super::sound::Sound;
-use crate::media::{AudioBuffer, Codec, Error, Result, Route};
+use crate::media::{AudioBuffer, Error, Result, Route};
 
 pub struct AudioStream {
     pub route: Route,
@@ -32,7 +30,6 @@ impl std::fmt::Debug for AudioStream {
 
 enum Inner {
     Native(Box<Native>),
-    Ffmpeg { child: Child, got: bool },
     Mix(Vec<Part>),
     Done,
 }
@@ -72,7 +69,7 @@ pub fn audio_stream(
     from: f64,
     rate: u32,
     channels: u16,
-    prefs: &Prefs,
+    _: &Prefs,
 ) -> Result<AudioStream> {
     if rate == 0 || channels == 0 {
         return Err(Error::Invalid(format!(
@@ -82,47 +79,12 @@ pub fn audio_stream(
     if !from.is_finite() {
         return Err(Error::Invalid(format!("a stream from {from}")));
     }
-    let picked = pick_decode(Codec::Aac, prefs, &Caps::for_audio(prefs))?;
-    if picked.route != Route::Ffmpeg {
-        match Native::open(path, track, from, rate, channels) {
-            Ok(n) => {
-                return Ok(AudioStream {
-                    route: Route::Cpu,
-                    rate,
-                    channels,
-                    inner: Inner::Native(Box::new(n)),
-                });
-            }
-            Err(e) if prefs.user_ffmpeg().is_none() => return Err(e),
-            Err(_) => {}
-        }
-    }
-    let f = container_ffmpeg(prefs)?;
-    let from = from.max(0.0);
-    let mut args: Vec<String> = Vec::new();
-    if from > 0.0 {
-        args.extend(["-ss".into(), format!("{from:.6}")]);
-    }
-    args.extend([
-        "-i".into(),
-        path.display().to_string(),
-        "-map".into(),
-        format!("0:a:{track}"),
-        "-vn".into(),
-        "-ac".into(),
-        channels.to_string(),
-        "-ar".into(),
-        rate.to_string(),
-        "-f".into(),
-        "f32le".into(),
-        "-".into(),
-    ]);
-    let child = f.spawn(&args, false, true)?;
+    let native = Native::open(path, track, from, rate, channels)?;
     Ok(AudioStream {
-        route: Route::Ffmpeg,
+        route: Route::Cpu,
         rate,
         channels,
-        inner: Inner::Ffmpeg { child, got: false },
+        inner: Inner::Native(Box::new(native)),
     })
 }
 
@@ -152,13 +114,8 @@ pub fn audio_mix_stream(
             });
         }
     }
-    let route = if parts.iter().any(|p| p.stream.route == Route::Ffmpeg) {
-        Route::Ffmpeg
-    } else {
-        Route::Cpu
-    };
     Ok(AudioStream {
-        route,
+        route: Route::Cpu,
         rate,
         channels: 2,
         inner: Inner::Mix(parts),
@@ -409,45 +366,10 @@ pub(super) fn native_stream(
 
 impl AudioStream {
     fn read(&mut self) -> Result<Option<AudioBuffer>> {
-        let block = self.rate as usize * self.channels as usize * 4;
         match &mut self.inner {
             Inner::Native(n) => n.read(),
             Inner::Mix(parts) => mix(parts, self.rate),
             Inner::Done => Ok(None),
-            Inner::Ffmpeg { child, got } => {
-                let mut bytes = vec![0u8; block];
-                let mut filled = 0;
-                if let Some(out) = child.stdout.as_mut() {
-                    while filled < block {
-                        match out.read(&mut bytes[filled..]) {
-                            Ok(0) => break,
-                            Ok(n) => filled += n,
-                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                            Err(e) => return Err(Error::Io(e)),
-                        }
-                    }
-                }
-                let whole = filled / 4 / self.channels as usize * self.channels as usize * 4;
-                if whole == 0 {
-                    let first = !*got;
-                    if let Inner::Ffmpeg { child, .. } =
-                        std::mem::replace(&mut self.inner, Inner::Done)
-                    {
-                        let done = child.finish();
-                        if first {
-                            done?;
-                        }
-                    }
-                    return Ok(None);
-                }
-                *got = true;
-                let mut buf = AudioBuffer::new(self.rate, self.channels);
-                buf.samples = bytes[..whole]
-                    .chunks_exact(4)
-                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                    .collect();
-                Ok(Some(buf))
-            }
         }
     }
 }

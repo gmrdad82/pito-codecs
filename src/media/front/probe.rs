@@ -1,10 +1,10 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{LazyLock, Mutex, PoisonError};
 
-use super::base::{Key, key, sorted};
-use super::ffmpeg::{Ffmpeg, codec_of};
+use super::base::{Key, key};
 use super::route::Prefs;
+use super::variant::Chroma;
 use crate::media::{Codec, Error, Result};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -20,6 +20,9 @@ pub struct Probe {
     pub video_codec_name: String,
     pub profile: String,
     pub bit_depth: u8,
+    pub chroma: Option<Chroma>,
+    pub interlaced: bool,
+    pub(crate) tools: Option<&'static str>,
     pub frames: Option<u64>,
     pub audio: Vec<AudioTrack>,
     pub alpha: bool,
@@ -39,39 +42,193 @@ impl Probe {
     }
 
     pub fn video_native(&self) -> bool {
+        self.codec_native() && self.variant_native()
+    }
+
+    fn codec_native(&self) -> bool {
         match self.video_codec {
-            Some(Codec::H264 | Codec::Hevc | Codec::Vp9) => true,
-            Some(Codec::Av1) => {
-                cfg!(feature = "av1")
-                    || super::base::gpu()
-                        .0
-                        .contains(&(Codec::Av1, crate::media::Direction::Decode))
-            }
+            Some(Codec::H264) => cfg!(feature = "h264") || gpu_decodes(Codec::H264),
+            Some(Codec::Hevc) => cfg!(feature = "hevc") || gpu_decodes(Codec::Hevc),
+            Some(Codec::Vp9) => cfg!(feature = "vp9"),
+            Some(Codec::Av1) => cfg!(feature = "av1") || gpu_decodes(Codec::Av1),
             _ => false,
         }
     }
 
+    pub(crate) fn variant_native(&self) -> bool {
+        let plain = matches!(self.chroma, None | Some(Chroma::Yuv420)) && self.tools.is_none();
+        match self.video_codec {
+            Some(Codec::H264) => plain && !self.interlaced && self.bit_depth <= 8,
+            Some(_) => plain && matches!(self.bit_depth, 0..=8 | 10),
+            None => false,
+        }
+    }
+
+    pub fn video_variant(&self) -> String {
+        let codec = match self.video_codec {
+            Some(Codec::H264) => "H.264",
+            Some(Codec::Hevc) => "HEVC",
+            Some(Codec::Vp9) => "VP9",
+            Some(Codec::Av1) => "AV1",
+            _ => plain(&self.video_codec_name),
+        };
+        if codec.is_empty() {
+            return String::new();
+        }
+        let mut words: Vec<String> = Vec::new();
+        if self.interlaced {
+            words.push("interlaced".into());
+        }
+        if self.bit_depth > 0 {
+            words.push(format!("{}-bit", self.bit_depth));
+        }
+        if let Some(c) = self.chroma {
+            words.push(c.word().into());
+        }
+        words.push(codec.into());
+        if let Some(t) = self.tools {
+            words.push(format!("with {t}"));
+        }
+        words.join(" ")
+    }
+
     pub fn unsupported(&self) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
-        let none = self.video_codec.is_none() && self.video_codec_name.is_empty();
-        let video = (!none && !self.video_native()).then_some(self.video_codec_name.as_str());
+        let video = (self.has_video() && !self.video_native()).then(|| {
+            if self.codec_native() {
+                self.video_variant()
+            } else {
+                plain(&self.video_codec_name).to_string()
+            }
+        });
         let audio = self
             .audio
             .iter()
             .filter(|a| !a.native())
-            .map(|a| a.variant());
-        for name in video.map(str::to_string).into_iter().chain(audio) {
+            .map(AudioTrack::plain_variant);
+        for name in video.into_iter().chain(audio) {
             let name = if name.is_empty() {
-                "unknown"
+                "unknown".to_string()
             } else {
-                name.as_str()
+                name
             };
-            if !names.iter().any(|n| n == name) {
-                names.push(name.to_string());
+            if !names.contains(&name) {
+                names.push(name);
             }
         }
         names
     }
+
+    fn has_video(&self) -> bool {
+        self.video_codec.is_some() || !self.video_codec_name.is_empty() || self.width > 0
+    }
+
+    pub(crate) fn known_video(&self) -> Result<Codec> {
+        if let Some(codec) = self.video_codec {
+            return Ok(codec);
+        }
+        if !self.has_video() {
+            return Err(Error::Invalid("no video track".to_string()));
+        }
+        let name = match plain(&self.video_codec_name) {
+            "" => "unknown",
+            name => name,
+        };
+        Err(Error::Unsupported(format!("{name} video is not supported")))
+    }
+
+    pub(crate) fn decodable(&self) -> Result<()> {
+        self.known_video()?;
+        if self.variant_native() {
+            return Ok(());
+        }
+        Err(Error::Unsupported(format!(
+            "{} video is not supported",
+            self.video_variant()
+        )))
+    }
+}
+
+const PLAIN: [(&[&str], &str); 24] = [
+    (
+        &[
+            "mp4v",
+            "mpeg4",
+            "V_MPEG4/ISO/ASP",
+            "V_MPEG4/ISO/SP",
+            "V_MPEG4/ISO/AP",
+            "XVID",
+            "xvid",
+            "DIVX",
+            "divx",
+            "DX50",
+            "FMP4",
+            "MP4V",
+        ],
+        "MPEG-4 Part 2",
+    ),
+    (
+        &[
+            "mpeg2video",
+            "V_MPEG2",
+            "mp2v",
+            "m2v1",
+            "MPG2",
+            "hdv2",
+            "hdv3",
+            "hdv5",
+            "hdv6",
+        ],
+        "MPEG-2",
+    ),
+    (&["mpeg1video", "V_MPEG1", "m1v1", "MPG1"], "MPEG-1"),
+    (
+        &[
+            "apch", "apcn", "apcs", "apco", "ap4h", "ap4x", "V_PRORES", "prores",
+        ],
+        "ProRes",
+    ),
+    (
+        &[
+            "mjpeg", "jpeg", "mjpa", "mjpb", "MJPG", "AVRn", "dmb1", "V_MJPEG",
+        ],
+        "MJPEG",
+    ),
+    (&["AVdn", "AVdh", "dnxhd", "V_DNXHD"], "DNxHD"),
+    (&["vp08", "vp8", "VP80"], "VP8"),
+    (&["V_THEORA", "theora"], "Theora"),
+    (&["s263", "h263", "H263"], "H.263"),
+    (&["vc-1", "vc1", "WVC1", "WMV3"], "VC-1"),
+    (&["WMV1", "WMV2"], "Windows Media Video"),
+    (&["cvid"], "Cinepak"),
+    (&["SVQ1", "SVQ3"], "Sorenson Video"),
+    (&["V_FFV1", "FFV1"], "FFV1"),
+    (&["H264", "X264", "x264", "AVC1", "DAVC"], "VFW-mode H.264"),
+    (&["HEVC", "H265", "X265", "x265", "HVC1"], "VFW-mode HEVC"),
+    (
+        &["V_UNCOMPRESSED", "raw", "2vuy", "yuv2", "v210", "v410"],
+        "uncompressed video",
+    ),
+    (&["vorbis", "A_VORBIS"], "Vorbis"),
+    (&["flac", "fLaC", "A_FLAC"], "FLAC"),
+    (&["alac", "A_ALAC"], "ALAC"),
+    (&["A_TRUEHD", "mlpa", "truehd"], "TrueHD"),
+    (&["A_DTS", "dtsc", "dtsh", "dtsl", "dtse", "dts"], "DTS"),
+    (&["samr"], "AMR-NB"),
+    (&["sawb"], "AMR-WB"),
+];
+
+pub(crate) fn plain(id: &str) -> &str {
+    PLAIN
+        .iter()
+        .find(|(ids, _)| ids.contains(&id))
+        .map_or(id, |(_, name)| name)
+}
+
+fn gpu_decodes(codec: Codec) -> bool {
+    super::base::gpu()
+        .0
+        .contains(&(codec, crate::media::Direction::Decode))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -99,6 +256,26 @@ impl AudioTrack {
         } else {
             self.codec.clone()
         }
+    }
+
+    fn plain_variant(&self) -> String {
+        match self.variant() {
+            v if v == self.codec => plain(&self.codec).to_string(),
+            v => v,
+        }
+    }
+
+    pub(crate) fn decodable(&self) -> Result<()> {
+        if self.native() {
+            return Ok(());
+        }
+        Err(Error::Unsupported(match self.variant() {
+            v if v == self.codec => match plain(&self.codec) {
+                "" => "unknown audio is not supported".to_string(),
+                name => format!("{name} audio is not supported"),
+            },
+            v => v,
+        }))
     }
 
     pub fn native(&self) -> bool {
@@ -213,185 +390,16 @@ fn known<T: Clone>(
     Ok(v)
 }
 
-pub fn probe(path: &Path, prefs: &Prefs) -> Result<Probe> {
-    known(
-        path,
-        |k| &mut k.probe,
-        || match super::base::probe(path) {
-            Ok(p) => Ok(p),
-            Err(native) => match container_ffmpeg(prefs) {
-                Ok(f) => from_flat(&f.probe_flat(&["-show_format", "-show_streams"], path)?),
-                Err(_) => Err(native),
-            },
-        },
-    )
+pub fn probe(path: &Path, _: &Prefs) -> Result<Probe> {
+    known(path, |k| &mut k.probe, || super::base::probe(path))
 }
 
-pub fn keyframes(path: &Path, prefs: &Prefs) -> Result<Vec<f64>> {
-    known(
-        path,
-        |k| &mut k.keys,
-        || match super::base::keyframes(path) {
-            Ok(k) => Ok(k),
-            Err(native) => keyframes_of(path, prefs).map_err(|_| native),
-        },
-    )
+pub fn keyframes(path: &Path, _: &Prefs) -> Result<Vec<f64>> {
+    known(path, |k| &mut k.keys, || super::base::keyframes(path))
 }
 
-pub fn frame_count(path: &Path, prefs: &Prefs) -> Result<u64> {
-    match super::demux::frame_count(path) {
-        Ok(n) => Ok(n),
-        Err(native) => {
-            let Ok(f) = container_ffmpeg(prefs) else {
-                return Err(native);
-            };
-            f.probe_csv(
-                &[
-                    "-count_packets",
-                    "-select_streams",
-                    "v:0",
-                    "-show_entries",
-                    "stream=nb_read_packets",
-                ],
-                path,
-            )?
-            .trim()
-            .parse::<u64>()
-            .map_err(|_| native)
-        }
-    }
-}
-
-fn keyframes_of(path: &Path, prefs: &Prefs) -> Result<Vec<f64>> {
-    let start = probe(path, prefs).map_or(0.0, |p| p.start);
-    let f = container_ffmpeg(prefs)?;
-    let listing = f.probe_csv(
-        &[
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "packet=pts_time,flags",
-        ],
-        path,
-    )?;
-    Ok(sorted(
-        listing
-            .lines()
-            .filter_map(|l| {
-                let (t, flags) = l.trim().split_once(',')?;
-                flags.contains('K').then_some(())?;
-                t.parse::<f64>()
-                    .ok()
-                    .map(|t| t - start)
-                    .filter(|t| *t >= 0.0)
-            })
-            .collect(),
-    ))
-}
-
-pub(crate) fn container_ffmpeg(prefs: &Prefs) -> Result<Ffmpeg> {
-    match prefs.user_ffmpeg() {
-        Some(u) => Ffmpeg::find(u.path.as_deref()),
-        None => Err(Error::Unsupported(
-            "reading containers needs the MP4 module, which is not in this build, or ffmpeg picked in the settings"
-                .to_string(),
-        )),
-    }
-}
-
-fn rate(s: Option<&String>) -> Option<(u32, u32)> {
-    let (n, d) = s?.split_once('/')?;
-    let (n, d) = (n.parse().ok()?, d.parse().ok()?);
-    (n > 0 && d > 0).then_some((n, d))
-}
-
-fn from_flat(m: &BTreeMap<String, String>) -> Result<Probe> {
-    let get = |s: usize, k: &str| m.get(&format!("streams.stream.{s}.{k}"));
-    let count = (0..)
-        .take_while(|s| get(*s, "codec_type").is_some())
-        .count();
-    let video = (0..count)
-        .find(|&s| {
-            get(s, "codec_type").map(String::as_str) == Some("video")
-                && get(s, "disposition.attached_pic").map(String::as_str) != Some("1")
-        })
-        .ok_or_else(|| Error::Invalid("no video stream".to_string()))?;
-    let num = |s: usize, k: &str| get(s, k).and_then(|v| v.parse::<f64>().ok());
-    let fps = rate(get(video, "avg_frame_rate"))
-        .or_else(|| rate(get(video, "r_frame_rate")))
-        .ok_or_else(|| Error::Invalid("no frame rate".to_string()))?;
-    let duration = num(video, "duration")
-        .or_else(|| m.get("format.duration").and_then(|v| v.parse().ok()))
-        .filter(|d: &f64| d.is_finite() && *d >= 0.0)
-        .ok_or_else(|| Error::Invalid("no duration".to_string()))?;
-    let side = (0..8)
-        .find_map(|i| num(video, &format!("side_data_list.side_data.{i}.rotation")))
-        .map(|r| -r);
-    let tag = num(video, "tags.rotate");
-    let rotation = side.or(tag).unwrap_or(0.0).round() as i64;
-    let rotation = ((rotation.rem_euclid(360) + 45) / 90 * 90 % 360) as u16;
-    let codec_name = get(video, "codec_name").cloned().unwrap_or_default();
-    let pix = get(video, "pix_fmt").cloned().unwrap_or_default();
-    let audio = (0..count)
-        .filter(|&s| get(s, "codec_type").map(String::as_str) == Some("audio"))
-        .enumerate()
-        .map(|(index, s)| AudioTrack {
-            index,
-            stream: get(s, "index").and_then(|v| v.parse().ok()).unwrap_or(s),
-            title: ["tags.title", "tags.name", "tags.handler_name"]
-                .iter()
-                .filter_map(|k| get(s, k))
-                .map(|t| t.trim())
-                .find(|t| {
-                    let l = t.to_lowercase();
-                    !t.is_empty()
-                        && ![
-                            "soundhandler",
-                            "sound handler",
-                            "gpac",
-                            "l-smash",
-                            "media handler",
-                        ]
-                        .iter()
-                        .any(|g| l.contains(g))
-                })
-                .map(str::to_string),
-            language: get(s, "tags.language")
-                .filter(|l| !l.is_empty() && *l != "und")
-                .cloned(),
-            codec: get(s, "codec_name").cloned().unwrap_or_default(),
-            channels: num(s, "channels").unwrap_or(0.0) as u16,
-            rate: num(s, "sample_rate").unwrap_or(0.0) as u32,
-            bitrate: num(s, "bit_rate").map(|b| b as u32),
-            default: get(s, "disposition.default").map(String::as_str) == Some("1"),
-            start: num(s, "start_time").filter(|t| t.is_finite()),
-            bits: 0,
-            refused: None,
-        })
-        .collect();
-    let start = m
-        .get("format.start_time")
-        .and_then(|v| v.parse::<f64>().ok())
-        .filter(|t| t.is_finite())
-        .unwrap_or(0.0)
-        .max(0.0);
-    Ok(Probe {
-        duration,
-        start,
-        video_start: num(video, "start_time").filter(|t| t.is_finite()),
-        fps,
-        width: num(video, "width").unwrap_or(0.0) as u32,
-        height: num(video, "height").unwrap_or(0.0) as u32,
-        rotation,
-        video_codec: codec_of(&codec_name),
-        video_codec_name: codec_name,
-        profile: get(video, "profile").cloned().unwrap_or_default(),
-        bit_depth: if pix.contains("10") { 10 } else { 8 },
-        frames: num(video, "nb_frames").map(|n| n as u64),
-        audio,
-        alpha: get(video, "tags.alpha_mode").map(String::as_str) == Some("1")
-            || pix.starts_with("yuva"),
-    })
+pub fn frame_count(path: &Path, _: &Prefs) -> Result<u64> {
+    super::demux::frame_count(path)
 }
 
 #[cfg(feature = "flac")]
@@ -402,4 +410,281 @@ pub(super) fn flac_bits(config: &[u8]) -> u8 {
 #[cfg(not(feature = "flac"))]
 pub(super) fn flac_bits(_: &[u8]) -> u8 {
     0
+}
+
+#[cfg(all(test, feature = "h264", feature = "hevc"))]
+mod tests {
+    use super::*;
+
+    fn video(codec: Codec, bit_depth: u8, chroma: Option<Chroma>, interlaced: bool) -> Probe {
+        Probe {
+            duration: 1.0,
+            start: 0.0,
+            video_start: Some(0.0),
+            fps: (30, 1),
+            width: 352,
+            height: 240,
+            rotation: 0,
+            video_codec: Some(codec),
+            video_codec_name: match codec {
+                Codec::H264 => "h264",
+                Codec::Hevc => "hevc",
+                Codec::Vp9 => "vp9",
+                _ => "av1",
+            }
+            .into(),
+            profile: String::new(),
+            bit_depth,
+            chroma,
+            interlaced,
+            tools: None,
+            frames: Some(30),
+            audio: Vec::new(),
+            alpha: false,
+        }
+    }
+
+    fn native(p: &Probe) -> bool {
+        p.variant_native()
+    }
+
+    #[test]
+    fn plain_variants_name_depth_chroma_and_codec() {
+        let cases = [
+            (Codec::H264, 8, Chroma::Yuv420, false, "8-bit 4:2:0 H.264"),
+            (Codec::H264, 10, Chroma::Yuv422, false, "10-bit 4:2:2 H.264"),
+            (
+                Codec::H264,
+                8,
+                Chroma::Yuv420,
+                true,
+                "interlaced 8-bit 4:2:0 H.264",
+            ),
+            (Codec::Hevc, 12, Chroma::Yuv444, false, "12-bit 4:4:4 HEVC"),
+            (Codec::Hevc, 10, Chroma::Yuv420, false, "10-bit 4:2:0 HEVC"),
+            (Codec::Vp9, 8, Chroma::Yuv440, false, "8-bit 4:4:0 VP9"),
+            (Codec::Av1, 8, Chroma::Mono, false, "8-bit monochrome AV1"),
+        ];
+        for (codec, depth, chroma, interlaced, name) in cases {
+            assert_eq!(
+                video(codec, depth, Some(chroma), interlaced).video_variant(),
+                name
+            );
+        }
+        let mut p = video(Codec::Hevc, 10, Some(Chroma::Yuv420), false);
+        p.tools = Some("range extension tools");
+        assert_eq!(
+            p.video_variant(),
+            "10-bit 4:2:0 HEVC with range extension tools"
+        );
+        assert_eq!(video(Codec::H264, 0, None, false).video_variant(), "H.264");
+        let mut other = video(Codec::H264, 8, Some(Chroma::Yuv420), false);
+        other.video_codec = None;
+        other.video_codec_name = "mpeg2video".into();
+        assert_eq!(other.video_variant(), "8-bit 4:2:0 MPEG-2");
+        other.video_codec_name.clear();
+        assert_eq!(other.video_variant(), "");
+    }
+
+    #[test]
+    fn h264_takes_only_progressive_8_bit_4_2_0() {
+        let yes = |d, c, i| native(&video(Codec::H264, d, c, i));
+        assert!(yes(8, Some(Chroma::Yuv420), false));
+        assert!(yes(8, None, false));
+        assert!(!yes(8, Some(Chroma::Yuv420), true));
+        assert!(!yes(10, Some(Chroma::Yuv420), false));
+        assert!(!yes(10, Some(Chroma::Yuv422), false));
+        assert!(!yes(8, Some(Chroma::Yuv422), false));
+        assert!(!yes(8, Some(Chroma::Yuv444), false));
+        assert!(!yes(8, Some(Chroma::Mono), false));
+        let mut lossless = video(Codec::H264, 8, Some(Chroma::Yuv420), false);
+        lossless.tools = Some("lossless coding");
+        assert!(!native(&lossless));
+        lossless.tools = Some("slice groups");
+        assert!(!native(&lossless));
+    }
+
+    #[test]
+    fn hevc_vp9_and_av1_take_8_and_10_bit_4_2_0_only() {
+        for codec in [Codec::Hevc, Codec::Vp9, Codec::Av1] {
+            let yes = |d, c| native(&video(codec, d, c, false));
+            assert!(yes(8, Some(Chroma::Yuv420)), "{codec:?}");
+            assert!(yes(10, Some(Chroma::Yuv420)), "{codec:?}");
+            assert!(yes(10, None), "{codec:?}");
+            assert!(!yes(12, Some(Chroma::Yuv420)), "{codec:?}");
+            assert!(!yes(8, Some(Chroma::Yuv422)), "{codec:?}");
+            assert!(!yes(10, Some(Chroma::Yuv444)), "{codec:?}");
+            assert!(!yes(8, Some(Chroma::Yuv440)), "{codec:?}");
+            assert!(!yes(8, Some(Chroma::Mono)), "{codec:?}");
+        }
+        let mut tools = video(Codec::Hevc, 8, Some(Chroma::Yuv420), false);
+        tools.tools = Some("multilayer extensions");
+        assert!(!native(&tools));
+    }
+
+    #[test]
+    fn unsupported_names_the_variant_when_the_codec_has_a_route() {
+        let p = video(Codec::H264, 10, Some(Chroma::Yuv422), false);
+        assert!(!p.video_native());
+        assert_eq!(p.unsupported(), ["10-bit 4:2:2 H.264"]);
+        let p = video(Codec::Hevc, 12, Some(Chroma::Yuv444), false);
+        assert_eq!(p.unsupported(), ["12-bit 4:4:4 HEVC"]);
+        let mut p = video(Codec::H264, 8, Some(Chroma::Yuv420), false);
+        assert!(p.video_native());
+        assert!(p.unsupported().is_empty());
+        p.video_codec = None;
+        p.video_codec_name = "mpeg2video".into();
+        assert_eq!(p.unsupported(), ["MPEG-2"]);
+    }
+
+    fn track(codec: &str) -> AudioTrack {
+        AudioTrack {
+            index: 0,
+            stream: 1,
+            title: None,
+            language: None,
+            codec: codec.into(),
+            channels: 2,
+            rate: 48_000,
+            bitrate: None,
+            default: true,
+            start: None,
+            bits: 0,
+            refused: None,
+        }
+    }
+
+    fn audio_only(codecs: &[&str]) -> Probe {
+        let mut p = video(Codec::H264, 0, None, false);
+        p.video_codec = None;
+        p.video_codec_name.clear();
+        p.width = 0;
+        p.height = 0;
+        p.audio = codecs.iter().map(|c| track(c)).collect();
+        p
+    }
+
+    #[test]
+    fn readers_ids_read_as_names_a_person_knows() {
+        for (id, name) in [
+            ("mp4v", "MPEG-4 Part 2"),
+            ("V_MPEG4/ISO/ASP", "MPEG-4 Part 2"),
+            ("XVID", "MPEG-4 Part 2"),
+            ("mpeg2video", "MPEG-2"),
+            ("V_MPEG2", "MPEG-2"),
+            ("mpeg1video", "MPEG-1"),
+            ("apch", "ProRes"),
+            ("ap4x", "ProRes"),
+            ("jpeg", "MJPEG"),
+            ("mjpeg", "MJPEG"),
+            ("MJPG", "MJPEG"),
+            ("AVdn", "DNxHD"),
+            ("vp8", "VP8"),
+            ("V_THEORA", "Theora"),
+            ("WVC1", "VC-1"),
+            ("vorbis", "Vorbis"),
+            ("A_TRUEHD", "TrueHD"),
+            ("A_DTS", "DTS"),
+            ("alac", "ALAC"),
+            ("H264", "VFW-mode H.264"),
+            ("x264", "VFW-mode H.264"),
+            ("HEVC", "VFW-mode HEVC"),
+        ] {
+            assert_eq!(plain(id), name, "{id}");
+        }
+        for id in [
+            "h264",
+            "hevc",
+            "avc1",
+            "hvc1",
+            "hev1",
+            "av1",
+            "aac",
+            "opus",
+            "",
+            "zzzz",
+            "V_SOMETHING",
+        ] {
+            assert_eq!(plain(id), id);
+        }
+        for (ids, name) in PLAIN {
+            assert!(!name.is_empty());
+            assert!(ids.iter().all(|id| plain(id) == name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_codec_no_reader_knows_is_refused_by_its_plain_name() {
+        let mut p = video(Codec::H264, 8, Some(Chroma::Yuv420), false);
+        p.video_codec = None;
+        for (id, said) in [
+            ("mp4v", "unsupported: MPEG-4 Part 2 video is not supported"),
+            ("V_MPEG2", "unsupported: MPEG-2 video is not supported"),
+            ("apcn", "unsupported: ProRes video is not supported"),
+            ("H264", "unsupported: VFW-mode H.264 video is not supported"),
+            (
+                "V_SOMETHING",
+                "unsupported: V_SOMETHING video is not supported",
+            ),
+            ("", "unsupported: unknown video is not supported"),
+        ] {
+            p.video_codec_name = id.into();
+            assert_eq!(p.known_video().unwrap_err().to_string(), said);
+            assert_eq!(p.decodable().unwrap_err().to_string(), said);
+            assert!(!p.video_native());
+        }
+        p.video_codec_name = "mp4v".into();
+        assert_eq!(p.unsupported(), ["MPEG-4 Part 2"]);
+    }
+
+    #[test]
+    fn a_variant_no_decoder_takes_is_refused_at_open_and_a_plain_one_opens() {
+        let p = video(Codec::H264, 10, Some(Chroma::Yuv422), false);
+        assert_eq!(p.known_video().unwrap(), Codec::H264);
+        assert_eq!(
+            p.decodable().unwrap_err().to_string(),
+            "unsupported: 10-bit 4:2:2 H.264 video is not supported"
+        );
+        let p = video(Codec::H264, 8, Some(Chroma::Yuv420), true);
+        assert_eq!(
+            p.decodable().unwrap_err().to_string(),
+            "unsupported: interlaced 8-bit 4:2:0 H.264 video is not supported"
+        );
+        for codec in [Codec::H264, Codec::Hevc, Codec::Vp9, Codec::Av1] {
+            assert!(
+                video(codec, 8, Some(Chroma::Yuv420), false)
+                    .decodable()
+                    .is_ok()
+            );
+            assert!(video(codec, 8, None, false).decodable().is_ok());
+        }
+        assert!(
+            video(Codec::Hevc, 10, Some(Chroma::Yuv420), false)
+                .decodable()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_file_with_no_video_says_so_and_lists_only_its_audio() {
+        let p = audio_only(&["aac"]);
+        assert_eq!(
+            p.decodable().unwrap_err().to_string(),
+            "invalid data: no video track"
+        );
+        assert_eq!(
+            p.known_video().unwrap_err().to_string(),
+            "invalid data: no video track"
+        );
+        assert!(p.unsupported().is_empty(), "{:?}", p.unsupported());
+        let p = audio_only(&["aac", "vorbis", "A_TRUEHD", "vorbis"]);
+        assert_eq!(p.unsupported(), ["Vorbis", "TrueHD"]);
+        let mut p = audio_only(&[]);
+        p.width = 352;
+        assert_eq!(
+            p.decodable().unwrap_err().to_string(),
+            "unsupported: unknown video is not supported"
+        );
+        assert_eq!(p.unsupported(), ["unknown"]);
+    }
 }

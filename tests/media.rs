@@ -15,10 +15,11 @@ use std::process::Command;
 use std::sync::{Arc, OnceLock};
 
 use pito_codecs::media::{
-    AudioBuffer, Canvas, Choice, Codec, ExportOptions, Frame, IN_FLIGHT, Piece, PixelFormat, Prefs,
-    Progress, Rgba, Seek, Stills, TimeBase, VideoFrame, audio_mix, audio_mix_stream, audio_pcm,
-    audio_pcm_range, audio_stream, decode_video, decode_video_gpu, export, export_frames,
-    export_with_audio, first_frame, frame_count, frames_at, frames_at_seek, keyframes, probe,
+    AudioBuffer, Canvas, Choice, Chroma, Codec, ExportOptions, Frame, IN_FLIGHT, Piece,
+    PixelFormat, Prefs, Progress, Rgba, Seek, Stills, TimeBase, VideoFrame, audio_mix,
+    audio_mix_stream, audio_pcm, audio_pcm_range, audio_stream, decode_video, decode_video_gpu,
+    export, export_frames, export_with_audio, first_frame, frame_count, frames_at, frames_at_seek,
+    keyframes, probe,
 };
 
 fn have_ffmpeg() -> bool {
@@ -116,46 +117,6 @@ fn lit(img: &Rgba) -> bool {
     img.data.chunks_exact(4).any(|p| p[0] > 40 || p[1] > 40)
 }
 
-#[test]
-fn the_ffmpeg_route_probes_shows_and_hears_a_file() {
-    if !have_ffmpeg() {
-        eprintln!("no ffmpeg on PATH: skipped");
-        return;
-    }
-    let prefs = Prefs::ffmpeg();
-    let p = probe(clip(), &prefs).unwrap();
-    assert_eq!((p.width, p.height, p.fps), (1280, 720, (60, 1)));
-    assert_eq!(p.video_codec, Some(Codec::H264));
-    assert!((p.duration - 6.0).abs() < 0.05, "{}", p.duration);
-    let titles: Vec<_> = p.audio.iter().map(|a| a.title.clone()).collect();
-    assert_eq!(titles, [Some("Game".into()), Some("Mic".into())]);
-    assert_eq!((p.audio[1].index, p.audio[1].channels), (1, 1));
-
-    let still = first_frame(clip(), 240, &prefs).unwrap();
-    assert_eq!((still.width, still.height), (426, 240));
-    assert!(lit(&still));
-    let strip = frames_at(clip(), &[0.5, 2.0, 4.0, 99.0], 120, &prefs).unwrap();
-    assert_eq!(strip.len(), 4);
-    assert!(strip.iter().all(|s| s.height == 120 && lit(s)));
-
-    let pcm = audio_pcm(clip(), 1, 16_000, true, &prefs).unwrap();
-    assert_eq!(pcm.channels, 1);
-    assert!(
-        (pcm.frames() as i64 - 96_000).abs() < 1_600,
-        "{}",
-        pcm.frames()
-    );
-    assert!(pcm.samples.iter().any(|s| s.abs() > 0.1));
-
-    let frames: Vec<_> = decode_video(clip(), 3.0, Some(360), &prefs)
-        .unwrap()
-        .take(5)
-        .collect::<Result<_, _>>()
-        .unwrap();
-    assert_eq!(frames.len(), 5);
-    assert_eq!((frames[0].width, frames[0].pts), (640, 180));
-}
-
 fn min_psnr(out: &Path, src: &Path, ranges: &[(i64, i64)]) -> f64 {
     let mut graph = format!("[1:v]split={}", ranges.len());
     for i in 0..ranges.len() {
@@ -207,8 +168,39 @@ fn min_psnr(out: &Path, src: &Path, ranges: &[(i64, i64)]) -> f64 {
         .fold(f64::INFINITY, f64::min)
 }
 
-fn routes() -> [(&'static str, Prefs); 2] {
-    [("ffmpeg", Prefs::ffmpeg()), ("ours", Prefs::default())]
+fn routes() -> [(&'static str, Prefs); 1] {
+    [("ours", Prefs::default())]
+}
+
+fn ffmpeg_still(path: &Path, at: f64, height: u32, exact: bool) -> Rgba {
+    let mut c = Command::new("ffmpeg");
+    c.args(["-nostdin", "-v", "error", "-threads", "2"]);
+    if !exact {
+        c.args(["-skip_frame", "nokey", "-noaccurate_seek"]);
+    }
+    if at > 0.0 {
+        c.args(["-ss", &format!("{at:.6}")]);
+    }
+    let out = c
+        .arg("-i")
+        .arg(path)
+        .args(["-map", "0:v:0", "-frames:v", "1", "-vf"])
+        .arg(format!("scale=-2:{height}:flags=bilinear"))
+        .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let width = (out.stdout.len() / 4 / height as usize) as u32;
+    assert_eq!(out.stdout.len(), width as usize * height as usize * 4);
+    Rgba {
+        width,
+        height,
+        data: out.stdout,
+    }
 }
 
 #[test]
@@ -223,7 +215,7 @@ fn our_route_probes_shows_and_hears_without_ffmpeg() {
     let titles: Vec<_> = p.audio.iter().map(|a| a.title.clone()).collect();
     assert_eq!(titles, [Some("Game".into()), Some("Mic".into())]);
     let ours = first_frame(clip(), 240, &prefs).unwrap();
-    let theirs = first_frame(clip(), 240, &Prefs::ffmpeg()).unwrap();
+    let theirs = ffmpeg_still(clip(), 0.0, 240, false);
     assert_eq!((ours.width, ours.height), (theirs.width, theirs.height));
     let diff = ours
         .data
@@ -333,8 +325,7 @@ fn a_three_piece_export_with_a_repeat_smart_cuts_to_the_frame_on_every_route() {
         .unwrap();
         assert!(done.smart && stages > 2, "{name}");
         assert_eq!(done.frames, 336, "{name}");
-        let at_least = if name == "ours" { 180 } else { 120 };
-        assert!(done.copied >= at_least, "{name}: {}", done.copied);
+        assert!(done.copied >= 180, "{name}: {}", done.copied);
         assert!(decodes_clean(&out), "{name}");
         let psnr = min_psnr(&out, clip(), &[(66, 204), (30, 90), (66, 204)]);
         assert!(psnr > 40.0, "{name}: {psnr}");
@@ -433,11 +424,9 @@ fn header_durations_match_the_samples(path: &Path, name: &str) {
             ticks - media_time
         };
         let kind = if video { "video" } else { "audio" };
-        if name != "ffmpeg" {
-            let expected = if video { shown } else { shown + media_time };
-            assert_eq!(media, expected, "{name}: mdhd of a {kind} track");
-            assert_eq!(ticks, media, "{name}: stts of a {kind} track");
-        }
+        let expected = if video { shown } else { shown + media_time };
+        assert_eq!(media, expected, "{name}: mdhd of a {kind} track");
+        assert_eq!(ticks, media, "{name}: stts of a {kind} track");
         let shown = shown as f64 / ts as f64;
         if let Some((segment, _)) = start {
             let segment = segment as f64 / movie_ts as f64;
@@ -735,14 +724,14 @@ fn an_export_with_an_overlay_re_encodes_and_paints_every_frame_on_every_route() 
         );
         if codec == "h264" {
             assert!(
-                name == "ours" && done.reasons.iter().any(|r| r.contains("instead")),
+                done.reasons.iter().any(|r| r.contains("instead")),
                 "{name}: {:?}",
                 done.reasons
             );
         } else {
             assert_eq!(codec, "hevc", "{name}");
         }
-        let top = first_frame(&out, 720, &Prefs::ffmpeg()).unwrap();
+        let top = ffmpeg_still(&out, 0.0, 720, false);
         let px = &top.data[(50 * 1280 + 640) * 4..(50 * 1280 + 640) * 4 + 3];
         assert!(px[0] > 220 && px[1] < 40 && px[2] < 40, "{name}: {px:?}");
         assert!(decodes_clean(&out), "{name}");
@@ -1298,7 +1287,7 @@ fn an_mkv_still_late_in_a_recording_comes_from_the_cues_on_every_route() {
         decode: Choice::Cpu,
         ..Prefs::default()
     };
-    let theirs = frames_at(path, &[170.5], 120, &Prefs::ffmpeg()).unwrap();
+    let theirs = [ffmpeg_still(path, 170.5, 120, false)];
     let mut routes = Vec::new();
     for prefs in [cpu.clone(), Prefs::default()] {
         let mut ours = frames_at(path, &[170.5, 10.0, 171.9, 172.0, 999.0], 120, &prefs).unwrap();
@@ -1311,7 +1300,7 @@ fn an_mkv_still_late_in_a_recording_comes_from_the_cues_on_every_route() {
     }
     assert!(mean_diff(&routes[0], &routes[1]) < 1.0);
     let first = first_frame(path, 240, &cpu).unwrap();
-    let theirs = first_frame(path, 240, &Prefs::ffmpeg()).unwrap();
+    let theirs = ffmpeg_still(path, 0.0, 240, false);
     assert!(mean_diff(&first, &theirs) < 6.0);
 }
 
@@ -1389,8 +1378,6 @@ fn a_range_past_the_end_returns_only_what_the_track_has() {
     assert!(tail.samples == theirs[178 * 96_000..]);
     let past = audio_pcm_range(path, 0, 200.0, 210.0, 48_000, 2, &prefs).unwrap();
     assert_eq!(past.frames(), 0);
-    let tail = audio_pcm_range(path, 0, 178.0, 190.0, 48_000, 2, &Prefs::ffmpeg()).unwrap();
-    assert!(tail.frames() <= 96_000 && tail.frames() > 94_000);
     let whole = audio_pcm(clip(), 0, 48_000, false, &prefs).unwrap();
     let aac = audio_pcm_range(clip(), 0, 4.0, 16.0, 48_000, 2, &prefs).unwrap();
     assert_eq!(aac.frames(), whole.frames() - 4 * 48_000);
@@ -1432,7 +1419,7 @@ fn an_exact_still_inside_the_first_gop_of_a_fade_is_not_the_keyframe() {
                 ],
             );
         }
-        let theirs = frames_at_seek(&path, &[1.5], 120, Seek::Exact, &Prefs::ffmpeg()).unwrap();
+        let theirs = [ffmpeg_still(&path, 1.5, 120, true)];
         for prefs in [cpu.clone(), Prefs::default()] {
             let key = frames_at(&path, &[1.5], 120, &prefs).unwrap();
             assert!(!lit(&key[0]), "{name}: the keyframe at 0 is not black");
@@ -2189,9 +2176,8 @@ fn a_file_that_starts_late_counts_every_time_from_its_start() {
             assert!(diff < 1.0, "{ext}: {diff}");
         }
         let still = frames_at_seek(&path, &[at], 240, Seek::Exact, &cpu).unwrap();
-        let theirs_still =
-            frames_at_seek(&path, &[at], 240, Seek::Exact, &Prefs::ffmpeg()).unwrap();
-        let d = mean_diff(&still[0], &theirs_still[0]);
+        let theirs_still = ffmpeg_still(&path, at, 240, true);
+        let d = mean_diff(&still[0], &theirs_still);
         assert!(d < 6.0, "{ext}: {d}");
 
         let ours = audio_pcm_range(&path, 0, 30.0, 35.0, 48_000, 1, &prefs).unwrap();
@@ -2632,4 +2618,876 @@ fn av1_in_mp4_mkv_and_webm_probes_and_decodes_on_the_gpu_or_refuses_cleanly() {
         }
         assert_eq!(n, 30, "{name}");
     }
+}
+
+fn variant_clip(name: &str, encode: &[&str]) -> PathBuf {
+    let path = dir().join(name);
+    if !path.exists() {
+        let mut args = vec!["-f", "lavfi", "-i", "testsrc2=s=352x240:r=30:d=1"];
+        args.extend_from_slice(encode);
+        ffmpeg_make(&path, &args);
+    }
+    path
+}
+
+#[test]
+fn a_10_bit_4_2_2_h264_is_refused_at_probe_with_its_variant_on_every_container() {
+    if !have_ffmpeg() || !has_encoder("libx264") {
+        eprintln!("no ffmpeg with libx264 on PATH: skipped");
+        return;
+    }
+    let prefs = Prefs::default();
+    for ext in ["mp4", "mkv"] {
+        let path = variant_clip(
+            &format!("h264-10bit-422.{ext}"),
+            &[
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv422p10le",
+                "-profile:v",
+                "high422",
+            ],
+        );
+        let p = probe(&path, &prefs).unwrap();
+        assert_eq!(
+            (p.video_codec, p.bit_depth, p.chroma, p.interlaced),
+            (Some(Codec::H264), 10, Some(Chroma::Yuv422), false),
+            "{ext}"
+        );
+        assert_eq!(p.video_variant(), "10-bit 4:2:2 H.264", "{ext}");
+        assert!(!p.video_native(), "{ext}");
+        assert_eq!(p.unsupported(), ["10-bit 4:2:2 H.264"], "{ext}");
+        assert_eq!(
+            first_frame(&path, 120, &prefs).unwrap_err().to_string(),
+            "unsupported: 10-bit 4:2:2 H.264 video is not supported",
+            "{ext}"
+        );
+    }
+}
+
+#[test]
+fn an_interlaced_h264_is_refused_at_probe_and_a_plain_one_is_native() {
+    if !have_ffmpeg() || !has_encoder("libx264") {
+        eprintln!("no ffmpeg with libx264 on PATH: skipped");
+        return;
+    }
+    let prefs = Prefs::default();
+    let interlaced = variant_clip(
+        "h264-interlaced.mp4",
+        &[
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-flags",
+            "+ildct+ilme",
+            "-x264opts",
+            "tff=1",
+        ],
+    );
+    let p = probe(&interlaced, &prefs).unwrap();
+    assert!(p.interlaced);
+    assert_eq!(p.video_variant(), "interlaced 8-bit 4:2:0 H.264");
+    assert!(!p.video_native());
+    assert_eq!(p.unsupported(), ["interlaced 8-bit 4:2:0 H.264"]);
+    let plain = variant_clip(
+        "h264-plain-high.mkv",
+        &[
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-profile:v",
+            "high",
+        ],
+    );
+    let p = probe(&plain, &prefs).unwrap();
+    assert_eq!(
+        (p.bit_depth, p.chroma, p.interlaced),
+        (8, Some(Chroma::Yuv420), false)
+    );
+    assert_eq!(p.video_variant(), "8-bit 4:2:0 H.264");
+    assert!(p.video_native());
+    assert!(p.unsupported().is_empty());
+}
+
+fn has_encoder(name: &str) -> bool {
+    Command::new("ffmpeg")
+        .args(["-hide_banner", "-encoders"])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(name))
+}
+
+#[test]
+fn a_10_bit_4_2_2_hevc_is_refused_at_probe_and_main_10_is_native() {
+    if !have_ffmpeg() || !has_encoder("libx265") {
+        return;
+    }
+    let prefs = Prefs::default();
+    let x265 = |pix: &'static str| {
+        [
+            "-c:v",
+            "libx265",
+            "-pix_fmt",
+            pix,
+            "-x265-params",
+            "log-level=error",
+        ]
+    };
+    for ext in ["mp4", "mkv"] {
+        let path = variant_clip(&format!("hevc-10bit-422.{ext}"), &x265("yuv422p10le"));
+        let p = probe(&path, &prefs).unwrap();
+        assert_eq!(
+            (p.video_codec, p.bit_depth, p.chroma, p.interlaced),
+            (Some(Codec::Hevc), 10, Some(Chroma::Yuv422), false),
+            "{ext}"
+        );
+        let variant = p.video_variant();
+        assert!(variant.starts_with("10-bit 4:2:2 HEVC"), "{ext}: {variant}");
+        assert!(!p.video_native(), "{ext}");
+        assert_eq!(p.unsupported(), [variant], "{ext}");
+        let path = variant_clip(&format!("hevc-main10.{ext}"), &x265("yuv420p10le"));
+        let p = probe(&path, &prefs).unwrap();
+        assert_eq!(p.video_variant(), "10-bit 4:2:0 HEVC", "{ext}");
+        assert!(p.video_native(), "{ext}");
+        assert!(p.unsupported().is_empty(), "{ext}");
+    }
+}
+
+#[test]
+fn vp9_profiles_read_from_the_webm_keyframe_and_the_mp4_vpcc_alike() {
+    if !have_ffmpeg() || !has_encoder("libvpx-vp9") {
+        return;
+    }
+    let prefs = Prefs::default();
+    let vpx = |pix: &'static str| {
+        [
+            "-c:v",
+            "libvpx-vp9",
+            "-deadline",
+            "realtime",
+            "-cpu-used",
+            "8",
+            "-pix_fmt",
+            pix,
+        ]
+    };
+    for ext in ["webm", "mp4"] {
+        let path = variant_clip(&format!("vp9-444.{ext}"), &vpx("yuv444p"));
+        let p = probe(&path, &prefs).unwrap();
+        assert_eq!(p.video_variant(), "8-bit 4:4:4 VP9", "{ext}");
+        assert!(!p.video_native(), "{ext}");
+        assert_eq!(p.unsupported(), ["8-bit 4:4:4 VP9"], "{ext}");
+        let path = variant_clip(&format!("vp9-10bit.{ext}"), &vpx("yuv420p10le"));
+        let p = probe(&path, &prefs).unwrap();
+        assert_eq!(p.video_variant(), "10-bit 4:2:0 VP9", "{ext}");
+        assert!(p.video_native(), "{ext}");
+    }
+}
+
+fn said<T, E: std::fmt::Display>(r: Result<T, E>) -> String {
+    match r {
+        Ok(_) => panic!("opened what should be refused"),
+        Err(e) => e.to_string(),
+    }
+}
+
+fn refused_in_one_line<T, E: std::fmt::Display>(r: Result<T, E>, naming: &str) -> String {
+    let e = said(r);
+    assert_eq!(e.lines().count(), 1, "{e}");
+    assert!(e.contains(naming), "{naming}: {e}");
+    assert!(
+        !e.replace(env!("CARGO_MANIFEST_DIR"), "")
+            .to_lowercase()
+            .contains("ffmpeg"),
+        "{e}"
+    );
+    e
+}
+
+fn every_open_says(path: &Path, want: &str) {
+    let prefs = Prefs::default();
+    let name = path.display();
+    assert_eq!(said(decode_video(path, 0.0, None, &prefs)), want, "{name}");
+    assert_eq!(
+        said(decode_video_gpu(path, 0.0, None, &prefs)),
+        want,
+        "{name}"
+    );
+    assert_eq!(said(first_frame(path, 120, &prefs)), want, "{name}");
+    assert_eq!(said(frames_at(path, &[0.5], 120, &prefs)), want, "{name}");
+    assert_eq!(said(Stills::open(path, 120, &prefs)), want, "{name}");
+    let piece = Piece {
+        path: path.to_path_buf(),
+        from: 0.1,
+        to: 0.6,
+    };
+    let out = dir().join(format!(
+        "{}.refused.mp4",
+        path.file_name().unwrap().to_string_lossy()
+    ));
+    assert_eq!(
+        said(export(&out, &[piece], ExportOptions::default(), |_| true)),
+        want,
+        "{name}"
+    );
+    assert!(!out.exists(), "{name}");
+}
+
+#[test]
+fn a_video_codec_no_decoder_reads_is_refused_at_open_by_its_plain_name() {
+    if !have_ffmpeg() {
+        eprintln!("no ffmpeg on PATH: skipped");
+        return;
+    }
+    let prefs = Prefs::default();
+    for (name, encode, plain) in [
+        (
+            "mpeg4-part2.mp4",
+            &["-c:v", "mpeg4", "-f", "mp4"][..],
+            "MPEG-4 Part 2",
+        ),
+        (
+            "mpeg4-part2.mkv",
+            &["-c:v", "mpeg4", "-f", "matroska"][..],
+            "MPEG-4 Part 2",
+        ),
+        (
+            "mpeg2.mp4",
+            &["-c:v", "mpeg2video", "-f", "mp4"][..],
+            "MPEG-2",
+        ),
+        (
+            "mpeg2.mkv",
+            &["-c:v", "mpeg2video", "-f", "matroska"][..],
+            "MPEG-2",
+        ),
+        (
+            "mjpeg.mov",
+            &["-c:v", "mjpeg", "-pix_fmt", "yuvj420p", "-f", "mov"][..],
+            "MJPEG",
+        ),
+        (
+            "mjpeg.mkv",
+            &["-c:v", "mjpeg", "-pix_fmt", "yuvj420p", "-f", "matroska"][..],
+            "MJPEG",
+        ),
+    ] {
+        let path = variant_clip(name, encode);
+        let p = probe(&path, &prefs).unwrap();
+        assert_eq!(p.video_codec, None, "{name}");
+        assert!(!p.video_native(), "{name}");
+        assert_eq!(p.unsupported(), [plain], "{name}");
+        assert!(keyframes(&path, &prefs).is_ok(), "{name}");
+        let want = format!("unsupported: {plain} video is not supported");
+        refused_in_one_line(first_frame(&path, 120, &prefs), plain);
+        every_open_says(&path, &want);
+    }
+}
+
+#[test]
+fn a_container_no_reader_takes_is_refused_by_name_at_probe_and_every_open() {
+    if !have_ffmpeg() {
+        eprintln!("no ffmpeg on PATH: skipped");
+        return;
+    }
+    let prefs = Prefs::default();
+    for (name, encode, container) in [
+        ("mpeg4.avi", &["-c:v", "mpeg4", "-f", "avi"][..], "AVI"),
+        (
+            "mpeg2.ts",
+            &["-c:v", "mpeg2video", "-f", "mpegts"][..],
+            "MPEG-TS",
+        ),
+        (
+            "mpeg2.m2ts",
+            &[
+                "-c:v",
+                "mpeg2video",
+                "-mpegts_m2ts_mode",
+                "1",
+                "-f",
+                "mpegts",
+            ][..],
+            "MPEG-TS",
+        ),
+        ("flv1.flv", &["-c:v", "flv1", "-f", "flv"][..], "FLV"),
+        (
+            "mpeg2.mpg",
+            &["-c:v", "mpeg2video", "-f", "vob"][..],
+            "MPEG-PS",
+        ),
+        ("wmv2.wmv", &["-c:v", "wmv2", "-f", "asf"][..], "ASF"),
+    ] {
+        let path = variant_clip(name, encode);
+        let e = refused_in_one_line(probe(&path, &prefs), container);
+        assert!(e.starts_with("unsupported: "), "{name}: {e}");
+        assert!(e.ends_with(" files are not supported"), "{name}: {e}");
+        assert_eq!(said(keyframes(&path, &prefs)), e, "{name}");
+        assert_eq!(said(frame_count(&path, &prefs)), e, "{name}");
+        every_open_says(&path, &e);
+    }
+}
+
+#[test]
+fn a_file_that_is_no_media_container_is_refused_plainly() {
+    let path = dir().join("not-media.txt");
+    std::fs::write(
+        &path,
+        "these words are not a movie, and no reader should try them",
+    )
+    .unwrap();
+    let prefs = Prefs::default();
+    let want = "unsupported: this file is not an MP4, MOV, MKV or WebM file";
+    assert_eq!(said(probe(&path, &prefs)), want);
+    assert_eq!(said(keyframes(&path, &prefs)), want);
+    every_open_says(&path, want);
+}
+
+#[test]
+fn an_mp4_whose_first_box_is_442_bytes_is_no_mpeg_ps() {
+    let size = (352, 240);
+    let src = dir().join(format!("{}.free-442-source.mp4", std::process::id()));
+    export_frames(
+        &src,
+        Canvas {
+            width: size.0,
+            height: size.1,
+            fps: (30, 1),
+            frames: Some(30),
+        },
+        ExportOptions::default(),
+        |n, spent| Ok((n < 30).then(|| VideoFrame::Cpu(picture(n, size, spent)))),
+        |_, frames| {
+            let mut buf = AudioBuffer::new(48_000, 2);
+            buf.samples = vec![0.0; frames * 2];
+            Ok(buf)
+        },
+        |_| true,
+    )
+    .unwrap();
+    let mut bytes = vec![0, 0, 1, 0xba];
+    bytes.extend_from_slice(b"free");
+    bytes.resize(442, 0);
+    bytes.extend_from_slice(&std::fs::read(&src).unwrap());
+    let _ = std::fs::remove_file(&src);
+    let path = dir().join("free-442-first.mp4");
+    std::fs::write(&path, &bytes).unwrap();
+    let prefs = Prefs::default();
+    let p = probe(&path, &prefs).unwrap();
+    assert_eq!(p.video_codec, Some(Codec::H264));
+    assert_eq!((p.width, p.height), size);
+    assert!(p.unsupported().is_empty(), "{:?}", p.unsupported());
+    assert_eq!(frame_count(&path, &prefs).unwrap(), 30);
+}
+
+fn wav(name: &str) -> PathBuf {
+    let path = dir().join(name);
+    let rate = 48_000u32;
+    let data = vec![0u8; rate as usize * 4 / 2];
+    let mut b = Vec::new();
+    b.extend_from_slice(b"RIFF");
+    b.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+    b.extend_from_slice(b"WAVEfmt ");
+    b.extend_from_slice(&16u32.to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&2u16.to_le_bytes());
+    b.extend_from_slice(&rate.to_le_bytes());
+    b.extend_from_slice(&(rate * 4).to_le_bytes());
+    b.extend_from_slice(&4u16.to_le_bytes());
+    b.extend_from_slice(&16u16.to_le_bytes());
+    b.extend_from_slice(b"data");
+    b.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    b.extend_from_slice(&data);
+    std::fs::write(&path, b).unwrap();
+    path
+}
+
+fn foreign_audio() -> &'static Path {
+    static FILE: OnceLock<PathBuf> = OnceLock::new();
+    FILE.get_or_init(|| {
+        let out = dir().join("aac-vorbis-truehd.mkv");
+        if out.exists() {
+            return out;
+        }
+        let id = std::process::id();
+        let src = dir().join(format!("{id}.foreign-audio-source.mp4"));
+        let size = (352, 240);
+        let canvas = Canvas {
+            width: size.0,
+            height: size.1,
+            fps: (30, 1),
+            frames: Some(30),
+        };
+        export_frames(
+            &src,
+            canvas,
+            ExportOptions::default(),
+            |n, spent| Ok((n < 30).then(|| VideoFrame::Cpu(picture(n, size, spent)))),
+            |_, frames| {
+                let mut buf = AudioBuffer::new(48_000, 2);
+                buf.samples = (0..frames).flat_map(|k| [tone(k), tone(k)]).collect();
+                Ok(buf)
+            },
+            |_| true,
+        )
+        .unwrap();
+        let r = pito_codecs::mp4::Reader::open(&src).unwrap();
+        let v = r.video().unwrap();
+        let a = r.audio()[0];
+        let part = dir().join(format!("{id}.aac-vorbis-truehd.mkv"));
+        let mut w = pito_codecs::mkv::Writer::create(&part).unwrap();
+        let tv = w
+            .add_track(pito_codecs::mkv::TrackConfig::from_mp4(&r.tracks[v]).unwrap())
+            .unwrap();
+        let ta = w
+            .add_track(pito_codecs::mkv::TrackConfig::from_mp4(&r.tracks[a]).unwrap())
+            .unwrap();
+        let foreign = |codec: &str| pito_codecs::mkv::TrackConfig {
+            sample_rate: 48_000,
+            channels: 2,
+            ..pito_codecs::mkv::TrackConfig::new(
+                pito_codecs::mkv::TrackKind::Audio,
+                codec,
+                TimeBase::new(1, 48_000),
+            )
+        };
+        let tf = [
+            w.add_track(foreign("A_VORBIS")).unwrap(),
+            w.add_track(foreign("A_TRUEHD")).unwrap(),
+        ];
+        let mut blocks: Vec<(f64, usize, Vec<u8>, i64, bool)> = Vec::new();
+        for (track, t) in [(tv, v), (ta, a)] {
+            let at = &r.tracks[t];
+            for (i, s) in at.samples.iter().enumerate() {
+                let seconds = s.dts as f64 / at.timescale.max(1) as f64;
+                blocks.push((seconds, track, r.read(t, i).unwrap(), s.pts, s.keyframe));
+            }
+        }
+        for track in tf {
+            for k in 0..48i64 {
+                let seconds = (k * 1024) as f64 / 48_000.0;
+                blocks.push((seconds, track, vec![0x55; 64], k * 1024, true));
+            }
+        }
+        blocks.sort_by(|x, y| x.0.total_cmp(&y.0));
+        for (_, track, data, pts, key) in blocks {
+            w.push_sample(track, &data, pts, None, key).unwrap();
+        }
+        w.finish().unwrap();
+        std::fs::rename(&part, &out).unwrap();
+        let _ = std::fs::remove_file(&src);
+        out
+    })
+}
+
+#[test]
+fn an_audio_track_no_decoder_reads_is_named_on_every_path_and_a_muted_one_is_skipped() {
+    let path = foreign_audio();
+    let prefs = Prefs::default();
+    let p = probe(path, &prefs).unwrap();
+    assert!(p.video_native());
+    assert_eq!(p.audio.len(), 3);
+    assert_eq!(p.audio[0].codec, "aac");
+    assert_eq!(p.unsupported(), ["Vorbis", "TrueHD"]);
+    let whole = audio_pcm(path, 0, 48_000, false, &prefs).unwrap();
+    assert!(!whole.samples.is_empty());
+    for (track, name) in [(1, "Vorbis"), (2, "TrueHD")] {
+        assert_eq!(
+            said(audio_pcm(path, track, 48_000, false, &prefs)),
+            format!("unsupported: {name} audio is not supported")
+        );
+        refused_in_one_line(audio_pcm(path, track, 48_000, false, &prefs), name);
+        refused_in_one_line(
+            audio_pcm_range(path, track, 0.2, 0.6, 48_000, 2, &prefs),
+            name,
+        );
+        refused_in_one_line(audio_stream(path, track, 0.2, 48_000, 2, &prefs), name);
+    }
+    let either = |e: String| {
+        assert_eq!(e.lines().count(), 1, "{e}");
+        assert!(e.contains("Vorbis") || e.contains("TrueHD"), "{e}");
+        assert!(
+            !e.replace(env!("CARGO_MANIFEST_DIR"), "")
+                .to_lowercase()
+                .contains("ffmpeg"),
+            "{e}"
+        );
+    };
+    either(said(audio_mix(path, &[], 0.0, 0.5, 48_000, &prefs)));
+    either(said(audio_mix_stream(path, &[], 0.0, 48_000, &prefs)));
+    either(said(audio_mix(
+        path,
+        &[1.0, 0.5, 0.0],
+        0.0,
+        0.5,
+        48_000,
+        &prefs,
+    )));
+    let muted = [1.0, 0.0, 0.0];
+    let mixed = audio_mix(path, &muted, 0.0, 0.5, 48_000, &prefs).unwrap();
+    assert_eq!(mixed.samples.len(), 24_000 * 2);
+    assert!(audio_mix_stream(path, &muted, 0.0, 48_000, &prefs).is_ok());
+    let piece = || Piece {
+        path: path.to_path_buf(),
+        from: 0.0,
+        to: 0.5,
+    };
+    let out = dir().join("foreign-audio-export.mp4");
+    let _ = std::fs::remove_file(&out);
+    either(said(export(
+        &out,
+        &[piece()],
+        ExportOptions::default(),
+        |_| true,
+    )));
+    let opts = ExportOptions {
+        audio_gains: muted.to_vec(),
+        ..ExportOptions::default()
+    };
+    let done = export(&out, &[piece()], opts, |_| true).unwrap();
+    assert!(done.frames > 0);
+    let back = probe(&out, &prefs).unwrap();
+    assert_eq!(back.audio.len(), 1);
+    assert_eq!(back.audio[0].codec, "aac");
+    assert!(back.unsupported().is_empty(), "{:?}", back.unsupported());
+}
+
+#[test]
+fn export_refuses_a_gained_track_no_decoder_reads_before_any_work() {
+    let path = foreign_audio();
+    let long: Vec<Piece> = (0..20)
+        .map(|_| Piece {
+            path: path.to_path_buf(),
+            from: 0.0,
+            to: 1.0,
+        })
+        .collect();
+    let out = dir().join("foreign-audio-long.mp4");
+    let _ = std::fs::remove_file(&out);
+    let parts = out.with_extension("parts");
+    let _ = std::fs::remove_dir_all(&parts);
+    let mut told = 0;
+    let opts = ExportOptions {
+        audio_gains: vec![1.0, 0.5, 0.0],
+        ..ExportOptions::default()
+    };
+    assert_eq!(
+        said(export(&out, &long, opts, |_| {
+            told += 1;
+            true
+        })),
+        "unsupported: Vorbis audio is not supported"
+    );
+    assert_eq!(told, 0);
+    assert!(!out.exists());
+    assert!(!parts.exists());
+
+    let twin = dir().join("aac-vorbis-truehd-twin.mkv");
+    std::fs::copy(path, &twin).unwrap();
+    let both: Vec<Piece> = (0..10)
+        .flat_map(|_| [path, twin.as_path()])
+        .map(|p| Piece {
+            path: p.to_path_buf(),
+            from: 0.0,
+            to: 1.0,
+        })
+        .collect();
+    let opts = ExportOptions {
+        audio_gains: vec![1.0, 0.0, 0.7],
+        ..ExportOptions::default()
+    };
+    assert_eq!(
+        said(export(&out, &both, opts, |_| {
+            told += 1;
+            true
+        })),
+        format!(
+            "unsupported: {}: TrueHD audio is not supported",
+            path.display()
+        )
+    );
+    assert_eq!(told, 0);
+    assert!(!out.exists());
+    assert!(!parts.exists());
+
+    let premixed = dir().join("foreign-audio-premixed.mp4");
+    let _ = std::fs::remove_file(&premixed);
+    let done = export_with_audio(
+        &premixed,
+        &long[..2],
+        ExportOptions::default(),
+        |_, frames| {
+            let mut buf = AudioBuffer::new(48_000, 2);
+            buf.samples = (0..frames).flat_map(|k| [tone(k), tone(k)]).collect();
+            Ok(buf)
+        },
+        |_| true,
+    )
+    .unwrap();
+    assert_eq!(done.frames, 60);
+    let back = probe(&premixed, &Prefs::default()).unwrap();
+    assert_eq!(back.audio.len(), 1);
+    assert!(back.unsupported().is_empty(), "{:?}", back.unsupported());
+}
+
+#[test]
+fn a_file_with_no_video_says_so_on_every_video_path() {
+    let path = wav("audio-only.wav");
+    let prefs = Prefs::default();
+    let p = probe(&path, &prefs).unwrap();
+    assert_eq!(p.video_codec, None);
+    assert!(p.unsupported().is_empty(), "{:?}", p.unsupported());
+    assert_eq!(
+        audio_pcm(&path, 0, 48_000, false, &prefs).unwrap().frames(),
+        24_000
+    );
+    let mono = audio_pcm(&path, 0, 48_000, true, &prefs).unwrap();
+    assert_eq!((mono.channels, mono.frames()), (1, 24_000));
+    let span = audio_pcm_range(&path, 0, 0.1, 0.3, 48_000, 2, &prefs).unwrap();
+    assert_eq!(span.frames(), 9_600);
+    assert!(
+        audio_pcm_range(&path, 0, 0.2, 0.2, 48_000, 2, &prefs)
+            .unwrap()
+            .samples
+            .is_empty()
+    );
+    assert_eq!(
+        audio_mix(&path, &[], 0.0, 0.25, 48_000, &prefs)
+            .unwrap()
+            .frames(),
+        12_000
+    );
+    every_open_says(&path, "invalid data: no video track");
+}
+
+#[test]
+fn a_10_bit_or_4_2_2_h264_is_refused_when_opened_not_at_its_first_frame() {
+    if !have_ffmpeg() || !has_encoder("libx264") {
+        eprintln!("no ffmpeg with libx264 on PATH: skipped");
+        return;
+    }
+    for ext in ["mp4", "mkv"] {
+        for (pix, profile, variant) in [
+            ("yuv422p10le", "high422", "10-bit 4:2:2 H.264"),
+            ("yuv420p10le", "high10", "10-bit 4:2:0 H.264"),
+        ] {
+            let path = variant_clip(
+                &format!("h264-{pix}.{ext}"),
+                &["-c:v", "libx264", "-pix_fmt", pix, "-profile:v", profile],
+            );
+            every_open_says(
+                &path,
+                &format!("unsupported: {variant} video is not supported"),
+            );
+        }
+    }
+}
+
+#[test]
+fn a_10_bit_4_2_2_h264_exports_when_every_part_is_copied_and_is_refused_by_file_when_one_needs_a_decode()
+ {
+    if !have_ffmpeg() || !has_encoder("libx264") {
+        eprintln!("no ffmpeg with libx264 on PATH: skipped");
+        return;
+    }
+    let encode = [
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv422p10le",
+        "-profile:v",
+        "high422",
+    ];
+    let mp4 = variant_clip("h264-yuv422p10le.mp4", &encode);
+    let mkv = variant_clip("h264-yuv422p10le.mkv", &encode);
+    let prefs = Prefs::default();
+    let whole = probe(&mp4, &prefs).unwrap().duration;
+    let out = dir().join("h264-422-10-copied.mp4");
+    let piece = Piece {
+        path: mp4.clone(),
+        from: 0.0,
+        to: whole,
+    };
+    let done = export(&out, &[piece], ExportOptions::default(), |_| true).unwrap();
+    assert!(done.smart);
+    assert_eq!(done.encoded, 0);
+    assert!(done.copied > 0);
+    let p = probe(&out, &prefs).unwrap();
+    assert_eq!(p.video_variant(), "10-bit 4:2:2 H.264");
+    assert!(!p.video_native());
+
+    let out = dir().join("h264-422-10-two-files.refused.mp4");
+    let pieces = [
+        Piece {
+            path: mp4.clone(),
+            from: 0.1,
+            to: 0.6,
+        },
+        Piece {
+            path: mkv.clone(),
+            from: 0.1,
+            to: 0.6,
+        },
+    ];
+    let e = said(export(&out, &pieces, ExportOptions::default(), |_| true));
+    assert_eq!(
+        e,
+        format!(
+            "unsupported: {}: 10-bit 4:2:2 H.264 video is not supported",
+            mp4.display()
+        )
+    );
+    assert!(!out.exists());
+
+    let out = dir().join("h264-422-10-one-file.refused.mp4");
+    let piece = Piece {
+        path: mp4,
+        from: 0.1,
+        to: 0.6,
+    };
+    assert_eq!(
+        said(export(&out, &[piece], ExportOptions::default(), |_| true)),
+        "unsupported: 10-bit 4:2:2 H.264 video is not supported"
+    );
+    assert!(!out.exists());
+}
+
+#[test]
+fn a_vp9_our_encoder_cannot_splice_is_re_encoded_whole_even_on_gop_bounds() {
+    if !have_ffmpeg() || !has_encoder("libvpx-vp9") {
+        eprintln!("no ffmpeg with libvpx-vp9 on PATH: skipped");
+        return;
+    }
+    let src = variant_clip(
+        "vp9-profile2-g10.webm",
+        &[
+            "-c:v",
+            "libvpx-vp9",
+            "-pix_fmt",
+            "yuv420p10le",
+            "-g",
+            "10",
+            "-keyint_min",
+            "10",
+            "-auto-alt-ref",
+            "0",
+            "-lag-in-frames",
+            "0",
+            "-crf",
+            "40",
+            "-b:v",
+            "0",
+        ],
+    );
+    let prefs = Prefs::default();
+    let p = probe(&src, &prefs).unwrap();
+    assert_eq!((p.video_codec, p.bit_depth), (Some(Codec::Vp9), 10));
+    assert!(p.video_native(), "{}", p.video_variant());
+    let opts = || ExportOptions {
+        video: Codec::Vp9,
+        ..ExportOptions::default()
+    };
+    for (name, from, to, frames) in [("gops", 0.0, 20.0 / 30.0, 20), ("cut", 0.1, 0.6, 15)] {
+        let out = dir().join(format!("vp9-profile2-{name}.webm"));
+        let piece = Piece {
+            path: src.clone(),
+            from,
+            to,
+        };
+        let done = export(&out, &[piece], opts(), |_| true).unwrap();
+        assert!(!done.smart, "{name}: {:?}", done.reasons);
+        assert_eq!((done.copied, done.encoded), (0, frames), "{name}");
+        assert!(
+            done.reasons.iter().any(|r| r
+                == "the source VP9 is Profile 2 at 10 bits, our VP9 encoder writes profile 0 at 8 bits, so the whole export is re-encoded"),
+            "{name}: {:?}",
+            done.reasons
+        );
+        let back = probe(&out, &prefs).unwrap();
+        assert_eq!(
+            (back.video_codec, back.bit_depth, back.profile.as_str()),
+            (Some(Codec::Vp9), 8, "Profile 0"),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_4_4_4_vp9_with_alpha_is_refused_when_its_stills_open() {
+    if !have_ffmpeg() || !has_encoder("libvpx-vp9") {
+        eprintln!("no ffmpeg with libvpx-vp9 on PATH: skipped");
+        return;
+    }
+    let src = variant_clip(
+        "vp9-444.webm",
+        &[
+            "-c:v",
+            "libvpx-vp9",
+            "-deadline",
+            "realtime",
+            "-cpu-used",
+            "8",
+            "-pix_fmt",
+            "yuv444p",
+        ],
+    );
+    let r = pito_codecs::mkv::Reader::open(&src).unwrap();
+    let v = r.video().unwrap();
+    let path = dir().join("vp9-444-alpha.webm");
+    let mut w =
+        pito_codecs::mkv::Writer::create_with(&path, pito_codecs::mkv::Options::webm()).unwrap();
+    let mut cfg = pito_codecs::mkv::TrackConfig::from_track(&r.tracks[v]);
+    cfg.alpha = true;
+    let t = w.add_track(cfg).unwrap();
+    for (i, s) in r.tracks[v].samples.iter().enumerate() {
+        let data = r.read(v, i).unwrap();
+        w.push_block(t, &data, s.pts, None, s.keyframe, Some(&data))
+            .unwrap();
+    }
+    w.finish().unwrap();
+    let prefs = Prefs::default();
+    let p = probe(&path, &prefs).unwrap();
+    assert_eq!(p.video_variant(), "8-bit 4:4:4 VP9");
+    let want = "unsupported: 8-bit 4:4:4 VP9 video is not supported";
+    assert_eq!(said(Stills::open(&path, 120, &prefs)), want);
+    assert_eq!(said(first_frame(&path, 120, &prefs)), want);
+}
+
+#[test]
+fn a_bare_mp3_decodes_on_every_audio_path_with_no_ffmpeg_route() {
+    if !have_ffmpeg() || !has_encoder("libmp3lame") {
+        eprintln!("no ffmpeg with libmp3lame on PATH: skipped");
+        return;
+    }
+    let path = dir().join("bare-sine.mp3");
+    let ok = Command::new("ffmpeg")
+        .args(["-v", "error", "-y"])
+        .args(["-f", "lavfi", "-i", "sine=f=440:r=44100:d=2"])
+        .args(["-ac", "2", "-c:a", "libmp3lame", "-b:a", "128k"])
+        .arg(&path)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        eprintln!("ffmpeg could not make the MP3: skipped");
+        return;
+    }
+    let prefs = Prefs::default();
+    let p = probe(&path, &prefs).unwrap();
+    assert_eq!(p.video_codec, None);
+    assert_eq!(p.audio.len(), 1);
+    let whole = audio_pcm(&path, 0, 48_000, false, &prefs).unwrap();
+    assert!(
+        whole.frames().abs_diff(96_000) < 2_400,
+        "{}",
+        whole.frames()
+    );
+    let peak = whole.samples.iter().fold(0f32, |m, s| m.max(s.abs()));
+    assert!(peak > 0.05, "{peak}");
+    let span = audio_pcm_range(&path, 0, 0.5, 1.5, 48_000, 1, &prefs).unwrap();
+    assert_eq!((span.channels, span.frames()), (1, 48_000));
+    let mixed = audio_mix(&path, &[], 0.0, 1.0, 48_000, &prefs).unwrap();
+    assert_eq!(mixed.frames(), 48_000);
+    assert!(audio_pcm(&path, 1, 48_000, false, &prefs).is_err());
 }

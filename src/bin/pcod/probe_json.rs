@@ -2,7 +2,7 @@ use std::path::Path;
 
 use pito_codecs::gpu::Color;
 use pito_codecs::media::wav::{self, Layout};
-use pito_codecs::media::{Prefs, Probe, VideoLook, probe, video_look};
+use pito_codecs::media::{Chroma, Prefs, Probe, VideoLook, probe, video_look};
 
 use super::json::Json;
 use super::{Fail, about};
@@ -145,22 +145,32 @@ fn media(p: &Probe, look: Option<VideoLook>, video: bool, pcm: Option<Layout>) -
         ("audio_float", pcm.map(|l| l.float()).into()),
         ("audio_extradata", Json::Null),
         ("alpha", p.alpha.into()),
+        (
+            "chroma",
+            p.chroma.filter(|_| video).map(Chroma::name).into(),
+        ),
+        ("interlaced", when(video, p.interlaced)),
+        ("variant", when(video, p.video_variant())),
     ])
 }
 
 fn pix_fmt(p: &Probe) -> String {
-    let chroma = if p.profile.contains("4:4:4") {
-        "444"
-    } else if p.profile.contains("4:2:2") {
-        "422"
-    } else {
-        "420"
+    let bits = match p.bit_depth {
+        0..=8 => String::new(),
+        d => format!("{d}le"),
+    };
+    let chroma = match p.chroma {
+        Some(Chroma::Mono) if !p.alpha => return format!("gray{bits}"),
+        Some(Chroma::Yuv420) => "420",
+        Some(Chroma::Yuv422) => "422",
+        Some(Chroma::Yuv440) => "440",
+        Some(Chroma::Yuv444) => "444",
+        _ if p.profile.contains("4:4:4") => "444",
+        _ if p.profile.contains("4:2:2") => "422",
+        _ => "420",
     };
     let a = if p.alpha { "a" } else { "" };
-    match p.bit_depth {
-        0..=8 => format!("yuv{a}{chroma}p"),
-        depth => format!("yuv{a}{chroma}p{depth}le"),
-    }
+    format!("yuv{a}{chroma}p{bits}")
 }
 
 fn layout(channels: u16) -> Option<&'static str> {

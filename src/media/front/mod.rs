@@ -25,7 +25,6 @@ mod demux;
 ))]
 mod export;
 mod feed;
-mod ffmpeg;
 #[cfg(all(
     feature = "h264",
     feature = "hevc",
@@ -152,6 +151,7 @@ mod sound;
 ))]
 mod still;
 mod stream;
+mod variant;
 #[cfg(all(
     feature = "h264",
     feature = "hevc",
@@ -190,7 +190,6 @@ pub use export::{
     ExportOptions, Exported, Overlay, Part, Piece, Progress, Stage, export, export_with_audio,
     parts,
 };
-pub use ffmpeg::{Ffmpeg, Listed};
 #[cfg(all(
     feature = "h264",
     feature = "hevc",
@@ -257,7 +256,7 @@ pub use picture::{
     Blender, Color, blend, rotate, scale, scale_to_height, to_rgba, to_rgba_color, to_rgba_height,
 };
 pub use probe::{AudioTrack, Probe, frame_count, keyframes, probe};
-pub use route::{Caps, Choice, Fallback, Picked, Prefs, UserFfmpeg, pick_decode, pick_encode};
+pub use route::{Caps, Choice, Fallback, Picked, Prefs, pick_decode, pick_encode};
 pub use sound::Pcm;
 #[cfg(all(
     feature = "h264",
@@ -271,6 +270,7 @@ pub use sound::Pcm;
 ))]
 pub use still::{Seek, Stills, first_frame, frames_at, frames_at_seek};
 pub use stream::{AudioSpan, AudioStream, audio_mix_stream, audio_stream, decode_audio_span};
+pub use variant::Chroma;
 #[cfg(all(
     feature = "h264",
     feature = "hevc",

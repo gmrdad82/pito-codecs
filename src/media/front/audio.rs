@@ -2,10 +2,9 @@ use std::path::Path;
 
 use rayon::prelude::*;
 
-use super::ffmpeg::Ffmpeg;
-use super::probe::{container_ffmpeg, probe};
-use super::route::{Caps, Prefs, pick_decode};
-use crate::media::{AudioBuffer, Codec, Error, Result, Route};
+use super::probe::probe;
+use super::route::Prefs;
+use crate::media::{AudioBuffer, Error, Result};
 
 pub fn audio_pcm(
     path: &Path,
@@ -25,7 +24,7 @@ pub fn audio_pcm_range(
     to: f64,
     rate: u32,
     channels: u16,
-    prefs: &Prefs,
+    _: &Prefs,
 ) -> Result<AudioBuffer> {
     if rate == 0 || channels == 0 {
         return Err(Error::Invalid(format!(
@@ -35,74 +34,7 @@ pub fn audio_pcm_range(
     if from.is_nan() || to.is_nan() || to < from {
         return Err(Error::Invalid(format!("the range {from} to {to}")));
     }
-    let picked = pick_decode(Codec::Aac, prefs, &Caps::for_audio(prefs))?;
-    if picked.route != Route::Ffmpeg {
-        match super::base::audio_range(path, track, from, to, rate, channels) {
-            Ok(buf) => return Ok(buf),
-            Err(e) if prefs.user_ffmpeg().is_none() => return Err(e),
-            Err(_) => {}
-        }
-    }
-    let f = container_ffmpeg(prefs)?;
-    let from = from.max(0.0);
-    let start = (from * rate as f64).round() as usize;
-    let end = to.is_finite().then(|| (to * rate as f64).round() as usize);
-    if end.is_some_and(|e| e <= start) {
-        return Ok(AudioBuffer::new(rate, channels));
-    }
-    let mut buf = ffmpeg_pcm(
-        &f,
-        path,
-        track,
-        (from > 0.0).then_some(from),
-        end.map(|_| to - from),
-        rate,
-        channels,
-    )?;
-    if let Some(e) = end {
-        buf.samples
-            .truncate(e.saturating_sub(start) * channels as usize);
-    }
-    Ok(buf)
-}
-
-pub(super) fn ffmpeg_pcm(
-    f: &Ffmpeg,
-    path: &Path,
-    track: usize,
-    from: Option<f64>,
-    seconds: Option<f64>,
-    rate: u32,
-    channels: u16,
-) -> Result<AudioBuffer> {
-    let mut args: Vec<String> = Vec::new();
-    if let Some(from) = from {
-        args.extend(["-ss".into(), format!("{from:.6}")]);
-    }
-    if let Some(seconds) = seconds {
-        args.extend(["-t".into(), format!("{seconds:.6}")]);
-    }
-    args.extend([
-        "-i".into(),
-        path.display().to_string(),
-        "-map".into(),
-        format!("0:a:{track}"),
-        "-vn".into(),
-        "-ac".into(),
-        channels.to_string(),
-        "-ar".into(),
-        rate.to_string(),
-        "-f".into(),
-        "f32le".into(),
-        "-".into(),
-    ]);
-    let raw = f.run_args(&args)?;
-    let mut buf = AudioBuffer::new(rate, channels);
-    buf.samples = raw
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
-    Ok(buf)
+    super::base::audio_range(path, track, from, to, rate, channels)
 }
 
 pub fn audio_mix(

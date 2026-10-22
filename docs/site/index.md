@@ -7,7 +7,7 @@ sidebar:
 
 ![A terminal running pcod on a 1080p H.264 clip: it probes the file, decodes it on the CPU and on the GPU through VA-API with the speed of each, then encodes it to HEVC on the GPU.](images/decode.gif)
 
-**Video and audio codecs in pure Rust, on the CPU and the GPU, with no ffmpeg inside.** H.264, H.265, VP9, AAC, AC-3, E-AC-3, Opus, MP3 and FLAC; MP4, MOV, MKV and WebM; GIF and WebP. One MIT Cargo package, a feature per part, two direct dependencies and no C linked.
+**Video and audio codecs in pure Rust, on the CPU and the GPU, with no ffmpeg inside.** H.264, H.265, VP9, AAC, AC-3, E-AC-3, Opus, MP3, FLAC and ALAC; MP4, MOV, MKV and WebM; GIF and WebP. One MIT Cargo package, a feature per part, two direct dependencies and no C linked.
 
 It comes as a Rust library and as `pcod`, a small command line over it that probes, decodes and encodes MP4 files.
 
