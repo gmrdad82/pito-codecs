@@ -154,6 +154,11 @@ pub fn run(
         )
         .into());
     }
+    if let Some(to) = wav.to
+        && to <= wav.from
+    {
+        return Err(format!("--to {to} must come after --from {}", wav.from).into());
+    }
     let prefs = Prefs::default();
     let probe = media::probe(input, &prefs).map_err(|e| format!("{}: {e}", input.display()))?;
     let sound = probe
@@ -256,6 +261,7 @@ pub fn run(
             loudness: loud.as_ref().map(|l| stats(&l.after)),
         }],
         join: None,
+        cut: None,
     };
     Ok(document.to_json())
 }

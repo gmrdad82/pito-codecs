@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use super::demux::Demux;
-use super::export::{ExportOptions, Fit, Piece, Progress, Stage, WRITTEN, export_fitted};
+use super::export::{ExportOptions, Fit, Piece, Progress, Stage, WRITTEN, export, export_fitted};
 use super::mux::{RATE, aac_encoder};
 use super::route::Prefs;
 use super::shape::{color_of, display};
@@ -90,7 +90,7 @@ enum Kind {
 }
 
 impl Kind {
-    fn of(out: &Path) -> Result<Kind> {
+    fn of(out: &Path, what: &str) -> Result<Kind> {
         let ext = extension(out);
         match ext.as_str() {
             "mp4" | "m4v" => Ok(Kind::Mp4),
@@ -98,7 +98,7 @@ impl Kind {
             "mkv" => Ok(Kind::Mkv),
             "webm" => Ok(Kind::Webm),
             _ => Err(Error::Invalid(format!(
-                "join writes mp4, mov, mkv or webm, not .{ext}"
+                "{what} writes mp4, mov, mkv or webm, not .{ext}"
             ))),
         }
     }
@@ -243,7 +243,7 @@ pub fn join(
     if inputs.len() < 2 {
         return Err(Error::Invalid("a join takes at least two clips".into()));
     }
-    let kind = Kind::of(out)?;
+    let kind = Kind::of(out, "join")?;
     if let Some(input) = inputs.iter().find(|input| same_file(input, out)) {
         return Err(Error::Invalid(format!(
             "{} is both a clip and the output",
@@ -824,7 +824,7 @@ struct Encoded {
 }
 
 fn encode_audio(
-    sources: &[(&Path, Option<usize>)],
+    sources: &[(&Path, Option<usize>, f64)],
     lengths: &[f64],
     codec: Codec,
     kbps: u32,
@@ -865,14 +865,14 @@ fn encode_audio(
     let mut done = 0.0;
     let mut at = 0usize;
     let mut buf = AudioBuffer::new(RATE, 2);
-    for (&(path, ordinal), &length) in sources.iter().zip(lengths) {
+    for (&(path, ordinal, start), &length) in sources.iter().zip(lengths) {
         let end = ((done + length) * RATE as f64).round().max(0.0) as usize;
         let mut left = end.saturating_sub(at);
         at = end;
         done += length;
         let mut stream = match ordinal {
             Some(o) => Some(
-                native_stream(path, o, 0.0, RATE, 2)
+                native_stream(path, o, start, RATE, 2)
                     .map_err(|e| about(&path.display().to_string(), e))?,
             ),
             None => None,
@@ -1276,9 +1276,9 @@ fn copy(
         } else {
             AAC_KBPS
         });
-        let sources: Vec<(&Path, Option<usize>)> = clips
+        let sources: Vec<(&Path, Option<usize>, f64)> = clips
             .iter()
-            .map(|c| (c.path.as_path(), c.audio.as_ref().map(|a| a.ordinal)))
+            .map(|c| (c.path.as_path(), c.audio.as_ref().map(|a| a.ordinal), 0.0))
             .collect();
         let lengths: Vec<f64> = (0..clips.len())
             .map(|c| {
@@ -1463,7 +1463,18 @@ fn encode(
         }
     };
     let done = if after {
-        rewrap(clips, &temp, out, kind, opts, &lengths, route, progress)
+        rewrap(
+            clips,
+            &temp,
+            out,
+            kind,
+            opts,
+            &lengths,
+            &vec![0.0; clips.len()],
+            false,
+            route,
+            progress,
+        )
     } else {
         std::fs::rename(&temp, out).map_err(|e| Error::at(out, e))
     };
@@ -1493,6 +1504,8 @@ fn rewrap(
     kind: Kind,
     opts: &JoinOptions,
     lengths: &[f64],
+    starts: &[f64],
+    silent: bool,
     route: Route,
     progress: &mut dyn FnMut(&Progress) -> bool,
 ) -> Result<()> {
@@ -1501,10 +1514,11 @@ fn rewrap(
     let plan = plan_video(one, kind)?;
     let part = partial(out);
     let mut tell = |f: f32| progress(&joining(0.9 + 0.1 * f, route));
-    let encoded = if kind == Kind::Webm {
-        let sources: Vec<(&Path, Option<usize>)> = clips
+    let encoded = if kind == Kind::Webm && !silent {
+        let sources: Vec<(&Path, Option<usize>, f64)> = clips
             .iter()
-            .map(|c| (c.path.as_path(), c.audio.as_ref().map(|a| a.ordinal)))
+            .zip(starts)
+            .map(|(c, s)| (c.path.as_path(), c.audio.as_ref().map(|a| a.ordinal), *s))
             .collect();
         let kbps = opts.audio_kbps.unwrap_or(OPUS_KBPS);
         Some(encode_audio(
@@ -1519,7 +1533,7 @@ fn rewrap(
     };
     let audio = match &encoded {
         Some(e) => Audio::Encoded(e),
-        None if made.audio.is_some() => Audio::Copy(plan_audio(one, &plan, kind)?),
+        None if made.audio.is_some() && !silent => Audio::Copy(plan_audio(one, &plan, kind)?),
         None => Audio::None,
     };
     let base = if encoded.is_some() { 0.5 } else { 0.0 };
@@ -1527,4 +1541,347 @@ fn rewrap(
         tell(base + (1.0 - base) * f)
     });
     finish(&part, out, done)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Cut {
+    pub path: PathBuf,
+    pub from: f64,
+    pub to: f64,
+    pub size: (u32, u32),
+    pub fps: (u32, u32),
+    pub frames: u64,
+    pub copied: u64,
+    pub encoded: u64,
+    pub smart: bool,
+    pub video: Codec,
+    pub route: Route,
+    pub audio: JoinAudio,
+    pub reasons: Vec<String>,
+}
+
+pub fn track_length(seconds: Option<f64>, frames: Option<u64>, fps: (u32, u32)) -> Option<f64> {
+    let (n, d) = fps;
+    let own = frames
+        .filter(|&f| f > 0 && n > 0 && d > 0)
+        .map(|f| f as f64 * f64::from(d) / f64::from(n));
+    match (seconds.filter(|s| s.is_finite() && *s > 0.0), own) {
+        (Some(s), Some(o)) => Some(s.min(o)),
+        (s, o) => s.or(o),
+    }
+}
+
+fn video_length(probe: &super::probe::Probe) -> f64 {
+    track_length(Some(probe.duration), probe.frames, probe.fps).unwrap_or(probe.duration)
+}
+
+pub fn first_frame_at(seconds: f64, fps: (u32, u32)) -> i64 {
+    let frames = seconds * fps.0 as f64 / fps.1.max(1) as f64;
+    (frames - 1e-6).ceil().clamp(-9e15, 9e15) as i64
+}
+
+fn unfit_copy(kind: Kind, source: Option<Codec>, matroska: bool) -> Option<String> {
+    if !matches!(kind, Kind::Mp4 | Kind::Mov) {
+        return None;
+    }
+    match source {
+        Some(Codec::Vp9) => Some("MP4 and MOV get H.264 or HEVC, not VP9, so the cut encodes the whole window".to_string()),
+        Some(_) if matroska => Some("a Matroska source is re-encoded into MP4 or MOV, as a plain convert does, so the cut encodes the whole window".to_string()),
+        _ => None,
+    }
+}
+
+pub fn cut(
+    input: &Path,
+    from: f64,
+    to: f64,
+    out: &Path,
+    opts: JoinOptions,
+    mut progress: impl FnMut(&Progress) -> bool,
+) -> Result<Cut> {
+    let kind = Kind::of(out, "a cut")?;
+    if same_file(input, out) {
+        return Err(Error::Invalid(format!(
+            "{} is both the source and the output",
+            input.display()
+        )));
+    }
+    if !from.is_finite() || from < 0.0 || to.is_nan() || to <= from {
+        return Err(Error::Invalid(format!("a range from {from} to {to}")));
+    }
+    if let Some(kbps) = opts.audio_kbps
+        && !(6..=512).contains(&kbps)
+    {
+        return Err(Error::Invalid(format!(
+            "an audio bitrate of {kbps} kbps, not 6 to 512"
+        )));
+    }
+    let clip = Clip::load(input, &opts.prefs)?;
+    if let (Some(kbps), None) = (opts.audio_kbps, &clip.audio) {
+        return Err(Error::Invalid(format!(
+            "{}: the source has no audio to encode at {kbps} kbps",
+            clip.name
+        )));
+    }
+    let length = video_length(&clip.src.probe);
+    let known = length.is_finite() && length > 0.0;
+    if known && from >= length {
+        return Err(Error::Invalid(format!(
+            "{}: {from:.3} s is at or past the end of the video ({length:.3} s)",
+            clip.name
+        )));
+    }
+    let to = if known { to.min(length) } else { to };
+    if !to.is_finite() {
+        return Err(Error::Invalid(format!(
+            "{} has no known length to cut to",
+            clip.name
+        )));
+    }
+    let source = clip.src.probe.video_codec;
+    let mut reasons = Vec::new();
+    let foreign = unfit_copy(kind, source, clip.matroska());
+    let fit = opts.encode || opts.size.is_some() || opts.fps.is_some() || foreign.is_some();
+    reasons.extend(foreign);
+    let fps = opts.fps.unwrap_or(clip.src.probe.fps);
+    if fps.0 == 0 || fps.1 == 0 {
+        return Err(Error::Invalid(format!(
+            "a frame rate of {}/{}",
+            fps.0, fps.1
+        )));
+    }
+    let (a, b) = (first_frame_at(from, fps), first_frame_at(to, fps));
+    if b <= a {
+        return Err(Error::Invalid(format!(
+            "{}: no frame starts between {from:.3} s and {to:.3} s",
+            clip.name
+        )));
+    }
+    let at = |f: i64| f as f64 * fps.1 as f64 / fps.0 as f64;
+    let piece = Piece {
+        path: input.to_path_buf(),
+        from: at(a),
+        to: at(b),
+    };
+    let video = match source {
+        Some(c @ (Codec::H264 | Codec::Hevc | Codec::Vp9)) if !fit && kind.video(source) => c,
+        _ if kind == Kind::Webm && opts.video != Codec::Vp9 => {
+            if fit {
+                reasons.push(format!(
+                    "WebM carries VP9, not {}, so the cut encodes VP9",
+                    source.unwrap_or(opts.video)
+                ));
+            }
+            Codec::Vp9
+        }
+        _ if kind == Kind::Mov && opts.video == Codec::Vp9 => {
+            if fit {
+                reasons.push("MOV doesn't carry VP9, so the cut encodes H.264".to_string());
+            }
+            Codec::H264
+        }
+        _ => opts.video,
+    };
+    let shown = display(&clip.src, clip.sar);
+    let size = match (fit, opts.size) {
+        (true, Some((w, h))) => (w & !1, h & !1),
+        (true, None) => (shown.0 & !1, shown.1 & !1),
+        (false, _) => (clip.src.probe.width & !1, clip.src.probe.height & !1),
+    };
+    if size.0 == 0 || size.1 == 0 {
+        return Err(Error::Invalid(format!(
+            "{}'s shape {}x{} cannot make an even output",
+            clip.name, shown.0, shown.1
+        )));
+    }
+    if fit {
+        readable(&clip)?;
+    }
+    let tracks = clip.src.probe.audio.len();
+    let mut gains = vec![0.0f32; tracks.max(1)];
+    gains[0] = 1.0;
+    let aac = opts.audio_kbps.unwrap_or(AAC_KBPS).clamp(32, 512);
+    let silent = clip.audio.is_none();
+    let after = kind != Kind::Mp4 || silent;
+    let temp = out.with_extension(format!("cutting.{}.mp4", extension(out)));
+    let scale = if after { 0.9 } else { 1.0 };
+    let options = ExportOptions {
+        video,
+        crf: opts.crf,
+        audio_kbps: aac,
+        audio_gains: gains,
+        overlay: None,
+        prefs: opts.prefs.clone(),
+    };
+    let pieces = std::slice::from_ref(&piece);
+    let tell = |p: &Progress| {
+        progress(&Progress {
+            stage: p.stage,
+            done: p.done * scale,
+            encoder: p.encoder,
+        })
+    };
+    let exported = if fit {
+        export_fitted(&temp, pieces, options, Fit { size, fps }, tell)
+    } else {
+        export(&temp, pieces, options, tell)
+    };
+    let exported = match exported {
+        Ok(e) => e,
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp);
+            return Err(e);
+        }
+    };
+    let route = exported.video.route;
+    reasons.extend(exported.reasons.iter().cloned());
+    let audio = if silent {
+        JoinAudio::Silent
+    } else if kind == Kind::Webm {
+        JoinAudio::Encoded {
+            codec: Codec::Opus,
+            kbps: opts.audio_kbps.unwrap_or(OPUS_KBPS),
+        }
+    } else {
+        JoinAudio::Encoded {
+            codec: Codec::Aac,
+            kbps: aac,
+        }
+    };
+    let done = if after {
+        rewrap(
+            std::slice::from_ref(&clip),
+            &temp,
+            out,
+            kind,
+            &opts,
+            &[at(b - a)],
+            &[piece.from],
+            silent,
+            route,
+            &mut progress,
+        )
+    } else {
+        std::fs::rename(&temp, out).map_err(|e| Error::at(out, e))
+    };
+    let _ = std::fs::remove_file(&temp);
+    done?;
+    Ok(Cut {
+        path: out.to_path_buf(),
+        from: piece.from,
+        to: piece.to,
+        size,
+        fps,
+        frames: exported.frames,
+        copied: exported.copied,
+        encoded: exported.encoded,
+        smart: exported.smart,
+        video: exported.video.codec,
+        route,
+        audio,
+        reasons,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::probe::Probe;
+    use super::*;
+
+    fn probe(duration: f64, fps: (u32, u32), frames: Option<u64>) -> Probe {
+        Probe {
+            duration,
+            start: 0.0,
+            video_start: Some(0.0),
+            fps,
+            width: 352,
+            height: 240,
+            rotation: 0,
+            video_codec: Some(Codec::H264),
+            video_codec_name: "h264".into(),
+            profile: String::new(),
+            bit_depth: 8,
+            frames,
+            audio: Vec::new(),
+            alpha: false,
+        }
+    }
+
+    #[test]
+    fn first_frame_at_snaps_up_to_the_next_frame() {
+        assert_eq!(first_frame_at(0.0, (24, 1)), 0);
+        assert_eq!(first_frame_at(1.0, (24, 1)), 24);
+        assert_eq!(first_frame_at(1.01, (24, 1)), 25);
+        assert_eq!(first_frame_at(1.0 / 24.0 * 3.0, (24, 1)), 3);
+        assert_eq!(first_frame_at(2.0, (30000, 1001)), 60);
+        assert_eq!(first_frame_at(2.0 * 1001.0 / 30000.0, (30000, 1001)), 2);
+        assert_eq!(first_frame_at(3.5, (25, 1)), 88);
+    }
+
+    #[test]
+    fn first_frame_at_survives_a_zero_denominator_and_huge_times() {
+        assert_eq!(first_frame_at(1.0, (24, 0)), 24);
+        assert_eq!(first_frame_at(f64::MAX, (24, 1)), 9e15 as i64);
+        assert_eq!(first_frame_at(-f64::MAX, (24, 1)), -9e15 as i64);
+    }
+
+    #[test]
+    fn a_cut_copies_into_mp4_and_mov_only_what_a_plain_convert_copies() {
+        for kind in [Kind::Mp4, Kind::Mov] {
+            assert_eq!(unfit_copy(kind, Some(Codec::H264), false), None);
+            assert_eq!(unfit_copy(kind, Some(Codec::Hevc), false), None);
+            assert!(unfit_copy(kind, Some(Codec::Vp9), false).is_some());
+            assert!(unfit_copy(kind, Some(Codec::Vp9), true).is_some());
+            assert!(unfit_copy(kind, Some(Codec::H264), true).is_some());
+        }
+        for kind in [Kind::Mkv, Kind::Webm] {
+            for codec in [Codec::H264, Codec::Hevc, Codec::Vp9] {
+                assert_eq!(unfit_copy(kind, Some(codec), true), None);
+                assert_eq!(unfit_copy(kind, Some(codec), false), None);
+            }
+        }
+    }
+
+    #[test]
+    fn video_length_takes_the_video_track_not_a_longer_audio_track() {
+        assert_eq!(video_length(&probe(5.5, (24, 1), Some(120))), 5.0);
+        assert_eq!(video_length(&probe(4.0, (24, 1), Some(120))), 4.0);
+        assert_eq!(video_length(&probe(5.5, (24, 1), None)), 5.5);
+        assert_eq!(video_length(&probe(5.5, (24, 1), Some(0))), 5.5);
+        assert_eq!(video_length(&probe(f64::NAN, (24, 1), Some(48))), 2.0);
+        assert_eq!(video_length(&probe(5.5, (0, 1), Some(120))), 5.5);
+    }
+
+    #[test]
+    fn a_cut_refuses_a_backwards_or_empty_range_before_reading_the_source() {
+        let missing = Path::new("tmp/does-not-exist.mp4");
+        let out = Path::new("tmp/out.mp4");
+        for (from, to) in [
+            (2.0, 2.0),
+            (3.0, 2.0),
+            (-1.0, 2.0),
+            (f64::NAN, 2.0),
+            (1.0, f64::NAN),
+        ] {
+            let e = cut(missing, from, to, out, JoinOptions::default(), |_| true).unwrap_err();
+            assert!(matches!(e, Error::Invalid(_)), "{from} {to}: {e}");
+        }
+    }
+
+    #[test]
+    fn a_cut_refuses_an_output_it_cannot_write() {
+        let e = cut(
+            Path::new("tmp/a.mp4"),
+            0.0,
+            1.0,
+            Path::new("tmp/a.gif"),
+            JoinOptions::default(),
+            |_| true,
+        )
+        .unwrap_err();
+        assert!(
+            e.to_string().contains("a cut writes mp4, mov, mkv or webm"),
+            "{e}"
+        );
+    }
 }

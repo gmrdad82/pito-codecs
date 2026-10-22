@@ -76,6 +76,15 @@ pub struct Join {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct Cut {
+    pub from: f64,
+    pub to: f64,
+    pub frames: u64,
+    pub copied: u64,
+    pub encoded: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
     pub sources: Vec<Source>,
     pub params: Params,
@@ -83,6 +92,7 @@ pub struct Manifest {
     pub seconds: f64,
     pub files: Vec<Output>,
     pub join: Option<Join>,
+    pub cut: Option<Cut>,
 }
 
 impl Measured {
@@ -237,6 +247,18 @@ impl Manifest {
                 ]),
             ));
         }
+        if let Some(c) = &self.cut {
+            fields.push((
+                "cut",
+                Json::Obj(vec![
+                    ("from", c.from.into()),
+                    ("to", c.to.into()),
+                    ("frames", c.frames.into()),
+                    ("copied", c.copied.into()),
+                    ("encoded", c.encoded.into()),
+                ]),
+            ));
+        }
         Json::Obj(fields).text()
     }
 }
@@ -294,6 +316,7 @@ mod tests {
                 loudness: Some(loud),
             }],
             join: None,
+            cut: None,
         };
         let v: serde_json::Value = serde_json::from_str(&m.to_json()).unwrap();
         assert_eq!(v["tool"]["name"], "pcod");
@@ -308,6 +331,22 @@ mod tests {
         assert_eq!(v["params"]["audio"]["sample_rate"], 48000);
         assert_eq!(v["files"][0]["bytes"], 2259013);
         assert!(v.get("join").is_none());
+        assert!(v.get("cut").is_none());
+        m.cut = Some(Cut {
+            from: 2.0,
+            to: 3.5,
+            frames: 36,
+            copied: 24,
+            encoded: 12,
+        });
+        let v: serde_json::Value = serde_json::from_str(&m.to_json()).unwrap();
+        assert_eq!(v["cut"]["from"], 2.0);
+        assert_eq!(v["cut"]["to"], 3.5);
+        assert_eq!(v["cut"]["frames"], 36);
+        assert_eq!(v["cut"]["copied"], 24);
+        assert_eq!(v["cut"]["encoded"], 12);
+        assert_eq!(v["source"]["path"], "talk \"1\".mp4");
+        m.cut = None;
         m.sources.push(m.sources[0].clone());
         m.join = Some(Join {
             method: "copy".into(),

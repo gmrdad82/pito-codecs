@@ -246,8 +246,9 @@ enum Command {
     },
     #[command(
         about = "Write stills of a video as PNGs and/or one contact sheet",
-        long_about = "Write stills of a video as PNGs and/or one contact sheet\n\nThe stills are N evenly spaced over the video (--count, 12 by default, or rows x cols when both are given for a sheet) or at the given times (--at). Each is scaled to --height keeping its shape. --out writes still-001.png, still-002.png, ... into a folder; --sheet writes one PNG of rows x cols stills on black with --pad pixels between and around them. --json prints each still's time, size and path.",
-        group(ArgGroup::new("written").args(["out", "sheet"]).required(true).multiple(true))
+        long_about = "Write stills of a video as PNGs and/or one contact sheet\n\nThe stills are N evenly spaced over the video (--count, 12 by default, or rows x cols when both are given for a sheet) or at the given times (--at). Each is scaled to --height keeping its shape. --out writes still-001.png, still-002.png, ... into a folder; --sheet writes one PNG of rows x cols stills on black with --pad pixels between and around them. --json prints each still's time, size and path.\n\nWith --from and --to, every frame from the first at or after --from to the last before --to goes to --out as 000000.png, 000001.png, ... (the names pcod frames reads), at the source's rate or at --fps (the nearest frame for each), scaled to --size or to --height keeping the shape. One decode pass, each PNG written as its frame decodes. A range of more than 100,000 frames is refused unless --force, which also replaces the numbered PNGs --out already holds; a folder with any other PNG is refused. --json prints the count, rate, size and folder.",
+        group(ArgGroup::new("written").args(["out", "sheet"]).required(true).multiple(true)),
+        group(ArgGroup::new("range").args(["from", "to"]).multiple(true))
     )]
     Stills {
         #[arg(help = "The video: MP4, MOV, MKV or WebM")]
@@ -259,6 +260,41 @@ enum Command {
             help = "How many evenly spaced stills [default: 12]"
         )]
         count: Option<usize>,
+        #[arg(
+            long,
+            value_parser = time_of,
+            conflicts_with_all = ["count", "at", "sheet", "seek"],
+            help = "Every frame from this time on (seconds, m:ss or h:mm:ss), into --out as 000000.png, 000001.png, ..."
+        )]
+        from: Option<f64>,
+        #[arg(
+            long,
+            value_parser = time_of,
+            conflicts_with_all = ["count", "at", "sheet", "seek"],
+            help = "With --from: stop before this time [default: the end]"
+        )]
+        to: Option<f64>,
+        #[arg(
+            long,
+            value_parser = args::rate_of,
+            requires = "range",
+            help = "With --from or --to: the rate to take frames at, the nearest frame for each [default: the source's]"
+        )]
+        fps: Option<(u32, u32)>,
+        #[arg(
+            long,
+            value_parser = args::size_of,
+            requires = "range",
+            conflicts_with = "height",
+            help = "With --from or --to: a width, WxH within 1% of the aspect, or 720p, 1080p, 1440p, 2160p"
+        )]
+        size: Option<size::Size>,
+        #[arg(
+            long,
+            requires = "range",
+            help = "With --from or --to: write more than 100,000 frames, and replace the numbered PNGs --out holds"
+        )]
+        force: bool,
         #[arg(
             long,
             value_delimiter = ',',
@@ -509,6 +545,11 @@ fn run(command: Command) -> Result<(), Fail> {
         Command::Stills {
             file,
             count,
+            from,
+            to,
+            fps,
+            size,
+            force,
             at,
             height,
             out: dir,
@@ -537,6 +578,13 @@ fn run(command: Command) -> Result<(), Fail> {
                 },
                 prefs: route.prefs(),
                 json,
+                range: (from.is_some() || to.is_some()).then(|| stills::Range {
+                    from: from.unwrap_or(0.0),
+                    to,
+                    fps,
+                    size,
+                    force,
+                }),
             },
         ),
     };

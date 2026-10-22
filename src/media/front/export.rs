@@ -394,11 +394,8 @@ fn export_to(
             ),
             None => "the sources differ in frame rate, size, depth or rotation, so the whole export is re-encoded".to_string(),
         })
-    } else if video.codec == Codec::Vp9 && (first.profile != "Profile 0" || first.bit_depth > 8) {
-        Some(format!(
-            "the source VP9 is {} at {} bits, our VP9 encoder writes profile 0 at 8 bits, so the whole export is re-encoded",
-            first.profile, first.bit_depth
-        ))
+    } else if let Some(why) = unspliced(video.codec, &first.profile, first.bit_depth) {
+        Some(why)
     } else if size != (first.width, first.height) {
         Some(format!(
             "the picture's odd size {}x{} is evened, so the whole export is re-encoded",
@@ -1138,9 +1135,62 @@ fn mix_args(job: &Job, opts: &ExportOptions, out: &Path) -> Vec<String> {
     args
 }
 
+fn unspliced(codec: Codec, profile: &str, bits: u8) -> Option<String> {
+    let (fits, ours) = match codec {
+        Codec::Vp9 => (
+            profile == "Profile 0" && bits <= 8,
+            "VP9 encoder writes profile 0 at 8 bits",
+        ),
+        Codec::H264 => (
+            bits <= 8
+                && matches!(
+                    profile,
+                    "Baseline" | "Constrained Baseline" | "Main" | "Extended" | "High"
+                ),
+            "H.264 encoder writes 4:2:0 at 8 bits",
+        ),
+        Codec::Hevc => (
+            bits <= 10 && profile != "Rext",
+            "HEVC encoder writes Main or Main 10",
+        ),
+        _ => (true, ""),
+    };
+    (!fits).then(|| {
+        format!(
+            "the source {codec} is {profile} at {bits} bits, our {ours}, so the whole export is re-encoded"
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edges_our_encoders_cannot_match_re_encode_the_whole_export() {
+        assert_eq!(unspliced(Codec::H264, "High", 8), None);
+        assert_eq!(unspliced(Codec::H264, "Main", 8), None);
+        assert_eq!(unspliced(Codec::H264, "Baseline", 8), None);
+        assert_eq!(unspliced(Codec::H264, "Extended", 8), None);
+        assert_eq!(unspliced(Codec::Hevc, "Main", 8), None);
+        assert_eq!(unspliced(Codec::Hevc, "Main 10", 10), None);
+        assert_eq!(unspliced(Codec::Vp9, "Profile 0", 8), None);
+        for (codec, profile, bits) in [
+            (Codec::H264, "High 10", 10),
+            (Codec::H264, "High 4:2:2", 8),
+            (Codec::H264, "High 4:4:4 Predictive", 8),
+            (Codec::H264, "", 8),
+            (Codec::Hevc, "Main 12", 12),
+            (Codec::Hevc, "Rext", 8),
+            (Codec::Vp9, "Profile 2", 10),
+            (Codec::Vp9, "Profile 1", 8),
+        ] {
+            let why = unspliced(codec, profile, bits)
+                .unwrap_or_else(|| panic!("{codec} {profile} {bits}"));
+            assert!(why.contains("whole export is re-encoded"), "{why}");
+            assert!(why.contains(profile), "{why}");
+        }
+    }
 
     #[test]
     fn a_piece_between_keyframes_copies_its_middle_and_encodes_its_edges() {

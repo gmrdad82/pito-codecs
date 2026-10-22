@@ -7,7 +7,7 @@ use super::Fail;
 use super::manifest;
 use super::pipeline::{self, Audio, Stopped};
 use super::plan::{AAC_KBPS, Container, OPUS_KBPS, Request, SAMPLE_RATE, partial, same_file};
-use super::profile::{ANIMATED_FPS, ANIMATED_WIDTH, Encoder, Profile};
+use super::profile::{ANIMATED_FPS, ANIMATED_WIDTH, Encoder, Preset, Profile};
 use super::progress::Progress;
 use super::quality;
 use super::sha256;
@@ -21,7 +21,21 @@ pub struct Options {
     pub json: bool,
     pub progress: bool,
     pub wav: Option<super::extract::Wav>,
+    pub range: Option<Span>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Span {
+    pub from: f64,
+    pub to: Option<f64>,
+}
+
+struct Origin {
+    path: PathBuf,
+    cut: manifest::Cut,
+}
+
+const CUT_CRF: u8 = 12;
 
 struct Planned {
     container: Container,
@@ -53,7 +67,11 @@ fn audio_for(request: &Request, container: Container, codec: &str) -> Audio {
             codec: codec.into(),
         };
     }
-    if webm {
+    encoded_audio(request, container)
+}
+
+fn encoded_audio(request: &Request, container: Container) -> Audio {
+    if container == Container::Webm {
         Audio::Opus {
             kbps: request.audio_bitrate.unwrap_or(OPUS_KBPS),
         }
@@ -210,17 +228,67 @@ pub fn land(partial_path: &Path, output: &Path, overwrite: bool) -> Result<(), F
     }
 }
 
-fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<String, Fail> {
+fn convert(
+    options: &Options,
+    partial_path: &mut Option<PathBuf>,
+    origin: Option<&Origin>,
+) -> Result<String, Fail> {
     let started = Instant::now();
     let request = &options.request;
-    let media = source::open(&request.input, request.fps)?;
+    let mut media = source::open(&request.input, request.fps)?;
+    let mut window = None;
+    let mut cut = None;
+    if let Some(span) = options.range {
+        let to = span.to.unwrap_or(f64::INFINITY);
+        if to <= span.from {
+            return Err(format!("--to {to} must come after --from {}", span.from).into());
+        }
+        if let Some(length) = media.seconds
+            && span.from >= length
+        {
+            return Err(format!(
+                "--from {} is at or past the end of the video ({length:.3} s)",
+                span.from
+            )
+            .into());
+        }
+        if media.kind == Kind::File && !media.alpha {
+            return ranged(options, &media, span, partial_path);
+        }
+        if media.kind == Kind::File {
+            let frames = windowed(&mut media, span.from, to)?;
+            window = Some(frames);
+            cut = Some(Origin {
+                path: media.path.clone(),
+                cut: manifest::Cut {
+                    from: frames.0 as f64 * f64::from(media.fps.1) / f64::from(media.fps.0.max(1)),
+                    to: frames.1 as f64 * f64::from(media.fps.1) / f64::from(media.fps.0.max(1)),
+                    frames: (frames.1 - frames.0) as u64,
+                    copied: 0,
+                    encoded: (frames.1 - frames.0) as u64,
+                },
+            });
+        } else {
+            media = sliced(media, span.from, to)?;
+        }
+    }
+    let origin = origin.or(cut.as_ref());
     let mut request = request.clone();
+    if window.is_some() {
+        request.copy_video = false;
+    }
     if matches!(media.kind, Kind::Frames(_)) {
         request.fps = None;
     }
-    let planned = plan(&request, &media)?;
-    let source_hash = match (&media.kind, options.json) {
-        (Kind::File, true) => hash(&media.path)?,
+    let mut planned = plan(&request, &media)?;
+    if window.is_some()
+        && let Some(Audio::Copy { .. }) = planned.audio
+    {
+        planned.audio = Some(encoded_audio(&request, planned.container));
+    }
+    let source_hash = match (&media.kind, options.json, origin) {
+        (Kind::File, true, Some(o)) => hash(&o.path)?,
+        (Kind::File, true, None) => hash(&media.path)?,
         _ => String::new(),
     };
     let part = partial(&request.output)?;
@@ -250,6 +318,7 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
             &[],
             Some(loud),
             source_hash,
+            origin,
         );
     }
     let level = match request.loudness {
@@ -263,7 +332,14 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
                 &media.path,
                 track,
                 &media::Prefs::default(),
-                &media::AudioSpan::WHOLE,
+                &pipeline::window_span(window, media.fps).map_or(
+                    media::AudioSpan::WHOLE,
+                    |(from, to)| media::AudioSpan {
+                        from,
+                        to,
+                        ..media::AudioSpan::WHOLE
+                    },
+                ),
                 &target_of(&target),
                 media::LevelStyle {
                     linear: target.linear,
@@ -298,6 +374,7 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
         level: level.as_ref().map(|(_, p)| *p),
         profile: request.profile.name(),
         alpha: media.alpha && planned.container == Container::Webm,
+        window,
         stop: &signals::STOP,
         progress: &progress,
     };
@@ -341,6 +418,7 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
         &done.notes,
         loud,
         source_hash,
+        origin,
     )
 }
 
@@ -354,6 +432,7 @@ fn finish(
     notes: &[String],
     loud: Option<Loud>,
     source_hash: String,
+    origin: Option<&Origin>,
 ) -> Result<String, Fail> {
     let seconds = started.elapsed().as_secs_f64();
     if !options.json {
@@ -369,7 +448,10 @@ fn finish(
         .unwrap_or(0);
     let document = manifest::Manifest {
         sources: vec![manifest::Source {
-            path: request.input.display().to_string(),
+            path: origin
+                .map_or(&request.input, |o| &o.path)
+                .display()
+                .to_string(),
             sha256: source_hash,
             loudness: loud.as_ref().map(|l| stats(&l.before)),
         }],
@@ -393,6 +475,7 @@ fn finish(
             loudness: loud.as_ref().map(|l| stats(&l.after)),
         }],
         join: None,
+        cut: origin.map(|o| o.cut.clone()),
     };
     Ok(document.to_json())
 }
@@ -528,6 +611,377 @@ fn crf_of(rate: media::Rate) -> u8 {
     }
 }
 
+fn join_options(
+    request: &Request,
+    container: Container,
+    display: (u32, u32),
+    encode: bool,
+) -> Result<media::JoinOptions, Fail> {
+    let size = match request.size {
+        Some(size) => Some(size.resolve(display.0, display.1)?),
+        None => None,
+    };
+    let profile = request.profile.name();
+    let animation = request.tune.as_deref() == Some("animation");
+    let webm = container == Container::Webm;
+    let crf = if webm {
+        let vp9 = crf_of(quality::vp9_rate(profile, request.quality.map(f32::from)));
+        ((f32::from(vp9) * 4.0 / 7.0).round() as u8).clamp(1, 51)
+    } else {
+        crf_of(quality::h264_rate(
+            profile,
+            request.quality.map(f32::from),
+            animation,
+        ))
+    };
+    let choice = if request.profile == Profile::Fast {
+        media::Choice::Gpu
+    } else {
+        media::Choice::Cpu
+    };
+    Ok(media::JoinOptions {
+        encode,
+        size,
+        fps: request.fps,
+        video: if webm {
+            media::Codec::Vp9
+        } else {
+            media::Codec::H264
+        },
+        crf,
+        audio_kbps: request.audio_bitrate,
+        prefs: media::Prefs {
+            encode: choice,
+            ..media::Prefs::default()
+        },
+    })
+}
+
+fn windowed(media: &mut Media, from: f64, to: f64) -> Result<(i64, i64), Fail> {
+    let first = media::first_frame_at(from, media.fps).max(0);
+    let total = media
+        .seconds
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .map(|s| media::first_frame_at(s, media.fps))
+        .ok_or_else(|| format!("{} has no known length to cut", media.path.display()))?;
+    let end = if to.is_finite() {
+        media::first_frame_at(to, media.fps).min(total)
+    } else {
+        total
+    };
+    if end <= first {
+        return Err(format!("no frame of the video starts between {from} s and {to} s").into());
+    }
+    media.frames = Some((end - first) as u64);
+    media.seconds =
+        Some((end - first) as f64 * f64::from(media.fps.1) / f64::from(media.fps.0.max(1)));
+    Ok((first, end))
+}
+
+fn sliced(mut media: Media, from: f64, to: f64) -> Result<Media, Fail> {
+    let Kind::Frames(files) = &media.kind else {
+        return Ok(media);
+    };
+    let count = i64::try_from(files.len()).unwrap_or(i64::MAX);
+    let first = media::first_frame_at(from, media.fps).clamp(0, count) as usize;
+    let end = media::first_frame_at(to, media.fps).clamp(0, count) as usize;
+    if end <= first {
+        return Err(format!("no frame of the folder starts between {from} s and {to} s").into());
+    }
+    let kept = files[first..end].to_vec();
+    media.frames = Some(kept.len() as u64);
+    media.seconds =
+        Some(kept.len() as f64 * f64::from(media.fps.1) / f64::from(media.fps.0.max(1)));
+    media.kind = Kind::Frames(kept);
+    Ok(media)
+}
+
+fn cut_to(
+    input: &Path,
+    (from, to): (f64, f64),
+    out: &Path,
+    opts: media::JoinOptions,
+    progress: &Progress,
+) -> Result<media::Cut, Fail> {
+    progress.step("cut", 1, 1, Some(1000));
+    media::cut(input, from, to, out, opts, |p| {
+        progress.frame((p.done.clamp(0.0, 1.0) * 1000.0) as u64);
+        !signals::STOP.load(std::sync::atomic::Ordering::Relaxed)
+    })
+    .map_err(|e| match e {
+        media::Error::Cancelled => Box::new(Stopped) as Fail,
+        e => e.to_string().into(),
+    })
+}
+
+fn cut_prefs(media: &Media) -> media::Prefs {
+    let encode = if media.codec == "hevc" {
+        media::Choice::Auto
+    } else {
+        media::Choice::Cpu
+    };
+    media::Prefs {
+        encode,
+        ..media::Prefs::default()
+    }
+}
+
+fn cut_encoder(
+    made: &media::Cut,
+    request: &Request,
+    crf: u8,
+) -> (manifest::Encoder, Option<manifest::Quality>) {
+    let codec = made.video.to_string().to_ascii_lowercase().replace('.', "");
+    let encoder = match (made.video, made.route) {
+        _ if made.encoded == 0 => Encoder::Copy { codec },
+        (media::Codec::Vp9, _) => Encoder::Vp9 {
+            crf: crf_of(quality::vp9_rate(
+                request.profile.name(),
+                request.quality.map(f32::from),
+            )),
+        },
+        (media::Codec::H264, media::Route::Gpu) => Encoder::H264Gpu { qp: crf },
+        (media::Codec::H264, _) => Encoder::H264 {
+            preset: if request.profile == Profile::Best {
+                Preset::Quality
+            } else {
+                Preset::Balanced
+            },
+            crf,
+        },
+        (media::Codec::Hevc, _) => {
+            return (
+                manifest::Encoder {
+                    encoder: "hevc_gpu".into(),
+                    codec: None,
+                    settings: vec![("qp", crf.into())],
+                },
+                Some(manifest::Quality::Qp(u32::from(crf))),
+            );
+        }
+        _ => Encoder::Copy { codec },
+    };
+    let quality = if matches!(encoder, Encoder::Copy { .. }) {
+        None
+    } else {
+        encoder.quality()
+    };
+    (encoder.manifest(), quality)
+}
+
+fn cut_line(c: &media::Cut) -> String {
+    let span = format!("cut {:.3} s to {:.3} s, {} frames", c.from, c.to, c.frames);
+    let route = match c.route {
+        media::Route::Gpu => "GPU",
+        _ => "CPU",
+    };
+    if c.encoded == 0 {
+        format!("{span}, all copied, no re-encode")
+    } else if c.copied == 0 {
+        format!("{span}, all re-encoded ({} on the {route})", c.video)
+    } else {
+        format!(
+            "{span}: {} copied, {} re-encoded at the edges ({} on the {route})",
+            c.copied, c.encoded, c.video
+        )
+    }
+}
+
+fn cut_manifest(c: &media::Cut) -> manifest::Cut {
+    manifest::Cut {
+        from: c.from,
+        to: c.to,
+        frames: c.frames,
+        copied: c.copied,
+        encoded: c.encoded,
+    }
+}
+
+fn ranged(
+    options: &Options,
+    media: &Media,
+    span: Span,
+    partial_path: &mut Option<PathBuf>,
+) -> Result<String, Fail> {
+    let started = Instant::now();
+    let request = &options.request;
+    let (container, _) = request.settings()?;
+    if same_file(&request.input, &request.output) {
+        return Err("input and output are the same file".into());
+    }
+    if !request.overwrite && request.output.exists() {
+        return Err(format!(
+            "{} already exists; use --force to replace it",
+            request.output.display()
+        )
+        .into());
+    }
+    if let (Some(target), None) = (&request.loudness, &media.audio) {
+        return Err(format!(
+            "the source has no audio to bring to {} LUFS",
+            target.integrated
+        )
+        .into());
+    }
+    if let (Some(kbps), None) = (request.audio_bitrate, &media.audio) {
+        return Err(format!("the source has no audio to encode at {kbps} kbps").into());
+    }
+    let window = (span.from, span.to.unwrap_or(f64::INFINITY));
+    if container.animated() {
+        return animated(options, media, window, partial_path);
+    }
+    let mut opts = join_options(
+        request,
+        container,
+        media.display_size(),
+        !request.copy_video,
+    )?;
+    if !opts.encode {
+        opts.prefs = cut_prefs(media);
+    }
+    let crf = opts.crf;
+    let part = partial(&request.output)?;
+    *partial_path = Some(part.clone());
+    let progress = Progress::new(options.progress);
+    let made = match cut_to(&request.input, window, &part, opts, &progress) {
+        Ok(m) => m,
+        Err(e) => {
+            progress.clear();
+            return Err(e);
+        }
+    };
+    let mut part = part;
+    let loud = match request.loudness {
+        Some(target) => {
+            let levelled = partial(&request.output)?;
+            *partial_path = Some(levelled.clone());
+            let loud = level_copy(
+                &part,
+                &levelled,
+                0,
+                target,
+                request.audio_bitrate,
+                &progress,
+            );
+            let _ = std::fs::remove_file(&part);
+            part = levelled;
+            progress.clear();
+            let loud = loud?;
+            loud.held()?;
+            Some(loud)
+        }
+        None => None,
+    };
+    progress.clear();
+    land(&part, &request.output, request.overwrite)?;
+    *partial_path = None;
+    let seconds = started.elapsed().as_secs_f64();
+    if !options.json {
+        let mut lines = vec![request.output.display().to_string(), cut_line(&made)];
+        lines.extend(made.reasons.iter().map(|n| format!("note: {n}")));
+        if let Some(l) = &loud {
+            lines.push(l.lines());
+        }
+        return Ok(lines.join("\n"));
+    }
+    let (encoder, quality) = cut_encoder(&made, request, crf);
+    let audio = match made.audio {
+        media::JoinAudio::Silent => None,
+        media::JoinAudio::Copied => Some(Audio::Copy {
+            codec: if container == Container::Webm {
+                "opus".into()
+            } else {
+                "aac".into()
+            },
+        }),
+        media::JoinAudio::Encoded {
+            codec: media::Codec::Opus,
+            kbps,
+        } => Some(Audio::Opus { kbps }),
+        media::JoinAudio::Encoded { kbps, .. } => Some(Audio::Aac { kbps }),
+    };
+    let bytes = std::fs::metadata(&request.output)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let document = manifest::Manifest {
+        sources: vec![manifest::Source {
+            path: request.input.display().to_string(),
+            sha256: hash(&request.input)?,
+            loudness: loud.as_ref().map(|l| stats(&l.before)),
+        }],
+        params: manifest::Params {
+            profile: request.profile.name().into(),
+            quality,
+            encoder,
+            width: made.size.0,
+            height: made.size.1,
+            fps: Some(f64::from(made.fps.0) / f64::from(made.fps.1.max(1))),
+            tune: request.tune.clone(),
+            loudness: loud.as_ref().map(Loud::target),
+            audio: audio.as_ref().map(audio_manifest),
+        },
+        device: match made.route {
+            media::Route::Gpu => "GPU".into(),
+            _ => "CPU".into(),
+        },
+        seconds: (seconds * 100.0).round() / 100.0,
+        files: vec![manifest::Output {
+            file: request.output.display().to_string(),
+            sha256: hash(&request.output)?,
+            bytes,
+            loudness: loud.as_ref().map(|l| stats(&l.after)),
+        }],
+        join: None,
+        cut: Some(cut_manifest(&made)),
+    };
+    Ok(document.to_json())
+}
+
+fn animated(
+    options: &Options,
+    media: &Media,
+    window: (f64, f64),
+    partial_path: &mut Option<PathBuf>,
+) -> Result<String, Fail> {
+    let request = &options.request;
+    let temp = partial(&request.output.with_extension("mp4"))?;
+    let opts = media::JoinOptions {
+        crf: CUT_CRF,
+        prefs: cut_prefs(media),
+        ..media::JoinOptions::default()
+    };
+    let progress = Progress::new(options.progress);
+    let made = cut_to(&request.input, window, &temp, opts, &progress);
+    progress.clear();
+    let made = match made {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp);
+            return Err(e);
+        }
+    };
+    let mut inner = request.clone();
+    inner.input = temp.clone();
+    inner.copy_video = false;
+    let origin = Origin {
+        path: request.input.clone(),
+        cut: cut_manifest(&made),
+    };
+    let done = convert(
+        &Options {
+            request: inner,
+            json: options.json,
+            progress: options.progress,
+            wav: None,
+            range: None,
+        },
+        partial_path,
+        Some(&origin),
+    );
+    let _ = std::fs::remove_file(&temp);
+    done
+}
+
 fn join(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<String, Fail> {
     let started = Instant::now();
     let request = &options.request;
@@ -557,47 +1011,14 @@ fn join(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<String,
         .into());
     }
     let first = source::file(&inputs[0])?;
-    let size = match request.size {
-        Some(size) => {
-            let (w, h) = first.display_size();
-            Some(size.resolve(w, h)?)
-        }
-        None => None,
-    };
     let profile = request.profile.name();
-    let animation = request.tune.as_deref() == Some("animation");
     let webm = container == Container::Webm;
-    let crf = if webm {
-        let vp9 = crf_of(quality::vp9_rate(profile, request.quality.map(f32::from)));
-        ((f32::from(vp9) * 4.0 / 7.0).round() as u8).clamp(1, 51)
-    } else {
-        crf_of(quality::h264_rate(
-            profile,
-            request.quality.map(f32::from),
-            animation,
-        ))
-    };
-    let choice = if request.profile == Profile::Fast {
-        media::Choice::Gpu
-    } else {
-        media::Choice::Cpu
-    };
-    let opts = media::JoinOptions {
-        encode: !request.copy_video,
-        size,
-        fps: request.fps,
-        video: if webm {
-            media::Codec::Vp9
-        } else {
-            media::Codec::H264
-        },
-        crf,
-        audio_kbps: request.audio_bitrate,
-        prefs: media::Prefs {
-            encode: choice,
-            ..media::Prefs::default()
-        },
-    };
+    let opts = join_options(
+        request,
+        container,
+        first.display_size(),
+        !request.copy_video,
+    )?;
     let part = partial(&request.output)?;
     *partial_path = Some(part.clone());
     let progress = Progress::new(options.progress);
@@ -745,6 +1166,7 @@ fn join(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<String,
             clips: joined.clips,
             loudness: loud.as_ref().map(|l| stats(&l.before)),
         }),
+        cut: None,
     };
     Ok(document.to_json())
 }
@@ -774,7 +1196,7 @@ pub fn run(options: Options) -> ExitCode {
     let outcome = if let Some(wav) = &options.wav {
         super::extract::run(&options, wav, &mut partial_path)
     } else if options.request.joins.is_empty() {
-        convert(&options, &mut partial_path)
+        convert(&options, &mut partial_path, None)
     } else {
         join(&options, &mut partial_path)
     };
@@ -852,4 +1274,152 @@ pub fn profiles() -> String {
         super::plan::AUDIO_KBPS_HIGHEST
     ));
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pito_codecs::gpu::Color;
+
+    fn folder(count: usize) -> Media {
+        Media {
+            path: PathBuf::from("frames"),
+            kind: Kind::Frames(
+                (0..count)
+                    .map(|k| PathBuf::from(format!("{k:06}.png")))
+                    .collect(),
+            ),
+            width: 64,
+            height: 64,
+            fps: (24, 1),
+            seconds: Some(count as f64 / 24.0),
+            frames: Some(count as u64),
+            codec: "png".into(),
+            bit_depth: 8,
+            alpha: false,
+            color: Color::UNKNOWN,
+            rotation: 0,
+            sar: (1, 1),
+            audio: None,
+        }
+    }
+
+    #[test]
+    fn an_alpha_window_keeps_the_frames_that_start_in_it() {
+        let mut m = folder(120);
+        m.kind = Kind::File;
+        assert_eq!(windowed(&mut m, 2.0, 3.5).unwrap(), (48, 84));
+        assert_eq!(m.frames, Some(36));
+        assert!((m.seconds.unwrap() - 1.5).abs() < 1e-9);
+        let mut m = folder(120);
+        assert_eq!(windowed(&mut m, 2.01, f64::INFINITY).unwrap(), (49, 120));
+        let mut m = folder(120);
+        assert_eq!(windowed(&mut m, 4.0, 9.0).unwrap(), (96, 120));
+        let mut m = folder(120);
+        assert!(windowed(&mut m, 2.01, 2.04).is_err());
+        let mut m = folder(120);
+        m.seconds = None;
+        let e = windowed(&mut m, 1.0, 2.0).unwrap_err().to_string();
+        assert!(e.contains("no known length"), "{e}");
+    }
+
+    fn names(media: &Media) -> Vec<String> {
+        let Kind::Frames(files) = &media.kind else {
+            panic!("not a folder");
+        };
+        files.iter().map(|p| p.display().to_string()).collect()
+    }
+
+    fn made(video: media::Codec, route: media::Route, encoded: u64) -> media::Cut {
+        media::Cut {
+            path: PathBuf::from("out.mp4"),
+            from: 2.0,
+            to: 3.5,
+            size: (384, 240),
+            fps: (24, 1),
+            frames: 36,
+            copied: 36 - encoded,
+            encoded,
+            smart: true,
+            video,
+            route,
+            audio: media::JoinAudio::Silent,
+            reasons: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_manifest_names_the_encoder_that_made_the_edges() {
+        let request = Request::new("in.mp4", "out.mp4");
+        let (e, q) = cut_encoder(
+            &made(media::Codec::Hevc, media::Route::Gpu, 0),
+            &request,
+            12,
+        );
+        assert_eq!(e.encoder, "copy");
+        assert_eq!(e.codec.as_deref(), Some("hevc"));
+        assert_eq!(q, None);
+        let (e, q) = cut_encoder(
+            &made(media::Codec::Hevc, media::Route::Gpu, 12),
+            &request,
+            12,
+        );
+        assert_eq!(e.encoder, "hevc_gpu");
+        assert_eq!(q, Some(manifest::Quality::Qp(12)));
+        let (e, q) = cut_encoder(
+            &made(media::Codec::H264, media::Route::Cpu, 12),
+            &request,
+            12,
+        );
+        assert_eq!(e.encoder, "h264");
+        assert_eq!(q, Some(manifest::Quality::Crf(12)));
+        let (e, q) = cut_encoder(
+            &made(media::Codec::H264, media::Route::Gpu, 36),
+            &request,
+            20,
+        );
+        assert_eq!(e.encoder, "h264_gpu");
+        assert_eq!(q, Some(manifest::Quality::Qp(20)));
+        let (e, _) = cut_encoder(
+            &made(media::Codec::Vp9, media::Route::Cpu, 36),
+            &request,
+            20,
+        );
+        assert_eq!(e.encoder, "vp9");
+    }
+
+    #[test]
+    fn a_folder_keeps_the_frames_that_start_in_the_window() {
+        let m = sliced(folder(48), 0.25, 0.5).unwrap();
+        assert_eq!(
+            names(&m),
+            (6..12).map(|k| format!("{k:06}.png")).collect::<Vec<_>>()
+        );
+        assert_eq!(m.frames, Some(6));
+        assert!((m.seconds.unwrap() - 0.25).abs() < 1e-9);
+        let m = sliced(folder(48), 0.26, 0.5).unwrap();
+        assert_eq!(names(&m).first().map(String::as_str), Some("000007.png"));
+    }
+
+    #[test]
+    fn a_folder_window_stops_at_the_last_frame() {
+        let m = sliced(folder(48), 1.5, 9.0).unwrap();
+        assert_eq!(m.frames, Some(12));
+        assert_eq!(names(&m).last().map(String::as_str), Some("000047.png"));
+    }
+
+    #[test]
+    fn a_folder_window_past_the_end_is_refused() {
+        assert!(sliced(folder(48), 2.0, 3.0).is_err());
+        assert!(sliced(folder(48), 0.01, 0.02).is_err());
+    }
+
+    #[test]
+    fn a_file_passes_through_untouched() {
+        let m = Media {
+            kind: Kind::File,
+            ..folder(1)
+        };
+        assert_eq!(sliced(m.clone(), 1.0, 2.0).unwrap(), m);
+    }
 }

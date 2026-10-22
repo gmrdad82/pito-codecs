@@ -22,6 +22,8 @@ pcod clip.mp4 readme.webp                          # an animated WebP
 pcod frames/ trailer.webm --fps 60                 # PNG frames to a transparent WebM
 pcod join intro.mp4 scene.mp4 outro.mp4 film.mp4   # one file, copied when the clips match
 pcod talk.mp4 upload.mp4 --loudness youtube        # -14 LUFS, the video copied
+pcod talk.mp4 moment.mp4 --from 1:02 --to 1:10     # eight seconds, GOPs copied, edges re-encoded
+pcod talk.mp4 moment.gif --from 1:02 --to 1:05     # three seconds as a looping GIF
 pcod phone.mp4 engine.wav --from 0:12 --to 0:20     # eight seconds of the audio as a WAV
 pcod mix.wav master.wav --loudness -14 --linear     # -14 LUFS, the dynamics kept
 ```
@@ -32,6 +34,7 @@ pcod mix.wav master.wav --loudness -14 --linear     # -14 LUFS, the dynamics kep
 - **Alpha.** A folder of RGBA PNG frames, or a WebM with alpha, keeps its alpha in `.webm` (VP9 alpha, read by browsers and ffmpeg), `.gif` and `.webp`; in H.264 it is laid onto black. A folder needs `--fps`.
 - **Audio.** AAC-LC 320k stereo at 48 kHz in `mp4`, `mov` and `mkv` (an AAC source is copied when nothing changes its audio), Opus 128k in `webm` (an Opus source is copied). `--audio-bitrate` sets the rate, 32 to 512, and with no video option the video is copied untouched.
 - **Loudness.** `--loudness youtube` levels the audio to -14 LUFS under a -2 dBTP true-peak ceiling in two EBU R128 passes; any target from -70 to -5 LUFS works too, with `--true-peak` for the ceiling (-1 dBTP by default). When the gain to the target would push peaks past the ceiling, a lookahead true-peak limiter holds them, and pcod raises the gain until the limited audio reaches the target, which flattens a mix whose loud passages hit the ceiling. `--linear` keeps the dynamics instead: the gain to the target, then the limiter on the peaks alone, so the result can land under the target. An encoded output (AAC or Opus) is checked after a trial encode and the ceiling lowered, up to eight times, until the encoded audio stays under it; an output whose encoded audio still peaks over the ceiling is not written. With no video option the video is copied untouched. pcod prints the loudness before and after, and `--json` carries both (`"linear"` in its loudness parameters).
+- **Ranges.** `--from` and `--to` (seconds, `m:ss` or `h:mm:ss`) cut a window of a video into any output: the first frame at or after `--from` to the last before `--to`, the audio cut to the same window and in sync, the output starting at 0. `--to` defaults to the end. With no video option and a container that carries the source's codec (H.264, HEVC or VP9), the cut copies every whole GOP inside the window and re-encodes only the frames from `--from` to the first keyframe and from the last keyframe to `--to`, on the CPU (on the GPU for HEVC); it says how many frames it copied and re-encoded. A video option (`--profile`, `--size`, `--fps`, `--crf`, `--qp`, `--tune`) or a WebM from H.264 re-encodes the whole window, and so does an MP4 or MOV from VP9 or from an MKV or WebM source, as a plain convert does, and a source our encoders can't match at the edges (10-bit or 4:2:2 H.264, 4:4:4 or 12-bit HEVC, VP9 past profile 0). The audio is AAC, or Opus in `.webm`, encoded from the window. GIFs and WebPs are cut first, then made from the window. A WebM with alpha is decoded with its alpha from the first frame of the window to the last, so `.webm`, `.gif` and `.webp` keep the alpha, and its audio is re-encoded from the window. A folder of PNG frames takes its frames in the window at its `--fps`. `--to` not after `--from`, or `--from` at or past the end, is refused; `join` takes whole clips.
 - **Audio alone.** A `.wav` output is the source's first audio track (AAC, Opus, MP3, AC-3, E-AC-3 or PCM) decoded to 16-bit PCM; the source can be a video, an M4A or MKA, a WAV or an MP3. It comes out stereo at the source's rate when it is 44.1 or 48 kHz and 48 kHz otherwise. `--from` and `--to` cut a range (seconds, `m:ss` or `h:mm:ss`), `--mono` writes one channel, `--rate 44100` or `--rate 48000` resamples, and `--loudness` levels the range itself, measured in the output's own channels and rate. Video options are refused.
 - **Join.** `pcod join` stitches clips in order. When every clip matches the first (codec, size, rate, colour, headers and audio) it is a stream copy; otherwise, or with any video option, it re-encodes them to the first clip's size and rate, letterboxing a clip of another shape. It says which, and why.
 - **Existing outputs** are refused unless `--force` is given. pcod writes a hidden partial file beside the output and renames it into place at the end, so a failed or stopped run leaves nothing behind.
@@ -174,6 +177,18 @@ pcod stills clip.mkv -n 6 --cols 3 --height 240 --seek keyframe --sheet sheet.pn
 ```
 
 A time past the end of the video stops with one line, `pcod: clip.mp4: 65.000 s is past the end of the video (20.000 s)`.
+
+### Frame ranges
+
+`--from` and `--to` write every frame of a window instead: the first frame at or after `--from` to the last before `--to` (the end by default), into `--out` as `000000.png`, `000001.png`, ..., the names `pcod frames` reads, so a range goes back into an MP4 with `pcod frames`; like other stills a range is 360 pixels high by default, so give `--size` (the source's own size, `1920x1080` for a 1080p video) for a round trip at full size. The frames come at the source's rate, or at `--fps` with the frame whose start is nearest each slot (ties go to the earlier frame, so a `pcod --fps` re-encode of the same window, which keeps the frame each slot rounds to, can differ by one frame at some slots); each is scaled to `--size` (a width, `WxH` within 1% of the aspect, or `720p` to `2160p`) or to `--height` keeping its shape. The video is decoded once from the keyframe before `--from`, on the GPU route first (`--route cpu` for the CPU), and each PNG is written as its frame decodes, on every core, so memory stays flat however long the range. A range of more than 100,000 frames is refused unless `--force`; a folder that already holds numbered PNGs is refused too unless `--force`, which replaces them, and a folder with any other PNG is always refused, since `pcod frames` would read it too. A range that fails partway, on a full disk or an unwritable folder, stops at once and removes the PNGs it wrote. `--count`, `--at`, `--sheet` and `--seek` don't go with a range.
+
+```sh
+pcod stills clip.mp4 --from 1.0 --to 1.5 --out frames
+pcod stills clip.mp4 --from 0:10 --to 0:20 --fps 12 --size 640 --out reel --json
+pcod frames frames back.mp4 --fps 24
+```
+
+It prints how many frames it wrote, their size and rate, the window and the speed in frames per second with the time to the first PNG; `--json` prints the same as one line: `file`, `from`, `to`, `first` and `last` (the times of the first and last frame taken), `count`, `fps`, `rate`, `width`, `height`, `dir`, `digits`, `first_png`, `seconds` and `frames_per_second`.
 
 ## When something fails
 

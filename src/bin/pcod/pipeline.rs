@@ -52,6 +52,7 @@ pub struct Job<'a> {
     pub level: Option<media::LevelPlan>,
     pub profile: &'a str,
     pub alpha: bool,
+    pub window: Option<(i64, i64)>,
     pub stop: &'a AtomicBool,
     pub progress: &'a Progress,
 }
@@ -188,6 +189,27 @@ impl YuvFix {
     }
 }
 
+pub struct ToRgba(YuvFix);
+
+impl ToRgba {
+    pub fn new(media: &Media, size: (u32, u32)) -> ToRgba {
+        ToRgba(YuvFix {
+            rotation: rotation_of(media.rotation),
+            size,
+            scaler: None,
+            from: spec_of(media.color),
+            rgba: true,
+        })
+    }
+
+    pub fn apply(&mut self, frame: Frame) -> Result<Rgba, Fail> {
+        match self.0.apply(frame)? {
+            Pic::Rgba(img) => Ok(img),
+            _ => Err("a frame did not turn into RGBA".into()),
+        }
+    }
+}
+
 fn premultiply(img: &mut Rgba) {
     for px in img.data.chunks_exact_mut(4) {
         let a = u32::from(px[3]);
@@ -285,7 +307,7 @@ struct Retime {
 impl Retime {
     fn slot(&mut self, seconds: f64) -> i64 {
         let origin = *self.origin.get_or_insert(seconds);
-        ((seconds - origin) * self.fps.0 as f64 / self.fps.1.max(1) as f64).round() as i64
+        ((seconds - origin) * self.fps.0 as f64 / self.fps.1.max(1) as f64 + 1e-9).round() as i64
     }
 
     fn span(&mut self, at: i64, until: i64) -> std::ops::Range<i64> {
@@ -416,7 +438,13 @@ fn produce_alpha(
     tx: &SyncSender<Result<Pic, Fail>>,
 ) -> Result<Vec<String>, Fail> {
     let media = job.media;
-    let mut video = media::decode_alpha(&media.path, 0.0)?;
+    let (first, end) = job.window.unwrap_or((0, i64::MAX));
+    let start = if first > 0 {
+        (first as f64 - 0.5) * f64::from(media.fps.1) / f64::from(media.fps.0.max(1))
+    } else {
+        0.0
+    };
+    let mut video = media::decode_alpha(&media.path, start)?;
     let shown = if media.rotation % 180 == 90 {
         (video.height, video.width)
     } else {
@@ -441,6 +469,12 @@ fn produce_alpha(
     let mut held: Option<(Frame, Option<Plane>, i64)> = None;
     while let Some((frame, alpha)) = video.next_frame()? {
         stopped(job.stop)?;
+        if frame.pts < first {
+            continue;
+        }
+        if frame.pts >= end {
+            break;
+        }
         let slot = retime.slot(frame.time_base.seconds(frame.pts));
         if let Some((f, a, at)) = held.take() {
             let span = retime.span(at, slot);
@@ -791,6 +825,10 @@ pub fn mkv_family(path: &Path) -> bool {
 
 fn audio_plan(job: &Job, audio: &Audio) -> Result<AudioPlan, Fail> {
     let media = job.media;
+    let from = window_span(job.window, job.media.fps).map_or(0.0, |(from, _)| from);
+    if job.window.is_some() && matches!(audio, Audio::Copy { .. }) {
+        return Err("a window of the source re-encodes its audio".into());
+    }
     let sound = media
         .audio
         .as_ref()
@@ -865,7 +903,7 @@ fn audio_plan(job: &Job, audio: &Audio) -> Result<AudioPlan, Fail> {
             let stream = media::audio_stream(
                 &media.path,
                 sound.index,
-                0.0,
+                from,
                 SAMPLE_RATE,
                 2,
                 &Prefs::default(),
@@ -897,7 +935,7 @@ fn audio_plan(job: &Job, audio: &Audio) -> Result<AudioPlan, Fail> {
             let stream = media::audio_stream(
                 &media.path,
                 sound.index,
-                0.0,
+                from,
                 SAMPLE_RATE,
                 2,
                 &Prefs::default(),
@@ -915,6 +953,21 @@ fn audio_plan(job: &Job, audio: &Audio) -> Result<AudioPlan, Fail> {
     }
 }
 
+pub fn window_span(window: Option<(i64, i64)>, fps: (u32, u32)) -> Option<(f64, f64)> {
+    let (first, end) = window?;
+    let step = f64::from(fps.1) / f64::from(fps.0.max(1));
+    Some((first as f64 * step, end as f64 * step))
+}
+
+fn clip(buf: &mut AudioBuffer, left: &mut Option<u64>) {
+    if let Some(left) = left {
+        let frames = (buf.frames() as u64).min(*left);
+        buf.samples
+            .truncate(frames as usize * usize::from(buf.channels.max(1)));
+        *left -= frames;
+    }
+}
+
 fn leveler(job: &Job) -> Result<Option<Box<media::Leveler>>, Fail> {
     Ok(match &job.level {
         Some(plan) => Some(Box::new(plan.leveler(SAMPLE_RATE, 2)?)),
@@ -925,6 +978,7 @@ fn leveler(job: &Job) -> Result<Option<Box<media::Leveler>>, Fail> {
 fn run_audio(
     work: AudioWork,
     shift: i64,
+    mut left: Option<u64>,
     stop: &AtomicBool,
     tx: &mpsc::Sender<Result<Packet, Fail>>,
 ) -> Result<(), Fail> {
@@ -955,8 +1009,12 @@ fn run_audio(
         }
         AudioWork::Aac(stream, mut enc, mut level) => {
             for buf in stream {
+                if left == Some(0) {
+                    break;
+                }
                 stopped(stop)?;
                 let mut buf: AudioBuffer = buf?;
+                clip(&mut buf, &mut left);
                 if let Some(l) = level.as_mut() {
                     l.process(&mut buf)?;
                 }
@@ -977,8 +1035,12 @@ fn run_audio(
         }
         AudioWork::Opus(stream, mut enc, mut level) => {
             for buf in stream {
+                if left == Some(0) {
+                    break;
+                }
                 stopped(stop)?;
                 let mut buf: AudioBuffer = buf?;
+                clip(&mut buf, &mut left);
                 if let Some(l) = level.as_mut() {
                     l.process(&mut buf)?;
                 }
@@ -1178,6 +1240,9 @@ fn palette_pass(job: &Job, want: Want) -> Result<gif::Palette, Fail> {
 }
 
 pub fn run(job: &Job) -> Result<Done, Fail> {
+    if job.window.is_some() && !(job.media.kind == Kind::File && job.media.alpha) {
+        return Err("the decode pipeline windows only a source with alpha".into());
+    }
     let animated = job.container.animated();
     let direct = gpu_direct(job.media, job.encoder, job.fps);
     let want = if animated {
@@ -1202,6 +1267,8 @@ pub fn run(job: &Job) -> Result<Done, Fail> {
         )
     });
     let audio_work = audio_plan.map(|a| (a.work, a.shift));
+    let left = window_span(job.window, job.media.fps)
+        .map(|(from, to)| ((to - from).max(0.0) * f64::from(SAMPLE_RATE)).round() as u64);
     let gif = matches!(job.encoder, Encoder::Gif { .. });
     let steps = if gif { 3 } else { 2 };
     let palette = if gif {
@@ -1223,7 +1290,7 @@ pub fn run(job: &Job) -> Result<Done, Fail> {
         let audio = s.spawn(move || -> Result<(), Fail> {
             match audio_work {
                 Some((w, shift)) => {
-                    let r = run_audio(w, shift, job.stop, &atx);
+                    let r = run_audio(w, shift, left, job.stop, &atx);
                     if let Err(e) = &r {
                         let _ = atx.send(Err(e.to_string().into()));
                     }
@@ -1471,4 +1538,57 @@ fn consume_animation(
 
 fn write_all(path: &Path, data: &[u8]) -> Result<(), Fail> {
     std::fs::write(path, data).map_err(|e| format!("{}: {e}", path.display()).into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tie_between_two_slots_goes_to_the_later_one_whatever_the_origin() {
+        for origin in [0.0, 2.0, 7.0 / 3.0, 1234.5] {
+            let mut retime = Retime {
+                fps: (12, 1),
+                origin: None,
+                next: 0,
+            };
+            assert_eq!(retime.slot(origin), 0);
+            for n in 1..48 {
+                let at = origin + f64::from(n) / 24.0;
+                assert_eq!(retime.slot(at), i64::from(n + 1) / 2, "{origin} + {n}/24");
+            }
+        }
+    }
+
+    #[test]
+    fn a_window_maps_its_frames_to_seconds() {
+        assert_eq!(window_span(None, (24, 1)), None);
+        assert_eq!(window_span(Some((48, 84)), (24, 1)), Some((2.0, 3.5)));
+        let (from, to) = window_span(Some((30, 60)), (30_000, 1001)).unwrap();
+        assert!((from - 1.001).abs() < 1e-9 && (to - 2.002).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_audio_of_a_window_stops_at_its_length() {
+        let buffer = |frames: usize| AudioBuffer {
+            samples: vec![0.5; frames * 2],
+            rate: SAMPLE_RATE,
+            channels: 2,
+        };
+        let mut left = Some(1500);
+        let mut kept = 0;
+        for _ in 0..3 {
+            let mut buf = buffer(1024);
+            clip(&mut buf, &mut left);
+            assert_eq!(buf.samples.len(), buf.frames() * 2);
+            kept += buf.frames();
+        }
+        assert_eq!(kept, 1500);
+        assert_eq!(left, Some(0));
+        let mut whole = None;
+        let mut buf = buffer(1024);
+        clip(&mut buf, &mut whole);
+        assert_eq!(buf.frames(), 1024);
+        assert_eq!(whole, None);
+    }
 }

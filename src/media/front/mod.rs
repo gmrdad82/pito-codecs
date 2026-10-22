@@ -212,7 +212,9 @@ pub use frames::{Canvas, export_frames};
     feature = "mkv",
     feature = "vp9"
 ))]
-pub use join::{JoinAudio, JoinMethod, JoinOptions, Joined, join};
+pub use join::{
+    Cut, JoinAudio, JoinMethod, JoinOptions, Joined, cut, first_frame_at, join, track_length,
+};
 #[cfg(all(
     feature = "h264",
     feature = "hevc",

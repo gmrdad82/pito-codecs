@@ -4,7 +4,7 @@ use clap::error::ErrorKind;
 use clap::{CommandFactory, ValueEnum};
 
 use super::Cli;
-use super::convert::Options;
+use super::convert::{Options, Span};
 use super::extract::{
     OPUS_KBPS_HIGHEST, OPUS_KBPS_LOWEST, OPUS_KBPS_MONO, OPUS_KBPS_STEREO, RATES, Wav, is_opus,
     is_wav,
@@ -17,7 +17,7 @@ pub const USAGE: &str = "pcod [OPTIONS] <INPUT> <OUTPUT>\n       pcod <COMMAND>"
 
 pub fn help() -> String {
     format!(
-        "The output's extension picks the container: mp4, mov, mkv (H.264 and AAC), webm (VP9 and Opus), gif or webp (animated, looping, {ANIMATED_WIDTH} px wide at {ANIMATED_FPS} fps by default, or the source's width and rate where smaller). A .wav output is the audio alone: the first audio track as 16-bit PCM, stereo at the source's rate when it is 44100 or 48000 Hz (else 48000), with --from and --to for a range, --mono, --rate and --loudness. A .opus (or .ogg) output is the audio alone as Ogg Opus at 48000 Hz, 64k stereo or 32k with --mono by default, --audio-bitrate KBPS from 16 to 510, with --from, --to, --mono and --loudness. The input is a video file or a folder of PNG frames in name order (--fps gives their rate).
+        "The output's extension picks the container: mp4, mov, mkv (H.264 and AAC), webm (VP9 and Opus), gif or webp (animated, looping, {ANIMATED_WIDTH} px wide at {ANIMATED_FPS} fps by default, or the source's width and rate where smaller). --from and --to cut a window of the input, video and audio in sync, starting at 0: the first frame at or after --from to the last before --to. With no video option the cut copies whole GOPs and re-encodes only the frames at its edges where the container carries the source's codec; a video option re-encodes it all. A .wav output is the audio alone: the first audio track as 16-bit PCM, stereo at the source's rate when it is 44100 or 48000 Hz (else 48000), with --from and --to for a range, --mono, --rate and --loudness. A .opus (or .ogg) output is the audio alone as Ogg Opus at 48000 Hz, 64k stereo or 32k with --mono by default, --audio-bitrate KBPS from 16 to 510, with --from, --to, --mono and --loudness. The input is a video file or a folder of PNG frames in name order (--fps gives their rate).
 Profiles: balanced (the default) and best are H.264 on the CPU at CRF 20 and 18 on x264's scale; fast is H.264 on the GPU at QP 25, on the CPU where no GPU encoder is found. For .webm, balanced is VP9 at CRF 32 and best at 28 on libvpx's scale.
 Light web: --profile best --crf {LIGHT_WEB_CRF} (.webm: --crf {VP9_LIGHT_WEB_CRF})
 For screen recordings: --tune animation
@@ -107,9 +107,9 @@ pub struct ConvertArgs {
     pub linear: bool,
     #[arg(long, help = "The audio bitrate in kbps, 32 to 512 (.opus: 16 to 510)")]
     pub audio_bitrate: Option<u32>,
-    #[arg(long, value_parser = super::time_of, help = "For a .wav or .opus: start at this time (seconds, m:ss or h:mm:ss)")]
+    #[arg(long, value_parser = super::time_of, help = "Start at this time (seconds, m:ss or h:mm:ss): the first frame at or after it")]
     pub from: Option<f64>,
-    #[arg(long, value_parser = super::time_of, help = "For a .wav or .opus: stop at this time")]
+    #[arg(long, value_parser = super::time_of, help = "Stop before this time [default: the end]")]
     pub to: Option<f64>,
     #[arg(long, help = "For a .wav or .opus: one channel instead of two")]
     pub mono: bool,
@@ -190,11 +190,19 @@ pub fn options(
     if is_wav(&output) || is_opus(&output) {
         return wav(sub, input, joining, output, args);
     }
-    if args.from.is_some() || args.to.is_some() || args.mono || args.rate.is_some() {
+    let ranged = args.from.is_some() || args.to.is_some();
+    if joining && ranged {
         usage_error(
             sub,
             ErrorKind::ArgumentConflict,
-            "--from, --to, --mono and --rate fit a .wav or .opus output",
+            "join takes whole clips: cut each one with --from and --to first, then join them",
+        );
+    }
+    if args.mono || args.rate.is_some() {
+        usage_error(
+            sub,
+            ErrorKind::ArgumentConflict,
+            "--mono fits a .wav or .opus output, --rate a .wav",
         );
     }
     let picture = args.profile.is_some()
@@ -221,8 +229,9 @@ pub fn options(
     request.quality = args.crf.or(args.qp);
     request.tune = args.tune;
     request.overwrite = args.force;
-    request.copy_video =
-        (joining || loudness.is_some() || args.audio_bitrate.is_some()) && !picture && !folder;
+    request.copy_video = (joining || ranged || loudness.is_some() || args.audio_bitrate.is_some())
+        && !picture
+        && !folder;
     request.loudness = loudness;
     request.audio_bitrate = args.audio_bitrate;
     let mut checked = request.clone();
@@ -252,6 +261,10 @@ pub fn options(
         json: args.json,
         progress: super::progress::enabled(args.json, args.no_progress),
         wav: None,
+        range: ranged.then(|| Span {
+            from: args.from.unwrap_or(0.0),
+            to: args.to,
+        }),
     }
 }
 
@@ -305,15 +318,6 @@ fn wav(
         );
     }
     let from = args.from.unwrap_or(0.0);
-    if let Some(to) = args.to
-        && to <= from
-    {
-        usage_error(
-            sub,
-            ErrorKind::ValueValidation,
-            format!("--to {to} must come after --from {from}"),
-        );
-    }
     let loudness = loudness_with(args.loudness, args.true_peak, args.linear);
     if let Some(l) = &loudness
         && let Err(e) = l.check()
@@ -340,6 +344,7 @@ fn wav(
                 })
             }),
         }),
+        range: None,
     }
 }
 

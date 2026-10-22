@@ -369,7 +369,9 @@ impl AlphaVideo {
         let mut dec = vp9::AlphaDecoder::with_threads(threads());
         dec.set_time_base(t.time_base);
         let from_pts = if exact {
-            at
+            last.checked_sub(1)
+                .and_then(|i| t.samples.get(i))
+                .map_or(at, |s| s.pts)
         } else {
             t.samples.get(first).map_or(at, |s| s.pts)
         };
