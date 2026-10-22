@@ -1,5 +1,30 @@
 # Changelog
 
+## v2.0.0 — 2026-10-22
+
+### Added
+
+- FLAC and ALAC decode, bit-exact, in bare .flac, MP4/M4A and Matroska, through the media front and pcod (FLAC at 1.6 to 1.9 times the speed of `flac -d`).
+- `pcod <in> <out> --from S --to E` cuts MP4, MOV, MKV and WebM by smart cut (whole GOPs copied, only the edges re-encoded, frame-exact), and takes a window for GIF, WebP and PNG-folder outputs too; a WebM with alpha keeps its alpha.
+- `pcod stills <video> --from S --to E [--fps N] --out <dir>` writes every frame of a range (or the nearest frame per slot) as numbered PNGs in one decode pass.
+- `pcod` writes Ogg Opus (`.opus`, `.ogg`) from 16 kbps up and reads it back; `pito_codecs::opus::enc::OggWriter` streams it from the crate.
+- `pcod spectrum <in> <out.png>` draws a spectrogram with frequency, time and dB scales.
+- Bare WAV and MP3 files decode through `audio_pcm`, `audio_pcm_range` and `audio_mix`.
+
+### Changed
+
+- **Breaking:** the ffmpeg route is gone. Every file is read by pito-codecs' own code, and what it can't read is refused by name when it opens ("MPEG-TS files are not supported", "10-bit 4:2:2 H.264 video is not supported", "Vorbis audio is not supported"). The route's preferences and enum variants are removed, `AudioTrack` gained `bits`, and a `Probe` can no longer be built as a literal outside the crate.
+- `pcod probe --json` names a video variant it can't decode.
+- Join and export copy a stream they never need to decode, such as 10-bit 4:2:2 H.264, instead of refusing it, and an export with an audio track nothing decodes is refused before any work.
+
+### Fixed
+
+- VP9 encode no longer fails on widths that aren't a multiple of 64 (1080x1920 portrait, 1080x1080 and the like); geometry errors are reported in one line instead of a caught assertion.
+- H.264 encode rate control gives the same output on every run, keeps the QP at 51 or below, and clamps bitrates to their caps.
+- PNG decode checks chunk CRCs; a failed VP9 alpha packet no longer holds back or corrupts the colour frames; the AV1 decoder no longer overflows on a truncated sequence header.
+- FLAC in MP4 at 96 kHz probes at 96 kHz, FLAC and ALAC in Matroska end without trailing silence, and ALAC from ffmpeg decodes.
+- An exact still of an alpha WebM shows the frame on screen at that time.
+
 ## v1.16.3 — 2026-10-19
 
 ### Added
