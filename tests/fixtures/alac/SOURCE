@@ -1,0 +1,3 @@
+These ALAC files are part of this repository and under its MIT licence (see LICENSE at the root).
+
+The audio is synthetic: pcm.rs generates it with integer arithmetic only, and no recorded audio is in them. Each file was encoded once from that PCM with ffmpeg 9.0.2's ALAC encoder; README.md in this folder lists the command, the parameters and the PCM hash of every file.
