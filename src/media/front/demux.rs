@@ -38,7 +38,7 @@ fn tagged_look(
     let Some(c) = tags else {
         return look;
     };
-    let (sar, mut color) = look.unwrap_or(((1, 1), crate::gpu::Color::UNKNOWN));
+    let (sar, mut color) = look.unwrap_or(((0, 0), crate::gpu::Color::UNKNOWN));
     let tag = |v: Option<u64>| v.and_then(|v| u8::try_from(v).ok()).filter(|&v| v != 2);
     if let Some(m) = tag(c.matrix) {
         color.matrix = m;

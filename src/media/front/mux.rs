@@ -152,15 +152,6 @@ impl VEnc {
         }
     }
 
-    fn restart(&mut self, config: &GpuConfig) -> Result<()> {
-        match self {
-            VEnc::Gpu(e) => e.restart(config),
-            _ => Err(Error::Unsupported(
-                "only the GPU encoder restarts".to_string(),
-            )),
-        }
-    }
-
     pub(super) fn flush(&mut self) -> Result<Vec<Packet>> {
         match self {
             VEnc::Cpu(e) => e.flush(),
@@ -248,8 +239,9 @@ pub(super) fn gpu_check(
     fps: (u32, u32),
     format: PixelFormat,
     look: Look,
+    crf: u8,
 ) -> Result<HwEncoder> {
-    let config = gpu_config(codec, size, fps, format, (20, 60), look);
+    let config = gpu_config(codec, size, fps, format, (crf, 60), look);
     if device.is_none() {
         *device = Device::open().ok();
     }
@@ -280,7 +272,7 @@ fn encoder(
     edge: bool,
     frames: i64,
     threads: usize,
-) -> Result<VEnc> {
+) -> Result<(VEnc, Option<String>)> {
     if video.route == Route::Gpu {
         let config = job_config(job, video.codec, crf, edge, frames);
         let spare = job
@@ -288,19 +280,69 @@ fn encoder(
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
-        if let Some(mut e) = spare
-            && e.restart(&config).is_ok()
-        {
-            return Ok(VEnc::Gpu(Box::new(e)));
+        let mut why = None;
+        if let Some(mut e) = spare {
+            match reuse(job, &mut e, &config) {
+                Ok(()) => return Ok((VEnc::Gpu(Box::new(e)), None)),
+                Err(w) => why = w,
+            }
         }
-        let e = match &job.device {
-            Some(d) => HwEncoder::on(d, video.codec, &config)?,
-            None => HwEncoder::new(video.codec, &config)?,
-        };
-        return Ok(VEnc::Gpu(Box::new(e)));
+        let e = job.tally.open(|| match &job.device {
+            Some(d) => HwEncoder::on(d, video.codec, &config),
+            None => HwEncoder::new(video.codec, &config),
+        })?;
+        return Ok((VEnc::Gpu(Box::new(e)), why));
     }
     let shape = (job.size, job.fps, job.format);
-    encoder_for(shape, video, crf, edge, frames, threads)
+    Ok((encoder_for(shape, video, crf, edge, frames, threads)?, None))
+}
+
+fn restarted(job: &Job, enc: &mut HwEncoder, config: &GpuConfig) -> Result<()> {
+    if broken(job) {
+        return Err(Error::Backend(
+            "the reset was refused for a test".to_string(),
+        ));
+    }
+    enc.restart(config)
+}
+
+fn reuse(
+    job: &Job,
+    enc: &mut HwEncoder,
+    config: &GpuConfig,
+) -> std::result::Result<(), Option<String>> {
+    let start = std::time::Instant::now();
+    let done = restarted(job, enc, config);
+    job.tally.spent(start.elapsed());
+    match done {
+        Ok(()) => {
+            job.tally.reused();
+            Ok(())
+        }
+        Err(Error::Unsupported(_)) => Err(None),
+        Err(why) => {
+            job.tally.refreshed();
+            Err(Some(format!(
+                "a GPU encoder couldn't restart for the next edge ({why}); a fresh one was opened"
+            )))
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) static BROKEN: Mutex<Vec<std::path::PathBuf>> = Mutex::new(Vec::new());
+
+pub(super) fn broken(job: &Job) -> bool {
+    #[cfg(test)]
+    if BROKEN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(&job.work)
+    {
+        return true;
+    }
+    let _ = job;
+    false
 }
 
 pub(super) type Shape = ((u32, u32), (u32, u32), PixelFormat);
@@ -428,15 +470,25 @@ fn encode_edge(
 ) -> Result<Edge> {
     let gpu = video.route == Route::Gpu;
     let span = if gpu { longest.max(frames) } else { frames };
+    let mut refreshed = None;
     let mut enc = match worker.enc.take() {
-        Some(mut e) if gpu => {
+        Some(VEnc::Gpu(mut e)) if gpu => {
             let config = job_config(job, video.codec, crf, true, span);
-            match e.restart(&config) {
-                Ok(()) => e,
-                Err(_) => encoder(job, video, crf, true, span, threads)?,
+            match reuse(job, &mut e, &config) {
+                Ok(()) => VEnc::Gpu(e),
+                Err(why) => {
+                    drop(e);
+                    let (e, more) = encoder(job, video, crf, true, span, threads)?;
+                    refreshed = why.or(more);
+                    e
+                }
             }
         }
-        _ => encoder(job, video, crf, true, span, threads)?,
+        _ => {
+            let (e, why) = encoder(job, video, crf, true, span, threads)?;
+            refreshed = why;
+            e
+        }
     };
     let mut packets = Vec::new();
     let mut quiet = job.quiet();
@@ -495,7 +547,9 @@ fn encode_edge(
         .extradata()
         .ok_or_else(|| Error::Backend("the encoder gave no parameter sets".to_string()))?;
     let entry = entry_for(video.codec, &avcc, job.size.0, job.size.1)?;
-    let reasons = std::mem::take(&mut resident.reasons);
+    let mut reasons = std::mem::take(&mut resident.reasons);
+    reasons.extend(refreshed);
+    job.tally.edge();
     if enc.on_gpu() {
         worker.enc = Some(enc);
     }
@@ -1057,7 +1111,7 @@ fn whole_video(
     progress: Tell,
 ) -> Result<(u64, u64, Mux, Vec<String>)> {
     job.tell(progress, Stage::Encoding)?;
-    let mut enc = encoder(job, video, opts.crf, false, 0, 0)?;
+    let (mut enc, why) = encoder(job, video, opts.crf, false, 0, 0)?;
     let rotation = if job.fit {
         0
     } else {
@@ -1065,6 +1119,7 @@ fn whole_video(
     };
     let mut out = Sink::new(video.codec, job.size, rotation, (timescale, fd), part);
     let mut resident = Resident::new(&enc);
+    resident.reasons.extend(why);
     let mut at = 0i64;
     for n in 0..job.pieces.len() {
         let (a, b) = job.span(&job.pieces[n]);
@@ -1421,6 +1476,7 @@ fn smart_video(
         tail = Some((si, from + frames));
     }
     let workers = groups.len().clamp(1, 4);
+    job.tally.workers(workers);
     let per = (threads() * 2 / workers).max(2);
     let next = AtomicUsize::new(0);
     let wanted = AtomicUsize::new(0);

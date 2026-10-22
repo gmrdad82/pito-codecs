@@ -91,6 +91,8 @@ pub struct Setup {
     pub b_frames: u32,
     pub level: u32,
     pub slots: usize,
+    pub sar: (u16, u16),
+    pub color: crate::gpu::Color,
 }
 
 pub struct Locked<'a> {
@@ -256,6 +258,7 @@ impl Session {
                     }
                     h.maxNumRefFramesInDPB = 0;
                     h.useBFramesAsRef = NV_ENC_BFRAME_REF_MODE_DISABLED;
+                    signal(&mut h.hevcVUIParameters, p.color);
                 }
                 _ => {
                     let h = &mut cfg.encodeCodecConfig.h264Config;
@@ -273,6 +276,7 @@ impl Session {
                     vui.timingInfoPresentFlag = 1;
                     vui.numUnitInTicks = p.fps.1;
                     vui.timeScale = p.fps.0.saturating_mul(2);
+                    signal(vui, p.color);
                 }
             }
             let mut init: Box<NV_ENC_INITIALIZE_PARAMS> = Box::new(std::mem::zeroed());
@@ -281,8 +285,7 @@ impl Session {
             init.presetGUID = NV_ENC_PRESET_P4_GUID;
             init.encodeWidth = p.size.0;
             init.encodeHeight = p.size.1;
-            init.darWidth = p.size.0;
-            init.darHeight = p.size.1;
+            (init.darWidth, init.darHeight) = display_aspect(p.size, p.sar);
             init.frameRateNum = p.fps.0;
             init.frameRateDen = p.fps.1;
             init.enablePTD = 1;
@@ -387,6 +390,7 @@ impl Session {
         &mut self,
         slot: usize,
         pts: i64,
+        flags: u32,
         fill: impl FnOnce(Locked<'_>),
     ) -> Result<bool, String> {
         let s = self.slots.get(slot).ok_or("no such NVENC buffer")?;
@@ -444,6 +448,7 @@ impl Session {
             e.outputBitstream = output;
             e.bufferFmt = self.format;
             e.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
+            e.encodePicFlags = flags;
             e.inputTimeStamp = pts as u64;
             e.inputDuration = 1;
             encode(self.handle, &mut e)
@@ -513,6 +518,36 @@ impl Session {
             Ok(out)
         }
     }
+}
+
+pub fn signal(vui: &mut NV_ENC_CONFIG_H264_VUI_PARAMETERS, color: crate::gpu::Color) {
+    let described = color.described();
+    vui.videoSignalTypePresentFlag = u32::from(described || color.full_range);
+    vui.videoFormat = 5;
+    vui.videoFullRangeFlag = u32::from(color.full_range);
+    vui.colourDescriptionPresentFlag = u32::from(described);
+    if described {
+        vui.colourPrimaries = u32::from(color.primaries);
+        vui.transferCharacteristics = u32::from(color.transfer);
+        vui.colourMatrix = u32::from(color.matrix);
+    }
+}
+
+pub fn display_aspect(size: (u32, u32), sar: (u16, u16)) -> (u32, u32) {
+    if sar.0 == 0 || sar.1 == 0 {
+        return size;
+    }
+    let w = u64::from(size.0) * u64::from(sar.0);
+    let h = u64::from(size.1) * u64::from(sar.1);
+    let g = gcd(w, h).max(1);
+    match (u32::try_from(w / g), u32::try_from(h / g)) {
+        (Ok(w), Ok(h)) => (w, h),
+        _ => size,
+    }
+}
+
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 { a } else { gcd(b, a % b) }
 }
 
 fn rate_control(rc: &mut NV_ENC_RC_PARAMS, rate: Rate) {

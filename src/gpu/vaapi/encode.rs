@@ -94,7 +94,15 @@ fn default_gop(fps_num: u32, fps_den: u32) -> u32 {
 }
 
 fn shows_sar(sar: (u16, u16)) -> bool {
-    sar.0 != 0 && sar.1 != 0 && sar.0 != sar.1
+    headers::aspect_idc(sar).is_some()
+}
+
+fn sar_fields(sar: (u16, u16)) -> (u8, u32, u32) {
+    match headers::aspect_idc(sar) {
+        Some(255) => (255, u32::from(sar.0), u32::from(sar.1)),
+        Some(idc) => (idc, 0, 0),
+        None => (0, 0, 0),
+    }
 }
 
 fn rate_control(rate: Rate) -> u32 {
@@ -392,13 +400,8 @@ impl VaEncoder {
     }
 
     pub fn restart(&mut self, config: &EncoderConfig) -> Result<()> {
-        let a = &self.asked;
-        let same = EncoderConfig {
-            rate: a.rate,
-            gop: a.gop,
-            ..config.clone()
-        } == *a
-            && rate_control(config.rate) == rate_control(a.rate);
+        let same = crate::gpu::restartable(&self.asked, config)
+            && rate_control(config.rate) == rate_control(self.asked.rate);
         if !same {
             return Err(Error::Unsupported(
                 "a restart changes only the rate and the GOP, within the same rate control".into(),
@@ -799,6 +802,7 @@ impl VaEncoder {
         frame_num: u32,
     ) -> Result<Vec<(ffi::VABufferType, Vec<u8>)>> {
         let c = &self.config;
+        let (aspect_ratio_idc, sar_width, sar_height) = sar_fields(c.sar);
         let mut out = Vec::new();
         let (wm, hm) = (self.size.0 / 16, self.size.1 / 16);
         if kind == Kind::Idr {
@@ -838,17 +842,9 @@ impl VaEncoder {
                     | 15 << v::LOG2_MAX_MV_LENGTH_VERTICAL
                     | 1 << v::FIXED_FRAME_RATE
                     | flag(shows_sar(c.sar), v::ASPECT_RATIO_INFO_PRESENT),
-                aspect_ratio_idc: if shows_sar(c.sar) { 255 } else { 0 },
-                sar_width: if shows_sar(c.sar) {
-                    u32::from(c.sar.0)
-                } else {
-                    0
-                },
-                sar_height: if shows_sar(c.sar) {
-                    u32::from(c.sar.1)
-                } else {
-                    0
-                },
+                aspect_ratio_idc,
+                sar_width,
+                sar_height,
                 num_units_in_tick: c.fps_den,
                 time_scale: c.fps_num.saturating_mul(2),
                 va_reserved: [0; ffi::VA_PADDING_LOW],
@@ -1017,6 +1013,7 @@ impl VaEncoder {
         poc: u32,
     ) -> Result<Vec<(ffi::VABufferType, Vec<u8>)>> {
         let c = &self.config;
+        let (aspect_ratio_idc, sar_width, sar_height) = sar_fields(c.sar);
         let b = &self.blocks;
         let t = &self.tools;
         let mut out = Vec::new();
@@ -1059,17 +1056,9 @@ impl VaEncoder {
                     | 15 << v::LOG2_MAX_MV_LENGTH_HORIZONTAL
                     | 15 << v::LOG2_MAX_MV_LENGTH_VERTICAL
                     | flag(shows_sar(c.sar), v::ASPECT_RATIO_INFO_PRESENT),
-                aspect_ratio_idc: if shows_sar(c.sar) { 255 } else { 0 },
-                sar_width: if shows_sar(c.sar) {
-                    u32::from(c.sar.0)
-                } else {
-                    0
-                },
-                sar_height: if shows_sar(c.sar) {
-                    u32::from(c.sar.1)
-                } else {
-                    0
-                },
+                aspect_ratio_idc,
+                sar_width,
+                sar_height,
                 vui_num_units_in_tick: c.fps_den,
                 vui_time_scale: c.fps_num,
                 min_spatial_segmentation_idc: 0,
@@ -1199,5 +1188,54 @@ impl VaEncoder {
         };
         out.push((ffi::VAEncSliceParameterBufferType, bytes_of(&slice)));
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::syntax::bits::unescape_rbsp;
+    use crate::syntax::h264::params::Sps;
+
+    #[test]
+    fn the_sequence_buffer_aspect_agrees_with_the_packed_sps() {
+        for sar in [
+            (0, 0),
+            (1, 1),
+            (4, 3),
+            (2, 1),
+            (8, 9),
+            (64, 33),
+            (2, 2),
+            (5, 0),
+        ] {
+            let packed = headers::h264_sps(&headers::H264Sequence {
+                profile_idc: 100,
+                constraints: 0,
+                level_idc: 40,
+                width_mbs: 22,
+                height_mbs: 15,
+                crop_right: 0,
+                crop_bottom: 0,
+                max_refs: 1,
+                reorder: 0,
+                cabac: true,
+                transform_8x8: true,
+                sar,
+                color: Color::BT709,
+            });
+            let sps = Sps::parse(&unescape_rbsp(&packed.bytes[5..])).unwrap();
+            let vui = sps.vui.unwrap();
+            let (idc, w, h) = sar_fields(sar);
+            assert_eq!(shows_sar(sar), idc != 0, "{sar:?}");
+            assert_eq!(vui.aspect_ratio_idc, idc, "{sar:?}");
+            if idc == 255 {
+                assert_eq!((w, h), (u32::from(vui.sar.0), u32::from(vui.sar.1)));
+            } else {
+                assert_eq!((w, h), (0, 0), "{sar:?}");
+            }
+            let want = if idc == 0 { (0, 0) } else { sar };
+            assert_eq!(vui.sar, want, "{sar:?}");
+        }
     }
 }

@@ -54,6 +54,8 @@ struct NvEncoder {
     display_pts: VecDeque<i64>,
     duration: i64,
     name: String,
+    asked: EncoderConfig,
+    idr: bool,
 }
 
 fn hevc_level(width: u32, height: u32, fps: (u32, u32), kbps: u32) -> u32 {
@@ -273,6 +275,8 @@ impl NvEncoder {
                 b_frames,
                 level,
                 slots: DEPTH + b_frames as usize + 1,
+                sar: config.sar,
+                color: config.color,
             })
             .map_err(Error::Unsupported)?;
         let params = session.sequence_params().map_err(Error::Backend)?;
@@ -299,6 +303,8 @@ impl NvEncoder {
             display_pts: VecDeque::with_capacity(slots),
             duration: 0,
             name: format!("NVENC {codec} encoder"),
+            asked: config.clone(),
+            idr: false,
         })
     }
 
@@ -346,7 +352,12 @@ impl NvEncoder {
             .pop()
             .ok_or_else(|| Error::Backend("no free NVENC buffer".into()))?;
         let ten_bit = self.format == PixelFormat::Yuv420p10;
-        let done = self.session.submit(slot, frame.pts, |locked| {
+        let flags = if self.idr {
+            ffi::NV_ENC_PIC_FLAG_FORCEIDR | ffi::NV_ENC_PIC_FLAG_OUTPUT_SPSPPS
+        } else {
+            0
+        };
+        let done = self.session.submit(slot, frame.pts, flags, |locked| {
             if ten_bit {
                 fill_p010(locked, frame)
             } else {
@@ -360,6 +371,7 @@ impl NvEncoder {
                 return Err(Error::Backend(e));
             }
         };
+        self.idr = false;
         self.pending.push_back(slot);
         self.display_pts.push_back(frame.pts);
         if done {
@@ -369,6 +381,22 @@ impl NvEncoder {
             out.push(self.read_oldest()?);
         }
         Ok(out)
+    }
+
+    fn restart(&mut self, config: &EncoderConfig) -> Result<()> {
+        if !crate::gpu::restartable(&self.asked, config) || config.rate != self.asked.rate {
+            return Err(Error::Unsupported(
+                "an NVENC restart keeps the picture shape and the rate".into(),
+            ));
+        }
+        if !self.pending.is_empty() {
+            return Err(Error::Invalid(
+                "the encoder restarts only after a flush".into(),
+            ));
+        }
+        self.display_pts.clear();
+        self.idr = true;
+        Ok(())
     }
 
     fn drain(&mut self) -> Result<Vec<Packet>> {
@@ -429,6 +457,10 @@ impl EncoderBackend for NvEncoder {
 
     fn extradata(&self) -> Option<&[u8]> {
         Some(&self.extradata)
+    }
+
+    fn restart(&mut self, config: &EncoderConfig) -> Result<()> {
+        NvEncoder::restart(self, config)
     }
 }
 
@@ -496,6 +528,80 @@ mod tests {
         assert_eq!(hevc_level(1920, 1080, (30, 1), 8_000), 120);
         assert_eq!(hevc_level(1920, 1080, (30, 1), 15_000), 123);
         assert_eq!(hevc_level(3840, 2160, (60, 1), 50_000), 156);
+    }
+
+    #[test]
+    fn the_display_aspect_carries_the_sources_sample_aspect() {
+        use session::display_aspect;
+        assert_eq!(display_aspect((1920, 1080), (0, 0)), (1920, 1080));
+        assert_eq!(display_aspect((1920, 1080), (1, 0)), (1920, 1080));
+        assert_eq!(display_aspect((1920, 1080), (1, 1)), (16, 9));
+        assert_eq!(display_aspect((1440, 1080), (4, 3)), (16, 9));
+        assert_eq!(display_aspect((720, 480), (8, 9)), (4, 3));
+        assert_eq!(display_aspect((720, 576), (64, 45)), (16, 9));
+    }
+
+    #[test]
+    fn the_vui_signals_the_sources_colour_and_range() {
+        use crate::gpu::Color;
+        let blank = || -> ffi::NV_ENC_CONFIG_H264_VUI_PARAMETERS { unsafe { std::mem::zeroed() } };
+        let mut vui = blank();
+        session::signal(&mut vui, Color::BT709);
+        assert_eq!(
+            (
+                vui.videoSignalTypePresentFlag,
+                vui.videoFullRangeFlag,
+                vui.colourDescriptionPresentFlag,
+                vui.colourPrimaries,
+                vui.transferCharacteristics,
+                vui.colourMatrix
+            ),
+            (1, 0, 1, 1, 1, 1)
+        );
+        let mut vui = blank();
+        session::signal(
+            &mut vui,
+            Color {
+                primaries: 9,
+                transfer: 16,
+                matrix: 9,
+                full_range: true,
+            },
+        );
+        assert_eq!(
+            (
+                vui.videoFullRangeFlag,
+                vui.colourPrimaries,
+                vui.transferCharacteristics,
+                vui.colourMatrix
+            ),
+            (1, 9, 16, 9)
+        );
+        let mut vui = blank();
+        session::signal(&mut vui, Color::UNKNOWN);
+        assert_eq!(
+            (
+                vui.videoSignalTypePresentFlag,
+                vui.colourDescriptionPresentFlag
+            ),
+            (0, 0)
+        );
+        let mut vui = blank();
+        session::signal(
+            &mut vui,
+            Color {
+                full_range: true,
+                ..Color::UNKNOWN
+            },
+        );
+        assert_eq!(
+            (
+                vui.videoSignalTypePresentFlag,
+                vui.videoFullRangeFlag,
+                vui.colourDescriptionPresentFlag
+            ),
+            (1, 1, 0)
+        );
     }
 
     #[test]

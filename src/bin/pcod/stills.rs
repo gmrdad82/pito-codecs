@@ -5,12 +5,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
-use pito_codecs::media::{self, Frame, Prefs, Rgba, Seek, Stills, keyframes, probe};
+use pito_codecs::media::{self, Frame, Plane, Prefs, Rgba, Seek, Stills, keyframes, probe};
 use pito_codecs::png;
 use rayon::prelude::*;
 
 use super::json::quoted;
-use super::pipeline::ToRgba;
+use super::pipeline::{AlphaToRgba, ToRgba};
 use super::size::Size;
 use super::source::{self, Media};
 use super::{Fail, about};
@@ -133,7 +133,12 @@ fn path_json(p: Option<&Path>) -> String {
 
 pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
     if let Some(range) = &job.range {
-        return run_range(out, job, range);
+        let fresh = job.out.as_deref().is_some_and(|d| !d.exists());
+        let done = run_range(out, job, range);
+        if let (Err(_), true, Some(dir)) = (&done, fresh, job.out.as_deref()) {
+            let _ = std::fs::remove_dir(dir);
+        }
+        return done;
     }
     let started = Instant::now();
     let n = count_of(job);
@@ -367,6 +372,51 @@ fn picked(slots: &Slots, next: &mut u64, held: f64, coming: Option<f64>) -> Vec<
     taken
 }
 
+fn tail(slots: &Slots, next: &mut u64, held: f64, step: f64) -> Vec<u64> {
+    let mut taken = Vec::new();
+    while *next < slots.count && slots.at(*next) + 1e-6 < held + step {
+        taken.push(*next);
+        *next += 1;
+    }
+    taken
+}
+
+enum Feed {
+    Plain(media::Video),
+    Alpha(Box<media::AlphaVideo>),
+}
+
+impl Feed {
+    fn open(
+        file: &Path,
+        media: &Media,
+        lead: f64,
+        size: (u32, u32),
+        prefs: &Prefs,
+    ) -> Result<Feed, Fail> {
+        let opened = if media.alpha {
+            media::decode_alpha(file, lead).map(|v| Feed::Alpha(Box::new(v)))
+        } else {
+            media::decode_video(file, lead, shrunk(media, size), prefs).map(Feed::Plain)
+        };
+        opened.map_err(|e| about(file, e))
+    }
+
+    fn alpha(&self) -> Option<((u32, u32), media::Color)> {
+        match self {
+            Feed::Alpha(v) => Some(((v.width, v.height), v.color)),
+            Feed::Plain(_) => None,
+        }
+    }
+
+    fn next(&mut self) -> Result<Option<(Frame, Option<Plane>)>, media::Error> {
+        match self {
+            Feed::Alpha(v) => v.next_frame(),
+            Feed::Plain(v) => v.next().transpose().map(|f| f.map(|f| (f, None))),
+        }
+    }
+}
+
 fn numbered(name: &str) -> bool {
     name.strip_suffix(".png")
         .is_some_and(|stem| stem.len() >= NAME_DIGITS && stem.bytes().all(|b| b.is_ascii_digit()))
@@ -488,12 +538,16 @@ fn run_range(out: &mut impl Write, job: &Job, range: &Range) -> Result<(), Fail>
     ready(dir, range.force)?;
     let digits = slots.count.to_string().len().max(NAME_DIGITS);
     let lead = (slots.at(0) - f64::from(media.fps.1) / f64::from(media.fps.0)).max(0.0);
-    let video = media::decode_video(&job.file, lead, shrunk(&media, size), &job.prefs)
-        .map_err(|e| about(&job.file, e))?;
+    let mut feed = Feed::open(&job.file, &media, lead, size, &job.prefs)?;
+    let see_through = feed
+        .alpha()
+        .map(|(coded, color)| AlphaToRgba::new(coded, color, media.rotation, size))
+        .transpose()?;
+    let step = f64::from(media.fps.1) / f64::from(media.fps.0);
     let workers = std::thread::available_parallelism()
         .map_or(4, |n| n.get())
         .clamp(1, 16);
-    let (tx, rx) = std::sync::mpsc::sync_channel::<(Frame, Vec<u64>)>(workers * 2);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(Frame, Option<Plane>, Vec<u64>)>(workers * 2);
     let rx = Mutex::new(rx);
     let first_png: OnceLock<f64> = OnceLock::new();
     let written = AtomicU64::new(0);
@@ -502,22 +556,33 @@ fn run_range(out: &mut impl Write, job: &Job, range: &Range) -> Result<(), Fail>
     let (read, wrote) = std::thread::scope(|s| {
         let handles: Vec<_> = (0..workers)
             .map(|_| {
-                let (rx, media, first_png, written, stop, made) =
-                    (&rx, &media, &first_png, &written, &stop, &made);
+                let (rx, media, first_png, written, stop, made, see_through) = (
+                    &rx,
+                    &media,
+                    &first_png,
+                    &written,
+                    &stop,
+                    &made,
+                    &see_through,
+                );
                 s.spawn(move || -> Result<(), Fail> {
-                    let mut fix = ToRgba::new(media, size);
+                    let mut fix = see_through.is_none().then(|| ToRgba::new(media, size));
                     let mut failed: Option<Fail> = None;
                     loop {
                         let next = rx.lock().unwrap_or_else(PoisonError::into_inner).recv();
-                        let Ok((frame, taken)) = next else {
+                        let Ok((frame, plane, taken)) = next else {
                             return failed.map_or(Ok(()), Err);
                         };
                         if stop.load(Ordering::Relaxed) {
                             continue;
                         }
                         let wrote = (|| -> Result<(), Fail> {
-                            let image = fix.apply(frame)?;
-                            let data = png::encode(&image).map_err(|e| about(dir, e))?;
+                            let data = match (see_through, &mut fix) {
+                                (Some(a), _) => png::encode_rgba(&a.apply(&frame, plane.as_ref())?),
+                                (None, Some(fix)) => png::encode(&fix.apply(frame)?),
+                                (None, None) => return Err("no RGBA converter".into()),
+                            }
+                            .map_err(|e| about(dir, e))?;
                             for k in taken {
                                 let path = dir.join(format!("{k:0digits$}.png"));
                                 std::fs::write(&path, &data).map_err(|e| about(&path, e))?;
@@ -539,30 +604,29 @@ fn run_range(out: &mut impl Write, job: &Job, range: &Range) -> Result<(), Fail>
             .collect();
         let read = (|| -> Result<(), Fail> {
             let mut next = 0u64;
-            let mut held: Option<(Frame, f64)> = None;
-            for frame in video {
+            let mut held: Option<(Frame, Option<Plane>, f64)> = None;
+            while let Some((frame, plane)) = feed.next().map_err(|e| about(&job.file, e))? {
                 if stop.load(Ordering::Relaxed) {
                     return Err(Fail::from("a PNG writer stopped"));
                 }
-                let frame = frame.map_err(|e| about(&job.file, e))?;
                 let t = frame.time_base.seconds(frame.pts);
-                if let Some((f, at)) = held.take() {
+                if let Some((f, p, at)) = held.take() {
                     let taken = picked(&slots, &mut next, at, Some(t));
                     if !taken.is_empty() {
-                        tx.send((f, taken))
+                        tx.send((f, p, taken))
                             .map_err(|_| Fail::from("a PNG writer stopped"))?;
                     }
                 }
                 if next >= slots.count {
                     return Ok(());
                 }
-                held = Some((frame, t));
+                held = Some((frame, plane, t));
             }
             match held {
-                Some((f, at)) => {
-                    let taken = picked(&slots, &mut next, at, None);
+                Some((f, p, at)) => {
+                    let taken = tail(&slots, &mut next, at, step);
                     if !taken.is_empty() {
-                        tx.send((f, taken))
+                        tx.send((f, p, taken))
                             .map_err(|_| Fail::from("a PNG writer stopped"))?;
                     }
                     Ok(())
@@ -591,6 +655,12 @@ fn run_range(out: &mut impl Write, job: &Job, range: &Range) -> Result<(), Fail>
         return Err(e);
     }
     let count = written.load(Ordering::Relaxed);
+    if count == 0 {
+        return Err(about(
+            &job.file,
+            format!("the stream ends before {:.3} s", slots.at(0)),
+        ));
+    }
     let elapsed = started.elapsed().as_secs_f64();
     let first = first_png.get().copied();
     let speed = if elapsed > 0.0 {
@@ -602,10 +672,11 @@ fn run_range(out: &mut impl Write, job: &Job, range: &Range) -> Result<(), Fail>
     if job.json {
         writeln!(
             out,
-            "{{\"file\":{},\"from\":{:.6},\"to\":{end:.6},\"first\":{:.6},\"last\":{last:.6},\"count\":{count},\"fps\":{},\"rate\":\"{}/{}\",\"width\":{},\"height\":{},\"dir\":{},\"digits\":{digits},\"first_png\":{},\"seconds\":{elapsed:.3},\"frames_per_second\":{speed:.1}}}",
+            "{{\"file\":{},\"from\":{:.6},\"to\":{end:.6},\"first\":{:.6},\"last\":{last:.6},\"count\":{count},\"expected\":{},\"fps\":{},\"rate\":\"{}/{}\",\"width\":{},\"height\":{},\"dir\":{},\"digits\":{digits},\"first_png\":{},\"seconds\":{elapsed:.3},\"frames_per_second\":{speed:.1}}}",
             path_json(Some(&job.file)),
             range.from,
             slots.at(0),
+            slots.count,
             rate_text(rate),
             rate.0,
             rate.1,
@@ -629,6 +700,13 @@ fn run_range(out: &mut impl Write, job: &Job, range: &Range) -> Result<(), Fail>
             "{elapsed:.2} s, {speed:.1} frames/s, the first PNG after {:.3} s",
             first.unwrap_or(elapsed)
         )?;
+        if count < slots.count {
+            writeln!(
+                out,
+                "note: the stream ends before its probed length: {count} of {} frames written",
+                slots.count
+            )?;
+        }
     }
     Ok(())
 }
@@ -735,9 +813,45 @@ mod tests {
     }
 
     #[test]
-    fn the_last_frame_takes_the_slots_left_when_the_stream_ends() {
+    fn the_last_frame_takes_only_the_slots_it_covers() {
         let s = Slots::of(0.0, 0.5, (24, 1), Some((10, 1)));
-        assert_eq!(all(&s, &[0.0]), vec![vec![0, 1, 2, 3, 4]]);
+        let mut next = 0;
+        assert_eq!(tail(&s, &mut next, 0.0, 1.0 / 24.0), vec![0]);
+        assert_eq!(tail(&s, &mut next, 0.0, 1.0 / 24.0), Vec::<u64>::new());
+        let mut next = 0;
+        assert_eq!(tail(&s, &mut next, 0.0, 0.5), vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn a_stream_that_ends_short_leaves_the_later_slots_empty() {
+        let s = Slots::of(0.0, 5.0, (24, 1), None);
+        assert_eq!(s.count, 120);
+        let times: Vec<f64> = (0..60).map(|k| f64::from(k) / 24.0).collect();
+        let mut next = 0;
+        let mut taken: Vec<u64> = Vec::new();
+        for (i, &t) in times.iter().enumerate() {
+            match times.get(i + 1) {
+                Some(&n) => taken.extend(picked(&s, &mut next, t, Some(n))),
+                None => taken.extend(tail(&s, &mut next, t, 1.0 / 24.0)),
+            }
+        }
+        assert_eq!(taken, (0..60).collect::<Vec<u64>>());
+        assert_eq!(next, 60);
+    }
+
+    #[test]
+    fn a_full_stream_fills_every_slot_through_its_last_frame() {
+        let s = Slots::of(1.0, 2.0, (24, 1), Some((10, 1)));
+        let times: Vec<f64> = (24..48).map(|k| f64::from(k) / 24.0).collect();
+        let mut next = 0;
+        let mut taken: Vec<u64> = Vec::new();
+        for (i, &t) in times.iter().enumerate() {
+            match times.get(i + 1) {
+                Some(&n) => taken.extend(picked(&s, &mut next, t, Some(n))),
+                None => taken.extend(tail(&s, &mut next, t, 1.0 / 24.0)),
+            }
+        }
+        assert_eq!(taken, (0..s.count).collect::<Vec<u64>>());
     }
 
     #[test]

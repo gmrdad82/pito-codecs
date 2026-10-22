@@ -265,5 +265,6 @@ pub fn export_frames(
         smart: false,
         video,
         reasons,
+        sessions: Default::default(),
     })
 }

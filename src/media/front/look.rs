@@ -46,5 +46,10 @@ pub fn video_look(path: &Path) -> Result<VideoLook> {
             }
         }
     }
+    let sar = if sar.0 == 0 || sar.1 == 0 {
+        (1, 1)
+    } else {
+        sar
+    };
     Ok(VideoLook { sar, color })
 }

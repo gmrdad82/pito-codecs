@@ -307,6 +307,9 @@ pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
                     "level   {:+.2} dB, {how} (target {} LUFS, ceiling {} dBTP)",
                     done.gain_db, l.integrated, l.true_peak
                 )?;
+                if let Some(s) = done.calibration.and_then(|c| c.shortfall(&target_of(l))) {
+                    writeln!(out, "short   {s}")?;
+                }
                 if let Some(e) = &done.encoded {
                     writeln!(out, "check   {} (a trial AAC)", shown(e))?;
                 }

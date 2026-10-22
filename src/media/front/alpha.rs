@@ -260,6 +260,7 @@ pub fn export_rgba(
             reasons: Vec::new(),
         },
         reasons,
+        sessions: Default::default(),
     })
 }
 

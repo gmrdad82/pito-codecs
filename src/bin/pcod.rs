@@ -701,26 +701,28 @@ fn show(out: &mut impl Write, file: &Path) -> Result<(), Fail> {
 }
 
 fn container(file: &Path, wav: bool) -> &'static str {
-    let mut head = [0u8; 4];
-    let read =
-        std::fs::File::open(file).and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head));
+    let mut bytes = Vec::with_capacity(12);
+    let _ = std::fs::File::open(file)
+        .and_then(|f| std::io::Read::read_to_end(&mut std::io::Read::take(f, 12), &mut bytes));
+    let head = bytes.get(..4).unwrap_or(&[]);
+    let flac_name = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("flac"));
     if wav {
         "WAV"
-    } else if read.is_ok() && head == [0x1a, 0x45, 0xdf, 0xa3] {
+    } else if head == [0x1a, 0x45, 0xdf, 0xa3] {
         "Matroska"
-    } else if read.is_ok()
-        && (&head == b"fLaC"
-            || (head.starts_with(b"ID3")
-                && file
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(|e| e.eq_ignore_ascii_case("flac"))))
-    {
+    } else if head == *b"OggS" {
+        "Ogg"
+    } else if head == *b"fLaC" || (head.starts_with(b"ID3") && flac_name) {
         "FLAC"
-    } else if read.is_ok()
-        && (head.starts_with(b"ID3") || (head[0] == 0xff && head[1] & 0xe0 == 0xe0))
+    } else if head.starts_with(b"ID3")
+        || (head.len() == 4 && head[0] == 0xff && head[1] & 0xe0 == 0xe0)
     {
         "MP3"
+    } else if bytes.get(4..12) == Some(&b"ftypqt  "[..]) {
+        "QuickTime"
     } else {
         "MP4"
     }

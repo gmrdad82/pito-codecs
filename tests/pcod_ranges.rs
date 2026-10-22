@@ -423,31 +423,75 @@ fn from_alone_runs_to_the_end_and_to_alone_starts_at_zero() {
 }
 
 #[test]
-fn a_gif_window_is_made_from_the_cut() {
+fn a_gif_and_a_webp_window_are_made_from_the_decoded_frames() {
     let work = dir("gif");
-    let gif = work.join("cut.gif");
-    let json = ok(&run(&[
-        s(&sources().mp4),
-        s(&gif),
-        "--from",
-        "2",
-        "--to",
-        "3.5",
-        "--json",
-    ]));
-    assert!(gif.is_file());
-    assert_eq!(field(&json, "path"), Some(s(&sources().mp4)), "{json}");
-    let shown = animated_frames(&gif);
-    assert_eq!(shown.len(), 18, "12 fps over 1.5 s");
-    assert_eq!(number_of(&shown[0]), 48, "the first frame");
-    let cut_json = &json[json.find("\"cut\":").unwrap()..];
-    assert_eq!(number(cut_json, "frames"), 36.0, "{json}");
-    let left: Vec<String> = fs::read_dir(&work)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|n| n != "cut.gif")
-        .collect();
-    assert!(left.is_empty(), "left behind: {left:?}");
+    for ext in ["gif", "webp"] {
+        let out = work.join(format!("cut.{ext}"));
+        let json = ok(&run(&[
+            s(&sources().mp4),
+            s(&out),
+            "--from",
+            "2",
+            "--to",
+            "3.5",
+            "--json",
+        ]));
+        assert!(out.is_file(), "{ext}");
+        assert_eq!(field(&json, "path"), Some(s(&sources().mp4)), "{json}");
+        let shown = animated_frames(&out);
+        assert_eq!(shown.len(), 18, "{ext}: 12 fps over 1.5 s");
+        assert_eq!(number_of(&shown[0]), 48, "{ext}: the first frame");
+        assert_eq!(number_of(&shown[9]), 66, "{ext}: the middle frame");
+        assert_eq!(number_of(&shown[17]), 82, "{ext}: the last frame");
+        assert!(
+            shown[0].data.chunks_exact(4).all(|px| px[3] == 255),
+            "{ext}: an opaque source makes opaque frames"
+        );
+        let cut_json = &json[json.find("\"cut\":").unwrap()..];
+        assert_eq!(number(cut_json, "frames"), 36.0, "{json}");
+        assert_eq!(number(cut_json, "copied"), 0.0, "{json}");
+        assert_eq!(number(cut_json, "encoded"), 36.0, "{json}");
+        assert!((number(cut_json, "from") - 2.0).abs() < 1e-6, "{json}");
+        assert!((number(cut_json, "to") - 3.5).abs() < 1e-6, "{json}");
+    }
+    assert_eq!(
+        listed(&work),
+        ["cut.gif", "cut.webp"],
+        "nothing left behind"
+    );
+}
+
+#[test]
+fn a_gif_window_from_the_start_and_to_the_end() {
+    let work = dir("gif-ends");
+    let head = work.join("head.gif");
+    ok(&run(&[s(&sources().mp4), s(&head), "--to", "0.5"]));
+    let shown = animated_frames(&head);
+    assert_eq!(shown.len(), 6, "12 fps over 0.5 s");
+    assert_eq!(number_of(&shown[0]), 0, "the first frame");
+    let tail = work.join("tail.gif");
+    ok(&run(&[s(&sources().mp4), s(&tail), "--from", "4.5"]));
+    let shown = animated_frames(&tail);
+    assert_eq!(shown.len(), 6, "12 fps over 0.5 s");
+    assert_eq!(number_of(&shown[0]), 108, "the first frame");
+    assert_eq!(number_of(&shown[5]), 118, "the last frame");
+}
+
+#[test]
+fn an_animated_window_refuses_a_bad_range_in_one_line() {
+    let work = dir("gif-refusals");
+    let out = work.join("cut.gif");
+    let src = s(&sources().mp4);
+    refused(&run(&[src, s(&out), "--from", "9"]), "past the end");
+    refused(
+        &run(&[src, s(&out), "--from", "2", "--to", "1"]),
+        "must come after",
+    );
+    refused(
+        &run(&[src, s(&out), "--from", "4.99"]),
+        "no frame of the video starts",
+    );
+    assert!(listed(&work).is_empty(), "{:?}", listed(&work));
 }
 
 #[test]
@@ -1319,4 +1363,385 @@ fn the_rgba_png_writer_round_trips_through_the_decoder() {
     let back = pito_codecs::png::decode(&rgba_png(&img)).unwrap();
     assert_eq!((back.width, back.height), (WIDTH, HEIGHT));
     assert!(back.data == img.data, "the PNG did not round-trip");
+}
+
+fn mux_webm(video: &Path, audio: &Path, out: &Path, squeeze: f64) {
+    use pito_codecs::mkv;
+    let vr = mkv::Reader::open(video).unwrap();
+    let ar = mkv::Reader::open(audio).unwrap();
+    let (vt, at) = (vr.video().unwrap(), ar.audio()[0]);
+    let (vtrack, atrack) = (&vr.tracks[vt], &ar.tracks[at]);
+    let mut w = mkv::Writer::create_with(out, mkv::Options::webm()).unwrap();
+    let mut vcfg = mkv::TrackConfig::from_track(vtrack);
+    vcfg.default_duration = Some(1_000_000_000 / u64::from(FPS));
+    let v = w.add_track(vcfg).unwrap();
+    let a = w.add_track(mkv::TrackConfig::from_track(atrack)).unwrap();
+    let (vn, an) = (vtrack.samples.len(), atrack.samples.len());
+    let (mut vi, mut ai) = (0, 0);
+    let mut alpha = Vec::new();
+    while vi < vn || ai < an {
+        let vs = (vi < vn).then(|| vtrack.seconds(vtrack.samples[vi].pts) / squeeze);
+        let sound = (ai < an).then(|| atrack.seconds(atrack.samples[ai].pts));
+        match (vs, sound) {
+            (Some(t), s) if s.is_none_or(|s| t <= s) => {
+                let mut p = vr.packet(vt, vi).unwrap();
+                p.pts = vtrack.ticks(t);
+                p.dts = p.pts;
+                let has = vr.read_alpha(vt, vi, &mut alpha).unwrap();
+                w.push_alpha(v, &p, has.then_some(alpha.as_slice()))
+                    .unwrap();
+                vi += 1;
+            }
+            _ => {
+                w.push(a, &ar.packet(at, ai).unwrap()).unwrap();
+                ai += 1;
+            }
+        }
+    }
+    w.finish().unwrap();
+}
+
+fn alpha_with_opus() -> &'static PathBuf {
+    static MADE: OnceLock<PathBuf> = OnceLock::new();
+    MADE.get_or_init(|| {
+        let (video, audio) = (alpha_source(), &sources().webm);
+        shared("alpha-opus", |root| {
+            mux_webm(video, audio, &root.join("alpha-opus.webm"), 1.0);
+        })
+        .join("alpha-opus.webm")
+    })
+}
+
+#[test]
+fn the_alpha_fixture_carries_its_alpha_and_an_opus_track() {
+    let p = probe(alpha_with_opus(), &Prefs::default()).unwrap();
+    assert!(p.alpha, "the fixture lost its alpha");
+    assert_eq!(p.audio.len(), 1, "{:?}", p.audio);
+    assert!(
+        p.audio[0].codec.eq_ignore_ascii_case("opus"),
+        "{:?}",
+        p.audio
+    );
+    assert!((p.duration - 5.0).abs() <= FRAME, "{} s", p.duration);
+}
+
+#[test]
+fn an_alpha_webm_window_with_an_opus_track_keeps_its_alpha_and_its_audio_in_sync() {
+    let work = dir("alpha-opus-cut");
+    let cut = work.join("cut.webm");
+    let json = ok(&run(&[
+        s(alpha_with_opus()),
+        s(&cut),
+        "--from",
+        "2",
+        "--to",
+        "3.5",
+        "--json",
+    ]));
+    let cut_json = &json[json.find("\"cut\":").expect("a cut object")..];
+    assert_eq!(number(cut_json, "frames"), 36.0, "{json}");
+    let p = probe(&cut, &Prefs::default()).unwrap();
+    assert!(p.alpha, "the cut lost its alpha");
+    assert_eq!(p.audio.len(), 1, "the cut lost its audio: {:?}", p.audio);
+    assert!((p.duration - 1.5).abs() <= FRAME, "{} s", p.duration);
+    let first = first_frame(&cut, 0, &Prefs::default()).unwrap();
+    assert_eq!(number_of(&first), 48, "the first frame");
+    let (solid, clear) = see_through(&first);
+    assert!(solid > 224 && clear < 32, "alpha {solid} and {clear}");
+    let (pulse, length) = pulse_and_length(&cut, &work);
+    assert!((pulse - (PULSE - 2.0)).abs() <= SYNC, "pulse at {pulse}");
+    assert!((length - 1.5).abs() <= FRAME, "{length}");
+    assert_eq!(listed(&work), ["audio.wav", "cut.webm"]);
+}
+
+#[test]
+fn a_frame_range_of_an_alpha_webm_writes_rgba_pngs_with_the_alpha() {
+    let work = dir("alpha-range");
+    let out = work.join("frames");
+    let json = ok(&run(&[
+        "stills",
+        s(alpha_source()),
+        "--from",
+        "2",
+        "--to",
+        "2.25",
+        "--height",
+        "240",
+        "--out",
+        s(&out),
+        "--json",
+    ]));
+    assert_eq!(number(&json, "count"), 6.0, "{json}");
+    assert_eq!(number(&json, "expected"), 6.0, "{json}");
+    let names = listed(&out);
+    assert_eq!(names.len(), 6, "{names:?}");
+    for (i, name) in names.iter().enumerate() {
+        let data = fs::read(out.join(name)).unwrap();
+        assert_eq!(data[25], 6, "{name}: an RGBA PNG");
+        let img = pito_codecs::png::decode(&data).unwrap();
+        assert_eq!((img.width, img.height), (WIDTH, HEIGHT), "{name}");
+        assert_eq!(number_of(&img), 48 + i as u32, "{name}");
+        let (solid, clear) = see_through(&img);
+        assert!(
+            solid > 224 && clear < 32,
+            "{name}: alpha {solid} and {clear}"
+        );
+    }
+    let small = work.join("small");
+    let json = ok(&run(&[
+        "stills",
+        s(alpha_source()),
+        "--from",
+        "2",
+        "--to",
+        "2.25",
+        "--height",
+        "120",
+        "--out",
+        s(&small),
+        "--json",
+    ]));
+    assert_eq!(number(&json, "count"), 6.0, "{json}");
+    for (i, name) in listed(&small).iter().enumerate() {
+        let data = fs::read(small.join(name)).unwrap();
+        assert_eq!(data[25], 6, "{name}: a scaled RGBA PNG");
+        let img = pito_codecs::png::decode(&data).unwrap();
+        assert_eq!((img.width, img.height), (WIDTH / 2, HEIGHT / 2), "{name}");
+        assert_eq!(number_of(&img), 48 + i as u32, "{name}");
+        let (solid, clear) = see_through(&img);
+        assert!(
+            solid > 224 && clear < 32,
+            "{name}: scaled alpha {solid} and {clear}"
+        );
+    }
+    let plain = work.join("plain");
+    ok(&run(&[
+        "stills",
+        s(&sources().mp4),
+        "--from",
+        "2",
+        "--to",
+        "2.1",
+        "--out",
+        s(&plain),
+    ]));
+    let data = fs::read(plain.join("000000.png")).unwrap();
+    assert_eq!(data[25], 2, "an opaque source still writes RGB PNGs");
+}
+
+fn short_stream() -> &'static PathBuf {
+    static MADE: OnceLock<PathBuf> = OnceLock::new();
+    MADE.get_or_init(|| {
+        let src = &sources().webm;
+        shared("short", |root| {
+            mux_webm(src, src, &root.join("short.webm"), 2.0);
+        })
+        .join("short.webm")
+    })
+}
+
+#[test]
+fn a_frame_range_stops_at_the_last_real_frame_of_a_stream_that_ends_short() {
+    let p = probe(short_stream(), &Prefs::default()).unwrap();
+    assert!(
+        (p.duration - 2.5).abs() <= FRAME,
+        "the probe reads the video's own end: {}",
+        p.duration
+    );
+    let work = dir("short-range");
+    let out = work.join("frames");
+    let json = ok(&run(&[
+        "stills",
+        s(short_stream()),
+        "--from",
+        "0",
+        "--route",
+        "cpu",
+        "--out",
+        s(&out),
+        "--json",
+    ]));
+    let count = number(&json, "count");
+    assert!(count < number(&json, "expected"), "{json}");
+    assert!((59.0..=62.0).contains(&count), "{json}");
+    assert_eq!(listed(&out).len() as f64, count, "{json}");
+    let last = listed(&out).last().cloned().unwrap();
+    let shown = png_number(&out.join(last));
+    assert!(
+        (FRAMES - 3..FRAMES).contains(&shown),
+        "the last PNG shows frame {shown}, not one of the stream's last frames"
+    );
+    let text_out = ok(&run(&[
+        "stills",
+        s(short_stream()),
+        "--from",
+        "0",
+        "--route",
+        "cpu",
+        "--out",
+        s(&work.join("again")),
+    ]));
+    assert!(
+        text_out.contains("note: the stream ends before its probed length"),
+        "{text_out}"
+    );
+}
+
+#[test]
+fn a_range_past_the_last_real_frame_is_refused_and_leaves_no_folder() {
+    let work = dir("short-past");
+    let out = work.join("frames");
+    refused(
+        &run(&[
+            "stills",
+            s(short_stream()),
+            "--from",
+            "3",
+            "--to",
+            "4",
+            "--route",
+            "cpu",
+            "--out",
+            s(&out),
+        ]),
+        "--from 3 is at or past the end of the video",
+    );
+    assert!(!out.exists(), "the refusal left its --out folder behind");
+    let kept = work.join("kept");
+    fs::create_dir_all(&kept).unwrap();
+    refused(
+        &run(&[
+            "stills",
+            s(short_stream()),
+            "--from",
+            "3",
+            "--to",
+            "4",
+            "--route",
+            "cpu",
+            "--out",
+            s(&kept),
+        ]),
+        "--from 3 is at or past the end of the video",
+    );
+    assert!(kept.is_dir(), "a folder it didn't make stays");
+}
+
+#[test]
+fn a_range_refuses_a_tune_the_cut_cannot_honour() {
+    let work = dir("cut-tune");
+    let out = work.join("cut.mp4");
+    refused(
+        &run(&[
+            s(&sources().mp4),
+            s(&out),
+            "--from",
+            "2",
+            "--to",
+            "3.5",
+            "--tune",
+            "film",
+        ]),
+        "--tune film doesn't apply to a --from/--to cut",
+    );
+    assert!(!out.exists());
+    let json = ok(&run(&[
+        s(&sources().mp4),
+        s(&out),
+        "--from",
+        "2.02",
+        "--to",
+        "3.5",
+        "--tune",
+        "animation",
+        "--json",
+    ]));
+    let cut_json = &json[json.find("\"cut\":").unwrap()..];
+    assert!(number(cut_json, "encoded") > 0.0, "{json}");
+    assert!(json.contains("\"tune\":\"animation\""), "{json}");
+    let copied = work.join("copied.mp4");
+    let json = ok(&run(&[
+        s(&sources().mp4),
+        s(&copied),
+        "--from",
+        "2",
+        "--to",
+        "4",
+        "--tune",
+        "animation",
+        "--json",
+    ]));
+    let cut_json = &json[json.find("\"cut\":").unwrap()..];
+    assert_eq!(
+        number(cut_json, "copied"),
+        0.0,
+        "a tune re-encodes the whole window: {json}"
+    );
+    assert!(number(cut_json, "encoded") > 0.0, "{json}");
+    assert!(json.contains("\"tune\":\"animation\""), "{json}");
+}
+
+#[test]
+fn the_cut_manifest_reports_the_edge_settings_it_used() {
+    let work = dir("cut-manifest");
+    let smart = ok(&run(&[
+        s(&sources().mp4),
+        s(&work.join("smart.mp4")),
+        "--from",
+        "1.5",
+        "--to",
+        "4.5",
+        "--json",
+    ]));
+    let smart_cut = &smart[smart.find("\"cut\":").unwrap()..];
+    assert!(number(smart_cut, "encoded") > 0.0, "{smart}");
+    assert!(number(smart_cut, "copied") > 0.0, "{smart}");
+    assert!(
+        smart.contains("\"preset\":\"speed\""),
+        "smart edges: {smart}"
+    );
+    assert!(!smart.contains("\"tune\":\""), "{smart}");
+    let whole = ok(&run(&[
+        s(&sources().mp4),
+        s(&work.join("whole.mp4")),
+        "--from",
+        "1.5",
+        "--to",
+        "4.5",
+        "--crf",
+        "20",
+        "--json",
+    ]));
+    let whole_cut = &whole[whole.find("\"cut\":").unwrap()..];
+    assert_eq!(number(whole_cut, "copied"), 0.0, "{whole}");
+    assert!(whole.contains("\"preset\":\"balanced\""), "{whole}");
+    assert_eq!(
+        number(&smart, "crf"),
+        number(&whole, "crf") - 2.0,
+        "smart edges run the default CRF less 2: {smart} {whole}"
+    );
+}
+
+#[test]
+fn a_range_with_a_profile_re_encodes_the_whole_window_at_its_crf() {
+    let work = dir("cut-profile");
+    let json = ok(&run(&[
+        s(&sources().mp4),
+        s(&work.join("best.mp4")),
+        "--from",
+        "2.02",
+        "--to",
+        "3.5",
+        "--profile",
+        "best",
+        "--json",
+    ]));
+    let cut_json = &json[json.find("\"cut\":").unwrap()..];
+    assert_eq!(number(cut_json, "copied"), 0.0, "{json}");
+    assert!(number(cut_json, "encoded") > 0.0, "{json}");
+    assert!(json.contains("\"preset\":\"balanced\""), "{json}");
+    assert!(
+        json.contains("\"crf\":16"),
+        "best maps 18 to crf 16: {json}"
+    );
 }

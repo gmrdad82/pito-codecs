@@ -22,7 +22,11 @@ pub const LOUDEST_LUFS: f64 = -5.0;
 pub const LOWEST_TRUE_PEAK: f64 = -9.0;
 pub const HIGHEST_TRUE_PEAK: f64 = 0.0;
 const CLOSE: f64 = 0.1;
-const TRIES: usize = 3;
+pub const CALIBRATION_PASSES: usize = 8;
+const SETTLED: f64 = 0.05;
+const LEAST_SLOPE: f64 = 0.05;
+const SATURATING_STEP: f64 = 0.5;
+const LONGEST_STEP: f64 = 12.0;
 const RETRIES: usize = 8;
 const NARROWS: usize = 4;
 const MARGIN: f64 = 0.05;
@@ -86,6 +90,105 @@ impl LoudnessStats {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Calibration {
+    pub passes: usize,
+    pub landed: f64,
+    pub reached: bool,
+    pub ceiling_db: f64,
+}
+
+impl Calibration {
+    pub fn shortfall(&self, target: &LevelTarget) -> Option<String> {
+        if self.reached {
+            return None;
+        }
+        if !self.landed.is_finite() {
+            return Some(format!(
+                "calibrated levelling measured silence after {} passes, so it can't reach the {} LUFS target",
+                self.passes, target.integrated
+            ));
+        }
+        Some(format!(
+            "calibrated levelling landed at {:.2} LUFS after {} passes, {:.2} LU from the {} LUFS target: the limiter at {:.2} dBTP can't get closer",
+            self.landed,
+            self.passes,
+            (target.integrated - self.landed).abs(),
+            target.integrated,
+            self.ceiling_db
+        ))
+    }
+}
+
+fn calibrate<T>(
+    target: f64,
+    from: f64,
+    ceiling_db: f64,
+    mut pass: impl FnMut(f64) -> Result<(T, f64)>,
+) -> Result<(T, f64, Calibration)> {
+    let mut gain = from;
+    let mut last: Option<(f64, f64)> = None;
+    let mut best: Option<(T, f64, f64)> = None;
+    let mut passes = 0;
+    let mut flat = false;
+    while passes < CALIBRATION_PASSES {
+        let (value, got) = pass(gain)?;
+        passes += 1;
+        if !got.is_finite() {
+            if best.is_none() {
+                best = Some((value, gain, got));
+            }
+            break;
+        }
+        let miss = target - got;
+        if best
+            .as_ref()
+            .is_none_or(|(_, _, b)| !b.is_finite() || miss.abs() < (target - b).abs())
+        {
+            best = Some((value, gain, got));
+        }
+        if miss.abs() <= SETTLED {
+            break;
+        }
+        let slope = match last {
+            Some((g, l)) if (gain - g).abs() > 1e-9 => {
+                let step = gain - g;
+                let slope = (got - l) / step;
+                if !slope.is_finite() || slope <= 0.0 {
+                    1.0
+                } else if slope < LEAST_SLOPE {
+                    if step.abs() >= SATURATING_STEP && (miss > 0.0) == (step > 0.0) {
+                        if flat {
+                            break;
+                        }
+                        flat = true;
+                    }
+                    LEAST_SLOPE
+                } else {
+                    flat = false;
+                    slope.min(1.0)
+                }
+            }
+            _ => 1.0,
+        };
+        last = Some((gain, got));
+        gain += (miss / slope).clamp(-LONGEST_STEP, LONGEST_STEP);
+    }
+    let (value, gain, landed) =
+        best.ok_or_else(|| Error::Invalid("a loudness calibration ran no pass".into()))?;
+    let reached = landed.is_finite() && (target - landed).abs() <= CLOSE;
+    Ok((
+        value,
+        gain,
+        Calibration {
+            passes,
+            landed,
+            reached,
+            ceiling_db,
+        },
+    ))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LevelMode {
     Linear,
@@ -141,6 +244,7 @@ pub struct Levelled {
     pub audio_kbps: u32,
     pub video: Option<Codec>,
     pub video_packets: u64,
+    pub calibration: Option<Calibration>,
 }
 
 #[derive(Debug, Clone)]
@@ -407,6 +511,7 @@ pub struct LevelledPcm {
     pub mode: LevelMode,
     pub gain_db: f64,
     pub ceiling_db: Option<f64>,
+    pub calibration: Option<Calibration>,
 }
 
 fn measured(b: &AudioBuffer) -> Result<LoudnessStats> {
@@ -437,22 +542,25 @@ pub fn level_pcm(
     }
     let linear = target.integrated - before.integrated;
     let mut gain_db = linear;
-    settle(|headroom| {
+    let mut spent = 0;
+    let mut done = settle(|headroom| {
         let ceiling = target.true_peak - headroom;
         let ceiling_db = (before.true_peak + linear > ceiling).then_some(ceiling);
-        let mut out = levelled(buffer, gain_db, ceiling_db)?;
-        let mut after = measured(&out)?;
-        if ceiling_db.is_some() && !style.linear {
-            for _ in 0..TRIES {
-                let short = target.integrated - after.integrated;
-                if !short.is_finite() || short.abs() <= CLOSE {
-                    break;
-                }
-                gain_db += short;
-                out = levelled(buffer, gain_db, ceiling_db)?;
-                after = measured(&out)?;
-            }
-        }
+        let ((out, after), calibration) = if ceiling_db.is_some() && !style.linear {
+            let (kept, gain, calibration) = calibrate(target.integrated, gain_db, ceiling, |g| {
+                let out = levelled(buffer, g, ceiling_db)?;
+                let after = measured(&out)?;
+                let got = after.integrated;
+                Ok(((out, after), got))
+            })?;
+            gain_db = gain;
+            spent += calibration.passes;
+            (kept, Some(calibration))
+        } else {
+            let out = levelled(buffer, gain_db, ceiling_db)?;
+            let after = measured(&out)?;
+            ((out, after), None)
+        };
         let encoded = match style.encoded {
             Some((codec, kbps)) => Some(encoded_pcm(&out, codec, kbps)?),
             None => None,
@@ -474,10 +582,15 @@ pub fn level_pcm(
             mode,
             gain_db,
             ceiling_db,
+            calibration,
         };
         let limited = ceiling_db.is_some() && encoded.is_some();
         Ok((levelled, over, limited))
-    })
+    })?;
+    if let Some(c) = done.calibration.as_mut() {
+        c.passes = spent;
+    }
+    Ok(done)
 }
 
 fn settle<T>(mut trial: impl FnMut(f64) -> Result<(T, f64, bool)>) -> Result<T> {
@@ -990,6 +1103,7 @@ pub struct LevelPlan {
     pub before: LoudnessStats,
     pub gain_db: f64,
     pub ceiling_db: Option<f64>,
+    pub calibration: Option<Calibration>,
 }
 
 impl LevelPlan {
@@ -1060,7 +1174,8 @@ pub fn plan_level_styled(
             progress,
         );
     };
-    settle(|headroom| {
+    let mut spent = 0;
+    let mut plan = settle(|headroom| {
         let plan = planned(
             &source,
             before,
@@ -1071,11 +1186,18 @@ pub fn plan_level_styled(
             progress,
         )?;
         gain = plan.gain_db;
+        if let Some(c) = plan.calibration {
+            spent += c.passes;
+        }
         let trial = plan.leveler(LEVEL_RATE, 2)?;
         let got = encoded_pass(&source, trial, codec, kbps, progress)?;
         let over = got.true_peak - (target.true_peak - MARGIN);
         Ok((plan, over, plan.ceiling_db.is_some()))
-    })
+    })?;
+    if let Some(c) = plan.calibration.as_mut() {
+        c.passes = spent;
+    }
+    Ok(plan)
 }
 
 #[derive(Clone, Copy)]
@@ -1104,7 +1226,7 @@ fn planned(
     before: LoudnessStats,
     target: &LevelTarget,
     headroom: f64,
-    mut gain_db: f64,
+    gain_db: f64,
     linear_only: bool,
     progress: &mut Tell,
 ) -> Result<LevelPlan> {
@@ -1118,6 +1240,7 @@ fn planned(
             before,
             gain_db: linear,
             ceiling_db: None,
+            calibration: None,
         });
     }
     if linear_only {
@@ -1125,22 +1248,20 @@ fn planned(
             before,
             gain_db: linear,
             ceiling_db: Some(ceiling),
+            calibration: None,
         });
     }
-    for _ in 0..TRIES {
-        let span = source.span;
-        let trial = Leveler::with_gain(span.rate, span.channels, gain_db, Some(ceiling))?;
+    let span = source.span;
+    let ((), gain_db, calibration) = calibrate(target.integrated, gain_db, ceiling, |g| {
+        let trial = Leveler::with_gain(span.rate, span.channels, g, Some(ceiling))?;
         let got = meter_pass(source, Some(trial), LevelStage::Calibrating, progress)?;
-        let short = target.integrated - got.integrated;
-        if !short.is_finite() || short.abs() <= CLOSE {
-            break;
-        }
-        gain_db += short;
-    }
+        Ok(((), got.integrated))
+    })?;
     Ok(LevelPlan {
         before,
         gain_db,
         ceiling_db: Some(ceiling),
+        calibration: Some(calibration),
     })
 }
 
@@ -1180,7 +1301,8 @@ pub fn level_with(
     let part = partial(output);
     let mut gain = target.integrated - before.integrated;
     let mut n = 0;
-    let (trial, levelled) = settle(|headroom| {
+    let mut spent = 0;
+    let (trial, mut levelled) = settle(|headroom| {
         let plan = planned(
             &source,
             before,
@@ -1191,6 +1313,9 @@ pub fn level_with(
             progress,
         )?;
         gain = plan.gain_db;
+        if let Some(c) = plan.calibration {
+            spent += c.passes;
+        }
         n += 1;
         let trial = Trial(part.with_extension(format!("level{n}")));
         let leveler = plan.leveler(LEVEL_RATE, 2)?;
@@ -1208,9 +1333,13 @@ pub fn level_with(
             audio_kbps: kbps,
             video,
             video_packets,
+            calibration: plan.calibration,
         };
         Ok(((trial, levelled), over, limited))
     })?;
+    if let Some(c) = levelled.calibration.as_mut() {
+        c.passes = spent;
+    }
     std::fs::rename(&trial.0, output).map_err(|e| Error::at(output, e))?;
     Ok(levelled)
 }
@@ -1296,4 +1425,219 @@ fn write(
     }
     tell(progress, stage, total, total)?;
     Ok((LoudnessStats::of(&meter), codec, copied, enc.codec()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn knee(g: f64) -> f64 {
+        if g < 10.0 {
+            g - 30.0
+        } else {
+            -20.0 + 0.3 * (g - 10.0)
+        }
+    }
+
+    fn run(target: f64, from: f64, curve: impl Fn(f64) -> f64) -> (f64, f64, Calibration) {
+        calibrate(target, from, -2.3, |g| Ok((g, curve(g)))).unwrap()
+    }
+
+    #[test]
+    fn a_limited_curve_converges_where_plain_steps_land_short() {
+        let (kept, gain, c) = run(-14.0, 16.0, knee);
+        assert_eq!(kept, gain);
+        assert!(c.reached, "{c:?}");
+        assert!((c.landed + 14.0).abs() <= SETTLED, "{c:?}");
+        assert!((knee(gain) - c.landed).abs() < 1e-12);
+        assert!(c.passes <= CALIBRATION_PASSES, "{c:?}");
+        let mut g = 16.0;
+        for _ in 0..3 {
+            g += -14.0 - knee(g);
+        }
+        assert!(
+            -14.0 - knee(g) > CLOSE,
+            "three plain steps reach {}",
+            knee(g)
+        );
+    }
+
+    #[test]
+    fn a_signal_at_the_target_takes_one_pass() {
+        let (_, gain, c) = run(-14.0, 16.0, |g| g - 30.0);
+        assert_eq!(gain, 16.0);
+        assert_eq!(c.passes, 1);
+        assert!(c.reached);
+    }
+
+    #[test]
+    fn an_overshoot_steps_back_down() {
+        let (_, gain, c) = run(-14.0, 25.0, |g| g - 30.0);
+        assert!((gain - 16.0).abs() < 1e-9, "{gain}");
+        assert_eq!(c.passes, 2);
+        assert!(c.reached);
+    }
+
+    #[test]
+    fn a_saturated_limiter_stops_early_and_says_it_fell_short() {
+        let flat = |g: f64| -20.0 + 5.0 * (1.0 - (-g / 5.0).exp());
+        let (_, gain, c) = run(-14.0, 6.0, flat);
+        assert!(!c.reached, "{c:?}");
+        assert!(c.passes < CALIBRATION_PASSES, "{c:?}");
+        assert!((flat(gain) - c.landed).abs() < 1e-12);
+        let target = LevelTarget {
+            integrated: -14.0,
+            true_peak: -2.0,
+        };
+        let line = c.shortfall(&target).unwrap();
+        assert!(!line.contains('\n'), "{line}");
+        assert!(line.contains("-14 LUFS"), "{line}");
+        assert!(line.contains("-2.30 dBTP"), "{line}");
+        assert!(line.contains(&format!("{:.2} LUFS", c.landed)), "{line}");
+    }
+
+    #[test]
+    fn the_pass_count_is_bounded_on_a_curve_that_never_settles() {
+        let mut calls = 0;
+        let (_, _, c) = calibrate(-14.0, 0.0, -1.3, |g| {
+            calls += 1;
+            Ok((
+                (),
+                -40.0 + 0.06 * g + if calls % 2 == 0 { 0.3 } else { 0.0 },
+            ))
+        })
+        .unwrap();
+        assert_eq!(calls, c.passes);
+        assert!(c.passes <= CALIBRATION_PASSES, "{c:?}");
+        assert!(!c.reached);
+        assert!(c.shortfall(&LevelTarget::new(-14.0)).is_some());
+    }
+
+    #[test]
+    fn a_reached_calibration_says_nothing() {
+        let c = Calibration {
+            passes: 2,
+            landed: -14.05,
+            reached: true,
+            ceiling_db: -1.3,
+        };
+        assert_eq!(c.shortfall(&LevelTarget::new(-14.0)), None);
+    }
+
+    #[test]
+    fn a_silent_pass_keeps_the_first_gain_and_is_not_reached() {
+        let (_, gain, c) = run(-14.0, 3.0, |_| f64::NEG_INFINITY);
+        assert_eq!(gain, 3.0);
+        assert_eq!(c.passes, 1);
+        assert!(!c.reached);
+    }
+
+    #[test]
+    fn a_failing_pass_is_an_error() {
+        let got = calibrate(-14.0, 0.0, -1.3, |_| -> Result<((), f64)> {
+            Err(Error::Invalid("decode failed".into()))
+        });
+        assert!(matches!(got, Err(Error::Invalid(m)) if m == "decode failed"));
+    }
+
+    #[test]
+    fn a_step_never_exceeds_the_longest_step() {
+        let mut seen = Vec::new();
+        let _ = calibrate(-14.0, 0.0, -1.3, |g| {
+            seen.push(g);
+            Ok(((), -60.0 + 0.01 * g))
+        });
+        for w in seen.windows(2) {
+            assert!((w[1] - w[0]).abs() <= LONGEST_STEP + 1e-9, "{seen:?}");
+        }
+    }
+
+    #[test]
+    fn a_slow_limited_step_near_the_target_is_not_taken_for_saturation() {
+        let (_, gain, c) = run(-14.0, 29.5, knee);
+        assert!((-14.0 - knee(29.5) - 0.15).abs() < 1e-9);
+        assert!((-14.0 - knee(29.65) - 0.105).abs() < 1e-9);
+        assert!(c.reached, "{c:?}");
+        assert!((c.landed + 14.0).abs() <= SETTLED, "{c:?}");
+        assert!((knee(gain) - c.landed).abs() < 1e-12);
+        assert!(c.shortfall(&LevelTarget::new(-14.0)).is_none());
+    }
+
+    #[test]
+    fn a_second_pass_that_misses_by_a_tenth_still_reaches_the_target() {
+        for from in [29.4, 29.5, 29.6] {
+            let (_, _, c) = run(-14.0, from, knee);
+            assert!(c.reached, "{from}: {c:?}");
+            assert!(c.passes <= 4, "{from}: {c:?}");
+        }
+    }
+
+    #[test]
+    fn a_loudness_that_drops_on_a_step_takes_a_unit_step_not_the_longest() {
+        let mut calls = 0;
+        let mut seen = Vec::new();
+        let (_, _, c) = calibrate(-14.0, 15.4, -2.3, |g| {
+            calls += 1;
+            seen.push(g);
+            let got = match calls {
+                1 => -14.6,
+                2 => -14.7,
+                _ => g - 30.0,
+            };
+            Ok(((), got))
+        })
+        .unwrap();
+        assert!(c.reached, "{c:?} {seen:?}");
+        for w in seen.windows(2) {
+            assert!((w[1] - w[0]).abs() <= 1.0 + 1e-9, "{seen:?}");
+        }
+    }
+
+    #[test]
+    fn a_saturated_step_breaks_only_after_a_real_push() {
+        let mut seen = Vec::new();
+        let (_, _, c) = calibrate(-14.0, 0.0, -2.3, |g| {
+            seen.push(g);
+            Ok(((), -16.0 + 0.01 * g))
+        })
+        .unwrap();
+        assert!(!c.reached, "{c:?}");
+        assert_eq!(c.passes, seen.len());
+        assert!(c.passes < CALIBRATION_PASSES, "{seen:?}");
+        let last = seen[seen.len() - 1] - seen[seen.len() - 2];
+        assert!(last >= SATURATING_STEP, "{seen:?}");
+    }
+
+    #[test]
+    fn a_curve_that_steepens_after_a_flat_step_still_reaches_the_target() {
+        let pinned = |g: f64| 10.0 * (10f64.powf(-2.0) + 10f64.powf((g - 40.0) / 10.0)).log10();
+        let (_, gain, c) = run(-14.0, 0.0, pinned);
+        assert!((pinned(5.957) - pinned(0.0)) / 5.957 < LEAST_SLOPE);
+        assert!(c.reached, "{c:?}");
+        assert!(c.passes > 2 && c.passes <= CALIBRATION_PASSES, "{c:?}");
+        assert!((pinned(gain) - c.landed).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_shortfall_names_the_limiter_ceiling_not_the_target_peak() {
+        let c = Calibration {
+            passes: 5,
+            landed: -14.6,
+            reached: false,
+            ceiling_db: -2.3,
+        };
+        let line = c.shortfall(&LevelTarget::youtube()).unwrap();
+        assert!(line.contains("at -2.30 dBTP"), "{line}");
+        assert!(line.contains("after 5 passes"), "{line}");
+        assert!(line.contains("0.60 LU"), "{line}");
+    }
+
+    #[test]
+    fn a_silent_landing_says_silence_not_infinity() {
+        let (_, _, c) = run(-14.0, 3.0, |_| f64::NEG_INFINITY);
+        let line = c.shortfall(&LevelTarget::new(-14.0)).unwrap();
+        assert!(line.contains("silence"), "{line}");
+        assert!(!line.contains("inf"), "{line}");
+        assert!(!line.contains('\n'), "{line}");
+    }
 }

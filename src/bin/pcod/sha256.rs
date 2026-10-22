@@ -476,3 +476,96 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod soft_tests {
+    use super::{H256, Sha256, compress, hex, sha256_file, soft};
+
+    fn padded(message: &[u8]) -> Vec<[u8; 64]> {
+        let mut bytes = message.to_vec();
+        bytes.push(0x80);
+        while bytes.len() % 64 != 56 {
+            bytes.push(0);
+        }
+        bytes.extend_from_slice(&(message.len() as u64 * 8).to_be_bytes());
+        bytes
+            .chunks_exact(64)
+            .map(|c| c.try_into().unwrap())
+            .collect()
+    }
+
+    fn digest(state: [u32; 8]) -> String {
+        hex(&state
+            .iter()
+            .flat_map(|s| s.to_be_bytes())
+            .collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn the_portable_rounds_match_the_known_vectors() {
+        for (message, want) in [
+            (
+                &b"abc"[..],
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+            (
+                &b""[..],
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                &b"abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu"[..],
+                "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1",
+            ),
+        ] {
+            let mut state = H256;
+            soft::compress(&mut state, &padded(message));
+            assert_eq!(digest(state), want);
+        }
+    }
+
+    #[test]
+    fn the_portable_and_the_detected_rounds_agree_on_many_blocks() {
+        let blocks: Vec<[u8; 64]> = (0..37u32)
+            .map(|b| std::array::from_fn(|i| (b.wrapping_mul(131) ^ (i as u32 * 29)) as u8))
+            .collect();
+        let (mut a, mut b) = (H256, H256);
+        soft::compress(&mut a, &blocks);
+        compress(&mut b, &blocks);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn a_file_hashes_like_its_bytes_across_read_boundaries() {
+        let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/pcod-sha256");
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join(format!("{}.bin", std::process::id()));
+        let bytes: Vec<u8> = (0..(3usize << 20) + 77)
+            .map(|i| (i * 31 % 251) as u8)
+            .collect();
+        std::fs::write(&path, &bytes).unwrap();
+        let mut h = Sha256::new();
+        h.update(&bytes);
+        let file = sha256_file(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(file, hex(&h.finish()));
+        let a = folder.join(format!("{}-a.bin", std::process::id()));
+        std::fs::write(&a, vec![b'a'; 1_000_000]).unwrap();
+        let file = sha256_file(&a).unwrap();
+        let _ = std::fs::remove_file(&a);
+        assert_eq!(
+            file,
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+        );
+        assert!(sha256_file(&folder.join("missing.bin")).is_err());
+    }
+
+    #[test]
+    fn the_default_hasher_is_a_fresh_one() {
+        let mut h = Sha256::default();
+        h.update(b"abc");
+        assert_eq!(
+            hex(&h.finish()),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+}

@@ -217,7 +217,7 @@ pub(crate) fn look(codec: Codec, extradata: &[u8]) -> Option<((u16, u16), Color)
         _ => return None,
     };
     let sar = if sar.0 == 0 || sar.1 == 0 {
-        (1, 1)
+        (0, 0)
     } else {
         sar
     };
@@ -307,6 +307,14 @@ pub(crate) trait DecoderBackend: Send {
     fn flush_gpu(&mut self) -> Result<Vec<GpuFrame>> {
         Ok(self.flush()?.into_iter().map(GpuFrame::cpu).collect())
     }
+}
+
+pub(crate) fn restartable(asked: &EncoderConfig, next: &EncoderConfig) -> bool {
+    EncoderConfig {
+        rate: asked.rate,
+        gop: asked.gop,
+        ..next.clone()
+    } == *asked
 }
 
 pub(crate) trait EncoderBackend: Send {

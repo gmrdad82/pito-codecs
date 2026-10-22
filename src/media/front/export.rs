@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use super::mux::{Premix, Sound};
 use super::picture::Blender;
@@ -69,6 +71,76 @@ pub struct Exported {
     pub smart: bool,
     pub video: Picked,
     pub reasons: Vec<String>,
+    pub sessions: Sessions,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Sessions {
+    pub edges: u32,
+    pub workers: u32,
+    pub opened: u32,
+    pub reused: u32,
+    pub refreshed: u32,
+    pub setup: Duration,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct Tally {
+    edges: AtomicU32,
+    workers: AtomicU32,
+    opened: AtomicU32,
+    reused: AtomicU32,
+    refreshed: AtomicU32,
+    nanos: AtomicU64,
+}
+
+impl Tally {
+    pub(super) fn open<T>(&self, make: impl FnOnce() -> Result<T>) -> Result<T> {
+        let start = Instant::now();
+        let made = make();
+        self.spent(start.elapsed());
+        if made.is_ok() {
+            self.opened.fetch_add(1, Ordering::Relaxed);
+        }
+        made
+    }
+
+    pub(super) fn spent(&self, d: Duration) {
+        let nanos = u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
+        self.nanos.fetch_add(nanos, Ordering::Relaxed);
+    }
+
+    pub(super) fn opened(&self) {
+        self.opened.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn workers(&self, n: usize) {
+        let n = u32::try_from(n).unwrap_or(u32::MAX);
+        self.workers.fetch_max(n, Ordering::Relaxed);
+    }
+
+    pub(super) fn edge(&self) {
+        self.edges.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn reused(&self) {
+        self.reused.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn refreshed(&self) {
+        self.refreshed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn sessions(&self) -> Sessions {
+        Sessions {
+            edges: self.edges.load(Ordering::Relaxed),
+            workers: self.workers.load(Ordering::Relaxed),
+            opened: self.opened.load(Ordering::Relaxed),
+            reused: self.reused.load(Ordering::Relaxed),
+            refreshed: self.refreshed.load(Ordering::Relaxed),
+            setup: Duration::from_nanos(self.nanos.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,6 +212,7 @@ pub(super) struct Job<'a> {
     pub(super) look: super::mux::Look,
     pub(super) spare: Arc<Mutex<Option<crate::gpu::HwEncoder>>>,
     pub(super) fit: bool,
+    pub(super) tally: Arc<Tally>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -342,15 +415,26 @@ fn export_to(
             d.video()
                 .ok()
                 .and_then(|v| d.stream(v).ok()?.look)
-                .unwrap_or(((1, 1), crate::gpu::Color::UNKNOWN))
+                .unwrap_or(((0, 0), crate::gpu::Color::UNKNOWN))
         }
     };
     let mut device = None;
     let mut spare = None;
+    let tally = Arc::new(Tally::default());
     let format = match video.route {
         Route::Gpu => {
-            match super::mux::gpu_check(&mut device, video.codec, size, fps, format, look) {
+            let start = Instant::now();
+            let crf = if fit.is_some() {
+                opts.crf
+            } else {
+                opts.crf.saturating_sub(2)
+            };
+            let checked =
+                super::mux::gpu_check(&mut device, video.codec, size, fps, format, look, crf);
+            tally.spent(start.elapsed());
+            match checked {
                 Ok(e) => {
+                    tally.opened();
                     spare = Some(e);
                     format
                 }
@@ -421,6 +505,7 @@ fn export_to(
         look,
         spare: Arc::new(Mutex::new(spare)),
         fit: fit.is_some(),
+        tally,
     };
     if why.is_some()
         && why == spliceless
@@ -479,6 +564,7 @@ fn export_to(
         smart,
         video,
         reasons,
+        sessions: job.tally.sessions(),
     })
 }
 

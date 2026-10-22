@@ -176,3 +176,37 @@ fn writes_what_the_png_crate_reads() {
         assert_eq!(super::decode(&file).expect("decode").data, image.data);
     }
 }
+
+#[test]
+fn an_rgba_png_keeps_its_alpha_through_the_decoder() {
+    for (w, h, seed) in [(1u32, 1u32, 7u32), (5, 3, 8), (97, 41, 9)] {
+        let mut image = crate::media::Rgba::new(w, h);
+        image.data = pattern(image.data.len(), seed);
+        let file = super::encode_rgba(&image).expect("encode");
+        assert_eq!(file[25], 6, "{w}x{h}: colour type");
+        assert_eq!(
+            expected(&file),
+            image.data,
+            "{w}x{h}: the png crate reads it"
+        );
+        assert_eq!(super::decode(&file).expect("decode").data, image.data);
+        let rgb = super::encode(&image).expect("encode");
+        assert_eq!(rgb[25], 2, "{w}x{h}: colour type");
+        assert!(
+            super::decode(&rgb)
+                .expect("decode")
+                .data
+                .chunks_exact(4)
+                .all(|px| px[3] == 255),
+            "{w}x{h}: an RGB PNG is opaque"
+        );
+    }
+}
+
+#[test]
+fn an_rgba_png_refuses_an_empty_or_short_image() {
+    assert!(super::encode_rgba(&crate::media::Rgba::new(0, 4)).is_err());
+    let mut short = crate::media::Rgba::new(4, 4);
+    short.data.truncate(10);
+    assert!(super::encode_rgba(&short).is_err());
+}

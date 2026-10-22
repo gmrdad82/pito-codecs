@@ -41,22 +41,40 @@ impl Resident {
     }
 
     fn frames(&mut self, job: &Job, si: usize, demux: &Demux, from: i64) -> Result<native::Frames> {
-        let dec = match self.decoders.remove(&si) {
-            Some(mut dec) => {
-                if let native::Decoder::Gpu(d) = &mut dec {
-                    d.reset();
+        if let Some(mut dec) = self.decoders.remove(&si) {
+            let start = std::time::Instant::now();
+            if let native::Decoder::Gpu(d) = &mut dec {
+                d.reset();
+            }
+            let reopened = if super::mux::broken(job) {
+                Err(Error::Backend(
+                    "the reset was refused for a test".to_string(),
+                ))
+            } else {
+                native::Frames::with_decoder(demux.clone(), job.seconds(from), dec)
+            };
+            job.tally.spent(start.elapsed());
+            match reopened {
+                Ok(f) => {
+                    job.tally.reused();
+                    return Ok(f);
                 }
-                dec
+                Err(e) => {
+                    job.tally.refreshed();
+                    self.note(format!(
+                        "the next edge couldn't reuse its GPU decoder ({e}); a fresh one was opened"
+                    ));
+                }
             }
-            None => {
-                let st = demux.stream(demux.video()?)?;
-                let codec = st
-                    .codec
-                    .ok_or_else(|| Error::Unsupported("an unknown video codec".to_string()))?;
-                let d = HwDecoder::on(job.device.as_ref(), codec, &st.extradata, HELD)?;
-                native::Decoder::Gpu(Box::new(d.with_time_base(st.time_base)))
-            }
-        };
+        }
+        let st = demux.stream(demux.video()?)?;
+        let codec = st
+            .codec
+            .ok_or_else(|| Error::Unsupported("an unknown video codec".to_string()))?;
+        let d = job
+            .tally
+            .open(|| HwDecoder::on(job.device.as_ref(), codec, &st.extradata, HELD))?;
+        let dec = native::Decoder::Gpu(Box::new(d.with_time_base(st.time_base)));
         native::Frames::with_decoder(demux.clone(), job.seconds(from), dec)
     }
 
@@ -67,7 +85,9 @@ impl Resident {
             .is_some_and(|(size, t, _)| *size == job.size && *t == ten);
         if !fits {
             self.scaler = None;
-            let s = GpuScaler::on(job.device.as_ref(), job.size.0, job.size.1, ten, IN_FLIGHT)?;
+            let s = job.tally.open(|| {
+                GpuScaler::on(job.device.as_ref(), job.size.0, job.size.1, ten, IN_FLIGHT)
+            })?;
             self.scaler = Some((job.size, ten, s));
         }
         self.scaler

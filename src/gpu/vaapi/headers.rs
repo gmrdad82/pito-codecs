@@ -32,13 +32,27 @@ pub fn join(parts: Vec<Packed>) -> Packed {
     Packed { bytes, bits }
 }
 
+pub fn aspect_idc(sar: (u16, u16)) -> Option<u8> {
+    if sar.0 == 0 || sar.1 == 0 {
+        return None;
+    }
+    let idc = crate::syntax::hevc::params::SAR_TABLE
+        .iter()
+        .position(|&s| s == sar)
+        .and_then(|i| u8::try_from(i).ok())
+        .unwrap_or(255);
+    Some(idc)
+}
+
 fn look(w: &mut BitWriter, sar: (u16, u16), color: Color) {
-    let aspect = sar.0 != 0 && sar.1 != 0 && sar.0 != sar.1;
-    w.write_bit(aspect);
-    if aspect {
-        w.write_bits(255, 8);
-        w.write_bits(u32::from(sar.0), 16);
-        w.write_bits(u32::from(sar.1), 16);
+    let aspect = aspect_idc(sar);
+    w.write_bit(aspect.is_some());
+    if let Some(idc) = aspect {
+        w.write_bits(u32::from(idc), 8);
+        if idc == 255 {
+            w.write_bits(u32::from(sar.0), 16);
+            w.write_bits(u32::from(sar.1), 16);
+        }
     }
     w.write_bit(false);
     let described = color.described();
@@ -422,7 +436,12 @@ mod tests {
             matrix: 6,
             full_range: true,
         };
-        for (sar, color) in [((4, 3), color), ((1, 1), Color::UNKNOWN)] {
+        for (sar, color) in [
+            ((4, 3), color),
+            ((1, 1), Color::UNKNOWN),
+            ((0, 0), Color::UNKNOWN),
+            ((64, 33), color),
+        ] {
             let h264 = H264Sequence {
                 profile_idc: 100,
                 constraints: 0,
@@ -440,7 +459,7 @@ mod tests {
             };
             let sps = crate::syntax::h264::params::Sps::parse(&rbsp(&h264_sps(&h264), 1)).unwrap();
             let vui = sps.vui.unwrap();
-            assert_eq!(vui.sar, if sar == (1, 1) { (0, 0) } else { sar });
+            assert_eq!(vui.sar, sar);
             assert_eq!(
                 (
                     vui.colour_primaries,
@@ -479,7 +498,7 @@ mod tests {
             };
             let sps = crate::syntax::hevc::params::Sps::parse(&rbsp(&hevc_sps(&hevc), 2)).unwrap();
             let vui = sps.vui.unwrap();
-            assert_eq!(vui.sar, if sar == (1, 1) { (0, 0) } else { sar });
+            assert_eq!(vui.sar, sar);
             assert_eq!(
                 (
                     vui.colour_primaries,
@@ -496,5 +515,17 @@ mod tests {
             );
             assert_eq!(vui.timing, None);
         }
+    }
+
+    #[test]
+    fn a_table_aspect_takes_its_idc_and_any_other_is_written_out() {
+        assert_eq!(aspect_idc((0, 0)), None);
+        assert_eq!(aspect_idc((4, 0)), None);
+        assert_eq!(aspect_idc((0, 3)), None);
+        assert_eq!(aspect_idc((1, 1)), Some(1));
+        assert_eq!(aspect_idc((4, 3)), Some(14));
+        assert_eq!(aspect_idc((2, 1)), Some(16));
+        assert_eq!(aspect_idc((8, 9)), Some(255));
+        assert_eq!(aspect_idc((2, 2)), Some(255));
     }
 }

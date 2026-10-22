@@ -215,8 +215,16 @@ fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
 }
 
 pub fn encode(image: &media::Rgba) -> Result<Vec<u8>> {
+    write(image, 3)
+}
+
+pub fn encode_rgba(image: &media::Rgba) -> Result<Vec<u8>> {
+    write(image, 4)
+}
+
+fn write(image: &media::Rgba, bpp: usize) -> Result<Vec<u8>> {
     let (w, h) = (image.width as usize, image.height as usize);
-    let row = w * 3;
+    let row = w * bpp;
     if w == 0 || h == 0 || w > 1 << 24 || h > 1 << 24 {
         return Err(Error::Invalid(format!("cannot write a {w}x{h} PNG")));
     }
@@ -227,14 +235,14 @@ pub fn encode(image: &media::Rgba) -> Result<Vec<u8>> {
     let mut prev = vec![0u8; row];
     let mut cur = vec![0u8; row];
     for (y, line) in image.data.chunks_exact(w * 4).take(h).enumerate() {
-        for (dst, px) in cur.chunks_exact_mut(3).zip(line.chunks_exact(4)) {
-            dst.copy_from_slice(&px[..3]);
+        for (dst, px) in cur.chunks_exact_mut(bpp).zip(line.chunks_exact(4)) {
+            dst.copy_from_slice(&px[..bpp]);
         }
         let out = &mut raw[y * (row + 1)..(y + 1) * (row + 1)];
         out[0] = 4;
         for i in 0..row {
-            let a = if i >= 3 { cur[i - 3] } else { 0 };
-            let c = if i >= 3 { prev[i - 3] } else { 0 };
+            let a = if i >= bpp { cur[i - bpp] } else { 0 };
+            let c = if i >= bpp { prev[i - bpp] } else { 0 };
             out[i + 1] = cur[i].wrapping_sub(paeth(a, prev[i], c));
         }
         std::mem::swap(&mut prev, &mut cur);
@@ -248,7 +256,7 @@ pub fn encode(image: &media::Rgba) -> Result<Vec<u8>> {
     ihdr[..4].copy_from_slice(&(w as u32).to_be_bytes());
     ihdr[4..8].copy_from_slice(&(h as u32).to_be_bytes());
     ihdr[8] = 8;
-    ihdr[9] = 2;
+    ihdr[9] = if bpp == 4 { 6 } else { 2 };
     chunk(&mut out, b"IHDR", &ihdr);
     for part in z.chunks(IDAT_CHUNK) {
         chunk(&mut out, b"IDAT", part);

@@ -17,8 +17,8 @@ use std::f64::consts::PI;
 
 use pito_codecs::filter::LoudnessMeter;
 use pito_codecs::media::{
-    AudioBuffer, AudioSpan, Codec, Error, LevelMode, LevelOptions, LevelStyle, LevelTarget, Prefs,
-    level, level_pcm, measure_loudness, meter_loudness, plan_level_styled, wav,
+    AudioBuffer, AudioSpan, CALIBRATION_PASSES, Codec, Error, LevelMode, LevelOptions, LevelStyle,
+    LevelTarget, Prefs, level, level_pcm, measure_loudness, meter_loudness, plan_level_styled, wav,
 };
 use pito_codecs::mp4::Reader;
 
@@ -315,4 +315,134 @@ fn a_dense_mix_keeps_the_ceiling_after_the_aac_encode() {
             done.ceiling_db
         );
     }
+}
+
+fn square_bursts(seconds: usize) -> AudioBuffer {
+    let rate = 48_000usize;
+    let mut b = AudioBuffer::new(rate as u32, 2);
+    for n in 0..seconds * rate {
+        let t = n as f64 / rate as f64;
+        let bed = 0.08 * (2.0 * PI * 220.0 * t).sin();
+        let burst = if t % 0.25 < 0.004 {
+            0.9 * (2.0 * PI * 1000.0 * t).sin().signum()
+        } else {
+            0.0
+        };
+        let s = (bed + burst) as f32;
+        b.samples.extend([s, s]);
+    }
+    b
+}
+
+fn speech(seconds: usize) -> AudioBuffer {
+    let rate = 48_000usize;
+    let mut b = AudioBuffer::new(rate as u32, 2);
+    let mut seed = 11u64;
+    for n in 0..seconds * rate {
+        let t = n as f64 / rate as f64;
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let hiss = ((seed >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0;
+        let syllable = (2.0 * PI * 4.0 * t).sin().max(0.0).powi(2);
+        let pause = if t % 3.0 < 2.2 { 1.0 } else { 0.0 };
+        let pitch = 140.0 + 15.0 * (2.0 * PI * 0.3 * t).sin();
+        let voice: f64 = (1..=8)
+            .map(|h| (2.0 * PI * pitch * h as f64 * t).sin() / h as f64)
+            .sum();
+        let plosive = if t % 1.7 < 0.003 { 0.25 * hiss } else { 0.0 };
+        let s = (0.012 * voice * syllable * pause + 0.002 * hiss + plosive) as f32;
+        b.samples.extend([s, s * 0.9]);
+    }
+    b
+}
+
+fn lands_on_target(name: &str, source: &AudioBuffer, target: &LevelTarget) {
+    let done = level_pcm(source, target, LevelStyle::default()).unwrap();
+    assert_eq!(done.mode, LevelMode::Limited, "{name}: {:?}", done.after);
+    let c = done
+        .calibration
+        .unwrap_or_else(|| panic!("{name}: levelled without calibrating"));
+    let passes = c.passes;
+    eprintln!(
+        "{name}: {:.2} LUFS, true peak {:.2} dBTP, {passes} passes",
+        done.after.integrated, done.after.true_peak
+    );
+    assert!(
+        (done.after.integrated - target.integrated).abs() <= 0.1,
+        "{name}: {:?} {:?}",
+        done.after,
+        done.calibration
+    );
+    assert!(
+        done.after.true_peak <= target.true_peak,
+        "{name}: {:?}",
+        done.after
+    );
+    assert!(c.reached, "{name}: {c:?}");
+    assert!(
+        (1..=CALIBRATION_PASSES).contains(&c.passes),
+        "{name}: {c:?}"
+    );
+    assert!(
+        (c.landed - done.after.integrated).abs() < 1e-9,
+        "{name}: {c:?}"
+    );
+    assert_eq!(c.ceiling_db, done.ceiling_db.unwrap(), "{name}");
+    assert_eq!(c.shortfall(target), None);
+}
+
+#[test]
+fn calibrated_levelling_lands_within_a_tenth_of_a_lu_on_limited_signals() {
+    for target in [LevelTarget::youtube(), LevelTarget::new(-14.0)] {
+        let bursts = square_bursts(20);
+        let looser = LevelTarget {
+            integrated: target.integrated,
+            true_peak: target.true_peak + 1.0,
+        };
+        let pressed = level_pcm(&bursts, &looser, LevelStyle::default()).unwrap();
+        assert!(
+            (pressed.after.integrated - target.integrated).abs() <= 0.1,
+            "{:?}",
+            pressed.after
+        );
+        assert_eq!(pressed.mode, LevelMode::Limited);
+        assert!(pressed.calibration.is_some());
+        lands_on_target("square bursts", &bursts, &target);
+        lands_on_target("dense mix", &dense(30), &target);
+        let quiet = speech(20);
+        let mut meter = LoudnessMeter::new(quiet.rate, quiet.channels).unwrap();
+        meter.process(&quiet).unwrap();
+        assert!(meter.integrated() < -30.0, "{}", meter.integrated());
+        lands_on_target("quiet speech", &quiet, &target);
+        lands_on_target("already at the target", &pressed.buffer, &target);
+    }
+}
+
+#[test]
+fn a_target_the_ceiling_cannot_reach_says_how_short_it_landed() {
+    let rate = 48_000usize;
+    let mut hum = AudioBuffer::new(rate as u32, 2);
+    for n in 0..10 * rate {
+        let s = (0.1 * (2.0 * PI * 100.0 * n as f64 / rate as f64).sin()) as f32;
+        hum.samples.extend([s, s]);
+    }
+    let target = LevelTarget {
+        integrated: -5.0,
+        true_peak: -9.0,
+    };
+    let done = level_pcm(&hum, &target, LevelStyle::default()).unwrap();
+    let c = done.calibration.unwrap();
+    assert!(!c.reached, "{c:?}");
+    assert!(c.passes <= CALIBRATION_PASSES, "{c:?}");
+    assert!(done.after.true_peak <= target.true_peak, "{:?}", done.after);
+    assert!(done.after.integrated < target.integrated - 0.1);
+    let line = c.shortfall(&target).unwrap();
+    assert!(!line.contains('\n'), "{line}");
+    assert!(line.contains("-5 LUFS"), "{line}");
+    let linear = LevelStyle {
+        linear: true,
+        encoded: None,
+    };
+    assert_eq!(level_pcm(&hum, &target, linear).unwrap().calibration, None);
 }

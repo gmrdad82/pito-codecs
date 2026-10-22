@@ -12,23 +12,28 @@ use objc2_core_media::{
     CMVideoFormatDescriptionGetHEVCParameterSetAtIndex,
 };
 use objc2_core_video::{
-    CVImageBuffer, CVPixelBufferCreate, CVPixelBufferLockFlags, CVPixelBufferPool,
-    kCVPixelBufferHeightKey, kCVPixelBufferIOSurfacePropertiesKey,
-    kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey,
+    CVColorPrimariesGetStringForIntegerCodePoint, CVImageBuffer, CVPixelBufferCreate,
+    CVPixelBufferLockFlags, CVPixelBufferPool, CVTransferFunctionGetStringForIntegerCodePoint,
+    CVYCbCrMatrixGetStringForIntegerCodePoint, kCVImageBufferPixelAspectRatioHorizontalSpacingKey,
+    kCVImageBufferPixelAspectRatioVerticalSpacingKey, kCVPixelBufferHeightKey,
+    kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey,
 };
 use objc2_video_toolbox::{
     VTCompressionSession, VTEncodeInfoFlags, VTPixelTransferSession, VTSessionSetProperty,
     kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AllowOpenGOP,
-    kVTCompressionPropertyKey_AverageBitRate, kVTCompressionPropertyKey_DataRateLimits,
-    kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
+    kVTCompressionPropertyKey_AverageBitRate, kVTCompressionPropertyKey_ColorPrimaries,
+    kVTCompressionPropertyKey_DataRateLimits, kVTCompressionPropertyKey_ExpectedFrameRate,
+    kVTCompressionPropertyKey_MaxKeyFrameInterval, kVTCompressionPropertyKey_PixelAspectRatio,
     kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_Quality,
-    kVTCompressionPropertyKey_RealTime, kVTProfileLevel_H264_Baseline_AutoLevel,
-    kVTProfileLevel_H264_High_AutoLevel, kVTProfileLevel_H264_Main_AutoLevel,
-    kVTProfileLevel_HEVC_Main_AutoLevel, kVTProfileLevel_HEVC_Main10_AutoLevel,
+    kVTCompressionPropertyKey_RealTime, kVTCompressionPropertyKey_TransferFunction,
+    kVTCompressionPropertyKey_YCbCrMatrix, kVTEncodeFrameOptionKey_ForceKeyFrame,
+    kVTProfileLevel_H264_Baseline_AutoLevel, kVTProfileLevel_H264_High_AutoLevel,
+    kVTProfileLevel_H264_Main_AutoLevel, kVTProfileLevel_HEVC_Main_AutoLevel,
+    kVTProfileLevel_HEVC_Main10_AutoLevel,
     kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
 };
 
-use super::{Locked, NV12_VIDEO, P010_VIDEO, codec_type, label, planes};
+use super::{Locked, NV12_FULL, NV12_VIDEO, P010_FULL, P010_VIDEO, codec_type, label, planes};
 use crate::gpu::nal;
 use crate::gpu::{EncoderConfig, GpuFrame, Profile};
 use crate::media::{Bitstream, Rate};
@@ -326,6 +331,71 @@ fn configure(
     )?;
     let key = unsafe { kVTCompressionPropertyKey_AllowOpenGOP };
     let _ = set(session, key, CFBoolean::new(false).as_ref());
+    look(session, config);
+    pace(session, codec, config)
+}
+
+fn look(session: &VTCompressionSession, config: &EncoderConfig) {
+    let (h, v) = config.sar;
+    if h != 0 && v != 0 {
+        let keys: [&CFString; 2] = unsafe {
+            [
+                kCVImageBufferPixelAspectRatioHorizontalSpacingKey,
+                kCVImageBufferPixelAspectRatioVerticalSpacingKey,
+            ]
+        };
+        let (h, v) = (
+            CFNumber::new_i32(i32::from(h)),
+            CFNumber::new_i32(i32::from(v)),
+        );
+        let par = CFDictionary::<CFString, CFType>::from_slices(&keys, &[h.as_ref(), v.as_ref()]);
+        let key = unsafe { kVTCompressionPropertyKey_PixelAspectRatio };
+        let _ = set(session, key, par.as_ref());
+    }
+    let c = config.color;
+    if !c.described() {
+        return;
+    }
+    let tags = unsafe {
+        [
+            (
+                kVTCompressionPropertyKey_ColorPrimaries,
+                CVColorPrimariesGetStringForIntegerCodePoint(c_int::from(c.primaries)),
+            ),
+            (
+                kVTCompressionPropertyKey_TransferFunction,
+                CVTransferFunctionGetStringForIntegerCodePoint(c_int::from(c.transfer)),
+            ),
+            (
+                kVTCompressionPropertyKey_YCbCrMatrix,
+                CVYCbCrMatrixGetStringForIntegerCodePoint(c_int::from(c.matrix)),
+            ),
+        ]
+    };
+    for (key, value) in tags {
+        if let Some(value) = value {
+            let value: &CFString = &value;
+            let _ = set(session, key, value.as_ref());
+        }
+    }
+}
+
+fn shift_past((value, scale): (i64, i32), first: i64, timescale: i32) -> i64 {
+    let (scale, timescale) = (i128::from(scale.max(1)), i128::from(timescale));
+    let at = (i128::from(value) * timescale + scale - 1).div_euclid(scale);
+    let shift = (at - i128::from(first)).max(0);
+    i64::try_from(shift).unwrap_or(i64::MAX / 2)
+}
+
+fn full_range(pixel_format: u32, full: bool) -> u32 {
+    match (pixel_format, full) {
+        (NV12_VIDEO, true) => NV12_FULL,
+        (P010_VIDEO, true) => P010_FULL,
+        (pf, _) => pf,
+    }
+}
+
+fn pace(session: &VTCompressionSession, codec: Codec, config: &EncoderConfig) -> Result<()> {
     let gop = match config.gop {
         0 => (2 * u64::from(config.fps.0)).div_ceil(u64::from(config.fps.1)),
         n => u64::from(n),
@@ -409,6 +479,11 @@ pub struct VtEncoder {
     queued: VecDeque<i64>,
     scaler: Option<Scaler>,
     submitted: u64,
+    asked: EncoderConfig,
+    key: bool,
+    shift: i64,
+    end: Option<(i64, i32)>,
+    floor: Option<(i64, i32)>,
 }
 
 struct Scaler {
@@ -518,6 +593,7 @@ impl VtEncoder {
                 }
             }
         };
+        let pixel_format = full_range(pixel_format, config.color.full_range);
         let reorder = config.b_frames > 0 && config.profile != Profile::Baseline;
         let shared = Box::new(Shared {
             codec,
@@ -592,7 +668,34 @@ impl VtEncoder {
             queued: VecDeque::new(),
             scaler: None,
             submitted: 0,
+            asked: config.clone(),
+            key: false,
+            shift: 0,
+            end: None,
+            floor: None,
         })
+    }
+
+    pub fn restart(&mut self, config: &EncoderConfig) -> Result<()> {
+        let same_rate =
+            std::mem::discriminant(&config.rate) == std::mem::discriminant(&self.asked.rate);
+        if !crate::gpu::restartable(&self.asked, config) || !same_rate {
+            return Err(Error::Unsupported(
+                "a restart changes only the rate and the GOP, within the same rate control".into(),
+            ));
+        }
+        if !self.queued.is_empty() {
+            return Err(Error::Invalid(
+                "the encoder restarts only after a flush".into(),
+            ));
+        }
+        pace(&self.session.session, self.codec, config)?;
+        self.asked.rate = config.rate;
+        self.asked.gop = config.gop;
+        self.key = true;
+        self.floor = self.end;
+        self.time_base = None;
+        Ok(())
     }
 
     pub fn name(&self) -> &str {
@@ -686,6 +789,12 @@ impl VtEncoder {
             .pts
             .checked_mul(i64::from(tb.num))
             .ok_or_else(|| Error::Invalid(format!("pts {} out of range", frame.pts)))?;
+        if let Some(floor) = self.floor.take() {
+            self.shift = shift_past(floor, value, timescale);
+        }
+        let value = value
+            .checked_add(self.shift)
+            .ok_or_else(|| Error::Invalid(format!("pts {} out of range", frame.pts)))?;
         let pts = valid_time(value, timescale);
         let buffer = self.buffer()?;
         if (frame.width, frame.height) == (self.width, self.height) {
@@ -696,12 +805,16 @@ impl VtEncoder {
             self.scale(frame, &buffer)?;
         }
         let refcon = std::ptr::without_provenance_mut::<c_void>(frame.pts as isize as usize);
+        let force = self.key.then(|| {
+            let key: &CFString = unsafe { kVTEncodeFrameOptionKey_ForceKeyFrame };
+            CFDictionary::<CFString, CFType>::from_slices(&[key], &[CFBoolean::new(true).as_ref()])
+        });
         let status = unsafe {
             self.session.session.encode_frame(
                 &buffer,
                 pts,
                 self.duration,
-                None,
+                force.as_deref().map(|d| d.as_opaque()),
                 refcon,
                 std::ptr::null_mut(),
             )
@@ -711,6 +824,9 @@ impl VtEncoder {
                 "VTCompressionSessionEncodeFrame failed ({status})"
             )));
         }
+        self.key = false;
+        let step = ticks(self.duration, tb).unwrap_or(1).max(1) * i64::from(tb.num);
+        self.end = Some((value.saturating_add(step), timescale));
         self.queued.push_back(frame.pts);
         self.submitted += 1;
         if self.submitted == 1 {
@@ -769,5 +885,48 @@ impl VtEncoder {
             });
         }
         Ok(packets)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_restarted_session_starts_past_the_last_frame_it_encoded() {
+        assert_eq!(shift_past((3_000, 90_000), 0, 90_000), 3_000);
+        assert_eq!(shift_past((3_000, 90_000), 1_000, 90_000), 2_000);
+        assert_eq!(shift_past((3_000, 90_000), 9_000, 90_000), 0);
+        assert_eq!(shift_past((1_001, 30_000), 0, 90_000), 3_003);
+        assert_eq!(shift_past((1, 3), 0, 2), 1);
+        assert_eq!(shift_past((10, 0), 0, 90_000), 900_000);
+    }
+
+    #[test]
+    fn a_full_range_source_picks_the_full_range_pixel_format() {
+        assert_eq!(full_range(NV12_VIDEO, false), NV12_VIDEO);
+        assert_eq!(full_range(NV12_VIDEO, true), NV12_FULL);
+        assert_eq!(full_range(P010_VIDEO, true), P010_FULL);
+        assert_eq!(full_range(P010_VIDEO, false), P010_VIDEO);
+    }
+
+    #[test]
+    fn the_codec_points_name_videotoolbox_colour_strings() {
+        let s = |v: Option<CFRetained<CFString>>| v.map(|s| s.to_string());
+        let want = |k: &CFString| Some(k.to_string());
+        unsafe {
+            assert_eq!(
+                s(CVColorPrimariesGetStringForIntegerCodePoint(1)),
+                want(objc2_core_video::kCVImageBufferColorPrimaries_ITU_R_709_2)
+            );
+            assert_eq!(
+                s(CVTransferFunctionGetStringForIntegerCodePoint(16)),
+                want(objc2_core_video::kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ)
+            );
+            assert_eq!(
+                s(CVYCbCrMatrixGetStringForIntegerCodePoint(9)),
+                want(objc2_core_video::kCVImageBufferYCbCrMatrix_ITU_R_2020)
+            );
+        }
     }
 }

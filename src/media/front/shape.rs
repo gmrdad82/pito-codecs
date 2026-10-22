@@ -31,7 +31,7 @@ pub(super) fn color_of(src: &Source) -> ((u16, u16), Color) {
     d.video()
         .ok()
         .and_then(|v| d.stream(v).ok()?.look)
-        .unwrap_or(((1, 1), Color::UNKNOWN))
+        .unwrap_or(((0, 0), Color::UNKNOWN))
 }
 
 pub(super) fn spec(color: Color) -> ColorSpec {

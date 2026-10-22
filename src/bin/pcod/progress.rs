@@ -73,6 +73,20 @@ pub struct Progress {
     stop: Arc<AtomicBool>,
 }
 
+fn shared() -> Arc<Shared> {
+    Arc::new(Shared {
+        state: Mutex::new(State {
+            snapshot: Snapshot::default(),
+            started: Instant::now(),
+            samples: VecDeque::new(),
+            width: 0,
+            tick: 0,
+            done: false,
+        }),
+        colour: coloured(),
+    })
+}
+
 impl Progress {
     pub fn new(enabled: bool) -> Progress {
         let stop = Arc::new(AtomicBool::new(false));
@@ -83,17 +97,7 @@ impl Progress {
                 stop,
             };
         }
-        let shared = Arc::new(Shared {
-            state: Mutex::new(State {
-                snapshot: Snapshot::default(),
-                started: Instant::now(),
-                samples: VecDeque::new(),
-                width: 0,
-                tick: 0,
-                done: false,
-            }),
-            colour: coloured(),
-        });
+        let shared = shared();
         let painter = {
             let shared = Arc::clone(&shared);
             let stop = Arc::clone(&stop);
@@ -308,4 +312,143 @@ fn visible(text: &str) -> usize {
         }
     }
     count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot(total: Option<u64>, frames: u64, fps: Option<f64>, steps: usize) -> Snapshot {
+        Snapshot {
+            name: Some("encode".into()),
+            step: 1,
+            steps,
+            total,
+            frames,
+            elapsed: Duration::from_secs(75),
+            fps,
+        }
+    }
+
+    #[test]
+    fn a_known_total_draws_a_bar_a_percentage_a_speed_and_an_eta() {
+        let (text, shown) = line(&snapshot(Some(200), 50, Some(25.0), 2), 0, false);
+        assert_eq!(
+            text,
+            format!(
+                "⠋ encode 1/2  {}{}   25%  25 fps  ETA 0:06",
+                "⣿".repeat(5),
+                "⣀".repeat(15)
+            )
+        );
+        assert_eq!(shown, text.chars().count());
+        let (text, _) = line(&snapshot(Some(200), 0, None, 1), 11, false);
+        assert_eq!(
+            text,
+            format!("⠙ encode  {}    0%  - fps  ETA -:--", "⣀".repeat(20))
+        );
+        let (text, _) = line(&snapshot(Some(10), 40, Some(30.0), 1), 0, false);
+        assert!(text.contains("⣿".repeat(20).as_str()), "{text}");
+        assert!(text.ends_with(" 100%  30 fps  ETA 0:00"), "{text}");
+        let (text, _) = line(&snapshot(Some(10), 5, Some(1e-9), 1), 0, false);
+        assert!(text.ends_with("  50%  0.0 fps  ETA -:--"), "{text}");
+    }
+
+    #[test]
+    fn an_unknown_total_counts_frames_or_the_clock() {
+        let (text, _) = line(&snapshot(None, 30, Some(7.3), 1), 0, false);
+        assert_eq!(text, "⠋ encode  30 frames  7.3 fps  1:15");
+        let (text, _) = line(&snapshot(Some(0), 0, None, 1), 0, false);
+        assert_eq!(text, "⠋ encode  1:15");
+        let mut long = snapshot(None, 0, None, 1);
+        long.elapsed = Duration::from_secs(3 * 3600 + 7 * 60 + 9);
+        assert_eq!(line(&long, 0, false).0, "⠋ encode  3:07:09");
+    }
+
+    #[test]
+    fn colour_adds_escapes_that_do_not_count_as_width() {
+        let snap = snapshot(Some(200), 100, Some(50.0), 1);
+        let (plain, plain_width) = line(&snap, 3, false);
+        let (painted, painted_width) = line(&snap, 3, true);
+        assert!(painted.contains(CYAN) && painted.contains(BOLD) && painted.contains(DIM));
+        assert!(!plain.contains('\x1b'));
+        assert_eq!(painted_width, plain_width);
+        assert_eq!(visible(&painted), visible(&plain));
+        assert_eq!(visible("\x1b[36mab\x1b[0mc"), 3);
+    }
+
+    #[test]
+    fn the_bar_fills_by_eighths_of_a_cell() {
+        assert_eq!(bar(0.0, false), "⣀".repeat(20));
+        assert_eq!(bar(1.0, false), "⣿".repeat(20));
+        assert_eq!(bar(0.125, false), format!("⣿⣿⣦{}", "⣀".repeat(17)));
+        assert_eq!(
+            bar(0.5, true),
+            format!("{CYAN}{}{}{RESET}", "⣿".repeat(10), "⣀".repeat(10))
+        );
+        assert_eq!(speed(Some(120.4)), "120 fps");
+        assert_eq!(speed(Some(9.96)), "10.0 fps");
+        assert_eq!(speed(None), "- fps");
+        assert_eq!(clock(Duration::from_secs(59)), "0:59");
+        assert_eq!(clock(Duration::from_secs(3600)), "1:00:00");
+    }
+
+    #[test]
+    fn the_rate_needs_half_a_second_and_progress() {
+        let now = Instant::now();
+        let mut samples = VecDeque::new();
+        assert_eq!(rate(&samples), None);
+        samples.push_back((now, 0));
+        samples.push_back((now + Duration::from_millis(400), 10));
+        assert_eq!(rate(&samples), None);
+        samples.push_back((now + Duration::from_secs(2), 100));
+        assert_eq!(rate(&samples), Some(50.0));
+        samples.push_back((now + Duration::from_secs(3), 100));
+        assert_eq!(rate(&samples), Some(100.0 / 3.0));
+        let stalled: VecDeque<_> = [(now, 5), (now + Duration::from_secs(1), 5)].into();
+        assert_eq!(rate(&stalled), None);
+    }
+
+    #[test]
+    fn a_disabled_progress_does_nothing_and_an_enabled_one_tracks_frames_without_painting() {
+        let off = Progress::new(false);
+        off.step("encode", 1, 1, Some(10));
+        off.frame(5);
+        off.clear();
+        assert!(off.shared.is_none());
+
+        let on = Progress {
+            shared: Some(shared()),
+            painter: Mutex::new(None),
+            stop: Arc::new(AtomicBool::new(false)),
+        };
+        on.step("encode", 2, 3, Some(100));
+        for done in [10, 20, 30] {
+            on.frame(done);
+        }
+        {
+            let shared = on.shared.as_ref().unwrap();
+            let s = shared.lock();
+            assert_eq!(s.snapshot.frames, 30);
+            assert_eq!((s.snapshot.step, s.snapshot.steps), (2, 3));
+            assert_eq!(s.snapshot.total, Some(100));
+        }
+        on.step("mux", 3, 3, None);
+        {
+            let s = on.shared.as_ref().unwrap().lock();
+            assert_eq!(s.snapshot.frames, 0);
+            assert_eq!(s.snapshot.name.as_deref(), Some("mux"));
+        }
+        on.clear();
+        let s = on.shared.as_ref().unwrap().lock();
+        assert!(s.done);
+        assert_eq!(s.width, 0);
+        assert!(on.stop.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn progress_is_off_for_json_and_no_progress() {
+        assert!(!enabled(true, false));
+        assert!(!enabled(false, true));
+    }
 }

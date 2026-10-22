@@ -15,6 +15,7 @@ use crate::mp4::{self, AvcConfig, HevcConfig, SampleEntry, VpcConfig};
 pub const SAME_RATE: f64 = 0.01;
 pub const AAC_KBPS: u32 = 320;
 pub const OPUS_KBPS: u32 = 128;
+const OPUS_KBPS_MOST: u32 = 510;
 const PREROLL: f64 = 0.1;
 const TELL_EVERY: usize = 512;
 
@@ -287,6 +288,13 @@ fn copyable(clips: &[Clip], kind: Kind, opts: &JoinOptions) -> std::result::Resu
         }
     }
     Ok(alike(first))
+}
+
+fn kbps_of(codec: Codec, asked: Option<u32>) -> u32 {
+    match codec {
+        Codec::Opus => asked.unwrap_or(OPUS_KBPS).clamp(6, OPUS_KBPS_MOST),
+        _ => asked.unwrap_or(AAC_KBPS).clamp(32, 512),
+    }
 }
 
 fn kind_ext(kind: Kind) -> &'static str {
@@ -1247,11 +1255,7 @@ fn copy(
         } else {
             Codec::Aac
         };
-        let kbps = opts.audio_kbps.unwrap_or(if codec == Codec::Opus {
-            OPUS_KBPS
-        } else {
-            AAC_KBPS
-        });
+        let kbps = kbps_of(codec, opts.audio_kbps);
         let sources: Vec<(&Path, Option<usize>, f64)> = clips
             .iter()
             .map(|c| (c.path.as_path(), c.audio.as_ref().map(|a| a.ordinal), 0.0))
@@ -1340,10 +1344,13 @@ fn encode(
         None => (shown.0 & !1, shown.1 & !1),
     };
     if size.0 == 0 || size.1 == 0 {
-        return Err(Error::Invalid(format!(
-            "{}'s shape {}x{} cannot make an even output",
-            first.name, shown.0, shown.1
-        )));
+        return Err(Error::Invalid(match opts.size {
+            Some((w, h)) => format!("a size of {w}x{h} cannot make an even output"),
+            None => format!(
+                "{}'s shape {}x{} cannot make an even output",
+                first.name, shown.0, shown.1
+            ),
+        }));
     }
     let fps = opts.fps.unwrap_or(first.src.probe.fps);
     if fps.0 == 0 || fps.1 == 0 {
@@ -1394,8 +1401,9 @@ fn encode(
         .unwrap_or(0);
     let mut gains = vec![0.0f32; tracks.max(1)];
     gains[0] = 1.0;
-    let aac = opts.audio_kbps.unwrap_or(AAC_KBPS).clamp(32, 512);
-    let after = kind != Kind::Mp4;
+    let aac = kbps_of(Codec::Aac, opts.audio_kbps);
+    let silent = clips.iter().all(|c| c.audio.is_none());
+    let after = kind != Kind::Mp4 || silent;
     let temp = out.with_extension(format!("joining.{}.mp4", extension(out)));
     let scale = if after { 0.9 } else { 1.0 };
     let exported = export_fitted(
@@ -1427,10 +1435,12 @@ fn encode(
     };
     let route = exported.video.route;
     reasons.extend(exported.reasons.iter().cloned());
-    let audio = if kind == Kind::Webm {
+    let audio = if silent {
+        JoinAudio::Silent
+    } else if kind == Kind::Webm {
         JoinAudio::Encoded {
             codec: Codec::Opus,
-            kbps: opts.audio_kbps.unwrap_or(OPUS_KBPS),
+            kbps: kbps_of(Codec::Opus, opts.audio_kbps),
         }
     } else {
         JoinAudio::Encoded {
@@ -1447,7 +1457,7 @@ fn encode(
             opts,
             &lengths,
             &vec![0.0; clips.len()],
-            false,
+            silent,
             route,
             progress,
         )
@@ -1496,7 +1506,7 @@ fn rewrap(
             .zip(starts)
             .map(|(c, s)| (c.path.as_path(), c.audio.as_ref().map(|a| a.ordinal), *s))
             .collect();
-        let kbps = opts.audio_kbps.unwrap_or(OPUS_KBPS);
+        let kbps = kbps_of(Codec::Opus, opts.audio_kbps);
         Some(encode_audio(
             &sources,
             lengths,
@@ -1676,7 +1686,7 @@ pub fn cut(
     let tracks = clip.src.probe.audio.len();
     let mut gains = vec![0.0f32; tracks.max(1)];
     gains[0] = 1.0;
-    let aac = opts.audio_kbps.unwrap_or(AAC_KBPS).clamp(32, 512);
+    let aac = kbps_of(Codec::Aac, opts.audio_kbps);
     let silent = clip.audio.is_none();
     let after = kind != Kind::Mp4 || silent;
     let temp = out.with_extension(format!("cutting.{}.mp4", extension(out)));
@@ -1716,7 +1726,7 @@ pub fn cut(
     } else if kind == Kind::Webm {
         JoinAudio::Encoded {
             codec: Codec::Opus,
-            kbps: opts.audio_kbps.unwrap_or(OPUS_KBPS),
+            kbps: kbps_of(Codec::Opus, opts.audio_kbps),
         }
     } else {
         JoinAudio::Encoded {
@@ -1861,6 +1871,153 @@ mod tests {
         assert!(
             e.to_string().contains("a cut writes mp4, mov, mkv or webm"),
             "{e}"
+        );
+    }
+    #[test]
+    fn an_audio_bitrate_lands_in_each_encoder_s_range() {
+        assert_eq!(kbps_of(Codec::Opus, None), OPUS_KBPS);
+        assert_eq!(kbps_of(Codec::Aac, None), AAC_KBPS);
+        assert_eq!(kbps_of(Codec::Opus, Some(512)), 510);
+        assert_eq!(kbps_of(Codec::Opus, Some(6)), 6);
+        assert_eq!(kbps_of(Codec::Aac, Some(6)), 32);
+        assert_eq!(kbps_of(Codec::Aac, Some(512)), 512);
+        assert_eq!(kbps_of(Codec::Aac, Some(900)), 512);
+    }
+
+    #[test]
+    fn each_output_kind_carries_its_own_codecs() {
+        let kind = |name: &str| Kind::of(Path::new(name), "join");
+        assert_eq!(kind("a.MP4").unwrap(), Kind::Mp4);
+        assert_eq!(kind("a.m4v").unwrap(), Kind::Mp4);
+        assert_eq!(kind("a.mov").unwrap(), Kind::Mov);
+        assert_eq!(kind("a.mkv").unwrap(), Kind::Mkv);
+        assert_eq!(kind("a.webm").unwrap(), Kind::Webm);
+        assert_eq!(
+            kind("a").unwrap_err().to_string(),
+            "invalid data: join writes mp4, mov, mkv or webm, not ."
+        );
+        assert!(Kind::Webm.video(Some(Codec::Vp9)));
+        assert!(!Kind::Webm.video(Some(Codec::H264)));
+        assert!(!Kind::Mov.video(Some(Codec::Vp9)));
+        assert!(Kind::Mov.video(Some(Codec::Hevc)));
+        assert!(Kind::Mp4.video(Some(Codec::Vp9)));
+        assert!(Kind::Mkv.video(Some(Codec::Hevc)));
+        assert!(!Kind::Mkv.video(Some(Codec::Av1)));
+        assert!(!Kind::Mp4.video(None));
+        assert!(Kind::Webm.audio("opus", true));
+        assert!(Kind::Webm.audio("vorbis", true));
+        assert!(!Kind::Webm.audio("opus", false));
+        assert!(!Kind::Webm.audio("aac", true));
+        assert!(Kind::Mp4.audio("aac", true));
+        assert!(!Kind::Mov.audio("opus", true));
+        assert!(Kind::Mkv.audio("aac", false));
+        assert!(Kind::Mkv.audio("flac", true));
+        assert!(!Kind::Mkv.audio("flac", false));
+        assert_eq!(
+            [Kind::Mp4, Kind::Mov, Kind::Mkv, Kind::Webm].map(kind_ext),
+            ["mp4", "mov", "mkv", "webm"]
+        );
+    }
+
+    #[test]
+    fn reasons_name_layouts_rates_and_pixel_formats_plainly() {
+        assert_eq!(
+            [1, 2, 6, 8, 3].map(layout),
+            ["mono", "stereo", "5.1", "7.1", "3 channels"]
+        );
+        assert_eq!(rate_text(Some(30.0)), "30 fps");
+        assert_eq!(rate_text(Some(30000.0 / 1001.0)), "29.97 fps");
+        assert_eq!(rate_text(None), "an unknown rate");
+        assert_eq!(pix_fmt(8), "yuv420p");
+        assert_eq!(pix_fmt(10), "yuv420p10le");
+    }
+
+    #[test]
+    fn colour_tags_read_like_ffmpeg_s_names() {
+        let c = |matrix, primaries, transfer, full_range| Color {
+            primaries,
+            transfer,
+            matrix,
+            full_range,
+        };
+        assert_eq!(
+            tags(c(2, 2, 2, false)),
+            "untagged/untagged/untagged/untagged"
+        );
+        assert_eq!(tags(c(1, 1, 1, false)), "bt709/tv/bt709/bt709");
+        assert_eq!(tags(c(1, 1, 1, true)), "bt709/pc/bt709/bt709");
+        assert_eq!(tags(c(9, 9, 16, false)), "bt2020nc/tv/bt2020/smpte2084");
+        assert_eq!(
+            [0, 4, 5, 6, 7, 8, 10, 3].map(matrix_name),
+            [
+                "gbr",
+                "fcc",
+                "bt470bg",
+                "smpte170m",
+                "smpte240m",
+                "ycgco",
+                "bt2020c",
+                "matrix 3"
+            ]
+        );
+        assert_eq!(
+            [4, 5, 6, 7, 11, 12, 3].map(primaries_name),
+            [
+                "bt470m",
+                "bt470bg",
+                "smpte170m",
+                "smpte240m",
+                "smpte431",
+                "smpte432",
+                "primaries 3"
+            ]
+        );
+        assert_eq!(
+            [4, 5, 6, 8, 13, 14, 15, 18, 3].map(transfer_name),
+            [
+                "gamma22",
+                "gamma28",
+                "smpte170m",
+                "linear",
+                "iec61966-2-1",
+                "bt2020-10",
+                "bt2020-12",
+                "arib-std-b67",
+                "transfer 3"
+            ]
+        );
+    }
+
+    #[test]
+    fn timestamps_rescale_to_the_nearest_tick_both_ways() {
+        let ms = TimeBase::new(1, 1000);
+        let k90 = TimeBase::new(1, 90_000);
+        assert_eq!(rescale(7, ms, ms), 7);
+        assert_eq!(rescale(1, ms, k90), 90);
+        assert_eq!(rescale(45, k90, ms), 1);
+        assert_eq!(rescale(-45, k90, ms), -1);
+        assert_eq!(rescale(44, k90, ms), 0);
+        assert_eq!(rescale(i64::MAX, ms, k90), i64::MAX);
+        assert_eq!(ticks_of(0.5, k90), 45_000);
+        assert_eq!(out_tb(TimeBase::new(1001, 30000), Kind::Mp4), k90);
+        assert_eq!(
+            out_tb(TimeBase::new(1001, 30000), Kind::Mkv),
+            TimeBase::new(1001, 30000)
+        );
+        assert_eq!(out_tb(ms, Kind::Mov), ms);
+        assert_eq!(nanos(-5, ms), 0);
+        assert_eq!(nanos(3, ms), 3_000_000);
+    }
+
+    #[test]
+    fn a_partial_keeps_the_output_s_extension() {
+        assert_eq!(
+            partial(Path::new("dir/out.MKV")),
+            PathBuf::from("dir/out.partial.mkv")
+        );
+        assert_eq!(
+            [JoinMethod::Copy, JoinMethod::Encode].map(JoinMethod::name),
+            ["copy", "encode"]
         );
     }
 }

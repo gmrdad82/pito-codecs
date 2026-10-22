@@ -367,6 +367,7 @@ fn write(
                 threshold: meter.threshold(),
             },
             mode: plan.mode(),
+            calibration: plan.calibration,
         }),
         _ => None,
     };

@@ -210,6 +210,59 @@ impl ToRgba {
     }
 }
 
+pub struct AlphaToRgba {
+    fix: RgbaFix,
+    rotation: u16,
+    color: media::Color,
+}
+
+impl AlphaToRgba {
+    pub fn new(
+        coded: (u32, u32),
+        color: media::Color,
+        rotation: u16,
+        size: (u32, u32),
+    ) -> Result<AlphaToRgba, Fail> {
+        AlphaToRgba::with(coded, color, rotation, size, Want::Rgba)
+    }
+
+    fn with(
+        (width, height): (u32, u32),
+        color: media::Color,
+        rotation: u16,
+        size: (u32, u32),
+        want: Want,
+    ) -> Result<AlphaToRgba, Fail> {
+        let shown = if rotation % 180 == 90 {
+            (height, width)
+        } else {
+            (width, height)
+        };
+        Ok(AlphaToRgba {
+            fix: RgbaFix::new(shown, size, want, Transfer::Bt1886)?,
+            rotation,
+            color,
+        })
+    }
+
+    fn pic(&self, f: &Frame, a: Option<&Plane>) -> Result<Pic, Fail> {
+        let img = media::to_rgba_alpha(f, a, 0, self.color);
+        let img = if self.rotation.is_multiple_of(360) {
+            img
+        } else {
+            media::rotate(&img, self.rotation)
+        };
+        self.fix.apply(img)
+    }
+
+    pub fn apply(&self, f: &Frame, a: Option<&Plane>) -> Result<Rgba, Fail> {
+        match self.pic(f, a)? {
+            Pic::Rgba(img) => Ok(img),
+            _ => Err("a frame did not turn into RGBA".into()),
+        }
+    }
+}
+
 fn premultiply(img: &mut Rgba) {
     for px in img.data.chunks_exact_mut(4) {
         let a = u32::from(px[3]);
@@ -350,13 +403,27 @@ fn send_span(
     Ok(())
 }
 
+fn lead_in(first: i64, fps: (u32, u32)) -> f64 {
+    if first > 0 {
+        (first as f64 - 0.5) * f64::from(fps.1) / f64::from(fps.0.max(1))
+    } else {
+        0.0
+    }
+}
+
 fn produce_file(
     job: &Job,
     rgba: bool,
     tx: &SyncSender<Result<Pic, Fail>>,
 ) -> Result<Vec<String>, Fail> {
     let media = job.media;
-    let video = media::decode_video(&media.path, 0.0, None, &Prefs::default())?;
+    let (first, end) = job.window.unwrap_or((0, i64::MAX));
+    let video = media::decode_video(
+        &media.path,
+        lead_in(first, media.fps),
+        None,
+        &Prefs::default(),
+    )?;
     let notes = video.reasons.clone();
     let mut fix = YuvFix {
         rotation: rotation_of(media.rotation),
@@ -374,6 +441,12 @@ fn produce_file(
     for frame in video {
         stopped(job.stop)?;
         let frame = frame?;
+        if frame.pts < first {
+            continue;
+        }
+        if frame.pts >= end {
+            break;
+        }
         let slot = retime.slot(frame.time_base.seconds(frame.pts));
         if let Some((f, at)) = held.take() {
             let span = retime.span(at, slot);
@@ -439,28 +512,14 @@ fn produce_alpha(
 ) -> Result<Vec<String>, Fail> {
     let media = job.media;
     let (first, end) = job.window.unwrap_or((0, i64::MAX));
-    let start = if first > 0 {
-        (first as f64 - 0.5) * f64::from(media.fps.1) / f64::from(media.fps.0.max(1))
-    } else {
-        0.0
-    };
-    let mut video = media::decode_alpha(&media.path, start)?;
-    let shown = if media.rotation % 180 == 90 {
-        (video.height, video.width)
-    } else {
-        (video.width, video.height)
-    };
-    let fix = RgbaFix::new(shown, job.size, want, Transfer::Bt1886)?;
-    let color = video.color;
-    let rotation = media.rotation;
-    let image = move |f: Frame, a: Option<Plane>| -> Rgba {
-        let img = media::to_rgba_alpha(&f, a.as_ref(), 0, color);
-        if rotation.is_multiple_of(360) {
-            img
-        } else {
-            media::rotate(&img, rotation)
-        }
-    };
+    let mut video = media::decode_alpha(&media.path, lead_in(first, media.fps))?;
+    let fix = AlphaToRgba::with(
+        (video.width, video.height),
+        video.color,
+        media.rotation,
+        job.size,
+        want,
+    )?;
     let mut retime = Retime {
         fps: job.fps,
         origin: None,
@@ -479,7 +538,7 @@ fn produce_alpha(
         if let Some((f, a, at)) = held.take() {
             let span = retime.span(at, slot);
             if !span.is_empty() {
-                send_span(tx, fix.apply(image(f, a))?, span)?;
+                send_span(tx, fix.pic(&f, a.as_ref())?, span)?;
             }
         }
         held = Some((frame, alpha, slot));
@@ -494,7 +553,7 @@ fn produce_alpha(
         };
         let span = retime.span(at, until);
         if !span.is_empty() {
-            send_span(tx, fix.apply(image(f, a))?, span)?;
+            send_span(tx, fix.pic(&f, a.as_ref())?, span)?;
         }
     }
     Ok(Vec::new())
@@ -1240,11 +1299,14 @@ fn palette_pass(job: &Job, want: Want) -> Result<gif::Palette, Fail> {
 }
 
 pub fn run(job: &Job) -> Result<Done, Fail> {
-    if job.window.is_some() && !(job.media.kind == Kind::File && job.media.alpha) {
-        return Err("the decode pipeline windows only a source with alpha".into());
+    if job.window.is_some() && job.media.kind != Kind::File {
+        return Err("the decode pipeline windows only a video file".into());
+    }
+    if job.window.is_some() && matches!(job.encoder, Encoder::Copy { .. }) {
+        return Err("a window of the source re-encodes its video".into());
     }
     let animated = job.container.animated();
-    let direct = gpu_direct(job.media, job.encoder, job.fps);
+    let direct = job.window.is_none() && gpu_direct(job.media, job.encoder, job.fps);
     let want = if animated {
         Want::Rgba
     } else if job.alpha {

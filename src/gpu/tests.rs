@@ -1311,3 +1311,35 @@ fn an_overlay_drawn_on_the_gpu_matches_the_cpu_blend() {
     let db = psnr(&path, &source, "yuv420p");
     assert!(db > 45.0, "GPU overlay against the CPU blend: {db:.2} dB");
 }
+
+#[test]
+fn a_restart_may_change_only_the_rate_and_the_gop() {
+    let asked = EncoderConfig::default();
+    let next = EncoderConfig {
+        rate: Rate::Crf(30),
+        gop: 7,
+        ..asked.clone()
+    };
+    assert!(super::restartable(&asked, &asked));
+    assert!(super::restartable(&asked, &next));
+    for changed in [
+        EncoderConfig {
+            sar: (4, 3),
+            ..asked.clone()
+        },
+        EncoderConfig {
+            color: super::Color::UNKNOWN,
+            ..asked.clone()
+        },
+        EncoderConfig {
+            width: 1280,
+            ..asked.clone()
+        },
+        EncoderConfig {
+            b_frames: 2,
+            ..asked.clone()
+        },
+    ] {
+        assert!(!super::restartable(&asked, &changed), "{changed:?}");
+    }
+}

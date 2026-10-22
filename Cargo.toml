@@ -105,6 +105,7 @@ required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter", "mk
 
 [[example]]
 name = "bench"
+test = true
 required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter", "mkv", "vp9"]
 
 [[bin]]

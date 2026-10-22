@@ -35,6 +35,15 @@ pub struct Target {
     pub true_peak: f64,
     pub mode: String,
     pub linear: bool,
+    pub calibration: Option<Calibrated>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Calibrated {
+    pub passes: usize,
+    pub reached: bool,
+    pub landed: f64,
+    pub short: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -174,6 +183,17 @@ impl Params {
                         ("true_peak", t.true_peak.into()),
                         ("mode", t.mode.as_str().into()),
                         ("linear", Json::Bool(t.linear)),
+                        (
+                            "calibration",
+                            t.calibration.as_ref().map_or(Json::Null, |c| {
+                                Json::Obj(vec![
+                                    ("passes", c.passes.into()),
+                                    ("reached", Json::Bool(c.reached)),
+                                    ("landed", c.landed.into()),
+                                    ("short", c.short.as_deref().into()),
+                                ])
+                            }),
+                        ),
                     ])
                 }),
             ),
@@ -298,6 +318,7 @@ mod tests {
                     true_peak: -2.0,
                     mode: "linear".into(),
                     linear: false,
+                    calibration: None,
                 }),
                 audio: Some(Audio {
                     encoder: "aac".into(),
@@ -328,6 +349,7 @@ mod tests {
         assert_eq!(v["params"]["fps"], 30.0);
         assert!(v["params"]["tune"].is_null());
         assert_eq!(v["params"]["loudness"]["mode"], "linear");
+        assert!(v["params"]["loudness"]["calibration"].is_null());
         assert_eq!(v["params"]["audio"]["sample_rate"], 48000);
         assert_eq!(v["files"][0]["bytes"], 2259013);
         assert!(v.get("join").is_none());
@@ -360,5 +382,65 @@ mod tests {
         assert_eq!(v["sources"].as_array().map(Vec::len), Some(2));
         assert_eq!(v["join"]["clips"], 2);
         assert!(v["seconds"].is_null());
+    }
+
+    fn params_with(calibration: Option<Calibrated>) -> serde_json::Value {
+        let p = Params {
+            profile: "audio".into(),
+            encoder: Encoder {
+                encoder: "aac".into(),
+                codec: None,
+                settings: vec![],
+            },
+            quality: None,
+            width: 0,
+            height: 0,
+            fps: None,
+            tune: None,
+            loudness: Some(Target {
+                integrated: -5.0,
+                true_peak: -9.0,
+                mode: "limited".into(),
+                linear: false,
+                calibration,
+            }),
+            audio: None,
+        };
+        serde_json::from_str(&p.json().text()).unwrap()
+    }
+
+    #[test]
+    fn a_short_calibration_is_in_the_json() {
+        let v = params_with(Some(Calibrated {
+            passes: 6,
+            reached: false,
+            landed: -8.42,
+            short: Some("calibrated levelling landed at -8.42 LUFS".into()),
+        }));
+        let c = &v["loudness"]["calibration"];
+        assert_eq!(c["passes"], 6);
+        assert_eq!(c["reached"], false);
+        assert_eq!(c["landed"], -8.42);
+        assert_eq!(c["short"], "calibrated levelling landed at -8.42 LUFS");
+    }
+
+    #[test]
+    fn a_reached_calibration_has_no_short_line_and_a_silent_one_has_no_landing() {
+        let v = params_with(Some(Calibrated {
+            passes: 2,
+            reached: true,
+            landed: -5.02,
+            short: None,
+        }));
+        assert_eq!(v["loudness"]["calibration"]["reached"], true);
+        assert!(v["loudness"]["calibration"]["short"].is_null());
+        let v = params_with(Some(Calibrated {
+            passes: 1,
+            reached: false,
+            landed: f64::NEG_INFINITY,
+            short: Some("silence".into()),
+        }));
+        assert!(v["loudness"]["calibration"]["landed"].is_null());
+        assert!(params_with(None)["loudness"]["calibration"].is_null());
     }
 }

@@ -9,7 +9,7 @@ mod tests;
 
 use crate::media::{self, Error, Result};
 use crc::crc;
-pub use encode::encode;
+pub use encode::{encode, encode_rgba};
 use filter::{Simd, unfilter};
 
 const SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];

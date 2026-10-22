@@ -164,20 +164,22 @@ struct Assets {
     pcm: PathBuf,
 }
 
-fn prepare(dir: &Path, fixtures: &Path) -> Res<Assets> {
-    fs::create_dir_all(dir)?;
+fn speech_media(fixtures: &Path) -> Res<(PathBuf, PathBuf)> {
     let clip = fixtures.join("clips/resilience.mp4");
     let speech = fixtures.join("clips/solstice.mp4");
-    if !clip.exists() || !speech.exists() {
-        note!("bench: materialising the speech media set");
-        let st = Command::new("prun")
-            .args(["fixtures", "speech", "--into"])
-            .arg(fixtures)
-            .status()?;
-        if !st.success() {
-            return Err("prun fixtures speech failed".into());
-        }
+    if !clip.is_file() || !speech.is_file() {
+        return Err(format!(
+            "{} needs clips/resilience.mp4 and clips/solstice.mp4",
+            fixtures.display()
+        )
+        .into());
     }
+    Ok((clip, speech))
+}
+
+fn prepare(dir: &Path, fixtures: &Path) -> Res<Assets> {
+    let (clip, speech) = speech_media(fixtures)?;
+    fs::create_dir_all(dir)?;
     let mut video = HashMap::new();
     for &(w, h) in sizes() {
         for codec in [Codec::H264, Codec::Hevc] {
@@ -1828,7 +1830,7 @@ fn run() -> Res<()> {
         commit: shell("git", &["rev-parse", "--short", "HEAD"]),
         runs: b.runs,
         input: format!(
-            "{CLIP_SECONDS} s of the public-domain NASA 'A Message of Resilience from the International Space Station' clip (prun speech set), 720p60 scaled to 1080p and 1440p and re-encoded with libx264 (CRF 20) and libx265 (CRF 23); audio from the NASA solstice interview (prun speech set)"
+            "{CLIP_SECONDS} s of the public-domain NASA 'A Message of Resilience from the International Space Station' clip, 720p60 scaled to 1080p and 1440p and re-encoded with libx264 (CRF 20) and libx265 (CRF 23); audio from the NASA solstice interview"
         ),
         machine: machine(),
         load_average_start: load_start.trim().to_string(),
@@ -1869,4 +1871,71 @@ fn merge(path: &Path, mut fresh: Results) -> Res<Results> {
     }
     fresh.rows = rows;
     Ok(fresh)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch(name: &str) -> Scratch {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tmp/bench-tests")
+            .join(format!("{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("clips")).unwrap();
+        Scratch(dir)
+    }
+
+    fn refusal(dir: &Path) -> String {
+        format!(
+            "{} needs clips/resilience.mp4 and clips/solstice.mp4",
+            dir.display()
+        )
+    }
+
+    #[test]
+    fn missing_speech_clip_names_folder_and_both_files() {
+        let s = scratch("missing-speech");
+        fs::write(s.0.join("clips/resilience.mp4"), b"x").unwrap();
+        let err = speech_media(&s.0).unwrap_err().to_string();
+        assert_eq!(err, refusal(&s.0));
+        assert!(!err.contains('\n'));
+    }
+
+    #[test]
+    fn missing_resilience_clip_names_folder_and_both_files() {
+        let s = scratch("missing-clip");
+        fs::write(s.0.join("clips/solstice.mp4"), b"x").unwrap();
+        let err = speech_media(&s.0).unwrap_err().to_string();
+        assert_eq!(err, refusal(&s.0));
+    }
+
+    #[test]
+    fn empty_or_absent_fixtures_folder_is_refused_by_name() {
+        let s = scratch("empty");
+        assert_eq!(speech_media(&s.0).unwrap_err().to_string(), refusal(&s.0));
+        let absent = s.0.join("absent");
+        assert_eq!(
+            speech_media(&absent).unwrap_err().to_string(),
+            refusal(&absent)
+        );
+    }
+
+    #[test]
+    fn present_media_gives_both_paths() {
+        let s = scratch("present");
+        fs::write(s.0.join("clips/resilience.mp4"), b"x").unwrap();
+        fs::write(s.0.join("clips/solstice.mp4"), b"x").unwrap();
+        let (clip, speech) = speech_media(&s.0).unwrap();
+        assert_eq!(clip, s.0.join("clips/resilience.mp4"));
+        assert_eq!(speech, s.0.join("clips/solstice.mp4"));
+    }
 }

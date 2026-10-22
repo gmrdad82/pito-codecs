@@ -1033,3 +1033,123 @@ fn an_id3_tagged_flac_is_labelled_flac() {
     ok(&plain);
     assert!(text(&plain.stdout).starts_with("container  FLAC"));
 }
+
+fn hum_wav(amplitude: f64, seconds: usize, clicks: bool) -> Vec<u8> {
+    const RATE: u32 = 48_000;
+    let mut pcm = Vec::new();
+    for n in 0..seconds * RATE as usize {
+        let hum =
+            amplitude * (2.0 * std::f64::consts::PI * 100.0 * n as f64 / f64::from(RATE)).sin();
+        let s = if clicks && n % (RATE as usize / 2) < 4 {
+            0.9
+        } else {
+            hum
+        };
+        let v = (s * 32767.0).round() as i16;
+        pcm.extend_from_slice(&v.to_le_bytes());
+        pcm.extend_from_slice(&v.to_le_bytes());
+    }
+    let mut wav = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + pcm.len() as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&RATE.to_le_bytes());
+    wav.extend_from_slice(&(RATE * 4).to_le_bytes());
+    wav.extend_from_slice(&4u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&pcm);
+    wav
+}
+
+#[test]
+fn calibrated_levelling_that_lands_short_says_so_in_text_and_json() {
+    let work = dir("loudness-short");
+    let input = work.join("hum.wav");
+    fs::write(&input, hum_wav(0.1, 10, false)).unwrap();
+    let out = work.join("out.wav");
+    let args = [
+        input.to_str().unwrap(),
+        out.to_str().unwrap(),
+        "--loudness",
+        "-5",
+        "--true-peak",
+        "-9",
+    ];
+    let shown = run(&args);
+    ok(&shown);
+    let shown = text(&shown.stdout);
+    let short: Vec<&str> = shown
+        .lines()
+        .filter(|l| l.starts_with("loudness short: "))
+        .collect();
+    assert_eq!(short.len(), 1, "{shown}");
+    assert!(short[0].contains("-5 LUFS target"), "{shown}");
+    assert!(short[0].contains("-9.30 dBTP"), "{shown}");
+    let json = run(&[&args[..], &["--json", "--force"]].concat());
+    ok(&json);
+    let v: serde_json::Value = serde_json::from_str(&text(&json.stdout)).unwrap();
+    let c = &v["params"]["loudness"]["calibration"];
+    assert_eq!(c["reached"], false, "{v}");
+    let passes = c["passes"].as_u64().unwrap();
+    assert!(passes >= 1, "{v}");
+    assert!(c["landed"].as_f64().unwrap() < -5.1, "{v}");
+    assert!(
+        c["short"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("after {passes} passes")),
+        "{v}"
+    );
+    assert!(
+        v["files"][0]["loudness"]["true_peak"].as_f64().unwrap() <= -9.0,
+        "{v}"
+    );
+}
+
+#[test]
+fn calibrated_levelling_that_reaches_the_target_reports_its_passes_without_a_short_line() {
+    let work = dir("loudness-reached");
+    let input = work.join("hum.wav");
+    fs::write(&input, hum_wav(0.05, 10, true)).unwrap();
+    let out = work.join("out.wav");
+    let args = [
+        input.to_str().unwrap(),
+        out.to_str().unwrap(),
+        "--loudness",
+        "-14",
+        "--true-peak",
+        "-1",
+    ];
+    let shown = run(&args);
+    ok(&shown);
+    assert!(
+        !text(&shown.stdout).contains("loudness short"),
+        "{}",
+        text(&shown.stdout)
+    );
+    let json = run(&[&args[..], &["--json", "--force"]].concat());
+    ok(&json);
+    let v: serde_json::Value = serde_json::from_str(&text(&json.stdout)).unwrap();
+    assert_eq!(v["params"]["loudness"]["mode"], "limited", "{v}");
+    let c = &v["params"]["loudness"]["calibration"];
+    assert_eq!(c["reached"], true, "{v}");
+    assert!(c["short"].is_null(), "{v}");
+    assert!(c["passes"].as_u64().unwrap() >= 1, "{v}");
+    let measured = run(&["loudness", out.to_str().unwrap(), "--json"]);
+    ok(&measured);
+    let m: serde_json::Value = serde_json::from_str(&text(&measured.stdout)).unwrap();
+    let integrated = m["integrated"].as_f64().unwrap();
+    assert!(
+        (integrated + 14.0).abs() <= 0.1,
+        "the written file reaches the target: {m}"
+    );
+    assert!(
+        m["true_peak"].as_f64().unwrap() <= -1.0,
+        "the written file stays under the ceiling: {m}"
+    );
+}

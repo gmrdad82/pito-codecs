@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+case "${1:-}" in
+    "" | --json) ;;
+    *)
+        echo "usage: bin/cov [--json]" >&2
+        exit 2
+        ;;
+esac
+
+mkdir -p tmp
+cargo llvm-cov clean --workspace
+if [ "${1:-}" = "--json" ]; then
+    report=(--json --summary-only --output-path tmp/cov.json)
+else
+    report=(--summary-only --output-path tmp/cov.txt)
+fi
+prlimit --core=1:1 -- cargo llvm-cov nextest --workspace --all-targets --no-fail-fast "${report[@]}"
+echo "cov: report in ${report[-1]}"

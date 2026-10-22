@@ -14,6 +14,18 @@ mod bare;
 mod base;
 mod demux;
 #[cfg(all(
+    test,
+    feature = "h264",
+    feature = "hevc",
+    feature = "aac",
+    feature = "mp4",
+    feature = "gpu",
+    feature = "filter",
+    feature = "mkv",
+    feature = "vp9"
+))]
+mod edges;
+#[cfg(all(
     feature = "h264",
     feature = "hevc",
     feature = "aac",
@@ -187,8 +199,8 @@ pub use audio::{audio_mix, audio_pcm, audio_pcm_range};
     feature = "vp9"
 ))]
 pub use export::{
-    ExportOptions, Exported, Overlay, Part, Piece, Progress, Stage, export, export_with_audio,
-    parts,
+    ExportOptions, Exported, Overlay, Part, Piece, Progress, Sessions, Stage, export,
+    export_with_audio, parts,
 };
 #[cfg(all(
     feature = "h264",
@@ -225,11 +237,11 @@ pub use join::{
     feature = "vp9"
 ))]
 pub use level::{
-    AAC_KBPS, DEFAULT_TRUE_PEAK, HIGHEST_TRUE_PEAK, LEVEL_RATE, LOUDEST_LUFS, LOWEST_TRUE_PEAK,
-    LevelMode, LevelOptions, LevelPlan, LevelProgress, LevelStage, LevelStyle, LevelTarget,
-    Leveler, Levelled, LevelledPcm, LoudnessStats, OPUS_KBPS, QUIETEST_LUFS, YOUTUBE_LUFS,
-    YOUTUBE_TRUE_PEAK, level, level_pcm, level_with, measure_loudness, meter_loudness, plan_level,
-    plan_level_span, plan_level_styled,
+    AAC_KBPS, CALIBRATION_PASSES, Calibration, DEFAULT_TRUE_PEAK, HIGHEST_TRUE_PEAK, LEVEL_RATE,
+    LOUDEST_LUFS, LOWEST_TRUE_PEAK, LevelMode, LevelOptions, LevelPlan, LevelProgress, LevelStage,
+    LevelStyle, LevelTarget, Leveler, Levelled, LevelledPcm, LoudnessStats, OPUS_KBPS,
+    QUIETEST_LUFS, YOUTUBE_LUFS, YOUTUBE_TRUE_PEAK, level, level_pcm, level_with, measure_loudness,
+    meter_loudness, plan_level, plan_level_span, plan_level_styled,
 };
 #[cfg(all(
     feature = "h264",

@@ -171,4 +171,8 @@ impl EncoderBackend for VtEncoder {
     fn extradata(&self) -> Option<&[u8]> {
         VtEncoder::extradata(self)
     }
+
+    fn restart(&mut self, config: &EncoderConfig) -> Result<()> {
+        VtEncoder::restart(self, config)
+    }
 }
