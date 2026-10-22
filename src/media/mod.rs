@@ -1,3 +1,5 @@
+#[cfg(any(feature = "aac", feature = "filter"))]
+pub(crate) mod fft;
 mod nal;
 mod types;
 pub mod wav;

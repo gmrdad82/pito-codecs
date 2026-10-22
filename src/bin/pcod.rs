@@ -53,6 +53,8 @@ mod signals;
 mod size;
 #[path = "pcod/source.rs"]
 mod source;
+#[path = "pcod/spectrum.rs"]
+mod spectrum;
 
 #[derive(Parser)]
 #[command(
@@ -70,7 +72,7 @@ struct Cli {
     input: Option<PathBuf>,
     #[arg(
         value_name = "OUTPUT",
-        help = "The file to write: mp4, mov, mkv, webm, gif, webp, or wav for the audio alone"
+        help = "The file to write: mp4, mov, mkv, webm, gif, webp, or wav or opus for the audio alone"
     )]
     output: Option<PathBuf>,
     #[command(flatten)]
@@ -115,6 +117,51 @@ enum Command {
         #[arg(long, default_value_t = 0, help = "The audio track, counted from 0")]
         track: usize,
         #[arg(long, help = "Print the measurements as JSON")]
+        json: bool,
+    },
+    #[command(
+        about = "Draw an audio track's spectrogram as a PNG",
+        long_about = "Draw an audio track's spectrogram as a PNG\n\nThe track is mixed to one channel and read at its own rate. Each pixel column averages the power of the Hann windows inside it (2048 samples at 44.1 and 48 kHz, half overlapped); each pixel row is the loudest frequency bin in its band. Brightness is the level in dB against a full-scale sine, from 0 dB down to --floor-db, and the frequency axis is linear from 0 Hz to --max-hz. The legend gives the time axis, the frequency axis and the dB scale. The file is a video or an audio file: MP4, MOV, M4A, MKV, MKA, WebM, WAV, MP3 or Ogg Opus. An existing PNG is refused unless --force is given. Rows above the track's Nyquist frequency (half its sample rate) carry no data and are left in the background colour. --json prints the size, the length and the decode, draw and PNG times."
+    )]
+    Spectrum {
+        #[arg(help = "A video or audio file")]
+        file: PathBuf,
+        #[arg(help = "The PNG to write")]
+        output: PathBuf,
+        #[arg(
+            long,
+            default_value_t = 12_000,
+            value_parser = clap::value_parser!(u32).range(100..=96_000),
+            help = "The top of the frequency axis in Hz"
+        )]
+        max_hz: u32,
+        #[arg(
+            long,
+            default_value_t = 1200,
+            value_parser = clap::value_parser!(u32).range(320..=16_384),
+            help = "The PNG's width in pixels"
+        )]
+        width: u32,
+        #[arg(
+            long,
+            default_value_t = 360,
+            value_parser = clap::value_parser!(u32).range(160..=16_384),
+            help = "The PNG's height in pixels"
+        )]
+        height: u32,
+        #[arg(
+            long,
+            default_value_t = -90,
+            allow_hyphen_values = true,
+            value_parser = clap::value_parser!(i32).range(-200..=-6),
+            help = "The bottom of the dB scale, -200 to -6"
+        )]
+        floor_db: i32,
+        #[arg(long, default_value_t = 0, help = "The audio track, counted from 0")]
+        track: usize,
+        #[arg(long, help = "Replace an existing output")]
+        force: bool,
+        #[arg(long, help = "Print the size, length and timings as JSON")]
         json: bool,
     },
     #[command(about = "Decode the whole video track and report the speed")]
@@ -387,6 +434,32 @@ fn run(command: Command) -> Result<(), Fail> {
     let result = match command {
         Command::Probe { file, .. } => show(&mut out, &file),
         Command::Loudness { file, track, json } => loudness(&mut out, &file, track, json),
+        Command::Spectrum {
+            file,
+            output,
+            max_hz,
+            width,
+            height,
+            floor_db,
+            track,
+            force,
+            json,
+        } => spectrum::run(
+            &mut out,
+            &spectrum::Job {
+                file,
+                output,
+                track,
+                options: pito_codecs::filter::spectrum::Options {
+                    width,
+                    height,
+                    max_hz: f64::from(max_hz),
+                    floor_db: f64::from(floor_db),
+                },
+                overwrite: force,
+                json,
+            },
+        ),
         Command::Convert { .. } | Command::Join { .. } | Command::Profiles => Ok(()),
         Command::Decode {
             file,

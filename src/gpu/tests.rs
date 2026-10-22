@@ -1,11 +1,21 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use super::nal;
 use super::{Direction, EncoderConfig, HwDecoder, HwEncoder, Profile, available};
 use crate::media::{Bitstream, Rate};
 use crate::media::{Codec, Frame, Packet, PixelFormat, TimeBase};
+
+fn part_tag() -> String {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    format!(
+        "{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
+}
 
 fn dir() -> PathBuf {
     let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp/gpu");
@@ -150,8 +160,10 @@ fn generate_sized(name: &str, codec: Codec, encoder_args: &[&str], size: (u32, u
             "50",
         ];
         args.extend_from_slice(encoder_args);
-        args.push(path.to_str().unwrap());
+        let part = dir().join(format!("{name}.{}.part.{ext}", part_tag()));
+        args.push(part.to_str().unwrap());
         run(&args);
+        std::fs::rename(&part, &path).unwrap();
     }
     path
 }
@@ -280,6 +292,7 @@ fn source_frames_from(
     };
     let path = dir().join(format!("source{tag}-{w}x{h}-{n}-{pix}.yuv"));
     if !path.exists() {
+        let part = path.with_extension(format!("{}.part", part_tag()));
         run(&[
             "-f",
             "lavfi",
@@ -291,8 +304,9 @@ fn source_frames_from(
             pix,
             "-f",
             "rawvideo",
-            path.to_str().unwrap(),
+            part.to_str().unwrap(),
         ]);
+        std::fs::rename(&part, &path).unwrap();
     }
     let data = std::fs::read(&path).unwrap();
     let bps = format.bytes_per_sample();

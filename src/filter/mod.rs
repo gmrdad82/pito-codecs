@@ -10,6 +10,7 @@ mod packed;
 mod plane;
 mod resample;
 mod scale;
+pub mod spectrum;
 
 pub use color::{ColorSpec, Matrix, Range, Siting, convert_color};
 
@@ -29,6 +30,7 @@ pub use packed::{
 pub(crate) use plane::check as check_frame;
 pub use resample::{Resampler, resample};
 pub use scale::{Kernel, Scaler, scale};
+pub use spectrum::{Spectrogram, spectrogram};
 
 #[cfg(test)]
 mod tests;

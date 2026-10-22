@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use pito_codecs::filter::LoudnessMeter;
 use pito_codecs::media::{self, AudioBuffer, AudioSpan, Prefs};
+use pito_codecs::opus::enc::{EncoderConfig, OggWriter};
 
 use super::Fail;
 use super::convert::{Loud, Options, hash, land, level_progress, stats, target_of};
@@ -16,6 +17,11 @@ use super::progress::Progress;
 use super::signals;
 
 pub const RATES: [u32; 2] = [44_100, 48_000];
+pub const OPUS_RATE: u32 = 48_000;
+pub const OPUS_KBPS_STEREO: u32 = 64;
+pub const OPUS_KBPS_MONO: u32 = 32;
+pub const OPUS_KBPS_LOWEST: u32 = 16;
+pub const OPUS_KBPS_HIGHEST: u32 = 510;
 const HEADER: usize = 44;
 const WRITE_BLOCK: usize = 1 << 16;
 
@@ -25,6 +31,7 @@ pub struct Wav {
     pub to: Option<f64>,
     pub mono: bool,
     pub rate: Option<u32>,
+    pub opus: Option<u32>,
 }
 
 pub fn is_wav(output: &Path) -> bool {
@@ -32,6 +39,13 @@ pub fn is_wav(output: &Path) -> bool {
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("wav"))
+}
+
+pub fn is_opus(output: &Path) -> bool {
+    output
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("opus") || e.eq_ignore_ascii_case("ogg"))
 }
 
 fn header(rate: u32, channels: u16, data: u32) -> [u8; HEADER] {
@@ -52,10 +66,18 @@ fn header(rate: u32, channels: u16, data: u32) -> [u8; HEADER] {
     h
 }
 
+enum Out {
+    Pcm {
+        file: BufWriter<File>,
+        bytes: u64,
+        scratch: Vec<u8>,
+        span: (u32, u16),
+    },
+    Opus(Box<OggWriter<BufWriter<File>>>),
+}
+
 struct Sink {
-    file: BufWriter<File>,
-    bytes: u64,
-    scratch: Vec<u8>,
+    out: Out,
     meter: Option<LoudnessMeter>,
 }
 
@@ -64,17 +86,45 @@ impl Sink {
         if let Some(m) = self.meter.as_mut() {
             m.process(buf)?;
         }
-        self.scratch.clear();
+        let (file, bytes, scratch) = match &mut self.out {
+            Out::Opus(w) => {
+                w.write(buf)?;
+                return Ok(());
+            }
+            Out::Pcm {
+                file,
+                bytes,
+                scratch,
+                ..
+            } => (file, bytes, scratch),
+        };
+        scratch.clear();
         for &s in &buf.samples {
             let v = (s * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
-            self.scratch.extend_from_slice(&v.to_le_bytes());
+            scratch.extend_from_slice(&v.to_le_bytes());
         }
-        self.bytes += self.scratch.len() as u64;
-        if self.bytes > u64::from(u32::MAX) - 36 {
+        *bytes += scratch.len() as u64;
+        if *bytes > u64::from(u32::MAX) - 36 {
             return Err("the WAV would pass 4 GiB; cut it shorter with --from and --to".into());
         }
-        self.file.write_all(&self.scratch)?;
+        file.write_all(scratch)?;
         Ok(())
+    }
+
+    fn finish(self) -> Result<(File, Option<LoudnessMeter>), Fail> {
+        let file = match self.out {
+            Out::Opus(w) => w.finish()?.into_inner().map_err(|e| e.into_error())?,
+            Out::Pcm {
+                file, bytes, span, ..
+            } => {
+                let data = u32::try_from(bytes).map_err(|_| "the WAV would pass 4 GiB")?;
+                let mut file = file.into_inner().map_err(|e| e.into_error())?;
+                file.seek(SeekFrom::Start(0))?;
+                file.write_all(&header(span.0, span.1, data))?;
+                file
+            }
+        };
+        Ok((file, self.meter))
     }
 }
 
@@ -118,11 +168,14 @@ pub fn run(
         )
         .into());
     }
-    let rate = wav.rate.unwrap_or(if RATES.contains(&sound.rate) {
-        sound.rate
-    } else {
-        48_000
-    });
+    let rate = match wav.opus {
+        Some(_) => OPUS_RATE,
+        None => wav.rate.unwrap_or(if RATES.contains(&sound.rate) {
+            sound.rate
+        } else {
+            48_000
+        }),
+    };
     let channels = if wav.mono { 1 } else { 2 };
     let span = AudioSpan {
         from: wav.from,
@@ -144,6 +197,7 @@ pub fn run(
         &prefs,
         &span,
         request.loudness,
+        wav.opus,
         &part,
         &progress,
     );
@@ -162,7 +216,10 @@ pub fn run(
         return Ok(lines.join("\n"));
     }
     let seconds = started.elapsed().as_secs_f64();
-    let pcm = "pcm_s16le";
+    let (profile, encoder, codec) = match wav.opus {
+        Some(_) => ("opus", "opus", "opus"),
+        None => ("wav", "pcm_s16le", "pcm"),
+    };
     let document = manifest::Manifest {
         sources: vec![manifest::Source {
             path: input.display().to_string(),
@@ -170,9 +227,9 @@ pub fn run(
             loudness: loud.as_ref().map(|l| stats(&l.before)),
         }],
         params: manifest::Params {
-            profile: "wav".into(),
+            profile: profile.into(),
             encoder: manifest::Encoder {
-                encoder: pcm.into(),
+                encoder: encoder.into(),
                 codec: None,
                 settings: Vec::new(),
             },
@@ -183,9 +240,9 @@ pub fn run(
             tune: None,
             loudness: loud.as_ref().map(Loud::target),
             audio: Some(manifest::Audio {
-                encoder: pcm.into(),
-                codec: Some("pcm".into()),
-                kbps: None,
+                encoder: encoder.into(),
+                codec: Some(codec.into()),
+                kbps: wav.opus,
                 layout: Some(if wav.mono { "mono" } else { "stereo" }.into()),
                 sample_rate: Some(rate),
             }),
@@ -203,12 +260,14 @@ pub fn run(
     Ok(document.to_json())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write(
     input: &Path,
     probe: &media::Probe,
     prefs: &Prefs,
     span: &AudioSpan,
     target: Option<Loudness>,
+    opus: Option<u32>,
     part: &Path,
     progress: &Progress,
 ) -> Result<(u64, Option<Loud>), Fail> {
@@ -236,16 +295,29 @@ fn write(
         .map(|p| p.leveler(span.rate, span.channels))
         .transpose()?;
     let file = File::create(part).map_err(|e| format!("{}: {e}", part.display()))?;
+    let mut file = BufWriter::with_capacity(WRITE_BLOCK, file);
+    let out = match opus {
+        Some(kbps) => Out::Opus(Box::new(OggWriter::new(
+            EncoderConfig::new(span.channels, kbps * 1000),
+            file,
+        )?)),
+        None => {
+            file.write_all(&header(span.rate, span.channels, 0))?;
+            Out::Pcm {
+                file,
+                bytes: 0,
+                scratch: Vec::new(),
+                span: (span.rate, span.channels),
+            }
+        }
+    };
     let mut sink = Sink {
-        file: BufWriter::with_capacity(WRITE_BLOCK, file),
-        bytes: 0,
-        scratch: Vec::new(),
+        out,
         meter: plan
             .is_some()
             .then(|| LoudnessMeter::new(span.rate, span.channels))
             .transpose()?,
     };
-    sink.file.write_all(&header(span.rate, span.channels, 0))?;
     let total = Some(probe.duration.min(span.to) - span.from)
         .filter(|s| s.is_finite() && *s > 0.0)
         .map(|s| (s * f64::from(span.rate)).round() as u64);
@@ -276,12 +348,9 @@ fn write(
         frames += tail.frames() as u64;
         sink.push(&tail)?;
     }
-    let data = u32::try_from(sink.bytes).map_err(|_| "the WAV would pass 4 GiB")?;
-    let mut file = sink.file.into_inner().map_err(|e| e.into_error())?;
-    file.seek(SeekFrom::Start(0))?;
-    file.write_all(&header(span.rate, span.channels, data))?;
+    let (file, meter) = sink.finish()?;
     file.sync_all()?;
-    let loud = match (plan, target, sink.meter) {
+    let loud = match (plan, target, meter) {
         (Some(plan), Some(target), Some(meter)) => Some(Loud {
             target,
             before: plan.before,

@@ -13,10 +13,13 @@ pub enum Bare {
     Wav,
     #[cfg(feature = "mp3")]
     Mp3,
+    #[cfg(feature = "opus")]
+    Opus,
+    Ogg(&'static str),
 }
 
 pub fn sniff(path: &Path) -> Option<Bare> {
-    let mut head = [0u8; 12];
+    let mut head = [0u8; 64];
     let mut file = File::open(path).ok()?;
     let mut got = 0;
     while got < head.len() {
@@ -27,6 +30,20 @@ pub fn sniff(path: &Path) -> Option<Bare> {
     }
     if wav::is_wav(&head[..got]) {
         return Some(Bare::Wav);
+    }
+    #[cfg(feature = "opus")]
+    if crate::opus::ogg::sniff(&head[..got])
+        && head[..got]
+            .get(27 + usize::from(head[26])..)
+            .is_some_and(|body| body.starts_with(b"OpusHead"))
+    {
+        return Some(Bare::Opus);
+    }
+    if got >= 27 && head.starts_with(b"OggS") {
+        let body = head[..got]
+            .get(27 + usize::from(head[26])..)
+            .unwrap_or_default();
+        return Some(Bare::Ogg(ogg_name(body)));
     }
     #[cfg(feature = "mp3")]
     {
@@ -43,10 +60,33 @@ pub fn sniff(path: &Path) -> Option<Bare> {
     None
 }
 
+fn ogg_name(body: &[u8]) -> &'static str {
+    [
+        (&b"OpusHead"[..], "Ogg Opus"),
+        (b"\x01vorbis", "Ogg Vorbis"),
+        (b"\x7fFLAC", "Ogg FLAC"),
+        (b"\x80theora", "Ogg Theora"),
+        (b"Speex   ", "Ogg Speex"),
+    ]
+    .into_iter()
+    .find(|(magic, _)| body.starts_with(magic))
+    .map_or("this Ogg stream", |(_, name)| name)
+}
+
+fn refuse(name: &str) -> Error {
+    Error::Unsupported(format!("{name} is not decoded"))
+}
+
 #[cfg(feature = "mp3")]
 fn mp3(path: &Path) -> Result<AudioBuffer> {
     let data = std::fs::read(path).map_err(|e| Error::at(path, e))?;
     crate::mp3::decode_file(&data)
+}
+
+#[cfg(feature = "opus")]
+fn opus(path: &Path) -> Result<AudioBuffer> {
+    let data = std::fs::read(path).map_err(|e| Error::at(path, e))?;
+    crate::opus::ogg::decode(&data)
 }
 
 pub fn probe(path: &Path, kind: Bare) -> Result<Probe> {
@@ -73,6 +113,15 @@ pub fn probe(path: &Path, kind: Bare) -> Result<Probe> {
             let bitrate = (seconds > 0.0).then(|| (bytes as f64 * 8.0 / seconds) as u32);
             ("mp3", b.channels, b.rate, bitrate, seconds)
         }
+        #[cfg(feature = "opus")]
+        Bare::Opus => {
+            let data = std::fs::read(path).map_err(|e| Error::at(path, e))?;
+            let ogg = crate::opus::ogg::OggOpus::parse(&data)?;
+            let seconds = ogg.samples() as f64 / 48_000.0;
+            let bitrate = (seconds > 0.0).then(|| (data.len() as f64 * 8.0 / seconds) as u32);
+            ("opus", ogg.head.channels as u16, 48_000, bitrate, seconds)
+        }
+        Bare::Ogg(name) => return Err(refuse(name)),
     };
     Ok(Probe {
         duration,
@@ -140,6 +189,17 @@ impl BareFeed {
                     src: Src::Memory(b, 0),
                 }
             }
+            #[cfg(feature = "opus")]
+            Bare::Opus => {
+                let b = opus(path)?;
+                BareFeed {
+                    rate: b.rate,
+                    channels: b.channels,
+                    frames: b.frames() as u64,
+                    src: Src::Memory(b, 0),
+                }
+            }
+            Bare::Ogg(name) => return Err(refuse(name)),
         };
         if feed.rate == 0 || feed.channels == 0 {
             return Err(Error::Invalid(format!(

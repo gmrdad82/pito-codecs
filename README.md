@@ -87,7 +87,7 @@ The GPU route needs nothing extra: libva is loaded at run time on Linux (Mesa's 
 
 ### Convert, the command line over everything
 
-`pcod <input> <output>` converts a video, or a folder of PNG frames, into whatever the output's extension names, and needs no ffmpeg: `mp4`, `mov` and `mkv` get H.264 and AAC, `webm` gets VP9 and Opus (with alpha when the source has it), `gif` and `webp` loop forever, and `wav` takes the audio alone, decoded to 16-bit PCM, with `--from`, `--to`, `--mono`, `--rate` and `--loudness`. Every video comes out limited-range BT.709 and tagged so, with rotation and non-square pixels applied; resizing is Lanczos in linear light. `pcod join` stitches clips by stream copy when they match and re-encodes them when they don't, saying which and why. It takes the command line of pconv, the ffmpeg-based converter it replaced, profiles, `--json` manifest, probe keys and exit codes, so a script moves from one to the other by changing the binary's name; only the encoder names in the manifest differ.
+`pcod <input> <output>` converts a video, or a folder of PNG frames, into whatever the output's extension names, and needs no ffmpeg: `mp4`, `mov` and `mkv` get H.264 and AAC, `webm` gets VP9 and Opus (with alpha when the source has it), `gif` and `webp` loop forever, and `wav` takes the audio alone, decoded to 16-bit PCM, with `--from`, `--to`, `--mono`, `--rate` and `--loudness`; `opus` (or `ogg`) takes it as Ogg Opus at 48 kHz, 64 kbps stereo or 32 kbps with `--mono` unless `--audio-bitrate` (16 to 510) says otherwise. `pcod spectrum <input> <out.png>` draws an audio track's spectrogram, 1200x360 by default (`--width`, `--height`), log magnitude from 0 dB down to `--floor-db` (-90), linear frequency up to `--max-hz` (12000), with time, frequency and dB axes, and refuses an existing PNG unless `--force`; `--json` gives its size, length and timings. Ogg Opus files read back as input everywhere pcod takes audio; other Ogg streams (Vorbis, FLAC) are refused by name. Every video comes out limited-range BT.709 and tagged so, with rotation and non-square pixels applied; resizing is Lanczos in linear light. `pcod join` stitches clips by stream copy when they match and re-encodes them when they don't, saying which and why. It takes the command line of pconv, the ffmpeg-based converter it replaced, profiles, `--json` manifest, probe keys and exit codes, so a script moves from one to the other by changing the binary's name; only the encoder names in the manifest differ.
 
 ```sh
 pcod master.mov site.mp4 --profile best --crf 23    # a light H.264 for the web
@@ -98,6 +98,8 @@ pcod talk.mp4 upload.mp4 --loudness youtube        # -14 LUFS in two EBU R128 pa
 pcod phone.mp4 engine.wav --from 0:12 --to 0:20     # a range of the audio as 16-bit PCM WAV
 pcod mix.wav master.wav --loudness -14 --linear     # -14 LUFS keeping the dynamics, peaks limited
 pcod loudness master.mp4 --json                     # EBU R128 integrated, range, true peak, maxima
+pcod memo.wav memo.opus --mono --audio-bitrate 24   # voice as Ogg Opus, 24 kbps mono
+pcod spectrum memo.opus memo.png                    # a 1200x360 spectrogram up to 12 kHz
 ```
 
 Against pconv 1.0.1, the converter pcod replaced (ffmpeg 9.0.1 with x264, libvpx and libwebp) on 30 s of 1080p30 H.264 talking head, run in turn three times each, medians, at load 22 to 46 on a 32-thread machine; quality against the source (the GIF and WebP against it scaled to 800x450 at 12 fps):

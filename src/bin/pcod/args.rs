@@ -5,7 +5,10 @@ use clap::{CommandFactory, ValueEnum};
 
 use super::Cli;
 use super::convert::Options;
-use super::extract::{RATES, Wav, is_wav};
+use super::extract::{
+    OPUS_KBPS_HIGHEST, OPUS_KBPS_LOWEST, OPUS_KBPS_MONO, OPUS_KBPS_STEREO, RATES, Wav, is_opus,
+    is_wav,
+};
 use super::plan::{Loudness, Request};
 use super::profile::{ANIMATED_FPS, ANIMATED_WIDTH, LIGHT_WEB_CRF, Profile, VP9_LIGHT_WEB_CRF};
 use super::size::Size;
@@ -14,7 +17,7 @@ pub const USAGE: &str = "pcod [OPTIONS] <INPUT> <OUTPUT>\n       pcod <COMMAND>"
 
 pub fn help() -> String {
     format!(
-        "The output's extension picks the container: mp4, mov, mkv (H.264 and AAC), webm (VP9 and Opus), gif or webp (animated, looping, {ANIMATED_WIDTH} px wide at {ANIMATED_FPS} fps by default, or the source's width and rate where smaller). A .wav output is the audio alone: the first audio track as 16-bit PCM, stereo at the source's rate when it is 44100 or 48000 Hz (else 48000), with --from and --to for a range, --mono, --rate and --loudness. The input is a video file or a folder of PNG frames in name order (--fps gives their rate).
+        "The output's extension picks the container: mp4, mov, mkv (H.264 and AAC), webm (VP9 and Opus), gif or webp (animated, looping, {ANIMATED_WIDTH} px wide at {ANIMATED_FPS} fps by default, or the source's width and rate where smaller). A .wav output is the audio alone: the first audio track as 16-bit PCM, stereo at the source's rate when it is 44100 or 48000 Hz (else 48000), with --from and --to for a range, --mono, --rate and --loudness. A .opus (or .ogg) output is the audio alone as Ogg Opus at 48000 Hz, 64k stereo or 32k with --mono by default, --audio-bitrate KBPS from 16 to 510, with --from, --to, --mono and --loudness. The input is a video file or a folder of PNG frames in name order (--fps gives their rate).
 Profiles: balanced (the default) and best are H.264 on the CPU at CRF 20 and 18 on x264's scale; fast is H.264 on the GPU at QP 25, on the CPU where no GPU encoder is found. For .webm, balanced is VP9 at CRF 32 and best at 28 on libvpx's scale.
 Light web: --profile best --crf {LIGHT_WEB_CRF} (.webm: --crf {VP9_LIGHT_WEB_CRF})
 For screen recordings: --tune animation
@@ -102,13 +105,13 @@ pub struct ConvertArgs {
         help = "Keep the dynamics: gain to the target, then only a true-peak limiter at the ceiling (may land under the target)"
     )]
     pub linear: bool,
-    #[arg(long, help = "The audio bitrate in kbps, 32 to 512")]
+    #[arg(long, help = "The audio bitrate in kbps, 32 to 512 (.opus: 16 to 510)")]
     pub audio_bitrate: Option<u32>,
-    #[arg(long, value_parser = super::time_of, help = "For a .wav: start at this time (seconds, m:ss or h:mm:ss)")]
+    #[arg(long, value_parser = super::time_of, help = "For a .wav or .opus: start at this time (seconds, m:ss or h:mm:ss)")]
     pub from: Option<f64>,
-    #[arg(long, value_parser = super::time_of, help = "For a .wav: stop at this time")]
+    #[arg(long, value_parser = super::time_of, help = "For a .wav or .opus: stop at this time")]
     pub to: Option<f64>,
-    #[arg(long, help = "For a .wav: one channel instead of two")]
+    #[arg(long, help = "For a .wav or .opus: one channel instead of two")]
     pub mono: bool,
     #[arg(long, value_parser = rate_hz, value_name = "HZ", help = "For a .wav: 44100 or 48000 [default: the source's when it is one of them, else 48000]")]
     pub rate: Option<u32>,
@@ -184,14 +187,14 @@ pub fn options(
             "invalid UTF-8 was detected in one or more arguments",
         );
     }
-    if is_wav(&output) {
+    if is_wav(&output) || is_opus(&output) {
         return wav(sub, input, joining, output, args);
     }
     if args.from.is_some() || args.to.is_some() || args.mono || args.rate.is_some() {
         usage_error(
             sub,
             ErrorKind::ArgumentConflict,
-            "--from, --to, --mono and --rate fit a .wav output",
+            "--from, --to, --mono and --rate fit a .wav or .opus output",
         );
     }
     let picture = args.profile.is_some()
@@ -260,13 +263,17 @@ fn wav(
     args: ConvertArgs,
 ) -> Options {
     let conflict = |message: &str| usage_error(sub, ErrorKind::ArgumentConflict, message);
+    let opus = is_opus(&output);
+    let kind = if opus { ".opus" } else { ".wav" };
     if joining {
-        conflict(
-            "join writes mp4, mov, mkv or webm, not .wav: join first, then take the .wav from the joined file",
-        );
+        conflict(&format!(
+            "join writes mp4, mov, mkv or webm, not {kind}: join first, then take the {kind} from the joined file"
+        ));
     }
     if input.is_dir() {
-        conflict("a .wav takes its audio from a video file, not a folder of frames");
+        conflict(&format!(
+            "a {kind} takes its audio from a video or audio file, not a folder of frames"
+        ));
     }
     let picture = [
         (args.profile.is_some(), "--profile"),
@@ -275,12 +282,27 @@ fn wav(
         (args.crf.is_some(), "--crf"),
         (args.qp.is_some(), "--qp"),
         (args.tune.is_some(), "--tune"),
-        (args.audio_bitrate.is_some(), "--audio-bitrate"),
+        (args.audio_bitrate.is_some() && !opus, "--audio-bitrate"),
+        (args.rate.is_some() && opus, "--rate"),
     ];
     if let Some((_, flag)) = picture.iter().find(|(set, _)| *set) {
-        conflict(&format!(
-            "{flag} doesn't apply to .wav, which is uncompressed audio"
-        ));
+        conflict(&if opus {
+            format!("{flag} doesn't apply to .opus, which is audio alone at 48000 Hz")
+        } else {
+            format!("{flag} doesn't apply to .wav, which is uncompressed audio")
+        });
+    }
+    if opus
+        && let Some(kbps) = args.audio_bitrate
+        && !(OPUS_KBPS_LOWEST..=OPUS_KBPS_HIGHEST).contains(&kbps)
+    {
+        usage_error(
+            sub,
+            ErrorKind::ValueValidation,
+            format!(
+                "an .opus bitrate of {kbps} kbps is outside {OPUS_KBPS_LOWEST}–{OPUS_KBPS_HIGHEST}"
+            ),
+        );
     }
     let from = args.from.unwrap_or(0.0);
     if let Some(to) = args.to
@@ -310,6 +332,13 @@ fn wav(
             to: args.to,
             mono: args.mono,
             rate: args.rate,
+            opus: opus.then(|| {
+                args.audio_bitrate.unwrap_or(if args.mono {
+                    OPUS_KBPS_MONO
+                } else {
+                    OPUS_KBPS_STEREO
+                })
+            }),
         }),
     }
 }

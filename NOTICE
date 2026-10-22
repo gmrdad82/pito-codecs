@@ -30,13 +30,13 @@ Adapted modules (one line per module, filled in by each task):
 
 - src/h264/: from crates/h264 (the H.264 decoder), crates/h264enc (the encoder) and crates/bitstream (bit reader and writer).
 - src/hevc/: from crates/hevc (the H.265 decoder) and crates/bitstream (bit reader, NAL splitting); adapted to the shared Frame and Packet types, with an hvcC writer added.
-- src/aac/: from crates/aac (the AAC-LC decoder and encoder) and crates/bitstream; src/aac/pcm.rs is new.
+- src/aac/: from crates/aac (the AAC-LC decoder and encoder) and crates/bitstream; src/aac/pcm.rs is new. The radix-2 FFT of its MDCT moved unchanged to src/media/fft.rs, which the spectrogram shares.
 - src/mp4/: from crates/isobmff (the MP4 and MOV reader and writer); remux, the MOV brand and the vp09 sample entry are new.
 - src/gpu/: decode from crates/platform/src/vaapi (the VA-API front ends, libva FFI and session) and crates/platform/src/biplanar.rs, with the H.264 and HEVC parameter, slice and DPB code of crates/h264 and crates/hevc in src/gpu/syntax; the VA-API encoders, packed headers, VPP and dma-buf export are new.
 - src/gpu/nvenc/: from crates/platform/src/nvenc (ffi, session, device, HEVC).
 - src/gpu/videotoolbox/: from crates/platform/src/videotoolbox.rs and videotoolbox_encode.rs.
 - src/gpu/media_foundation/: from crates/platform/src/media_foundation and crates/platform/src/annexb.rs.
-- src/filter/: the EBU R128 meter (K-weighting filters, gating histogram, loudness range) and the true-peak polyphase oversampler from crates/audio-dsp; the rest is new.
+- src/filter/: the EBU R128 meter (K-weighting filters, gating histogram, loudness range) and the true-peak polyphase oversampler from crates/audio-dsp; the rest is new, the spectrogram in src/filter/spectrum.rs included, with its colour stops sampled from matplotlib's inferno colour map (CC0 1.0, Nathaniel J. Smith and Stefan van der Walt) and its 5x7 glyphs taken from this package's bench charts.
 - src/vp9/: the VP9 decoder from crates/vp9 (header and superframe parsing, boolean decoder, probability adaptation, tiles, prediction, transforms, loop filter, frame threading); the shared Frame and Packet front and the bit reader (from crates/bitstream) are adapted.
 - src/opus/: the decoder (SILK, CELT, hybrid, multistream, OpusHead) from crates/opus; the range encoder, the FFT butterflies and the Ogg reader and writer are new.
 - src/mkv/: the Matroska and WebM reader (EBML, lacing, Cues, damage resync) from crates/matroska; the writer, remux and MP4 to MKV are reworked or new.

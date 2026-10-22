@@ -2032,3 +2032,209 @@ fn linear_light_resize_keeps_light_and_alpha_edges() {
         assert!(p.data.iter().all(|&v| v.abs_diff(want) <= 1), "{want}");
     }
 }
+
+fn sine_buffer(hz: f64, seconds: f64, rate: u32) -> AudioBuffer {
+    let n = (seconds * f64::from(rate)) as usize;
+    let mut b = AudioBuffer::new(rate, 2);
+    for i in 0..n {
+        let v = (0.5 * (2.0 * std::f64::consts::PI * hz * i as f64 / f64::from(rate)).sin()) as f32;
+        b.samples.extend_from_slice(&[v, v]);
+    }
+    b
+}
+
+fn has_text(img: &Rgba, a: spectrum::Area) -> bool {
+    (a.y..a.y + a.height).any(|y| {
+        (a.x..a.x + a.width).any(|x| {
+            let at = (y as usize * img.width as usize + x as usize) * 4;
+            img.data[at..at + 3] == spectrum::TEXT
+        })
+    })
+}
+
+#[test]
+fn spectrogram_size_and_axis_labels() {
+    let opts = spectrum::Options::default();
+    let s = spectrogram(&sine_buffer(1000.0, 3.0, 48_000), &opts).unwrap();
+    assert_eq!((s.image.width, s.image.height), (1200, 360));
+    assert_eq!(s.image.data.len(), 1200 * 360 * 4);
+    let (plot, bar) = (s.plot, s.bar);
+    assert!(plot.x > 0 && plot.y > 0 && plot.width >= 1000 && plot.height >= 280);
+    assert!(bar.x > plot.x + plot.width && bar.x + bar.width < 1200);
+    assert_eq!(bar.y, plot.y);
+    assert_eq!(bar.height, plot.height);
+    for l in &s.labels {
+        let a = l.area;
+        assert!(a.x >= 0 && a.y >= 0, "{l:?}");
+        assert!(a.x + a.width <= 1200 && a.y + a.height <= 360, "{l:?}");
+        assert!(has_text(&s.image, a), "{l:?} is not drawn");
+    }
+    let of = |axis| {
+        s.labels
+            .iter()
+            .filter(|l| l.axis == axis && l.value.is_some())
+            .collect::<Vec<_>>()
+    };
+    let title = |axis| {
+        s.labels
+            .iter()
+            .find(|l| l.axis == axis && l.value.is_none())
+            .unwrap()
+    };
+    let freq = of(spectrum::Axis::Frequency);
+    let texts: Vec<&str> = freq.iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(texts, ["0", "2", "4", "6", "8", "10", "12"]);
+    assert_eq!(freq[0].at, plot.y + plot.height - 1);
+    assert_eq!(freq.last().unwrap().at, plot.y);
+    for l in &freq {
+        assert_eq!(l.area.x + l.area.width, plot.x - 9);
+        assert!(l.area.y <= l.at && l.at < l.area.y + l.area.height);
+        let v = l.value.unwrap();
+        let expect = plot.y + ((1.0 - v / 12_000.0) * f64::from(plot.height)).round() as i32;
+        assert_eq!(l.at, expect.min(plot.y + plot.height - 1));
+    }
+    assert_eq!(title(spectrum::Axis::Frequency).text, "kHz");
+    assert!(title(spectrum::Axis::Frequency).area.y + 14 <= plot.y);
+    let time = of(spectrum::Axis::Time);
+    assert_eq!(time[0].text, "0.0s");
+    assert_eq!(time[0].at, plot.x);
+    assert!(time.len() >= 4);
+    for w in time.windows(2) {
+        assert!(w[0].at < w[1].at && w[0].area.x + w[0].area.width < w[1].area.x);
+    }
+    for l in &time {
+        assert_eq!(l.area.y, plot.y + plot.height + 9);
+        let t = l.value.unwrap();
+        let expect = plot.x + (t / 3.0 * f64::from(plot.width)).round() as i32;
+        assert_eq!(l.at, expect.min(plot.x + plot.width - 1));
+    }
+    let level = of(spectrum::Axis::Level);
+    assert_eq!(level[0].text, "0");
+    assert_eq!(level[0].at, bar.y);
+    assert_eq!(level.last().unwrap().text, "-80");
+    for l in &level {
+        assert_eq!(l.area.x, bar.x + bar.width + 9);
+    }
+    assert_eq!(title(spectrum::Axis::Level).text, "dB");
+}
+
+#[test]
+fn spectrogram_puts_a_tone_on_its_row() {
+    let opts = spectrum::Options::default();
+    for (hz, rate) in [(1000.0, 48_000), (3000.0, 16_000), (6000.0, 44_100)] {
+        let s = spectrogram(&sine_buffer(hz, 1.0, rate), &opts).unwrap();
+        let x = s.plot.x + s.plot.width / 2;
+        let row = (s.plot.y..s.plot.y + s.plot.height)
+            .max_by_key(|&y| {
+                let at = (y as usize * 1200 + x as usize) * 4;
+                s.image.data[at..at + 3]
+                    .iter()
+                    .map(|&v| u32::from(v))
+                    .sum::<u32>()
+            })
+            .unwrap();
+        let expect = s.plot.y + ((1.0 - hz / 12_000.0) * f64::from(s.plot.height)) as i32;
+        assert!(
+            (row - expect).abs() <= 1,
+            "{hz} Hz at {rate}: row {row}, expected {expect}"
+        );
+    }
+}
+
+#[test]
+fn spectrogram_refuses_bad_input() {
+    let opts = spectrum::Options::default();
+    assert!(spectrogram(&AudioBuffer::new(48_000, 1), &opts).is_err());
+    let small = spectrum::Options { width: 100, ..opts };
+    assert!(spectrogram(&sine_buffer(1000.0, 0.1, 48_000), &small).is_err());
+    let floor = spectrum::Options {
+        floor_db: 3.0,
+        ..opts
+    };
+    assert!(spectrogram(&sine_buffer(1000.0, 0.1, 48_000), &floor).is_err());
+}
+
+fn sine_tone(hz: f64, amplitude: f64, seconds: f64, rate: u32) -> AudioBuffer {
+    let n = (seconds * f64::from(rate)) as usize;
+    let mut b = AudioBuffer::new(rate, 1);
+    b.samples.extend((0..n).map(|i| {
+        (amplitude * (2.0 * std::f64::consts::PI * hz * i as f64 / f64::from(rate)).sin()) as f32
+    }));
+    b
+}
+
+fn pixel(s: &spectrum::Spectrogram, x: i32, y: i32) -> [u8; 3] {
+    let at = (y as usize * s.image.width as usize + x as usize) * 4;
+    [0, 1, 2].map(|c| s.image.data[at + c])
+}
+
+fn brightest(s: &spectrum::Spectrogram, x: i32) -> (i32, [u8; 3]) {
+    (s.plot.y..s.plot.y + s.plot.height)
+        .map(|y| (y, pixel(s, x, y)))
+        .max_by_key(|(_, p)| p.iter().map(|&v| u32::from(v)).sum::<u32>())
+        .unwrap()
+}
+
+#[test]
+fn spectrogram_levels_hold_over_one_and_many_windows() {
+    let hz = 1500.0;
+    let cases = [
+        (1.5, 1200, 360, 1),
+        (30.0, 1200, 360, 2),
+        (30.0, 320, 160, 9),
+    ];
+    for (seconds, width, height, windows) in cases {
+        let opts = spectrum::Options {
+            width,
+            height,
+            ..spectrum::Options::default()
+        };
+        let plot_width = width as f64 - 152.0;
+        let span = seconds * 48_000.0 / plot_width;
+        assert_eq!((span / 1024.0).ceil() as usize, windows);
+        for (amplitude, db) in [(1.0, 0.0), (0.1, -20.0)] {
+            let s = spectrogram(&sine_tone(hz, amplitude, seconds, 48_000), &opts).unwrap();
+            assert_eq!(s.window, 2048);
+            let expect_row =
+                s.plot.y + ((1.0 - hz / 12_000.0) * f64::from(s.plot.height)).round() as i32;
+            let want = spectrum::color(((db + 90.0) / 90.0) as f32);
+            for x in [
+                s.plot.x + s.plot.width / 3,
+                s.plot.x + s.plot.width / 2,
+                s.plot.x + s.plot.width * 2 / 3,
+            ] {
+                let (row, got) = brightest(&s, x);
+                assert!(
+                    (row - expect_row).abs() <= 1,
+                    "{seconds} s at {width}x{height}, {db} dB: row {row}, expected {expect_row}"
+                );
+                assert!(
+                    got.iter().zip(want).all(|(&g, w)| g.abs_diff(w) <= 2),
+                    "{seconds} s at {width}x{height}, {db} dB: {got:?}, expected {want:?}"
+                );
+                let far = s.plot.y + s.plot.height / 8;
+                assert!(
+                    pixel(&s, x, far).iter().map(|&v| u32::from(v)).sum::<u32>() < 120,
+                    "{seconds} s at {width}x{height}: energy at 10.5 kHz"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn spectrogram_leaves_rows_above_nyquist_blank() {
+    let s = spectrogram(
+        &sine_tone(1000.0, 0.5, 2.0, 16_000),
+        &spectrum::Options::default(),
+    )
+    .unwrap();
+    let x = s.plot.x + s.plot.width / 2;
+    let row = |hz: f64| s.plot.y + ((1.0 - hz / 12_000.0) * f64::from(s.plot.height)) as i32;
+    for hz in [8_200.0, 10_000.0, 11_900.0] {
+        assert_eq!(pixel(&s, x, row(hz)), spectrum::BACKGROUND, "{hz} Hz");
+    }
+    for hz in [500.0, 4_000.0, 7_800.0] {
+        assert_ne!(pixel(&s, x, row(hz)), spectrum::BACKGROUND, "{hz} Hz");
+    }
+}

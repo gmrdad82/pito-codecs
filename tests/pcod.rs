@@ -114,6 +114,14 @@ fn usage_errors_exit_2_like_clap() {
         &["probe", "--version"],
         &["join", "a.mp4", "out.mp4"],
         &["join", "a.mp4", "b.mp4", "out.gif"],
+        &["in.wav", "out.opus", "--rate", "44100"],
+        &["in.wav", "out.opus", "--audio-bitrate", "600"],
+        &["in.wav", "out.opus", "--audio-bitrate", "15"],
+        &["in.wav", "out.ogg", "--crf", "20"],
+        &["spectrum", "in.wav"],
+        &["spectrum", "in.wav", "out.png", "--floor-db", "3"],
+        &["spectrum", "in.wav", "out.png", "--max-hz", "50"],
+        &["spectrum", "in.wav", "out.png", "--width", "100"],
     ];
     for args in cases {
         let out = run(args);
@@ -533,5 +541,341 @@ fn audio_only_wavs_probe_as_audio() {
         let shown = text(&shown.stdout);
         assert!(shown.starts_with("container  WAV"), "{name}: {shown}");
         assert!(!shown.contains("video"), "{name}: {shown}");
+    }
+}
+
+fn voice(path: &Path, seconds: f64) -> Vec<f32> {
+    const RATE: u32 = 48_000;
+    let n = (seconds * f64::from(RATE)) as usize;
+    let mut seed = 0x1234_5678u32;
+    let mut samples = Vec::with_capacity(n * 2);
+    for i in 0..n {
+        let t = i as f64 / f64::from(RATE);
+        let env = if (i / 12_000) % 4 == 3 { 0.2 } else { 1.0 };
+        for f in [440.0, 660.0] {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let noise = (f64::from(seed >> 9) / f64::from(1u32 << 23) - 0.5) * 0.05;
+            let v = 0.3 * (std::f64::consts::TAU * f * t).sin()
+                + 0.1 * (std::f64::consts::TAU * 3150.0 * t).sin()
+                + noise;
+            let q = (v * env * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
+            samples.push(f32::from(q) / 32768.0);
+        }
+    }
+    let pcm: Vec<u8> = samples
+        .iter()
+        .flat_map(|&s| ((s * 32768.0) as i16).to_le_bytes())
+        .collect();
+    let mut wav = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + pcm.len() as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&RATE.to_le_bytes());
+    wav.extend_from_slice(&(RATE * 4).to_le_bytes());
+    wav.extend_from_slice(&4u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&pcm);
+    fs::write(path, wav).unwrap();
+    samples
+}
+
+fn snr_db(reference: &[f32], decoded: &[f32]) -> f64 {
+    let (mut s, mut e) = (0f64, 0f64);
+    for (a, b) in reference.iter().zip(decoded) {
+        s += f64::from(*a).powi(2);
+        e += f64::from(*a - *b).powi(2);
+    }
+    10.0 * (s / e.max(1e-20)).log10()
+}
+
+#[test]
+fn opus_output_round_trips_through_our_decoder() {
+    let out = dir("opus");
+    let wav = out.join("voice.wav");
+    let stereo = voice(&wav, 2.0);
+    let mono: Vec<f32> = stereo
+        .chunks_exact(2)
+        .map(|f| (f[0] + f[1]) / 2.0)
+        .collect();
+    let cases: [(&str, &[&str], usize, Option<f64>); 3] = [
+        ("stereo.opus", &[], 2, Some(10.0)),
+        ("mono.ogg", &["--mono"], 1, Some(10.0)),
+        ("voice.opus", &["--mono", "--audio-bitrate", "16"], 1, None),
+    ];
+    let mut sizes = Vec::new();
+    for (name, flags, channels, floor) in cases {
+        let path = out.join(name);
+        let mut args = vec![wav.to_str().unwrap(), path.to_str().unwrap()];
+        args.extend_from_slice(flags);
+        let result = run(&args);
+        ok(&result);
+        assert_eq!(text(&result.stdout).trim(), path.to_str().unwrap());
+        let data = fs::read(&path).unwrap();
+        sizes.push(data.len());
+        let ogg = pito_codecs::opus::ogg::OggOpus::parse(&data).unwrap();
+        assert!(ogg.warnings.is_empty(), "{name}: {:?}", ogg.warnings);
+        assert_eq!(ogg.head.channels, channels, "{name}");
+        assert_eq!(ogg.head.input_sample_rate, 48_000, "{name}");
+        let decoded = ogg.decode().unwrap();
+        assert_eq!((decoded.rate, decoded.channels), (48_000, channels as u16));
+        assert_eq!(decoded.frames(), 96_000, "{name}");
+        let reference = if channels == 2 { &stereo } else { &mono };
+        let snr = snr_db(reference, &decoded.samples);
+        eprintln!("{name}: {} bytes, snr {snr:.2} dB", data.len());
+        if let Some(floor) = floor {
+            assert!(snr > floor, "{name}: snr {snr:.2} dB, floor {floor} dB");
+        }
+        let p = probe(&path, &Prefs::default()).unwrap();
+        assert_eq!(p.audio.len(), 1);
+        assert_eq!(p.audio[0].codec, "opus");
+        assert!((p.duration - 2.0).abs() < 1e-6, "{name}: {}", p.duration);
+    }
+    assert!(sizes[2] < sizes[1] && sizes[1] < sizes[0], "{sizes:?}");
+    let again = run(&[
+        wav.to_str().unwrap(),
+        out.join("stereo.opus").to_str().unwrap(),
+    ]);
+    assert_eq!(again.status.code(), Some(1));
+}
+
+fn tone_power(samples: &[f32], stride: usize, offset: usize, hz: f64) -> f64 {
+    let w = std::f64::consts::TAU * hz / 48_000.0;
+    let coeff = 2.0 * w.cos();
+    let (mut s1, mut s2) = (0f64, 0f64);
+    let n = samples.len() / stride;
+    for i in n / 8..n - n / 8 {
+        let s0 = f64::from(samples[i * stride + offset]) + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    s1 * s1 + s2 * s2 - coeff * s1 * s2
+}
+
+#[test]
+fn opus_output_keeps_the_voice_band() {
+    let out = dir("opus-band");
+    let wav = out.join("voice.wav");
+    let stereo = voice(&wav, 2.0);
+    let mono: Vec<f32> = stereo
+        .chunks_exact(2)
+        .map(|f| (f[0] + f[1]) / 2.0)
+        .collect();
+    let cases: [(&str, &[&str], usize); 3] = [
+        ("mono16.opus", &["--mono", "--audio-bitrate", "16"], 1),
+        ("stereo24.opus", &["--audio-bitrate", "24"], 2),
+        ("mono24.opus", &["--mono", "--audio-bitrate", "24"], 1),
+    ];
+    let mut wrong = Vec::new();
+    for (name, flags, channels) in cases {
+        let path = out.join(name);
+        let mut args = vec![wav.to_str().unwrap(), path.to_str().unwrap()];
+        args.extend_from_slice(flags);
+        ok(&run(&args));
+        let data = fs::read(&path).unwrap();
+        let ogg = pito_codecs::opus::ogg::OggOpus::parse(&data).unwrap();
+        assert!(ogg.warnings.is_empty(), "{name}: {:?}", ogg.warnings);
+        assert_eq!(ogg.head.channels, channels, "{name}");
+        for i in 0..ogg.packets.len() {
+            let toc = ogg.packet(i)[0];
+            assert!(toc >> 3 >= 16, "{name}: packet {i} toc {toc:#04x}");
+            assert_eq!(
+                toc & 4 != 0,
+                channels == 2,
+                "{name}: packet {i} toc {toc:#04x}"
+            );
+        }
+        let decoded = ogg.decode().unwrap();
+        assert_eq!((decoded.rate, decoded.channels), (48_000, channels as u16));
+        assert_eq!(decoded.frames(), 96_000, "{name}");
+        let p = probe(&path, &Prefs::default()).unwrap();
+        assert!((p.duration - 2.0).abs() < 1e-6, "{name}: {}", p.duration);
+        for ch in 0..channels {
+            let (reference, stride, tones, absent): (&[f32], usize, &[f64], Option<f64>) =
+                match (channels, ch) {
+                    (1, _) => (&mono, 1, &[440.0, 660.0, 3150.0], None),
+                    (_, 0) => (&stereo, 2, &[440.0, 3150.0], Some(660.0)),
+                    _ => (&stereo, 2, &[660.0, 3150.0], Some(440.0)),
+                };
+            for &hz in tones {
+                let want = tone_power(reference, stride, ch, hz);
+                let got = tone_power(&decoded.samples, channels, ch, hz);
+                let db = 10.0 * (got / want).log10();
+                eprintln!("{name}: channel {ch} {hz} Hz {db:+.2} dB");
+                if db.abs() >= 1.0 {
+                    wrong.push(format!("{name}: channel {ch} {hz} Hz off by {db:.2} dB"));
+                }
+            }
+            if let Some(hz) = absent {
+                let leak = tone_power(&decoded.samples, channels, ch, hz)
+                    / tone_power(&decoded.samples, channels, ch, tones[0]);
+                let db = 10.0 * leak.log10();
+                eprintln!("{name}: channel {ch} {hz} Hz leak {db:+.2} dB");
+                if db >= -20.0 {
+                    wrong.push(format!(
+                        "{name}: channel {ch} carries {hz} Hz at {db:.2} dB"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+#[test]
+fn spectrum_writes_a_png_of_the_asked_size() {
+    let out = dir("spectrum");
+    let wav = out.join("voice.wav");
+    voice(&wav, 1.5);
+    let png_path = out.join("voice.png");
+    let result = run(&[
+        "spectrum",
+        wav.to_str().unwrap(),
+        png_path.to_str().unwrap(),
+        "--json",
+    ]);
+    ok(&result);
+    let json = text(&result.stdout);
+    assert_eq!(field(&json, "width"), Some("1200"));
+    assert_eq!(field(&json, "height"), Some("360"));
+    assert_eq!(field(&json, "window"), Some("2048"));
+    assert_eq!(field(&json, "max_hz"), Some("12000"));
+    assert_eq!(field(&json, "floor_db"), Some("-90"));
+    let img = pito_codecs::png::decode(&fs::read(&png_path).unwrap()).unwrap();
+    assert_eq!((img.width, img.height), (1200, 360));
+    let opus = out.join("voice.opus");
+    ok(&run(&[wav.to_str().unwrap(), opus.to_str().unwrap()]));
+    let small = out.join("small.png");
+    ok(&run(&[
+        "spectrum",
+        opus.to_str().unwrap(),
+        small.to_str().unwrap(),
+        "--width",
+        "640",
+        "--height",
+        "200",
+        "--max-hz",
+        "8000",
+        "--floor-db",
+        "-60",
+    ]));
+    let img = pito_codecs::png::decode(&fs::read(&small).unwrap()).unwrap();
+    assert_eq!((img.width, img.height), (640, 200));
+    let wrong = run(&[
+        "spectrum",
+        wav.to_str().unwrap(),
+        out.join("voice.jpg").to_str().unwrap(),
+    ]);
+    assert_eq!(wrong.status.code(), Some(1));
+    assert!(text(&wrong.stderr).starts_with("pcod: "));
+    let track = run(&[
+        "spectrum",
+        wav.to_str().unwrap(),
+        out.join("track.png").to_str().unwrap(),
+        "--track",
+        "3",
+    ]);
+    assert_eq!(track.status.code(), Some(1));
+    assert!(text(&track.stderr).contains("no audio track 3"));
+    let missing = run(&[
+        "spectrum",
+        out.join("gone.wav").to_str().unwrap(),
+        out.join("gone.png").to_str().unwrap(),
+    ]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(text(&missing.stderr).starts_with("pcod: "));
+    assert!(!out.join("track.png").exists() && !out.join("gone.png").exists());
+    assert!(partials(&out).is_empty(), "{:?}", partials(&out));
+}
+
+#[test]
+fn spectrum_keeps_an_existing_output_unless_forced() {
+    let out = dir("spectrum-force");
+    let wav = out.join("voice.wav");
+    voice(&wav, 1.0);
+    let png_path = out.join("cover.png");
+    fs::write(&png_path, b"keep me").unwrap();
+    let args = [
+        "spectrum",
+        wav.to_str().unwrap(),
+        png_path.to_str().unwrap(),
+    ];
+    let refused = run(&args);
+    assert_eq!(refused.status.code(), Some(1));
+    let err = text(&refused.stderr);
+    assert!(
+        err.starts_with("pcod: ") && err.contains("already exists"),
+        "{err}"
+    );
+    assert!(err.contains("--force"), "{err}");
+    assert_eq!(fs::read(&png_path).unwrap(), b"keep me");
+    let disguised = out.join("audio.png");
+    fs::copy(&wav, &disguised).unwrap();
+    let d = disguised.to_str().unwrap();
+    let same = run(&["spectrum", d, d, "--force"]);
+    assert_eq!(same.status.code(), Some(1));
+    assert!(text(&same.stderr).contains("the output is the input"));
+    assert_eq!(fs::read(&disguised).unwrap(), fs::read(&wav).unwrap());
+    let mut forced = args.to_vec();
+    forced.push("--force");
+    ok(&run(&forced));
+    let img = pito_codecs::png::decode(&fs::read(&png_path).unwrap()).unwrap();
+    assert_eq!((img.width, img.height), (1200, 360));
+    assert!(partials(&out).is_empty(), "{:?}", partials(&out));
+}
+
+fn ogg_page(body: &[u8]) -> Vec<u8> {
+    let mut page = Vec::new();
+    page.extend_from_slice(b"OggS");
+    page.extend_from_slice(&[0, 2]);
+    page.extend_from_slice(&[0; 8]);
+    page.extend_from_slice(&7u32.to_le_bytes());
+    page.extend_from_slice(&[0; 8]);
+    page.push(1);
+    page.push(body.len() as u8);
+    page.extend_from_slice(body);
+    page
+}
+
+#[test]
+fn ogg_that_is_not_opus_is_refused_by_name() {
+    let out = dir("ogg-other");
+    let mut vorbis = b"\x01vorbis".to_vec();
+    vorbis.resize(30, 0);
+    let mut flac = b"\x7fFLAC".to_vec();
+    flac.resize(30, 0);
+    let cases = [
+        ("talk.ogg", ogg_page(&vorbis), "Ogg Vorbis is not decoded"),
+        ("talk.oga", ogg_page(&flac), "Ogg FLAC is not decoded"),
+        (
+            "odd.ogg",
+            ogg_page(&[9; 30]),
+            "this Ogg stream is not decoded",
+        ),
+    ];
+    for (name, data, want) in cases {
+        let path = out.join(name);
+        fs::write(&path, data).unwrap();
+        let err = probe(&path, &Prefs::default()).unwrap_err().to_string();
+        assert!(err.contains(want), "{name}: {err}");
+        for args in [
+            vec!["probe", path.to_str().unwrap()],
+            vec![
+                "spectrum",
+                path.to_str().unwrap(),
+                out.join("s.png").to_str().unwrap(),
+            ],
+            vec![path.to_str().unwrap(), out.join("o.wav").to_str().unwrap()],
+        ] {
+            let r = run(&args);
+            assert_eq!(r.status.code(), Some(1), "{args:?}");
+            let stderr = text(&r.stderr);
+            assert!(stderr.contains(want), "{args:?}: {stderr}");
+            assert_eq!(stderr.lines().count(), 1, "{args:?}: {stderr}");
+        }
     }
 }
