@@ -18,6 +18,8 @@ use pito_codecs::{h264, hevc};
 
 type Fail = Box<dyn Error + Send + Sync>;
 
+#[path = "pcod/filmstrip.rs"]
+mod filmstrip;
 #[path = "pcod/frames.rs"]
 mod frames;
 #[path = "pcod/json.rs"]
@@ -246,9 +248,9 @@ enum Command {
     },
     #[command(
         about = "Write stills of a video as PNGs and/or one contact sheet",
-        long_about = "Write stills of a video as PNGs and/or one contact sheet\n\nThe stills are N evenly spaced over the video (--count, 12 by default, or rows x cols when both are given for a sheet) or at the given times (--at). Each is scaled to --height keeping its shape. --out writes still-001.png, still-002.png, ... into a folder; --sheet writes one PNG of rows x cols stills on black with --pad pixels between and around them. --json prints each still's time, size and path.\n\nWith --from and --to, every frame from the first at or after --from to the last before --to goes to --out as 000000.png, 000001.png, ... (the names pcod frames reads), at the source's rate or at --fps (the nearest frame for each), scaled to --size or to --height keeping the shape. One decode pass, each PNG written as its frame decodes. A range of more than 100,000 frames is refused unless --force, which also replaces the numbered PNGs --out already holds; a folder with any other PNG is refused. --json prints the count, rate, size and folder.",
+        long_about = "Write stills of a video as PNGs and/or one contact sheet\n\nThe stills are N evenly spaced over the video (--count, 12 by default, or rows x cols when both are given for a sheet) or at the given times (--at). Each is scaled to --height keeping its shape. --out writes still-001.png, still-002.png, ... into a folder; --sheet writes one PNG of rows x cols stills on black with --pad pixels between and around them. --json prints each still's time, size and path.\n\nWith --from and --to, every frame from the first at or after --from to the last before --to goes to --out as 000000.png, 000001.png, ... (the names pcod frames reads), at the source's rate, at --fps or one per --every interval (the nearest frame for each), scaled to --size or to --height keeping the shape. --fps or --every without --from and --to takes the whole video. One decode pass, each frame written as it decodes. A range of more than 100,000 frames is refused unless --force, which also replaces the numbered frames --out already holds; a folder with any other PNG is refused for PNG frames. --json prints the count, rate, size, folder and each written file with its time.\n\n--format writes the --out images as png (the default), jpeg or webp, with --quality from 1 to 100 for jpeg and webp (85 by default); the sheet stays PNG.",
         group(ArgGroup::new("written").args(["out", "sheet"]).required(true).multiple(true)),
-        group(ArgGroup::new("range").args(["from", "to"]).multiple(true))
+        group(ArgGroup::new("range").args(["from", "to", "fps", "every"]).multiple(true))
     )]
     Stills {
         #[arg(help = "The video: MP4, MOV, MKV or WebM")]
@@ -277,22 +279,30 @@ enum Command {
         #[arg(
             long,
             value_parser = args::rate_of,
-            requires = "range",
-            help = "With --from or --to: the rate to take frames at, the nearest frame for each [default: the source's]"
+            conflicts_with_all = ["count", "at", "sheet", "seek"],
+            help = "The rate to take frames at, the nearest frame for each, over --from and --to or the whole video [default: the source's]"
         )]
         fps: Option<(u32, u32)>,
+        #[arg(
+            long,
+            value_parser = args::every_of,
+            allow_hyphen_values = true,
+            conflicts_with_all = ["fps", "count", "at", "sheet", "seek"],
+            help = "One frame per interval (2s, 500ms, 1.5 or 0:01), the nearest frame for each, over --from and --to or the whole video"
+        )]
+        every: Option<f64>,
         #[arg(
             long,
             value_parser = args::size_of,
             requires = "range",
             conflicts_with = "height",
-            help = "With --from or --to: a width, WxH within 1% of the aspect, or 720p, 1080p, 1440p, 2160p"
+            help = "With --from, --to, --fps or --every: a width, WxH within 1% of the aspect, or 720p, 1080p, 1440p, 2160p"
         )]
         size: Option<size::Size>,
         #[arg(
             long,
             requires = "range",
-            help = "With --from or --to: write more than 100,000 frames, and replace the numbered PNGs --out holds"
+            help = "With --from, --to, --fps or --every: write more than 100,000 frames, and replace the numbered frames --out holds"
         )]
         force: bool,
         #[arg(
@@ -304,8 +314,23 @@ enum Command {
         at: Vec<f64>,
         #[arg(long, default_value_t = 360, help = "Height of each still in pixels")]
         height: u32,
-        #[arg(long, help = "A folder to write one PNG per still into")]
+        #[arg(long, help = "A folder to write one image per still into")]
         out: Option<PathBuf>,
+        #[arg(
+            long,
+            value_enum,
+            default_value = "png",
+            requires = "out",
+            help = "The format of the --out images"
+        )]
+        format: FormatKind,
+        #[arg(
+            long,
+            value_parser = clap::value_parser!(u8).range(1..=100),
+            requires = "out",
+            help = "Quality of jpeg and webp images, 1 to 100 [default: 85]"
+        )]
+        quality: Option<u8>,
         #[arg(long, help = "A PNG to write the contact sheet to")]
         sheet: Option<PathBuf>,
         #[arg(long, help = "Rows of the contact sheet [default: to fit]")]
@@ -335,6 +360,79 @@ enum Command {
         #[arg(long, help = "Print each still's time, size and path as JSON")]
         json: bool,
     },
+    #[command(
+        about = "Write a filmstrip of a video: tiles on a cadence in one image",
+        long_about = "Write a filmstrip of a video: tiles on a cadence in one image\n\nA tile is taken every --every (2s, 500ms, 1.5 or 0:01) from the start of the window, or --count tiles are spaced evenly over it (10 by default); --from and --to narrow the window. Each tile is scaled to --height keeping its shape, all from one pass over the video, at the keyframe at or before each time by default, which can sit before --from and is the time its label shows (--seek exact for the exact frame). The tiles sit in one row, or wrap into a grid with --wrap tiles per row or at --max-width pixels, with --gap pixels of --background between and around them; --timecodes writes each tile's time under it. The output's extension picks PNG, JPEG or WebP. A filmstrip over 268 megapixels is refused, and an existing output unless --force is given. --json prints the size, the tile size and each tile's time.",
+        group(ArgGroup::new("cadence").args(["every", "count"]))
+    )]
+    Filmstrip {
+        #[arg(help = "The video: MP4, MOV, MKV or WebM")]
+        file: PathBuf,
+        #[arg(help = "The image to write: .png, .jpg or .webp")]
+        output: PathBuf,
+        #[arg(long, value_parser = args::every_of, allow_hyphen_values = true, help = "A tile every this long: 2s, 500ms, 1.5 or 0:01")]
+        every: Option<f64>,
+        #[arg(long, short = 'n', help = "How many evenly spaced tiles [default: 10]")]
+        count: Option<usize>,
+        #[arg(long, default_value_t = 90, help = "Height of each tile in pixels")]
+        height: u32,
+        #[arg(long, value_parser = time_of, help = "Start the window here (seconds, m:ss or h:mm:ss)")]
+        from: Option<f64>,
+        #[arg(long, value_parser = time_of, help = "End the window here [default: the end]")]
+        to: Option<f64>,
+        #[arg(
+            long,
+            value_enum,
+            default_value = "keyframe",
+            help = "The keyframe at or before each time (fast), or the exact frame"
+        )]
+        seek: SeekKind,
+        #[arg(
+            long,
+            conflicts_with = "max_width",
+            help = "Tiles per row [default: one row]"
+        )]
+        wrap: Option<usize>,
+        #[arg(
+            long,
+            value_name = "PX",
+            help = "Wrap into rows no wider than this; narrower than one tile is refused"
+        )]
+        max_width: Option<u32>,
+        #[arg(
+            long,
+            value_name = "PX",
+            default_value_t = 4,
+            help = "Pixels between and around the tiles"
+        )]
+        gap: u32,
+        #[arg(long, value_parser = filmstrip::color_of, default_value = "#000000", help = "The colour of the gaps, #rrggbb")]
+        background: [u8; 3],
+        #[arg(long, help = "Write each tile's time under it")]
+        timecodes: bool,
+        #[arg(
+            long,
+            value_enum,
+            default_value = "gpu",
+            help = "Decode on the GPU, falling back to the CPU, or on the CPU only"
+        )]
+        route: Where,
+        #[arg(long, help = "Replace an existing output")]
+        force: bool,
+        #[arg(
+            long,
+            help = "Print the size, the tile size and each tile's time as JSON"
+        )]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum FormatKind {
+    Png,
+    #[value(alias = "jpg")]
+    Jpeg,
+    Webp,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -548,11 +646,14 @@ fn run(command: Command) -> Result<(), Fail> {
             from,
             to,
             fps,
+            every,
             size,
             force,
             at,
             height,
             out: dir,
+            format,
+            quality,
             sheet,
             rows,
             cols,
@@ -578,13 +679,67 @@ fn run(command: Command) -> Result<(), Fail> {
                 },
                 prefs: route.prefs(),
                 json,
-                range: (from.is_some() || to.is_some()).then(|| stills::Range {
-                    from: from.unwrap_or(0.0),
-                    to,
-                    fps,
-                    size,
-                    force,
-                }),
+                format: match format {
+                    FormatKind::Png => stills::Format::Png,
+                    FormatKind::Jpeg => stills::Format::Jpeg,
+                    FormatKind::Webp => stills::Format::Webp,
+                },
+                quality,
+                range: (from.is_some() || to.is_some() || fps.is_some() || every.is_some()).then(
+                    || stills::Range {
+                        from: from.unwrap_or(0.0),
+                        to,
+                        fps,
+                        every,
+                        size,
+                        force,
+                    },
+                ),
+            },
+        ),
+        Command::Filmstrip {
+            file,
+            output,
+            every,
+            count,
+            height,
+            from,
+            to,
+            seek,
+            wrap,
+            max_width,
+            gap,
+            background,
+            timecodes,
+            route,
+            force,
+            json,
+        } => filmstrip::run(
+            &mut out,
+            &filmstrip::Job {
+                file,
+                output,
+                cadence: match every {
+                    Some(step) => filmstrip::Cadence::Every(step),
+                    None => filmstrip::Cadence::Count(count.unwrap_or(10)),
+                },
+                height,
+                from,
+                to,
+                seek: match seek {
+                    SeekKind::Exact => media::Seek::Exact,
+                    SeekKind::Keyframe => media::Seek::Keyframe,
+                },
+                prefs: route.prefs(),
+                look: filmstrip::Look {
+                    wrap,
+                    max_width,
+                    gap,
+                    background,
+                    timecodes,
+                },
+                force,
+                json,
             },
         ),
     };

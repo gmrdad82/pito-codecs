@@ -4,7 +4,7 @@ grid = [72, 20]
 frame = "window"
 prompt = "$ "
 typing = "30ms"
-setup = "sh {app}/render/terminal/clip.sh {scratch}/demo"
+setup = "sh {app}/render/terminal/clip.sh {scratch}/demo {fixtures}"
 
 [build]
 command = "cargo build --release --locked --bin pcod"
@@ -45,3 +45,10 @@ tape = "render/terminal/decode.tape"
 launch = "cd {scratch}/demo && export PATH={bin}:$PATH && clear"
 settle = "400ms"
 status = "SHIPPED"
+
+[shots.strip]
+kind = "clip"
+line = "pcod draws a filmstrip of a 1080p clip, a tile every 2 seconds with its time under it"
+tape = "render/terminal/filmstrip.tape"
+launch = "cd {scratch}/demo && export PATH={bin}:$PATH && clear"
+settle = "400ms"

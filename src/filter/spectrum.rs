@@ -319,21 +319,34 @@ impl Canvas {
     }
 
     fn text(&mut self, x: i32, y: i32, text: &str) {
-        for (i, ch) in text.chars().enumerate() {
-            let rows = glyph(ch);
-            let pen = x + i as i32 * ADVANCE;
-            for (r, bits) in rows.iter().enumerate() {
-                for col in 0..5 {
-                    if bits >> (4 - col) & 1 == 1 {
-                        self.fill(
-                            Area {
-                                x: pen + col * SCALE,
-                                y: y + r as i32 * SCALE,
-                                width: SCALE,
-                                height: SCALE,
-                            },
-                            TEXT,
+        draw_text(&mut self.image, x, y, text, TEXT);
+    }
+}
+
+pub const TEXT_HEIGHT: i32 = GLYPH_HEIGHT;
+
+pub fn draw_text(image: &mut Rgba, x: i32, y: i32, text: &str, color: [u8; 3]) {
+    let (w, h) = (image.width as i64, image.height as i64);
+    for (i, ch) in text.chars().enumerate() {
+        let pen = x as i64 + i as i64 * ADVANCE as i64;
+        for (r, bits) in glyph(ch).iter().enumerate() {
+            for col in 0..5i64 {
+                if bits >> (4 - col) & 1 == 0 {
+                    continue;
+                }
+                for dy in 0..SCALE as i64 {
+                    for dx in 0..SCALE as i64 {
+                        let (px, py) = (
+                            pen + col * SCALE as i64 + dx,
+                            y as i64 + r as i64 * SCALE as i64 + dy,
                         );
+                        if px < 0 || py < 0 || px >= w || py >= h {
+                            continue;
+                        }
+                        let at = (py as usize * w as usize + px as usize) * 4;
+                        if let Some(p) = image.data.get_mut(at..at + 3) {
+                            p.copy_from_slice(&color);
+                        }
                     }
                 }
             }

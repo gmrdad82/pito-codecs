@@ -1,0 +1,33 @@
+{
+ "title": "FILMSTRIP AND FIRST FRAME, 10 MIN H.264",
+ "unit": "SECONDS",
+ "better": "lower",
+ "subtitle": "RYZEN 9 9950X, RADEON RX 9060 XT (VA-API), FFMPEG 9.0.2",
+ "date": "2026-10-23",
+ "parties": [
+  { "name": "PCOD" },
+  { "name": "FFMPEG 9.0.2" }
+ ],
+ "groups": [
+  {
+   "name": "60-TILE FILMSTRIP, EXACT FRAMES",
+   "rows": [
+    { "label": "1080P CPU", "values": [0.233, 13.084] },
+    { "label": "1080P GPU FIRST", "values": [0.195, 13.084] },
+    { "label": "4K CPU", "values": [1.162, 23.926] },
+    { "label": "4K GPU FIRST", "values": [0.967, 23.926] }
+   ]
+  },
+  {
+   "name": "FIRST FRAME TO A FULL-SIZE PNG",
+   "rows": [
+    { "label": "1080P CPU", "values": [0.048, 0.085] },
+    { "label": "4K CPU", "values": [0.171, 0.245] }
+   ]
+  }
+ ],
+ "notes": [
+  "WALL TIME OF THE WHOLE COMMAND, MEDIAN OF 3, AT LOAD 34 TO 38 ON 32 THREADS.",
+  "FFMPEG: -VF FPS=1/10,SCALE=-1:90,TILE=60X1 AND -FRAMES:V 1, ON THE CPU."
+ ]
+}

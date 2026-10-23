@@ -385,3 +385,49 @@ pub fn rate_of(text: &str) -> Result<(u32, u32), String> {
 fn gcd(a: u32, b: u32) -> u32 {
     if b == 0 { a.max(1) } else { gcd(b, a % b) }
 }
+
+pub fn every_of(text: &str) -> Result<f64, String> {
+    let bad = || format!("'{text}' is not an interval above zero such as 2s, 500ms, 1.5 or 0:01");
+    let trimmed = text.trim();
+    let seconds = if let Some(ms) = trimmed.strip_suffix("ms") {
+        ms.trim().parse::<f64>().map_err(|_| bad())? / 1000.0
+    } else {
+        let plain = trimmed.strip_suffix('s').unwrap_or(trimmed);
+        super::time_of(plain).map_err(|_| bad())?
+    };
+    if seconds.is_finite() && seconds > 0.0 {
+        Ok(seconds)
+    } else {
+        Err(bad())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_interval_reads_seconds_milliseconds_and_clock_times() {
+        assert_eq!(every_of("2s").unwrap(), 2.0);
+        assert_eq!(every_of("500ms").unwrap(), 0.5);
+        assert_eq!(every_of("1.5").unwrap(), 1.5);
+        assert_eq!(every_of("2.5s").unwrap(), 2.5);
+        assert_eq!(every_of("0:01").unwrap(), 1.0);
+        assert_eq!(every_of("1:30").unwrap(), 90.0);
+        assert_eq!(every_of("1:00:00").unwrap(), 3600.0);
+        assert_eq!(every_of(" 250 ms ").unwrap(), 0.25);
+    }
+
+    #[test]
+    fn an_interval_refuses_zero_negative_and_garbage() {
+        for bad in [
+            "0", "0s", "0ms", "-1", "-2s", "-500ms", "", "s", "ms", "soon", "2x", "1:99", "inf",
+            "NaN", "1e400",
+        ] {
+            let e = every_of(bad).unwrap_err();
+            assert!(e.contains("is not an interval above zero"), "{bad}: {e}");
+            assert!(e.contains(&format!("'{bad}'")), "{bad}: {e}");
+            assert!(!e.contains('\n'), "{bad}: {e}");
+        }
+    }
+}

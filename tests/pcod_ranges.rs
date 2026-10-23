@@ -648,7 +648,7 @@ fn a_frame_range_into_a_folder_with_pngs_needs_force() {
     };
     let plain = args(false);
     let refs: Vec<&str> = plain.iter().map(String::as_str).collect();
-    refused(&run(&refs), "already holds PNGs");
+    refused(&run(&refs), "already holds numbered frames");
     let forced = args(true);
     let refs: Vec<&str> = forced.iter().map(String::as_str).collect();
     ok(&run(&refs));
@@ -766,7 +766,6 @@ fn range_usage_errors_exit_2_like_clap() {
         &[
             "stills", "v.mp4", "--from", "1", "--seek", "keyframe", "--out", "d",
         ],
-        &["stills", "v.mp4", "--fps", "10", "--out", "d"],
         &["stills", "v.mp4", "--size", "640", "--out", "d"],
         &["stills", "v.mp4", "--force", "--out", "d"],
         &[

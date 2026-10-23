@@ -6,7 +6,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
 use pito_codecs::media::{self, Frame, Plane, Prefs, Rgba, Seek, Stills, keyframes, probe};
-use pito_codecs::png;
+use pito_codecs::{jpeg, png, webp};
 use rayon::prelude::*;
 
 use super::json::quoted;
@@ -28,11 +28,53 @@ pub struct Job {
     pub seek: Seek,
     pub prefs: Prefs,
     pub json: bool,
+    pub format: Format,
+    pub quality: Option<u8>,
     pub range: Option<Range>,
 }
 
 const MAX_STILLS: usize = 10_000;
 const DEFAULT_COUNT: usize = 12;
+const DEFAULT_QUALITY: u8 = 85;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Format {
+    Png,
+    Jpeg,
+    Webp,
+}
+
+impl Format {
+    fn ext(self) -> &'static str {
+        match self {
+            Format::Png => "png",
+            Format::Jpeg => "jpg",
+            Format::Webp => "webp",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Format::Png => "png",
+            Format::Jpeg => "jpeg",
+            Format::Webp => "webp",
+        }
+    }
+
+    fn encode(self, image: &Rgba, quality: u8, alpha: bool) -> Result<Vec<u8>, Fail> {
+        Ok(match self {
+            Format::Png if alpha => png::encode_rgba(image)?,
+            Format::Png => png::encode(image)?,
+            Format::Jpeg if alpha => {
+                let mut flat = Rgba::new(image.width, image.height);
+                super::filmstrip::over(&mut flat.data, &image.data, [0, 0, 0]);
+                jpeg::encode(&flat, quality)?
+            }
+            Format::Jpeg => jpeg::encode(image, quality)?,
+            Format::Webp => webp::encode(image, &webp::Options::lossy(f32::from(quality)))?,
+        })
+    }
+}
 
 struct Grid {
     rows: usize,
@@ -118,8 +160,10 @@ fn sheet(stills: &[Rgba], g: &Grid, pad: u32) -> Result<Rgba, Fail> {
     Ok(out)
 }
 
-fn write_png(path: &Path, image: &Rgba) -> Result<(), Fail> {
-    let data = png::encode(image).map_err(|e| about(path, e))?;
+fn write_image(path: &Path, image: &Rgba, format: Format, quality: u8) -> Result<(), Fail> {
+    let data = format
+        .encode(image, quality, false)
+        .map_err(|e| about(path, e))?;
     std::fs::write(path, data).map_err(|e| about(path, e))?;
     Ok(())
 }
@@ -131,15 +175,32 @@ fn path_json(p: Option<&Path>) -> String {
     }
 }
 
+fn quality_note(job: &Job) -> Option<&'static str> {
+    (job.format == Format::Png && job.quality.is_some())
+        .then_some("pcod: png is lossless, so --quality is ignored")
+}
+
 pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
-    if let Some(range) = &job.range {
-        let fresh = job.out.as_deref().is_some_and(|d| !d.exists());
-        let done = run_range(out, job, range);
-        if let (Err(_), true, Some(dir)) = (&done, fresh, job.out.as_deref()) {
-            let _ = std::fs::remove_dir(dir);
+    let done = match &job.range {
+        Some(range) => {
+            let fresh = job.out.as_deref().is_some_and(|d| !d.exists());
+            let done = run_range(out, job, range);
+            if let (Err(_), true, Some(dir)) = (&done, fresh, job.out.as_deref()) {
+                let _ = std::fs::remove_dir(dir);
+            }
+            done
         }
-        return done;
+        None => run_stills(out, job),
+    };
+    if done.is_ok()
+        && let Some(note) = quality_note(job)
+    {
+        eprintln!("{note}");
     }
+    done
+}
+
+fn run_stills(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
     let started = Instant::now();
     let n = count_of(job);
     if n == 0 {
@@ -211,7 +272,7 @@ pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
             std::fs::create_dir_all(dir).map_err(|e| about(dir, e))?;
             let digits = n.to_string().len().max(3);
             (1..=n)
-                .map(|i| Some(dir.join(format!("still-{i:0digits$}.png"))))
+                .map(|i| Some(dir.join(format!("still-{i:0digits$}.{}", job.format.ext()))))
                 .collect()
         }
         None => vec![None; n],
@@ -220,15 +281,21 @@ pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
         Some(g) => Some(sheet(&images, g, job.pad)?),
         None => None,
     };
-    let writes: Vec<(&Path, &Rgba)> = paths
+    let quality = job.quality.unwrap_or(DEFAULT_QUALITY);
+    let writes: Vec<(&Path, &Rgba, Format)> = paths
         .iter()
         .zip(&images)
-        .filter_map(|(p, img)| p.as_deref().map(|p| (p, img)))
-        .chain(job.sheet.as_deref().zip(sheet_image.as_ref()))
+        .filter_map(|(p, img)| p.as_deref().map(|p| (p, img, job.format)))
+        .chain(
+            job.sheet
+                .as_deref()
+                .zip(sheet_image.as_ref())
+                .map(|(p, img)| (p, img, Format::Png)),
+        )
         .collect();
     writes
         .par_iter()
-        .map(|(p, img)| write_png(p, img).map_err(|e| e.to_string()))
+        .map(|(p, img, format)| write_image(p, img, *format, quality).map_err(|e| e.to_string()))
         .collect::<Result<Vec<()>, String>>()?;
     let elapsed = started.elapsed().as_secs_f64();
     if job.json {
@@ -309,8 +376,19 @@ pub struct Range {
     pub from: f64,
     pub to: Option<f64>,
     pub fps: Option<(u32, u32)>,
+    pub every: Option<f64>,
     pub size: Option<Size>,
     pub force: bool,
+}
+
+impl Range {
+    fn step(&self) -> Option<f64> {
+        match (self.every, self.fps) {
+            (Some(every), _) => Some(every),
+            (None, Some((num, den))) => Some(f64::from(den) / f64::from(num.max(1))),
+            (None, None) => None,
+        }
+    }
 }
 
 const MAX_RANGE: u64 = 100_000;
@@ -323,9 +401,9 @@ struct Slots {
 }
 
 impl Slots {
-    fn of(from: f64, end: f64, source: (u32, u32), fps: Option<(u32, u32)>) -> Slots {
+    fn of(from: f64, end: f64, source: (u32, u32), step: Option<f64>) -> Slots {
         let seconds = |(num, den): (u32, u32)| f64::from(den) / f64::from(num.max(1));
-        match fps {
+        match step {
             None => {
                 let (a, b) = (
                     media::first_frame_at(from, source),
@@ -337,8 +415,7 @@ impl Slots {
                     count: u64::try_from(b - a).unwrap_or(0),
                 }
             }
-            Some(rate) => {
-                let step = seconds(rate);
+            Some(step) => {
                 let count = ((end - from) / step - 1e-6).ceil().max(0.0);
                 Slots {
                     first: from,
@@ -417,12 +494,19 @@ impl Feed {
     }
 }
 
-fn numbered(name: &str) -> bool {
-    name.strip_suffix(".png")
+fn numbered(name: &str, ext: &str) -> bool {
+    name.strip_suffix(ext)
+        .and_then(|stem| stem.strip_suffix('.'))
         .is_some_and(|stem| stem.len() >= NAME_DIGITS && stem.bytes().all(|b| b.is_ascii_digit()))
 }
 
-fn ready(dir: &Path, force: bool) -> Result<(), Fail> {
+fn a_frame(name: &str) -> bool {
+    [Format::Png, Format::Jpeg, Format::Webp]
+        .iter()
+        .any(|f| numbered(name, f.ext()))
+}
+
+fn ready(dir: &Path, force: bool, format: Format) -> Result<(), Fail> {
     std::fs::create_dir_all(dir).map_err(|e| about(dir, e))?;
     let mut held = Vec::new();
     let mut other = false;
@@ -433,9 +517,9 @@ fn ready(dir: &Path, force: bool) -> Result<(), Fail> {
             .and_then(|n| n.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        if numbered(&name) {
+        if a_frame(&name) {
             held.push(path);
-        } else if name.ends_with(".png") {
+        } else if format == Format::Png && name.ends_with(".png") {
             other = true;
         }
     }
@@ -448,7 +532,7 @@ fn ready(dir: &Path, force: bool) -> Result<(), Fail> {
     if !force && !held.is_empty() {
         return Err(about(
             dir,
-            "already holds PNGs; use --force to replace its numbered ones, or pick an empty folder",
+            "already holds numbered frames; use --force to replace them, or pick an empty folder",
         ));
     }
     for p in held {
@@ -480,8 +564,7 @@ fn shrunk(media: &Media, (w, h): (u32, u32)) -> Option<u32> {
     (plain && w == width.max(2) & !1).then_some(h)
 }
 
-fn rate_text((num, den): (u32, u32)) -> String {
-    let fps = f64::from(num) / f64::from(den.max(1));
+fn rate_text(fps: f64) -> String {
     if (fps - fps.round()).abs() < 0.0005 {
         format!("{fps:.0}")
     } else {
@@ -494,7 +577,7 @@ fn run_range(out: &mut impl Write, job: &Job, range: &Range) -> Result<(), Fail>
     let dir = job
         .out
         .as_deref()
-        .ok_or("--from and --to write their frames into --out")?;
+        .ok_or("a frame range writes its frames into --out")?;
     let to = range.to.unwrap_or(f64::INFINITY);
     if to <= range.from {
         return Err(format!("--to {to} must come after --from {}", range.from).into());
@@ -520,7 +603,11 @@ fn run_range(out: &mut impl Write, job: &Job, range: &Range) -> Result<(), Fail>
         return Err(about(&job.file, "has no frame rate"));
     }
     let rate = range.fps.unwrap_or(media.fps);
-    let slots = Slots::of(range.from, end, media.fps, range.fps);
+    let per_second = match range.every {
+        Some(every) => 1.0 / every,
+        None => f64::from(rate.0) / f64::from(rate.1.max(1)),
+    };
+    let slots = Slots::of(range.from, end, media.fps, range.step());
     if slots.count == 0 {
         return Err(about(
             &job.file,
@@ -535,7 +622,9 @@ fn run_range(out: &mut impl Write, job: &Job, range: &Range) -> Result<(), Fail>
         .into());
     }
     let size = range_size(&media, range, job.height)?;
-    ready(dir, range.force)?;
+    ready(dir, range.force, job.format)?;
+    let quality = job.quality.unwrap_or(DEFAULT_QUALITY);
+    let ext = job.format.ext();
     let digits = slots.count.to_string().len().max(NAME_DIGITS);
     let lead = (slots.at(0) - f64::from(media.fps.1) / f64::from(media.fps.0)).max(0.0);
     let mut feed = Feed::open(&job.file, &media, lead, size, &job.prefs)?;
@@ -552,7 +641,7 @@ fn run_range(out: &mut impl Write, job: &Job, range: &Range) -> Result<(), Fail>
     let first_png: OnceLock<f64> = OnceLock::new();
     let written = AtomicU64::new(0);
     let stop = AtomicBool::new(false);
-    let made: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    let made: Mutex<Vec<(u64, PathBuf, f64)>> = Mutex::new(Vec::new());
     let (read, wrote) = std::thread::scope(|s| {
         let handles: Vec<_> = (0..workers)
             .map(|_| {
@@ -577,18 +666,25 @@ fn run_range(out: &mut impl Write, job: &Job, range: &Range) -> Result<(), Fail>
                             continue;
                         }
                         let wrote = (|| -> Result<(), Fail> {
+                            let time = frame.time_base.seconds(frame.pts);
                             let data = match (see_through, &mut fix) {
-                                (Some(a), _) => png::encode_rgba(&a.apply(&frame, plane.as_ref())?),
-                                (None, Some(fix)) => png::encode(&fix.apply(frame)?),
+                                (Some(a), _) => job.format.encode(
+                                    &a.apply(&frame, plane.as_ref())?,
+                                    quality,
+                                    true,
+                                ),
+                                (None, Some(fix)) => {
+                                    job.format.encode(&fix.apply(frame)?, quality, false)
+                                }
                                 (None, None) => return Err("no RGBA converter".into()),
                             }
                             .map_err(|e| about(dir, e))?;
                             for k in taken {
-                                let path = dir.join(format!("{k:0digits$}.png"));
+                                let path = dir.join(format!("{k:0digits$}.{ext}"));
                                 std::fs::write(&path, &data).map_err(|e| about(&path, e))?;
                                 made.lock()
                                     .unwrap_or_else(PoisonError::into_inner)
-                                    .push(path);
+                                    .push((k, path, time));
                                 let _ = first_png.set(started.elapsed().as_secs_f64());
                                 written.fetch_add(1, Ordering::Relaxed);
                             }
@@ -607,14 +703,14 @@ fn run_range(out: &mut impl Write, job: &Job, range: &Range) -> Result<(), Fail>
             let mut held: Option<(Frame, Option<Plane>, f64)> = None;
             while let Some((frame, plane)) = feed.next().map_err(|e| about(&job.file, e))? {
                 if stop.load(Ordering::Relaxed) {
-                    return Err(Fail::from("a PNG writer stopped"));
+                    return Err(Fail::from("a frame writer stopped"));
                 }
                 let t = frame.time_base.seconds(frame.pts);
                 if let Some((f, p, at)) = held.take() {
                     let taken = picked(&slots, &mut next, at, Some(t));
                     if !taken.is_empty() {
                         tx.send((f, p, taken))
-                            .map_err(|_| Fail::from("a PNG writer stopped"))?;
+                            .map_err(|_| Fail::from("a frame writer stopped"))?;
                     }
                 }
                 if next >= slots.count {
@@ -627,7 +723,7 @@ fn run_range(out: &mut impl Write, job: &Job, range: &Range) -> Result<(), Fail>
                     let taken = tail(&slots, &mut next, at, step);
                     if !taken.is_empty() {
                         tx.send((f, p, taken))
-                            .map_err(|_| Fail::from("a PNG writer stopped"))?;
+                            .map_err(|_| Fail::from("a frame writer stopped"))?;
                     }
                     Ok(())
                 }
@@ -642,14 +738,14 @@ fn run_range(out: &mut impl Write, job: &Job, range: &Range) -> Result<(), Fail>
             .into_iter()
             .map(|h| {
                 h.join()
-                    .unwrap_or_else(|_| Err("a PNG writer failed".into()))
+                    .unwrap_or_else(|_| Err("a frame writer failed".into()))
             })
             .collect();
         (read, wrote)
     });
     let failed = wrote.into_iter().find_map(Result::err).map_or(read, Err);
     if let Err(e) = failed {
-        for path in made.into_inner().unwrap_or_else(PoisonError::into_inner) {
+        for (_, path, _) in made.into_inner().unwrap_or_else(PoisonError::into_inner) {
             let _ = std::fs::remove_file(path);
         }
         return Err(e);
@@ -661,6 +757,8 @@ fn run_range(out: &mut impl Write, job: &Job, range: &Range) -> Result<(), Fail>
             format!("the stream ends before {:.3} s", slots.at(0)),
         ));
     }
+    let mut files = made.into_inner().unwrap_or_else(PoisonError::into_inner);
+    files.sort_by_key(|(k, _, _)| *k);
     let elapsed = started.elapsed().as_secs_f64();
     let first = first_png.get().copied();
     let speed = if elapsed > 0.0 {
@@ -670,34 +768,60 @@ fn run_range(out: &mut impl Write, job: &Job, range: &Range) -> Result<(), Fail>
     };
     let last = slots.at(count.saturating_sub(1));
     if job.json {
+        let mut listed = String::new();
+        for (i, (k, path, time)) in files.iter().enumerate() {
+            if i > 0 {
+                listed.push(',');
+            }
+            let _ = write!(
+                listed,
+                "{{\"index\":{k},\"slot\":{:.6},\"time\":{time:.6},\"path\":{}}}",
+                slots.at(*k),
+                path_json(Some(path))
+            );
+        }
         writeln!(
             out,
-            "{{\"file\":{},\"from\":{:.6},\"to\":{end:.6},\"first\":{:.6},\"last\":{last:.6},\"count\":{count},\"expected\":{},\"fps\":{},\"rate\":\"{}/{}\",\"width\":{},\"height\":{},\"dir\":{},\"digits\":{digits},\"first_png\":{},\"seconds\":{elapsed:.3},\"frames_per_second\":{speed:.1}}}",
+            "{{\"file\":{},\"from\":{:.6},\"to\":{end:.6},\"first\":{:.6},\"last\":{last:.6},\"count\":{count},\"expected\":{},\"fps\":{},\"rate\":{},\"every\":{},\"format\":\"{}\",\"quality\":{},\"width\":{},\"height\":{},\"dir\":{},\"digits\":{digits},\"first_png\":{},\"seconds\":{elapsed:.3},\"frames_per_second\":{speed:.1},\"files\":[{listed}]}}",
             path_json(Some(&job.file)),
             range.from,
             slots.at(0),
             slots.count,
-            rate_text(rate),
-            rate.0,
-            rate.1,
+            rate_text(per_second),
+            match range.every {
+                Some(_) => "null".to_string(),
+                None => format!("\"{}/{}\"", rate.0, rate.1),
+            },
+            range
+                .every
+                .map_or("null".to_string(), |e| format!("{e:.6}")),
+            job.format.name(),
+            match job.format {
+                Format::Png => "null".to_string(),
+                _ => quality.to_string(),
+            },
             size.0,
             size.1,
             path_json(Some(dir)),
             first.map_or("null".to_string(), |t| format!("{t:.3}")),
         )?;
     } else {
+        let cadence = match range.every {
+            Some(every) => format!("one every {every:.3} s"),
+            None => format!("at {} fps", rate_text(per_second)),
+        };
         writeln!(
             out,
-            "{count} frames, {}x{} at {} fps, {:.3} s to {last:.3} s, in {}",
+            "{count} {} frames, {}x{} {cadence}, {:.3} s to {last:.3} s, in {}",
+            job.format.name(),
             size.0,
             size.1,
-            rate_text(rate),
             slots.at(0),
             dir.display()
         )?;
         writeln!(
             out,
-            "{elapsed:.2} s, {speed:.1} frames/s, the first PNG after {:.3} s",
+            "{elapsed:.2} s, {speed:.1} frames/s, the first image after {:.3} s",
             first.unwrap_or(elapsed)
         )?;
         if count < slots.count {
@@ -757,14 +881,11 @@ mod tests {
 
     #[test]
     fn resampled_slots_count_the_target_rate() {
-        assert_eq!(Slots::of(1.0, 1.5, (24, 1), Some((10, 1))).count, 5);
-        assert_eq!(Slots::of(0.0, 1.0, (24, 1), Some((30, 1))).count, 30);
-        assert_eq!(Slots::of(0.0, 0.05, (24, 1), Some((10, 1))).count, 1);
-        assert_eq!(Slots::of(1.0, 1.0, (24, 1), Some((10, 1))).count, 0);
-        assert_eq!(
-            Slots::of(0.0, 1e300, (24, 1), Some((10, 1))).count,
-            u64::MAX
-        );
+        assert_eq!(Slots::of(1.0, 1.5, (24, 1), Some(0.1)).count, 5);
+        assert_eq!(Slots::of(0.0, 1.0, (24, 1), Some(1.0 / 30.0)).count, 30);
+        assert_eq!(Slots::of(0.0, 0.05, (24, 1), Some(0.1)).count, 1);
+        assert_eq!(Slots::of(1.0, 1.0, (24, 1), Some(0.1)).count, 0);
+        assert_eq!(Slots::of(0.0, 1e300, (24, 1), Some(0.1)).count, u64::MAX);
     }
 
     #[test]
@@ -784,7 +905,7 @@ mod tests {
 
     #[test]
     fn a_resampled_slot_takes_a_nearer_frame_that_starts_before_from() {
-        let s = Slots::of(1.01, 1.5, (24, 1), Some((10, 1)));
+        let s = Slots::of(1.01, 1.5, (24, 1), Some(0.1));
         let times: Vec<f64> = (22..37).map(|k| k as f64 / 24.0).collect();
         let got = all(&s, &times);
         assert_eq!(got[0], Vec::<u64>::new());
@@ -794,7 +915,7 @@ mod tests {
 
     #[test]
     fn a_resampled_slot_takes_the_nearest_frame_and_ties_go_earlier() {
-        let s = Slots::of(1.0, 1.5, (24, 1), Some((10, 1)));
+        let s = Slots::of(1.0, 1.5, (24, 1), Some(0.1));
         let times: Vec<f64> = (20..40).map(|k| k as f64 / 24.0).collect();
         let got = all(&s, &times);
         let mut chosen = vec![0u64; 5];
@@ -814,7 +935,7 @@ mod tests {
 
     #[test]
     fn the_last_frame_takes_only_the_slots_it_covers() {
-        let s = Slots::of(0.0, 0.5, (24, 1), Some((10, 1)));
+        let s = Slots::of(0.0, 0.5, (24, 1), Some(0.1));
         let mut next = 0;
         assert_eq!(tail(&s, &mut next, 0.0, 1.0 / 24.0), vec![0]);
         assert_eq!(tail(&s, &mut next, 0.0, 1.0 / 24.0), Vec::<u64>::new());
@@ -841,7 +962,7 @@ mod tests {
 
     #[test]
     fn a_full_stream_fills_every_slot_through_its_last_frame() {
-        let s = Slots::of(1.0, 2.0, (24, 1), Some((10, 1)));
+        let s = Slots::of(1.0, 2.0, (24, 1), Some(0.1));
         let times: Vec<f64> = (24..48).map(|k| f64::from(k) / 24.0).collect();
         let mut next = 0;
         let mut taken: Vec<u64> = Vec::new();
@@ -888,12 +1009,12 @@ mod tests {
 
     #[test]
     fn numbered_names_are_the_ones_frames_reads() {
-        assert!(numbered("000000.png"));
-        assert!(numbered("1234567.png"));
-        assert!(!numbered("00001.png"));
-        assert!(!numbered("frame01.png"));
-        assert!(!numbered("000000.jpg"));
-        assert!(!numbered("00000a.png"));
+        assert!(numbered("000000.png", "png"));
+        assert!(numbered("1234567.png", "png"));
+        assert!(!numbered("00001.png", "png"));
+        assert!(!numbered("frame01.png", "png"));
+        assert!(!numbered("000000.jpg", "png"));
+        assert!(!numbered("00000a.png", "png"));
     }
 
     #[test]
@@ -903,6 +1024,7 @@ mod tests {
             from: 0.0,
             to: None,
             fps: None,
+            every: None,
             size: None,
             force: false,
         };
@@ -918,21 +1040,193 @@ mod tests {
     fn ready_refuses_pngs_unless_forced_and_never_takes_a_stray_one() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/unit-stills-ready");
         let _ = std::fs::remove_dir_all(&dir);
-        ready(&dir, false).unwrap();
+        ready(&dir, false, Format::Png).unwrap();
         std::fs::write(dir.join("000000.png"), b"x").unwrap();
         std::fs::write(dir.join("000001.png"), b"x").unwrap();
         std::fs::write(dir.join("notes.txt"), b"x").unwrap();
-        assert!(ready(&dir, false).is_err());
-        ready(&dir, true).unwrap();
+        assert!(ready(&dir, false, Format::Png).is_err());
+        ready(&dir, true, Format::Png).unwrap();
         assert!(!dir.join("000000.png").exists());
         assert!(!dir.join("000001.png").exists());
         assert!(dir.join("notes.txt").exists());
         std::fs::write(dir.join("000005.png"), b"x").unwrap();
         std::fs::write(dir.join("cover.png"), b"x").unwrap();
-        assert!(ready(&dir, false).is_err());
-        assert!(ready(&dir, true).is_err());
+        assert!(ready(&dir, false, Format::Png).is_err());
+        assert!(ready(&dir, true, Format::Png).is_err());
         assert!(dir.join("cover.png").exists());
         assert!(dir.join("000005.png").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_range_step_comes_from_every_or_fps_or_the_source() {
+        let r = |fps: Option<(u32, u32)>, every: Option<f64>| Range {
+            from: 0.0,
+            to: None,
+            fps,
+            every,
+            size: None,
+            force: false,
+        };
+        assert_eq!(r(None, None).step(), None);
+        assert_eq!(r(Some((4, 1)), None).step(), Some(0.25));
+        assert_eq!(r(Some((30000, 1001)), None).step(), Some(1001.0 / 30000.0));
+        assert_eq!(r(None, Some(2.0)).step(), Some(2.0));
+    }
+
+    #[test]
+    fn every_two_seconds_over_ten_takes_five_slots_on_the_nearest_frames() {
+        let s = Slots::of(0.0, 10.0, (24, 1), Some(2.0));
+        assert_eq!(s.count, 5);
+        let times: Vec<f64> = (0..240).map(|k| f64::from(k) / 24.0).collect();
+        let got = all(&s, &times);
+        let chosen: Vec<usize> = got
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| !t.is_empty())
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(chosen, vec![0, 48, 96, 144, 192]);
+    }
+
+    #[test]
+    fn an_interval_longer_than_the_window_still_takes_its_first_frame() {
+        let s = Slots::of(1.0, 1.5, (24, 1), Some(5.0));
+        assert_eq!(s.count, 1);
+        assert_eq!(s.at(0), 1.0);
+    }
+
+    #[test]
+    fn a_window_with_an_interval_starts_at_from() {
+        let s = Slots::of(2.5, 6.5, (24, 1), Some(2.0));
+        assert_eq!(s.count, 2);
+        assert_eq!((s.at(0), s.at(1)), (2.5, 4.5));
+    }
+
+    #[test]
+    fn a_jpeg_with_alpha_is_flattened_onto_black_first() {
+        let mut image = Rgba::new(16, 16);
+        let mut flat = Rgba::new(16, 16);
+        for (i, (px, want)) in image
+            .data
+            .chunks_exact_mut(4)
+            .zip(flat.data.chunks_exact_mut(4))
+            .enumerate()
+        {
+            let a = if i % 16 < 8 { 0 } else { 128 };
+            px.copy_from_slice(&[255, 255, 255, a]);
+            let v = if a == 0 { 0 } else { 128 };
+            want.copy_from_slice(&[v, v, v, 255]);
+        }
+        let alpha = Format::Jpeg.encode(&image, 85, true).unwrap();
+        assert_eq!(alpha, Format::Jpeg.encode(&flat, 85, false).unwrap());
+        assert_ne!(alpha, Format::Jpeg.encode(&image, 85, false).unwrap());
+    }
+
+    #[test]
+    fn frame_names_cover_every_format() {
+        assert_eq!(Format::Png.ext(), "png");
+        assert_eq!(Format::Jpeg.ext(), "jpg");
+        assert_eq!(Format::Webp.ext(), "webp");
+        assert!(a_frame("000000.png"));
+        assert!(a_frame("000012.jpg"));
+        assert!(a_frame("000012.webp"));
+        assert!(!a_frame("000012.jpeg"));
+        assert!(!a_frame("000012.gif"));
+        assert!(!a_frame("poster.webp"));
+        assert!(!numbered("000000png", "png"));
+    }
+
+    fn checker() -> Rgba {
+        let mut img = Rgba::new(64, 48);
+        for (i, px) in img.data.chunks_exact_mut(4).enumerate() {
+            let v = if (i % 64 / 8 + i / 64 / 8) % 2 == 0 {
+                255
+            } else {
+                0
+            };
+            px.copy_from_slice(&[v, v, v, 255]);
+        }
+        img
+    }
+
+    #[test]
+    fn png_and_webp_encodes_decode_back_to_the_same_shape() {
+        let img = checker();
+        let png_back = png::decode(&Format::Png.encode(&img, 85, false).unwrap()).unwrap();
+        assert_eq!(png_back.data, img.data);
+        let webp_back = webp::decode(&Format::Webp.encode(&img, 85, false).unwrap()).unwrap();
+        assert_eq!((webp_back.width, webp_back.height), (64, 48));
+        let low = Format::Webp.encode(&img, 1, false).unwrap();
+        let high = Format::Webp.encode(&img, 100, false).unwrap();
+        assert!(low.len() < high.len(), "{} vs {}", low.len(), high.len());
+    }
+
+    #[test]
+    fn png_keeps_alpha_only_when_asked() {
+        let mut img = checker();
+        img.data[3] = 0;
+        let kept = png::decode(&Format::Png.encode(&img, 85, true).unwrap()).unwrap();
+        assert_eq!(kept.data[3], 0);
+        let flat = png::decode(&Format::Png.encode(&img, 85, false).unwrap()).unwrap();
+        assert_eq!(flat.data[3], 255);
+    }
+
+    #[test]
+    fn jpeg_goes_through_the_jpeg_encoder() {
+        let low = Format::Jpeg.encode(&checker(), 5, false).unwrap();
+        let high = Format::Jpeg.encode(&checker(), 100, false).unwrap();
+        for file in [&low, &high] {
+            assert!(file.starts_with(&[0xff, 0xd8, 0xff, 0xe0]));
+            assert!(file.ends_with(&[0xff, 0xd9]));
+        }
+        assert!(low.len() < high.len(), "{} vs {}", low.len(), high.len());
+    }
+
+    #[test]
+    fn ready_for_webp_replaces_numbered_frames_of_any_format_and_ignores_stray_pngs() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/unit-stills-ready-webp");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("000000.png"), b"x").unwrap();
+        std::fs::write(dir.join("000001.webp"), b"x").unwrap();
+        std::fs::write(dir.join("cover.png"), b"x").unwrap();
+        let e = ready(&dir, false, Format::Webp).unwrap_err().to_string();
+        assert!(e.contains("already holds numbered frames"), "{e}");
+        ready(&dir, true, Format::Webp).unwrap();
+        assert!(!dir.join("000000.png").exists());
+        assert!(!dir.join("000001.webp").exists());
+        assert!(dir.join("cover.png").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn job(format: Format, quality: Option<u8>) -> Job {
+        Job {
+            file: PathBuf::from("v.mp4"),
+            count: None,
+            at: Vec::new(),
+            height: 360,
+            out: None,
+            sheet: None,
+            rows: None,
+            cols: None,
+            pad: 8,
+            seek: Seek::Exact,
+            prefs: Prefs::default(),
+            json: false,
+            format,
+            quality,
+            range: None,
+        }
+    }
+
+    #[test]
+    fn only_png_with_a_quality_gets_the_note() {
+        assert!(quality_note(&job(Format::Png, Some(50))).is_some());
+        assert!(quality_note(&job(Format::Png, None)).is_none());
+        assert!(quality_note(&job(Format::Webp, Some(50))).is_none());
+        assert!(quality_note(&job(Format::Jpeg, Some(50))).is_none());
+        let note = quality_note(&job(Format::Png, Some(50))).unwrap();
+        assert!(note.starts_with("pcod: ") && !note.contains('\n'));
     }
 }

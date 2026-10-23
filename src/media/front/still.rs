@@ -163,6 +163,33 @@ impl Stills {
         self.height
     }
 
+    pub fn shown(&self, times: &[f64], seek: Seek) -> Result<Vec<f64>> {
+        if seek == Seek::Exact {
+            return Ok(times.iter().map(|t| t.max(0.0)).collect());
+        }
+        match &self.kind {
+            Kind::File { .. } => {
+                let keys: &[f64] = if times.iter().all(|t| *t <= 0.0) {
+                    &[0.0]
+                } else {
+                    self.keys()
+                };
+                Ok(times.iter().map(|t| snap(keys, *t)).collect())
+            }
+            Kind::Mkv { r, .. } => {
+                let d = Demux::Mkv(r.clone());
+                let v = d.video()?;
+                let t = r
+                    .tracks
+                    .get(v)
+                    .ok_or_else(|| Error::Invalid("no video track".to_string()))?;
+                let keys = cue_keys(r, t, d.start());
+                Ok(times.iter().map(|at| cue_snap(&keys, *at)).collect())
+            }
+            Kind::Alpha(r) => times.iter().map(|at| super::alpha::shown(r, *at)).collect(),
+        }
+    }
+
     pub fn keep(&self, decoders: usize) {
         let n = decoders.max(1);
         self.shared.limit.store(n, Ordering::Relaxed);
@@ -337,21 +364,8 @@ impl Stills {
         let skip = d.stream(v).ok().and_then(|s| native::skipper(&s));
         let start = d.start();
         let shift = d.shift(v);
-        let mut keys: Vec<f64> = r
-            .cues
-            .iter()
-            .filter(|c| c.track == t.number)
-            .map(|c| (t.seconds(c.time as i64) - start).max(0.0))
-            .collect();
-        keys.sort_by(f64::total_cmp);
-        keys.dedup();
-        let snapped = |at: f64| {
-            if keys.is_empty() && at > 0.0 {
-                at
-            } else {
-                snap(&keys, at)
-            }
-        };
+        let keys = cue_keys(r, t, start);
+        let snapped = |at: f64| cue_snap(&keys, at);
         let (wanted, jobs): (Vec<f64>, Vec<Vec<f64>>) = match seek {
             Seek::Keyframe => {
                 let wanted: Vec<f64> = times.iter().map(|at| snapped(*at)).collect();
@@ -565,6 +579,26 @@ fn deliver(wanted: &[f64], batch: &[f64], got: Result<Vec<Rgba>>, emit: Emit) {
     }
 }
 
+fn cue_keys(r: &mkv::Reader, t: &mkv::Track, start: f64) -> Vec<f64> {
+    let mut keys: Vec<f64> = r
+        .cues
+        .iter()
+        .filter(|c| c.track == t.number)
+        .map(|c| (t.seconds(c.time as i64) - start).max(0.0))
+        .collect();
+    keys.sort_by(f64::total_cmp);
+    keys.dedup();
+    keys
+}
+
+fn cue_snap(keys: &[f64], at: f64) -> f64 {
+    if keys.is_empty() && at > 0.0 {
+        at
+    } else {
+        snap(keys, at)
+    }
+}
+
 fn snap(keys: &[f64], at: f64) -> f64 {
     if at <= 0.0 {
         return 0.0;
@@ -629,4 +663,20 @@ fn tagged(d: &Demux, track: usize) -> Color {
         .and_then(|s| s.color)
         .unwrap_or((2, false));
     Color { matrix, full_range }
+}
+
+#[cfg(test)]
+mod shown_tests {
+    use super::*;
+
+    #[test]
+    fn cue_snap_takes_the_cue_at_or_before_and_keeps_the_time_without_cues() {
+        let keys = [0.0, 2.0, 4.0];
+        assert_eq!(cue_snap(&keys, 1.9), 0.0);
+        assert_eq!(cue_snap(&keys, 2.0), 2.0);
+        assert_eq!(cue_snap(&keys, 9.0), 4.0);
+        assert_eq!(cue_snap(&[], 3.5), 3.5);
+        assert_eq!(cue_snap(&[], 0.0), 0.0);
+        assert_eq!(cue_snap(&[], -1.0), 0.0);
+    }
 }

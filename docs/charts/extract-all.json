@@ -1,0 +1,40 @@
+{
+ "title": "FRAMES AND FILMSTRIP, 10 MIN H.264",
+ "unit": "SECONDS",
+ "better": "lower",
+ "subtitle": "RYZEN 9 9950X, RADEON RX 9060 XT (VA-API), FFMPEG 9.0.2",
+ "date": "2026-10-23",
+ "parties": [
+  { "name": "PCOD GPU FIRST" },
+  { "name": "PCOD CPU" },
+  { "name": "FFMPEG 9.0.2" }
+ ],
+ "groups": [
+  {
+   "name": "1080P30",
+   "rows": [
+    { "label": "FIRST FRAME, FULL-SIZE PNG", "values": [0.081, 0.048, 0.085] },
+    { "label": "EVERY FRAME OF 20 S, PNG", "values": [3.174, 2.375, 2.103] },
+    { "label": "EVERY FRAME OF 20 S, JPEG", "values": [2.204, 2.098, 0.908] },
+    { "label": "ONE EVERY 2 S, PNG", "values": [24.804, 13.270, 10.641] },
+    { "label": "ONE EVERY 2 S, JPEG", "values": [23.972, 16.864, 15.754] },
+    { "label": "60-TILE FILMSTRIP, EXACT", "values": [0.195, 0.233, 13.084] }
+   ]
+  },
+  {
+   "name": "2160P30",
+   "rows": [
+    { "label": "FIRST FRAME, FULL-SIZE PNG", "values": [0.192, 0.171, 0.245] },
+    { "label": "EVERY FRAME OF 20 S, PNG", "values": [10.568, 8.386, 6.397] },
+    { "label": "EVERY FRAME OF 20 S, JPEG", "values": [9.122, 6.647, 2.942] },
+    { "label": "ONE EVERY 2 S, PNG", "values": [68.855, 40.637, 31.994] },
+    { "label": "ONE EVERY 2 S, JPEG", "values": [62.702, 38.649, 24.969] },
+    { "label": "60-TILE FILMSTRIP, EXACT", "values": [0.967, 1.162, 23.926] }
+   ]
+  }
+ ],
+ "notes": [
+  "WALL TIME OF THE WHOLE COMMAND, MEDIAN OF 3, AT LOAD 34 TO 38 ON 32 THREADS.",
+  "FRAMES AT THE FILE'S FULL SIZE; JPEG AT QUALITY 85; FFMPEG ON THE CPU."
+ ]
+}

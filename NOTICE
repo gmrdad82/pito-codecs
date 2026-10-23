@@ -335,13 +335,15 @@ For more information, please see
 
 Images in this repository that are not code, where each comes from, and what
 covers it, all under the MIT licence like the code:
-- docs/images/decode.gif: a terminal clip recorded by prec from this
-  repository's own shot (render/terminal.toml and render/terminal/), running
-  src/bin/pcod.rs over a clip render/terminal/clip.sh makes
+- docs/images/decode.gif and strip.gif: terminal clips recorded by prec from
+  this repository's own shots (render/terminal.toml and render/terminal/),
+  running src/bin/pcod.rs over a clip render/terminal/clip.sh makes from the
+  public-domain NASA solstice interview
 - docs/images/chart-*.png: charts drawn by pito-compare (MIT) from the data
   files in docs/charts/, which hold this repository's own measurements on
   public-domain NASA footage ("A Message of Resilience from the International
-  Space Station" and the NASA solstice interview)
+  Space Station" and the NASA solstice interview) and on synthetic test
+  patterns (ffmpeg's testsrc2)
 - docs/images/filmstrip.gif, overlay.gif, animated.gif and animated.webp:
   pictures examples/readme_shots.rs makes with this repository's own decoders,
   overlay blend and GIF and WebP encoders from public-domain NASA footage ("A
@@ -471,6 +473,116 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+The JPEG encoder in src/jpeg/ is adapted from jpeg-encoder 0.7.1
+(https://github.com/vstroebel/jpeg-encoder, commit
+baf40191ae25a32e56a884fa6e001c4fe938d451), licensed (MIT OR Apache-2.0) AND
+IJG; the MIT terms are taken for its own code. From it: the baseline
+interleaved scan, the quality-scaled Annex K quantisation tables and their
+reciprocal quantiser, the Annex K Huffman tables and code construction, the
+64-bit bit writer with byte stuffing, the marker writers, the integer RGB to
+YCbCr conversion and its AVX2 form, the 2x2 box downsampling with libjpeg's
+alternating bias and the edge replication. Changed here: one fixed 4:2:0
+RGBA path written into a Vec, component ids 1 to 3, an RGBA load in the AVX2
+colour conversion, and the 16-bit pass-2 rounding constant of the AVX2 forward
+DCT (the original adds a 32-bit constant, which rounds only half the lanes).
+Its MIT notice:
+
+Copyright (c) 2021 Volker Ströbel
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+The forward DCT in src/jpeg/dct.rs (jpeg-encoder's port of jfdctint.c, the
+slow-but-accurate integer DCT, through mozjpeg and libjpeg-turbo) is based in
+part on the work of the Independent JPEG Group. It carries this notice:
+
+This software is copyright (C) 1991-2020, Thomas G. Lane, Guido Vollbeding.
+All Rights Reserved except as specified below. libjpeg-turbo Modifications:
+Copyright (C) 2015, 2020, D. R. Commander.
+
+The authors make NO WARRANTY or representation, either express or implied,
+with respect to this software, its quality, accuracy, merchantability, or
+fitness for a particular purpose.  This software is provided "AS IS", and you,
+its user, assume the entire risk as to its quality and accuracy.
+
+Permission is hereby granted to use, copy, modify, and distribute this
+software (or portions thereof) for any purpose, without fee, subject to these
+conditions:
+(1) If any part of the source code for this software is distributed, then this
+README file must be included, with this copyright and no-warranty notice
+unaltered; and any additions, deletions, or changes to the original files
+must be clearly indicated in accompanying documentation.
+(2) If only executable code is distributed, then the accompanying
+documentation must state that "this software is based in part on the work of
+the Independent JPEG Group".
+(3) Permission for use of this software is granted only if the user accepts
+full responsibility for any undesirable consequences; the authors accept
+NO LIABILITY for damages of any kind.
+
+These conditions apply to any software derived from or based on the IJG code,
+not just to the unmodified library.  If you use our work, you ought to
+acknowledge us.
+
+Permission is NOT granted for the use of any IJG author's name or company name
+in advertising or publicity relating to this software or products derived from
+it.  This software may be referred to only as "the Independent JPEG Group's
+software".
+
+We specifically permit and encourage the use of this software as the basis of
+commercial products, provided that all warranty or liability claims are
+assumed by the product vendor.
+
+The changes to the IJG code here: translated to Rust, comments removed, the
+block held in a 32-byte aligned array of 16-bit samples.
+
+The AVX2 forward DCT in src/jpeg/avx2.rs is jpeg-encoder's port of
+libjpeg-turbo's jfdctint-avx2.asm, under libjpeg-turbo's SIMD licence (zlib):
+
+Copyright 2009 Pierre Ossman for Cendio AB
+Copyright (C) 2009, 2016, 2018, 2020, D. R. Commander.
+Based on the x86 SIMD extension for IJG JPEG library
+Copyright (C) 1999-2006, MIYASAKA Masaru.
+
+This software is provided 'as-is', without any express or implied
+warranty.  In no event will the authors be held liable for any damages
+arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+   claim that you wrote the original software. If you use this software
+   in a product, an acknowledgment in the product documentation would be
+   appreciated but is not required.
+2. Altered source versions must be plainly marked as such, and must not be
+   misrepresented as being the original software.
+3. This notice may not be removed or altered from any source distribution.
+
+The alterations: translated to Rust intrinsics, comments removed, the pass-2
+rounding constant held in 16-bit lanes as the assembly has it.
 
 The AV1 decode structures in src/gpu/vaapi/av1.rs are transcribed from libva's
 va_dec_av1.h (libva 2.23, https://github.com/intel/libva), Copyright (c) 2019

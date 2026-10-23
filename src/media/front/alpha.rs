@@ -491,3 +491,18 @@ pub(super) fn stills(
     }
     Ok(())
 }
+
+pub(super) fn shown(head: &Arc<mkv::Reader>, from: f64) -> Result<f64> {
+    let start = Demux::Mkv(head.clone()).start();
+    let r: &mkv::Reader<File> = head.full()?;
+    let t = r
+        .video()
+        .and_then(|v| r.tracks.get(v))
+        .ok_or_else(|| Error::Invalid("no video track".to_string()))?;
+    let at = t.ticks(from.max(0.0) + start);
+    let last = t.samples.partition_point(|s| s.pts <= at);
+    let first = t.keyframe_before(last.saturating_sub(1));
+    Ok(t.samples
+        .get(first)
+        .map_or(from.max(0.0), |s| (t.seconds(s.pts) - start).max(0.0)))
+}

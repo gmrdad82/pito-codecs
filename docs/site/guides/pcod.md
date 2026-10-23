@@ -1,11 +1,11 @@
 ---
-title: "Convert, join, probe, decode, encode and take stills with pcod"
-description: "Convert a video or a folder of PNG frames to MP4, MOV, MKV, WebM, GIF or WebP, join clips, look inside a file, decode it on the CPU or the GPU, encode it to H.264 or HEVC, and take stills and contact sheets from the command line."
+title: "Convert, join, probe, decode, encode, extract frames and draw filmstrips with pcod"
+description: "Convert a video or a folder of PNG frames to MP4, MOV, MKV, WebM, GIF or WebP, join clips, look inside a file, decode it on the CPU or the GPU, encode it to H.264 or HEVC, take stills, contact sheets and frames on a cadence as PNG, JPEG or WebP, and draw filmstrips from the command line."
 sidebar:
   order: 1
 ---
 
-pcod is a small command line over the library. `pcod <input> <output>` converts a file or a folder of PNG frames, `join` stitches clips, `probe` shows what is inside a file, `loudness` measures an audio track per EBU R128, `decode` decodes its whole video track and reports the speed, `encode` decodes, encodes and muxes a new MP4, copying the audio, `frames` encodes a folder of PNG frames and a WAV into an MP4, and `stills` writes stills of a video as PNGs and a contact sheet. Every option is in the [command reference](../../reference/cli/).
+pcod is a small command line over the library. `pcod <input> <output>` converts a file or a folder of PNG frames, `join` stitches clips, `probe` shows what is inside a file, `loudness` measures an audio track per EBU R128, `decode` decodes its whole video track and reports the speed, `encode` decodes, encodes and muxes a new MP4, copying the audio, `frames` encodes a folder of PNG frames and a WAV into an MP4, and `stills` writes stills of a video, every frame of a window or one on a cadence, as PNG, JPEG or WebP, and a contact sheet, and `filmstrip` draws tiles of a video on a cadence into one image. Every option is in the [command reference](../../reference/cli/).
 
 The outputs below are from a 10-second 1080p60 H.264 clip cut from NASA's public-domain "A Message of Resilience from the International Space Station", on a 16-core CPU and an AMD card through VA-API. Your speeds will differ.
 
@@ -181,7 +181,7 @@ A time past the end of the video stops with one line, `pcod: clip.mp4: 65.000 s 
 
 ### Frame ranges
 
-`--from` and `--to` write every frame of a window instead: the first frame at or after `--from` to the last before `--to` (the end by default), into `--out` as `000000.png`, `000001.png`, ..., the names `pcod frames` reads, so a range goes back into an MP4 with `pcod frames`; like other stills a range is 360 pixels high by default, so give `--size` (the source's own size, `1920x1080` for a 1080p video) for a round trip at full size. The frames come at the source's rate, or at `--fps` with the frame whose start is nearest each slot (ties go to the earlier frame, so a `pcod --fps` re-encode of the same window, which keeps the frame each slot rounds to, can differ by one frame at some slots); each is scaled to `--size` (a width, `WxH` within 1% of the aspect, or `720p` to `2160p`) or to `--height` keeping its shape. The video is decoded once from the keyframe before `--from`, on the GPU route first (`--route cpu` for the CPU), and each PNG is written as its frame decodes, on every core, so memory stays flat however long the range. A range of more than 100,000 frames is refused unless `--force`; a folder that already holds numbered PNGs is refused too unless `--force`, which replaces them, and a folder with any other PNG is always refused, since `pcod frames` would read it too. A range that fails partway, on a full disk or an unwritable folder, stops at once and removes the PNGs it wrote. `--count`, `--at`, `--sheet` and `--seek` don't go with a range.
+`--from` and `--to` write every frame of a window instead: the first frame at or after `--from` to the last before `--to` (the end by default), into `--out` as `000000.png`, `000001.png`, ..., the names `pcod frames` reads, so a range goes back into an MP4 with `pcod frames`; like other stills a range is 360 pixels high by default, so give `--size` (the source's own size, `1920x1080` for a 1080p video) for a round trip at full size. The frames come at the source's rate, or at `--fps` with the frame whose start is nearest each slot (ties go to the earlier frame, so a `pcod --fps` re-encode of the same window, which keeps the frame each slot rounds to, can differ by one frame at some slots); each is scaled to `--size` (a width, `WxH` within 1% of the aspect, or `720p` to `2160p`) or to `--height` keeping its shape. The video is decoded once from the keyframe before `--from`, on the GPU route first (`--route cpu` for the CPU), and each PNG is written as its frame decodes, on every core, so memory stays flat however long the range. A range of more than 100,000 frames is refused unless `--force`; a folder that already holds numbered frames is refused too unless `--force`, which replaces them, and a folder with any other PNG is always refused for PNG frames, since `pcod frames` would read it too. A range that fails partway, on a full disk or an unwritable folder, stops at once and removes the frames it wrote. `--count`, `--at`, `--sheet` and `--seek` don't go with a range.
 
 ```sh
 pcod stills clip.mp4 --from 1.0 --to 1.5 --out frames
@@ -189,7 +189,27 @@ pcod stills clip.mp4 --from 0:10 --to 0:20 --fps 12 --size 640 --out reel --json
 pcod frames frames back.mp4 --fps 24
 ```
 
-It prints how many frames it wrote, their size and rate, the window and the speed in frames per second with the time to the first PNG; `--json` prints the same as one line: `file`, `from`, `to`, `first` and `last` (the times of the first and last frame taken), `count`, `fps`, `rate`, `width`, `height`, `dir`, `digits`, `first_png`, `seconds` and `frames_per_second`, with `expected`, the frame count the probed length promised. A stream that ends before its probed length stops at its last real frame and says so, `note: the stream ends before its probed length: 59 of 60 frames written`; a window the stream never reaches is refused, `the stream ends before 9.000 s`.
+`--every` takes one frame per interval instead of `--fps` (`2s`, `500ms`, `1.5` or `0:01`; the frame nearest each slot, on the source's timeline from the start of the window), and `--fps` or `--every` with no `--from` and `--to` covers the whole video; `--from 0` takes every frame of it. `--format` writes the frames as `png` (the default), `jpeg` (`jpg`, baseline 4:2:0; a WebM with alpha is flattened onto black, as `filmstrip` flattens it onto `--background`) or `webp` (lossy), named `000000.jpg` or `000000.webp`, with `--quality` from 1 to 100 (85 by default) for JPEG and WebP; PNG ignores `--quality` and says so once. `--format` and `--quality` need `--out`; a contact sheet stays PNG.
+
+```sh
+pcod stills clip.mp4 --every 2s --size 1080p --format jpeg --quality 90 --out posters
+```
+
+It prints how many frames it wrote, their size and rate, the window and the speed in frames per second with the time to the first image; `--json` prints the same as one line: `file`, `from`, `to`, `first` and `last` (the times of the first and last frame taken), `count`, `fps`, `rate`, `every` (the interval in seconds, or null), `format`, `quality` (null for PNG), `width`, `height`, `dir`, `digits`, `first_png` (the seconds to the first image), `seconds`, `frames_per_second` and `files` (each frame's name, in order), with `expected`, the frame count the probed length promised. A stream that ends before its probed length stops at its last real frame and says so, `note: the stream ends before its probed length: 59 of 60 frames written`; a window the stream never reaches is refused, `the stream ends before 9.000 s`.
+
+## Filmstrips
+
+`filmstrip` draws tiles of a video into one image: a tile every `--every` (`2s`, `500ms`, `1.5` or `0:01`, as for `stills`) from the start of the window, or `--count` tiles (10 by default) spaced evenly over it, with `--from` and `--to` narrowing the window. Each tile is scaled to `--height` (90 by default) keeping its shape, all from one pass over the video, on the GPU route first (`--route cpu` for the CPU). By default each tile is the keyframe at or before its time, which is fast and can sit before `--from`; its label shows the time it really shows. `--seek exact` takes the exact frame instead. The tiles sit in one row, or wrap into a grid with `--wrap` tiles per row or at `--max-width` pixels, with `--gap` pixels (4 by default) of `--background` (`#000000`) between and around them, and `--timecodes` writes each tile's time under it. The output's extension picks PNG, JPEG or WebP. A filmstrip over 268 megapixels is refused, and so is an existing output unless `--force`.
+
+```sh
+pcod filmstrip clip.mp4 strip.png --every 2s --seek exact --timecodes
+```
+
+```
+strip.png 824x120, 5 tiles of 160x90 at 0:00 0:02 0:04 0:06 0:08
+```
+
+`--json` prints the same as one line: `file`, `output`, `width`, `height`, `tile_width`, `tile_height`, `tiles`, `cols`, `rows`, `seek`, `times` (the time each tile shows), `asked` (the time each tile was asked for), `bytes` and `seconds`.
 
 ## When something fails
 
@@ -201,4 +221,4 @@ pcod: missing.mp4: No such file or directory
 
 A command line it can't parse prints clap's error and usage on stderr with exit code 2; `pcod --help` and `pcod help <command>` print the full help.
 
-pcod's output is plain text for people; conversions, joins, `probe` and `stills` also print JSON with `--json`. For anything beyond these commands, [use the library](../library/).
+pcod's output is plain text for people; conversions, joins, `probe`, `stills` and `filmstrip` also print JSON with `--json`. For anything beyond these commands, [use the library](../library/).
