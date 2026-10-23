@@ -368,7 +368,7 @@ fn eval_against_libopus() {
     let src =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/fx/speech/clips/resilience.mp4");
     let raw = root.join("speech.f32");
-    if !raw.exists() {
+    crate::fixture::once(&raw, |part| {
         ffmpeg(&[
             "-ss",
             "5",
@@ -382,9 +382,9 @@ fn eval_against_libopus() {
             "48000",
             "-f",
             "f32le",
-            raw.to_str().unwrap(),
+            part.to_str().unwrap(),
         ]);
-    }
+    });
     let pcm = read_f32(&raw);
     for br in std::env::var("EVAL_RATES")
         .map(|s| {

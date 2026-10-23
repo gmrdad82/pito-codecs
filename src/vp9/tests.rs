@@ -289,7 +289,7 @@ fn ensure(f: &Fixture) -> Option<(PathBuf, PathBuf)> {
     }
     let ivf = dir().join(format!("{}.ivf", f.name));
     let yuv = dir().join(format!("{}.yuv", f.name));
-    if !ivf.exists() {
+    crate::fixture::once(&ivf, |tmp| {
         let src = format!(
             "{}=size={}x{}:rate=25,format=yuv444p,{},format={}",
             f.source, f.size.0, f.size.1, f.filter, f.pix_fmt
@@ -297,7 +297,6 @@ fn ensure(f: &Fixture) -> Option<(PathBuf, PathBuf)> {
         let frames = f.frames.to_string();
         let two_pass = f.args.first() == Some(&"2pass");
         let args: Vec<&str> = f.args.iter().copied().filter(|a| *a != "2pass").collect();
-        let tmp = scratch(&format!("{}.ivf", f.name));
         let tmp_s = tmp.to_str().unwrap();
         let log = scratch(&format!("{}.log", f.name));
         let log_s = log.to_str().unwrap();
@@ -323,13 +322,8 @@ fn ensure(f: &Fixture) -> Option<(PathBuf, PathBuf)> {
         base.extend(["-f", "ivf", tmp_s]);
         ff(&base);
         let _ = std::fs::remove_file(format!("{log_s}-0.log"));
-        if let Err(e) = std::fs::rename(&tmp, &ivf) {
-            assert!(std::path::Path::new(&ivf).exists(), "{e}");
-            let _ = std::fs::remove_file(&tmp);
-        }
-    }
-    if !yuv.exists() {
-        let tmp = scratch(&format!("{}.yuv", f.name));
+    });
+    crate::fixture::once(&yuv, |tmp| {
         ff(&[
             "-c:v",
             "vp9",
@@ -343,11 +337,7 @@ fn ensure(f: &Fixture) -> Option<(PathBuf, PathBuf)> {
             f.pix_fmt,
             tmp.to_str().unwrap(),
         ]);
-        if let Err(e) = std::fs::rename(&tmp, &yuv) {
-            assert!(std::path::Path::new(&yuv).exists(), "{e}");
-            let _ = std::fs::remove_file(&tmp);
-        }
-    }
+    });
     Some((ivf, yuv))
 }
 

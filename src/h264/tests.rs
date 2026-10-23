@@ -479,7 +479,7 @@ fn bench_decode(path: &Path, label: &str) {
 fn bench_files(src: &Path) -> (PathBuf, PathBuf) {
     let s = src.to_str().unwrap();
     let p1440 = dir().join("bench_1440.h264");
-    if !p1440.exists() {
+    crate::fixture::once(&p1440, |part| {
         run(&[
             "-i",
             s,
@@ -490,11 +490,11 @@ fn bench_files(src: &Path) -> (PathBuf, PathBuf) {
             "copy",
             "-bsf:v",
             "h264_mp4toannexb",
-            p1440.to_str().unwrap(),
+            part.to_str().unwrap(),
         ]);
-    }
+    });
     let p1080 = dir().join("bench_1080.h264");
-    if !p1080.exists() {
+    crate::fixture::once(&p1080, |part| {
         run(&[
             "-i",
             s,
@@ -509,9 +509,9 @@ fn bench_files(src: &Path) -> (PathBuf, PathBuf) {
             "medium",
             "-crf",
             "20",
-            p1080.to_str().unwrap(),
+            part.to_str().unwrap(),
         ]);
-    }
+    });
     (p1080, p1440)
 }
 

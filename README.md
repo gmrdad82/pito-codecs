@@ -453,7 +453,7 @@ cargo build --release
 cargo test --release
 ```
 
-The tests use the system ffmpeg as an oracle when it is installed and skip those checks when it is not, and the GPU tests skip cleanly without a device. `bin/gate` runs rustfmt, clippy with warnings as errors and the tests, then a release build (`--fast` skips the build). `bin/docs-bundle vX.Y.Z [out dir]` builds `docs-vX.Y.Z.tar.gz`, the documentation each Release carries: the guides in `docs/site`, a command reference made from pcod's own help, the API reference from `cargo doc` and the changelog.
+The tests use the system ffmpeg as an oracle when it is installed and skip those checks when it is not, and the GPU tests skip cleanly without a device. `bin/gate` runs rustfmt, clippy with warnings as errors (also with only the audio features, and for Windows, macOS and Linux on ARM when their std is installed), the tests through cargo-nextest, then a release build (`--fast` skips the build). `bin/docs-bundle vX.Y.Z [out dir]` builds `docs-vX.Y.Z.tar.gz`, the documentation each Release carries: the guides in `docs/site`, a command reference made from pcod's own help, the API reference from `cargo doc` and the changelog.
 
 Every change is checked on the maintainer's machines before it merges: formatting, clippy with warnings as errors, the tests with ffmpeg as the oracle, and the doc tests. Every release runs the full suite and builds pcod for Linux x86-64, Windows x86-64 and macOS on Apple Silicon there too, along with the VA-API tests and the benchmarks on an AMD card; the GitHub Release carries those binaries and their checksums. Media Foundation, NVENC and VideoToolbox are built for their systems; Media Foundation and NVENC have not run on their hardware here.
 

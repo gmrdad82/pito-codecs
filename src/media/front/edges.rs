@@ -66,33 +66,29 @@ fn source(name: &str, codec: &[&str], look: &Look) -> PathBuf {
     std::hash::Hash::hash(&(codec, look.size, look.sar, look.color), &mut hash);
     let key = std::hash::Hasher::finish(&hash);
     let path = dir().join(format!("{name}-{key:016x}.mp4"));
-    if path.exists() {
-        return path;
-    }
-    let part = dir().join(format!("{}.{}.part.mp4", name, std::process::id()));
-    let out = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-y"])
-        .args([
-            "-f",
-            "lavfi",
-            "-i",
-            &format!("testsrc2=size={}:rate=30:duration=12", look.size),
-        ])
-        .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=12"])
-        .args(["-vf", &format!("setsar={}", look.sar)])
-        .args(codec)
-        .args(look.color)
-        .args(["-c:a", "aac", "-b:a", "96k", "-shortest"])
-        .arg(&part)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "ffmpeg: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    std::fs::rename(&part, &path).unwrap();
-    path
+    crate::fixture::once(&path, |part| {
+        let out = Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-y"])
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("testsrc2=size={}:rate=30:duration=12", look.size),
+            ])
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=12"])
+            .args(["-vf", &format!("setsar={}", look.sar)])
+            .args(codec)
+            .args(look.color)
+            .args(["-c:a", "aac", "-b:a", "96k", "-shortest"])
+            .arg(part)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "ffmpeg: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    })
 }
 
 const X264: [&str; 12] = [

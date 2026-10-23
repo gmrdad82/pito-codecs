@@ -10,6 +10,10 @@
     feature = "vp9"
 ))]
 
+#[path = "../src/fixture.rs"]
+#[allow(dead_code)]
+mod fixture;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -24,24 +28,18 @@ fn dir() -> PathBuf {
 }
 
 fn ffmpeg(out: &Path, args: &[&str]) -> bool {
-    if out.exists() {
-        return true;
-    }
-    let part = dir().join(format!(
-        "{}.{}",
-        std::process::id(),
-        out.file_name().unwrap().to_str().unwrap()
-    ));
-    let made = Command::new("ffmpeg")
-        .args(["-v", "error", "-y"])
-        .args(args)
-        .arg(&part)
-        .status()
-        .is_ok_and(|s| s.success());
-    if made && std::fs::rename(&part, out).is_err() {
-        let _ = std::fs::remove_file(&part);
-    }
-    made
+    fixture::once(out, |part| {
+        let made = Command::new("ffmpeg")
+            .args(["-v", "error", "-y"])
+            .args(args)
+            .arg(part)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !made {
+            let _ = std::fs::remove_file(part);
+        }
+    });
+    out.exists()
 }
 
 fn output(args: &[&str], path: &Path, tail: &[&str]) -> Vec<u8> {

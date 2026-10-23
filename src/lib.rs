@@ -67,3 +67,9 @@ pub mod gif;
 
 #[cfg(feature = "png")]
 pub mod png;
+
+#[cfg(test)]
+mod fixture;
+
+#[cfg(test)]
+mod fixture_tests;

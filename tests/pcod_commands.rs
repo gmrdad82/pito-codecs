@@ -1,5 +1,9 @@
 #![cfg(feature = "cli")]
 
+#[path = "../src/fixture.rs"]
+#[allow(dead_code)]
+mod fixture;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -152,25 +156,18 @@ fn has_encoder(name: &str) -> bool {
 fn ffmpeg(name: &str, args: &[&str]) -> Option<PathBuf> {
     let media = root().join("media");
     fs::create_dir_all(&media).unwrap();
-    let path = media.join(name);
-    if path.exists() {
-        return Some(path);
-    }
-    let part = media.join(format!("{}.{name}", std::process::id()));
-    let made = Command::new("ffmpeg")
-        .args(["-v", "error", "-y"])
-        .args(args)
-        .arg(&part)
-        .status()
-        .is_ok_and(|s| s.success());
-    if !made {
-        let _ = fs::remove_file(&part);
-        return None;
-    }
-    if fs::rename(&part, &path).is_err() {
-        let _ = fs::remove_file(&part);
-    }
-    Some(path)
+    let path = fixture::once(&media.join(name), |part| {
+        let made = Command::new("ffmpeg")
+            .args(["-v", "error", "-y"])
+            .args(args)
+            .arg(part)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !made {
+            let _ = fs::remove_file(part);
+        }
+    });
+    path.exists().then_some(path)
 }
 
 fn write_frames(folder: &Path) {

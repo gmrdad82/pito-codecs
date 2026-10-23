@@ -265,72 +265,69 @@ fn x265_recon(f: &Fixture, hevc: &Path, yuv: &Path) -> bool {
     if !x265_cli(f.name) {
         return false;
     }
-    let raw = scratch(&format!("{}.raw.yuv", f.name));
-    let (tmp_hevc, tmp_yuv) = (
-        scratch(&format!("{}.hevc", f.name)),
-        scratch(&format!("{}.yuv", f.name)),
-    );
-    let mut src = format!(
-        "{}=size={}x{}:rate=25,format={}",
-        f.source,
-        f.width,
-        f.height,
-        pix_fmt(f.ten_bit)
-    );
-    if !f.filter.is_empty() {
-        src = format!("{src},{}", f.filter);
-    }
-    let frames = f.frames.to_string();
-    ff(
-        &["-f", "lavfi"],
-        Path::new(&src),
-        &[
-            "-frames:v",
-            &frames,
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            pix_fmt(f.ten_bit),
-        ],
-        &raw,
-    );
-    let depth = if f.ten_bit { "10" } else { "8" };
-    let mut cmd = Command::new("x265");
-    cmd.args(["--log-level", "error", "--input"])
-        .arg(&raw)
-        .args(["--input-res", &format!("{}x{}", f.width, f.height)])
-        .args(["--fps", "25", "--frames", &frames])
-        .args([
-            "--input-depth",
-            depth,
-            "--output-depth",
-            depth,
-            "--recon-depth",
-            depth,
-        ]);
-    for kv in f.args[1..].iter().flat_map(|a| a.split(':')) {
-        let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
-        cmd.arg(format!("--{k}"));
-        if !v.is_empty() {
-            cmd.arg(v);
+    crate::fixture::once_all(&[hevc, yuv], |parts| {
+        let raw = scratch(&format!("{}.raw.yuv", f.name));
+        let (tmp_hevc, tmp_yuv) = (&parts[0], &parts[1]);
+        let mut src = format!(
+            "{}=size={}x{}:rate=25,format={}",
+            f.source,
+            f.width,
+            f.height,
+            pix_fmt(f.ten_bit)
+        );
+        if !f.filter.is_empty() {
+            src = format!("{src},{}", f.filter);
         }
-    }
-    let out = cmd
-        .arg("--recon")
-        .arg(&tmp_yuv)
-        .arg("-o")
-        .arg(&tmp_hevc)
-        .output()
-        .unwrap();
-    let _ = std::fs::remove_file(&raw);
-    assert!(
-        out.status.success(),
-        "{}: x265 failed: {}",
-        f.name,
-        String::from_utf8_lossy(&out.stderr)
-    );
-    std::fs::rename(&tmp_hevc, hevc).unwrap();
-    std::fs::rename(&tmp_yuv, yuv).unwrap();
+        let frames = f.frames.to_string();
+        ff(
+            &["-f", "lavfi"],
+            Path::new(&src),
+            &[
+                "-frames:v",
+                &frames,
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                pix_fmt(f.ten_bit),
+            ],
+            &raw,
+        );
+        let depth = if f.ten_bit { "10" } else { "8" };
+        let mut cmd = Command::new("x265");
+        cmd.args(["--log-level", "error", "--input"])
+            .arg(&raw)
+            .args(["--input-res", &format!("{}x{}", f.width, f.height)])
+            .args(["--fps", "25", "--frames", &frames])
+            .args([
+                "--input-depth",
+                depth,
+                "--output-depth",
+                depth,
+                "--recon-depth",
+                depth,
+            ]);
+        for kv in f.args[1..].iter().flat_map(|a| a.split(':')) {
+            let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+            cmd.arg(format!("--{k}"));
+            if !v.is_empty() {
+                cmd.arg(v);
+            }
+        }
+        let out = cmd
+            .arg("--recon")
+            .arg(tmp_yuv)
+            .arg("-o")
+            .arg(tmp_hevc)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&raw);
+        assert!(
+            out.status.success(),
+            "{}: x265 failed: {}",
+            f.name,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    });
     true
 }
 
@@ -394,8 +391,7 @@ fn ensure(f: &Fixture) -> Option<(PathBuf, PathBuf)> {
     if f.args.first() == Some(&X265_RECON) {
         return x265_recon(f, &hevc, &yuv).then_some((hevc, yuv));
     }
-    if !hevc.exists() {
-        let tmp = scratch(&format!("{}.hevc", f.name));
+    crate::fixture::once(&hevc, |tmp| {
         let mut src = format!(
             "{}=size={}x{}:rate=25,format={}",
             f.source,
@@ -430,14 +426,9 @@ fn ensure(f: &Fixture) -> Option<(PathBuf, PathBuf)> {
         }
         mid.extend(args);
         mid.extend(["-f", "hevc"]);
-        ff(&["-f", "lavfi"], Path::new(&src), &mid, &tmp);
-        if let Err(e) = std::fs::rename(&tmp, &hevc) {
-            assert!(std::path::Path::new(&hevc).exists(), "{e}");
-            let _ = std::fs::remove_file(&tmp);
-        }
-    }
-    if !yuv.exists() {
-        let tmp = scratch(&format!("{}.yuv", f.name));
+        ff(&["-f", "lavfi"], Path::new(&src), &mid, tmp);
+    });
+    crate::fixture::once(&yuv, |tmp| {
         ff(
             &[],
             &hevc,
@@ -449,13 +440,9 @@ fn ensure(f: &Fixture) -> Option<(PathBuf, PathBuf)> {
                 "-pix_fmt",
                 pix_fmt(f.ten_bit),
             ],
-            &tmp,
+            tmp,
         );
-        if let Err(e) = std::fs::rename(&tmp, &yuv) {
-            assert!(std::path::Path::new(&yuv).exists(), "{e}");
-            let _ = std::fs::remove_file(&tmp);
-        }
-    }
+    });
     if !decodes_clean(&hevc) {
         eprintln!(
             "SKIPPED ({}): this ffmpeg's libx265 wrote a stream its own decoder rejects",

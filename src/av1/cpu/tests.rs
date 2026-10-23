@@ -155,8 +155,8 @@ fn encode(s: &Stream) -> Option<(Vec<u8>, Vec<u8>)> {
         return None;
     }
     let d = dir();
-    let ivf = d.join(format!("{}.{}.ivf", s.name, std::process::id()));
-    let yuv = d.join(format!("{}.{}.yuv", s.name, std::process::id()));
+    let ivf = crate::fixture::unique(&d.join(format!("{}.ivf", s.name)));
+    let yuv = crate::fixture::unique(&d.join(format!("{}.yuv", s.name)));
     let (ivf_s, yuv_s) = (ivf.to_str().unwrap(), yuv.to_str().unwrap());
     let frames = s.frames.to_string();
     let mut args = vec!["-f", "lavfi", "-i", s.source, "-frames:v", &frames];

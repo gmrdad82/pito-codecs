@@ -22,17 +22,13 @@ fn ffmpeg_present() -> bool {
 
 fn source(name: &str, w: u32, h: u32, frames: u32) -> Vec<Frame> {
     let path = dir().join(format!("{name}-{w}x{h}-{frames}.yuv"));
-    if !path.exists() {
-        let tmp = dir().join(format!(
-            ".{}-{name}-{w}x{h}-{frames}.yuv",
-            std::process::id()
-        ));
+    crate::fixture::once(&path, |tmp| {
         let src = format!("testsrc2=size={w}x{h}:rate=25,noise=alls=6:allf=t");
         let out = Command::new("ffmpeg")
             .args(["-v", "error", "-y", "-f", "lavfi", "-i", &src, "-frames:v"])
             .arg(frames.to_string())
             .args(["-pix_fmt", "yuv420p", "-f", "rawvideo"])
-            .arg(&tmp)
+            .arg(tmp)
             .output()
             .unwrap();
         assert!(
@@ -40,11 +36,7 @@ fn source(name: &str, w: u32, h: u32, frames: u32) -> Vec<Frame> {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        if let Err(e) = std::fs::rename(&tmp, &path) {
-            assert!(std::path::Path::new(&path).exists(), "{e}");
-            let _ = std::fs::remove_file(&tmp);
-        }
-    }
+    });
     let data = std::fs::read(&path).unwrap();
     let (cw, ch) = (w.div_ceil(2) as usize, h.div_ceil(2) as usize);
     let fsize = (w * h) as usize + 2 * cw * ch;

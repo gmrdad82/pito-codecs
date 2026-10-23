@@ -52,32 +52,20 @@ const VP9: &[&str] = &[
 ];
 
 fn generate(name: &str, args: &[&str]) -> PathBuf {
-    let path = dir().join(name);
-    if !path.exists() {
-        let tmp = dir().join(format!(
-            ".{}-{:?}-{name}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+    crate::fixture::once(&dir().join(name), |tmp| {
         let st = Command::new("ffmpeg")
             .args(["-v", "error", "-y"])
             .args(sources(6))
             .args(args)
-            .arg(&tmp)
+            .arg(tmp)
             .status()
             .unwrap();
         assert!(st.success());
-        if let Err(e) = std::fs::rename(&tmp, &path) {
-            assert!(std::path::Path::new(&path).exists(), "{e}");
-            let _ = std::fs::remove_file(&tmp);
-        }
-    }
-    path
+    })
 }
 
 fn streamed(name: &str) -> PathBuf {
-    let path = dir().join(name);
-    if !path.exists() {
+    crate::fixture::once(&dir().join(name), |tmp| {
         let out = Command::new("ffmpeg")
             .args(["-v", "error"])
             .args(sources(6))
@@ -87,18 +75,8 @@ fn streamed(name: &str) -> PathBuf {
             .output()
             .unwrap();
         assert!(out.status.success());
-        let tmp = dir().join(format!(
-            ".{}-{:?}-{name}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::write(&tmp, out.stdout).unwrap();
-        if let Err(e) = std::fs::rename(&tmp, &path) {
-            assert!(std::path::Path::new(&path).exists(), "{e}");
-            let _ = std::fs::remove_file(&tmp);
-        }
-    }
-    path
+        std::fs::write(tmp, out.stdout).unwrap();
+    })
 }
 
 type Packets = Vec<Vec<(i64, u32, bool)>>;
@@ -274,21 +252,16 @@ fn mp4_to_mkv() {
         return;
     }
     let mp4 = dir().join("bframes.mp4");
-    if !mp4.exists() {
-        let tmp = dir().join(format!(".{}-bframes.mp4", std::process::id()));
+    crate::fixture::once(&mp4, |tmp| {
         let st = Command::new("ffmpeg")
             .args(["-v", "error", "-y"])
             .args(sources(4))
             .args(H264)
-            .arg(&tmp)
+            .arg(tmp)
             .status()
             .unwrap();
         assert!(st.success());
-        if let Err(e) = std::fs::rename(&tmp, &mp4) {
-            assert!(std::path::Path::new(&mp4).exists(), "{e}");
-            let _ = std::fs::remove_file(&tmp);
-        }
-    }
+    });
     let out = dir().join("from-mp4.mkv");
     remux_mp4(&mp4, &out).unwrap();
     decodes_clean(&out);

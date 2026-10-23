@@ -10,6 +10,10 @@
     feature = "vp9"
 ))]
 
+#[path = "../src/fixture.rs"]
+#[allow(dead_code)]
+mod fixture;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
@@ -859,25 +863,18 @@ fn gpu_playback_keeps_frames_on_the_gpu_and_falls_back_to_the_cpu() {
 }
 
 fn matroska(name: &str, codec: &[&str]) -> PathBuf {
-    let out = dir().join(name);
-    if out.exists() {
-        return out;
-    }
-    let part = dir().join(format!("{}.{name}", std::process::id()));
-    let ok = Command::new("ffmpeg")
-        .args(["-v", "error", "-y"])
-        .args(["-f", "lavfi", "-i", "testsrc2=s=640x360:r=30:d=3"])
-        .args(["-pix_fmt", "yuv420p", "-g", "30"])
-        .args(codec)
-        .arg(&part)
-        .status()
-        .unwrap()
-        .success();
-    assert!(ok);
-    if std::fs::rename(&part, &out).is_err() {
-        let _ = std::fs::remove_file(&part);
-    }
-    out
+    fixture::once(&dir().join(name), |part| {
+        let ok = Command::new("ffmpeg")
+            .args(["-v", "error", "-y"])
+            .args(["-f", "lavfi", "-i", "testsrc2=s=640x360:r=30:d=3"])
+            .args(["-pix_fmt", "yuv420p", "-g", "30"])
+            .args(codec)
+            .arg(part)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+    })
 }
 
 #[test]
@@ -967,22 +964,16 @@ fn ffmpeg_f32(path: &Path) -> Vec<f32> {
 }
 
 fn ffmpeg_make(out: &Path, args: &[&str]) {
-    let part = dir().join(format!(
-        "{}.{}",
-        std::process::id(),
-        out.file_name().unwrap().to_str().unwrap()
-    ));
-    let ok = Command::new("ffmpeg")
-        .args(["-v", "error", "-y"])
-        .args(args)
-        .arg(&part)
-        .status()
-        .unwrap()
-        .success();
-    assert!(ok, "{}", out.display());
-    if std::fs::rename(&part, out).is_err() {
-        let _ = std::fs::remove_file(&part);
-    }
+    fixture::fresh(out, |part| {
+        let ok = Command::new("ffmpeg")
+            .args(["-v", "error", "-y"])
+            .args(args)
+            .arg(part)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "{}", out.display());
+    });
 }
 
 #[test]
@@ -1233,25 +1224,18 @@ fn recording() -> &'static Path {
 }
 
 fn without_cues(src: &Path, name: &str) -> PathBuf {
-    let out = dir().join(name);
-    if out.exists() {
-        return out;
-    }
-    let part = dir().join(format!("{}.{name}", std::process::id()));
-    let file = std::fs::File::create(&part).unwrap();
-    let ok = Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
-        .arg(src)
-        .args(["-map", "0", "-c", "copy", "-f", "matroska", "pipe:1"])
-        .stdout(file)
-        .status()
-        .unwrap()
-        .success();
-    assert!(ok);
-    if std::fs::rename(&part, &out).is_err() {
-        let _ = std::fs::remove_file(&part);
-    }
-    out
+    fixture::once(&dir().join(name), |part| {
+        let file = std::fs::File::create(part).unwrap();
+        let ok = Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(src)
+            .args(["-map", "0", "-c", "copy", "-f", "matroska", "pipe:1"])
+            .stdout(file)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+    })
 }
 
 fn mean_diff(a: &Rgba, b: &Rgba) -> f64 {

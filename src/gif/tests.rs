@@ -53,10 +53,7 @@ fn raw_frames(file: &str, w: u32, h: u32) -> Vec<Rgba> {
 
 fn source(name: &str, w: u32, h: u32, frames: u32) -> Vec<Rgba> {
     let file = format!("{name}-{w}x{h}-{frames}.rgba");
-    if !dir().join(&file).exists() {
-        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let part = format!("{file}.{}-{n}.part", std::process::id());
+    crate::fixture::once(&dir().join(&file), |part| {
         ffmpeg(&[
             "-f",
             "lavfi",
@@ -68,13 +65,9 @@ fn source(name: &str, w: u32, h: u32, frames: u32) -> Vec<Rgba> {
             "rawvideo",
             "-pix_fmt",
             "rgba",
-            &path(&part),
+            &part.to_string_lossy(),
         ]);
-        if let Err(e) = std::fs::rename(path(&part), path(&file)) {
-            assert!(std::path::Path::new(&path(&file)).exists(), "{e}");
-            let _ = std::fs::remove_file(path(&part));
-        }
-    }
+    });
     raw_frames(&file, w, h)
 }
 

@@ -203,7 +203,7 @@ pub(super) fn obus(unit: &[u8]) -> Vec<(u8, std::ops::Range<usize>)> {
 pub(super) fn small_stream(tag: &str) -> Option<Vec<u8>> {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp/av1-parser");
     std::fs::create_dir_all(&dir).ok()?;
-    let ivf = dir.join(format!("{tag}.{}.ivf", std::process::id()));
+    let ivf = crate::fixture::unique(&dir.join(format!("{tag}.ivf")));
     let made = Command::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi"])
         .args(["-i", "testsrc2=size=64x64:rate=30", "-frames:v", "3"])

@@ -73,7 +73,7 @@ fn decodes_libvpx_partitions_and_simple_filter_like_ffmpeg() {
         ("mandelbrot", "3", "2", "2", 98, 62, "60"),
     ];
     for (src, profile, slices, sharpness, w, h, q) in cases {
-        let ivf = oracle::dir().join(format!("libvpx-{profile}-{}.ivf", std::process::id()));
+        let ivf = crate::fixture::unique(&oracle::dir().join(format!("libvpx-{profile}.ivf")));
         let lavfi = format!("{src}=s={w}x{h}:r=1");
         let made = oracle::ffmpeg(&[
             "-f",

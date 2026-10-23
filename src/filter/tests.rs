@@ -84,7 +84,7 @@ fn write_yuv(name: &str, frame: &Frame) {
     for p in &frame.planes {
         bytes.extend_from_slice(&p.data);
     }
-    let part = format!("{}.part-{}", path(name), std::process::id());
+    let part = crate::fixture::unique(&dir().join(name));
     std::fs::write(&part, bytes).unwrap();
     if let Err(e) = std::fs::rename(&part, path(name)) {
         assert!(std::path::Path::new(&path(name)).exists(), "{e}");
@@ -110,22 +110,13 @@ fn make(label: &str, args: &[&str]) -> String {
     ffmpeg_version().hash(&mut h);
     args.hash(&mut h);
     let name = format!("{label}-{:016x}.raw", h.finish());
-    if !dir().join(&name).exists() {
-        let part = format!(
-            "{}.part-{}-{:?}",
-            path(&name),
-            std::process::id(),
-            std::thread::current().id()
-        );
+    crate::fixture::once(&dir().join(&name), |part| {
+        let part = part.to_string_lossy();
         let mut full = vec!["-v", "error"];
         full.extend_from_slice(args);
         full.push(&part);
         ffmpeg(&full);
-        if let Err(e) = std::fs::rename(&part, path(&name)) {
-            assert!(std::path::Path::new(&path(&name)).exists(), "{e}");
-            let _ = std::fs::remove_file(&part);
-        }
-    }
+    });
     name
 }
 

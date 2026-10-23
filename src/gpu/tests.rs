@@ -1,21 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use super::nal;
 use super::{Direction, EncoderConfig, HwDecoder, HwEncoder, Profile, available};
 use crate::media::{Bitstream, Rate};
 use crate::media::{Codec, Frame, Packet, PixelFormat, TimeBase};
-
-fn part_tag() -> String {
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    format!(
-        "{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    )
-}
 
 fn dir() -> PathBuf {
     let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp/gpu");
@@ -142,7 +132,7 @@ fn reference(path: &Path, pix: &str) -> Vec<u8> {
 fn generate_sized(name: &str, codec: Codec, encoder_args: &[&str], size: (u32, u32)) -> PathBuf {
     let ext = if codec == Codec::Hevc { "hevc" } else { "h264" };
     let path = dir().join(format!("{name}.{ext}"));
-    if !path.exists() {
+    crate::fixture::once(&path, |part| {
         let testsrc = format!("testsrc2=size={}x{}:rate=25:duration=2", size.0, size.1);
         let mandelbrot = format!("mandelbrot=size={}x{}:rate=25", size.0, size.1);
         let mut args = vec![
@@ -160,12 +150,9 @@ fn generate_sized(name: &str, codec: Codec, encoder_args: &[&str], size: (u32, u
             "50",
         ];
         args.extend_from_slice(encoder_args);
-        let part = dir().join(format!("{name}.{}.part.{ext}", part_tag()));
         args.push(part.to_str().unwrap());
         run(&args);
-        std::fs::rename(&part, &path).unwrap();
-    }
-    path
+    })
 }
 
 #[test]
@@ -291,8 +278,7 @@ fn source_frames_from(
         "yuv420p"
     };
     let path = dir().join(format!("source{tag}-{w}x{h}-{n}-{pix}.yuv"));
-    if !path.exists() {
-        let part = path.with_extension(format!("{}.part", part_tag()));
+    crate::fixture::once(&path, |part| {
         run(&[
             "-f",
             "lavfi",
@@ -306,8 +292,7 @@ fn source_frames_from(
             "rawvideo",
             part.to_str().unwrap(),
         ]);
-        std::fs::rename(&part, &path).unwrap();
-    }
+    });
     let data = std::fs::read(&path).unwrap();
     let bps = format.bytes_per_sample();
     let size = (w * h) as usize * bps * 3 / 2;
@@ -1062,7 +1047,7 @@ fn speed() {
     let mut report = String::new();
     if !sample.is_empty() && has(Codec::H264, Direction::Decode) {
         let path = dir().join("sample.h264");
-        if !path.exists() {
+        crate::fixture::once(&path, |part| {
             run(&[
                 "-i",
                 &sample,
@@ -1073,9 +1058,9 @@ fn speed() {
                 "h264_mp4toannexb",
                 "-f",
                 "h264",
-                path.to_str().unwrap(),
+                part.to_str().unwrap(),
             ]);
-        }
+        });
         decode_file(Codec::H264, &path, 60);
         let (frames, fps) = decode_file(Codec::H264, &path, 600);
         report.push_str(&format!(
@@ -1085,7 +1070,7 @@ fn speed() {
             frames.len()
         ));
         let small = dir().join("sample-1080.h264");
-        if !small.exists() {
+        crate::fixture::once(&small, |part| {
             run(&[
                 "-i",
                 &sample,
@@ -1104,9 +1089,9 @@ fn speed() {
                 "h264_mp4toannexb",
                 "-f",
                 "h264",
-                small.to_str().unwrap(),
+                part.to_str().unwrap(),
             ]);
-        }
+        });
         gpu_frames(Codec::H264, &path, 60);
         let (_, fps) = gpu_frames(Codec::H264, &path, 600);
         report.push_str(&format!(
@@ -1118,7 +1103,7 @@ fn speed() {
             frames.len()
         ));
         let hevc = dir().join("sample.hevc");
-        if !hevc.exists() {
+        crate::fixture::once(&hevc, |part| {
             run(&[
                 "-i",
                 &sample,
@@ -1135,9 +1120,9 @@ fn speed() {
                 "20",
                 "-f",
                 "hevc",
-                hevc.to_str().unwrap(),
+                part.to_str().unwrap(),
             ]);
-        }
+        });
         let (frames, fps) = decode_file(Codec::Hevc, &hevc, 600);
         report.push_str(&format!(
             "decode HEVC 2560x1440: {fps:.0} fps ({} frames)\n",
