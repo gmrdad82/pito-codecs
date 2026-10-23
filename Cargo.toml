@@ -106,6 +106,10 @@ name = "readme_shots"
 required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter", "mkv", "vp9", "gif", "webp"]
 
 [[example]]
+name = "record_refs"
+required-features = ["cli", "av1", "mp3"]
+
+[[example]]
 name = "bench"
 test = true
 required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter", "mkv", "vp9"]

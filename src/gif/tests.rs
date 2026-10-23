@@ -1,94 +1,25 @@
 use super::*;
 use crate::media::Rgba;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use crate::testref::{self, Digest, Refs};
 
-fn dir() -> PathBuf {
-    let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/test/gif");
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
+#[allow(dead_code)]
+#[path = "refs.rs"]
+mod refs;
 
-fn path(name: &str) -> String {
-    dir().join(name).to_string_lossy().into_owned()
-}
-
-fn ffmpeg_present() -> bool {
-    let ok = Command::new("ffmpeg")
-        .arg("-version")
-        .output()
-        .is_ok_and(|o| o.status.success());
-    if !ok {
-        eprintln!("ffmpeg not found, skipping");
+fn rgba_digest(a: &Animation) -> String {
+    let mut d = Digest::new();
+    for (f, _) in &a.frames {
+        d.rgba(f);
     }
-    ok
+    d.hex()
 }
 
-fn ffmpeg(args: &[&str]) {
-    let out = Command::new("ffmpeg")
-        .args(["-hide_banner", "-nostats", "-loglevel", "error", "-y"])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "ffmpeg {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+fn assert_like_ffmpeg(r: &Refs, gif: &str, a: &Animation) {
+    r.assert_digest(&format!("{gif}.rgba"), &rgba_digest(a));
 }
 
-fn raw_frames(file: &str, w: u32, h: u32) -> Vec<Rgba> {
-    let bytes = std::fs::read(path(file)).unwrap();
-    let n = (w * h * 4) as usize;
-    assert_eq!(bytes.len() % n, 0);
-    bytes
-        .chunks_exact(n)
-        .map(|c| Rgba {
-            width: w,
-            height: h,
-            data: c.to_vec(),
-        })
-        .collect()
-}
-
-fn source(name: &str, w: u32, h: u32, frames: u32) -> Vec<Rgba> {
-    let file = format!("{name}-{w}x{h}-{frames}.rgba");
-    crate::fixture::once(&dir().join(&file), |part| {
-        ffmpeg(&[
-            "-f",
-            "lavfi",
-            "-i",
-            &format!("testsrc2=size={w}x{h}:rate=10"),
-            "-frames:v",
-            &frames.to_string(),
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgba",
-            &part.to_string_lossy(),
-        ]);
-    });
-    raw_frames(&file, w, h)
-}
-
-fn ffmpeg_decode(gif: &str, w: u32, h: u32) -> Vec<Rgba> {
-    let out = format!("{gif}.rgba");
-    ffmpeg(&[
-        "-i",
-        &path(gif),
-        "-fps_mode",
-        "passthrough",
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        "rgba",
-        &path(&out),
-    ]);
-    raw_frames(&out, w, h)
-}
-
-fn ours(gif: &str) -> Animation {
-    decode(&std::fs::read(path(gif)).unwrap()).unwrap()
+fn assert_pinned(r: &Refs, gif: &str, bytes: &[u8]) {
+    r.assert_digest(&format!("{gif}.gif"), &testref::sha256(bytes));
 }
 
 fn same(a: &Rgba, b: &Rgba) -> bool {
@@ -96,25 +27,6 @@ fn same(a: &Rgba, b: &Rgba) -> bool {
         .chunks_exact(4)
         .zip(b.data.chunks_exact(4))
         .all(|(p, q)| p == q || (p[3] == 0 && q[3] == 0))
-}
-
-fn assert_frames(ours: &Animation, theirs: &[Rgba], what: &str) {
-    assert_eq!(ours.frames.len(), theirs.len(), "{what}: frame count");
-    for (i, ((a, _), b)) in ours.frames.iter().zip(theirs).enumerate() {
-        if !same(a, b) {
-            let bad = a
-                .data
-                .chunks_exact(4)
-                .zip(b.data.chunks_exact(4))
-                .position(|(p, q)| p != q && !(p[3] == 0 && q[3] == 0))
-                .unwrap();
-            panic!(
-                "{what}: frame {i} differs at pixel {bad}: ours {:?} ffmpeg {:?}",
-                &a.data[bad * 4..bad * 4 + 4],
-                &b.data[bad * 4..bad * 4 + 4]
-            );
-        }
-    }
 }
 
 fn psnr(a: &Rgba, b: &Rgba) -> f64 {
@@ -135,82 +47,27 @@ fn psnr(a: &Rgba, b: &Rgba) -> f64 {
 
 #[test]
 fn decodes_ffmpeg_gifs_exactly() {
-    if !ffmpeg_present() {
-        return;
-    }
-    let (w, h) = (320, 240);
-    source("src", w, h, 30);
-    let input = path("src-320x240-30.rgba");
-    let size = format!("{w}x{h}");
-    let cases = [
-        ("ff-global.gif", "palettegen[p];[s1][p]paletteuse"),
-        (
-            "ff-local.gif",
-            "palettegen=stats_mode=single[p];[s1][p]paletteuse=new=1:dither=bayer",
-        ),
-        (
-            "ff-rect.gif",
-            "palettegen=max_colors=32[p];[s1][p]paletteuse=diff_mode=rectangle:dither=none",
-        ),
-    ];
-    for (name, graph) in cases {
-        ffmpeg(&[
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgba",
-            "-s",
-            &size,
-            "-r",
-            "10",
-            "-i",
-            &input,
-            "-filter_complex",
-            &format!("split[s0][s1];[s0]{graph}"),
-            &path(name),
-        ]);
-        let a = ours(name);
-        assert_eq!((a.width, a.height), (w, h));
-        assert_frames(&a, &ffmpeg_decode(name, w, h), name);
+    let r = Refs::open(refs::AREA);
+    let (w, h) = refs::SIZE;
+    for (name, _) in refs::FFMPEG_GIFS {
+        let a = decode(&r.bytes(&format!("{name}.gif"))).unwrap();
+        assert_eq!((a.width, a.height), (w, h), "{name}");
+        assert_eq!(a.frames.len() as u64, refs::FRAMES, "{name}");
+        assert_like_ffmpeg(&r, name, &a);
     }
 }
 
 #[test]
 fn ffmpeg_decodes_ours_exactly() {
-    if !ffmpeg_present() {
-        return;
-    }
-    let (w, h) = (320, 240);
-    let src = source("src", w, h, 30);
-    let delays = vec![10u16; src.len()];
-    let modes = [
-        (
-            "our-global-fs.gif",
-            PaletteMode::Global,
-            Dither::FloydSteinberg,
-            256,
-        ),
-        ("our-global-none.gif", PaletteMode::Global, Dither::None, 64),
-        (
-            "our-local-ordered.gif",
-            PaletteMode::PerFrame,
-            Dither::Ordered,
-            128,
-        ),
-    ];
-    for (name, palette, dither, colors) in modes {
-        let opts = EncodeOptions {
-            colors,
-            dither,
-            palette,
-            ..EncodeOptions::default()
-        };
-        let bytes = encode(&src, &delays, opts).unwrap();
-        std::fs::write(path(name), &bytes).unwrap();
-        let a = ours(name);
+    let r = Refs::open(refs::AREA);
+    let src = refs::source();
+    for (name, _) in refs::ours() {
+        let bytes = refs::encode_ours(name).unwrap();
+        assert_pinned(&r, name, &bytes);
+        let a = decode(&bytes).unwrap();
         assert_eq!(a.loop_count, Some(0));
         assert_eq!(a.frames.len(), src.len(), "{name}");
-        assert_frames(&a, &ffmpeg_decode(name, w, h), name);
+        assert_like_ffmpeg(&r, name, &a);
         for (i, ((f, _), s)) in a.frames.iter().zip(&src).enumerate() {
             let p = psnr(f, s);
             assert!(p > 26.0, "{name}: frame {i} PSNR {p:.1}");
@@ -219,11 +76,18 @@ fn ffmpeg_decodes_ours_exactly() {
 }
 
 #[test]
+fn a_damaged_reference_is_refused_before_use() {
+    let r = Refs::open(refs::AREA);
+    let mut bytes = r.bytes("ff-global.gif");
+    bytes[20] ^= 1;
+    assert_ne!(testref::sha256(&bytes), r.digest("ff-global.gif"));
+    let a = decode(&bytes).ok().map(|a| rgba_digest(&a));
+    assert_ne!(a.as_deref(), Some(r.digest("ff-global.rgba")));
+}
+
+#[test]
 fn batches_do_not_change_the_output() {
-    if !ffmpeg_present() {
-        return;
-    }
-    let src = source("src", 160, 120, 30);
+    let src = testref::rgba_frames(160, 120, 30, 0);
     let delays = vec![4u16; src.len()];
     let small = rayon::ThreadPoolBuilder::new()
         .num_threads(2)
@@ -252,37 +116,11 @@ fn batches_do_not_change_the_output() {
 
 #[test]
 fn transparency_and_still_frames_survive() {
-    if !ffmpeg_present() {
-        return;
-    }
-    let (w, h) = (97u32, 61u32);
-    let mut frames = Vec::new();
-    for k in 0..8u32 {
-        let mut f = Rgba::new(w, h);
-        for y in 0..h {
-            for x in 0..w {
-                let i = ((y * w + x) * 4) as usize;
-                let hole = (k == 1 || k == 4) && (x + k * 7) % 23 < 9;
-                let v = if k == 4 { 3 } else { k };
-                f.data[i..i + 4].copy_from_slice(&[
-                    (x * 255 / w) as u8,
-                    (y * 255 / h) as u8,
-                    ((x + y + v * 40) % 256) as u8,
-                    if hole { 0 } else { 255 },
-                ]);
-            }
-        }
-        frames.push(f);
-    }
-    frames[6] = frames[5].clone();
-    let delays: Vec<u16> = (0..8).map(|k| 5 + k).collect();
-    let opts = EncodeOptions {
-        dither: Dither::None,
-        ..EncodeOptions::default()
-    };
-    let bytes = encode(&frames, &delays, opts).unwrap();
-    std::fs::write(path("alpha.gif"), &bytes).unwrap();
-    let a = ours("alpha.gif");
+    let r = Refs::open(refs::AREA);
+    let (frames, delays) = refs::alpha_frames();
+    let bytes = refs::encode_alpha().unwrap();
+    assert_pinned(&r, "alpha", &bytes);
+    let a = decode(&bytes).unwrap();
     assert_eq!(a.frames.len(), 7);
     assert_eq!(a.frames[5].1, delays[5] + delays[6]);
     let kept: Vec<usize> = vec![0, 1, 2, 3, 4, 5, 7];
@@ -294,7 +132,7 @@ fn transparency_and_still_frames_survive() {
         let p = psnr(got, &frames[k]);
         assert!(p > 22.0, "frame {k}: PSNR {p:.1}");
     }
-    assert_frames(&a, &ffmpeg_decode("alpha.gif", w, h), "alpha.gif");
+    assert_like_ffmpeg(&r, "alpha", &a);
 }
 
 #[test]
@@ -328,170 +166,15 @@ fn lzw_round_trips_noise_and_runs() {
 
 #[test]
 fn decodes_interlaced_disposal_and_gif87a_exactly() {
-    if !ffmpeg_present()
-        || !Command::new("magick")
-            .arg("-version")
-            .output()
-            .is_ok_and(|o| o.status.success())
-    {
-        return;
+    let r = Refs::open(refs::AREA);
+    for (name, w, h, _) in refs::MAGICK_GIFS {
+        let a = decode(&r.bytes(&format!("{name}.gif"))).unwrap();
+        assert_eq!((a.width, a.height), (w, h), "{name}");
+        assert_like_ffmpeg(&r, name, &a);
     }
-    let magick = |args: &str| {
-        let out = Command::new("magick")
-            .current_dir(dir())
-            .args(args.split('|'))
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "magick {args}");
-    };
-    magick("-seed|7|-size|161x117|plasma:|-colors|200|-interlace|GIF|im-interlaced.gif");
-    magick(
-        "-size|120x90|xc:none|-delay|7|-dispose|Previous|(|-size|120x90|xc:none|-fill|red\
-         |-draw|circle 40,40 40,15|)|-dispose|Background|(|-size|120x90|xc:none|-fill|blue\
-         |-draw|rectangle 50,20 110,80|)|-dispose|None|(|-size|120x90|gradient:yellow-green|)\
-         |-loop|3|im-dispose.gif",
-    );
-    magick("-seed|3|-size|64x48|plasma:|GIF87:im-87.gif");
-    for (name, w, h) in [
-        ("im-interlaced.gif", 161, 117),
-        ("im-dispose.gif", 120, 90),
-        ("im-87.gif", 64, 48),
-    ] {
-        let a = ours(name);
-        assert_frames(&a, &ffmpeg_decode(name, w, h), name);
-    }
-    assert_eq!(ours("im-dispose.gif").loop_count, Some(2));
-}
-
-fn timed(f: impl FnOnce()) -> f64 {
-    let t = std::time::Instant::now();
-    f();
-    t.elapsed().as_secs_f64()
-}
-
-#[test]
-#[ignore]
-fn speed_against_ffmpeg() {
-    if !ffmpeg_present() {
-        return;
-    }
-    for (w, h) in [(640u32, 360u32), (1280, 720)] {
-        let name = format!("coast-{w}x{h}.rgba");
-        let file = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tmp/bench")
-            .join(&name);
-        let Ok(bytes) = std::fs::read(&file) else {
-            eprintln!("{} missing, skipping", file.display());
-            continue;
-        };
-        let n = (w * h * 4) as usize;
-        let src: Vec<Rgba> = bytes
-            .chunks_exact(n)
-            .map(|c| Rgba {
-                width: w,
-                height: h,
-                data: c.to_vec(),
-            })
-            .collect();
-        let count = src.len() as f64;
-        let delays = vec![3u16; src.len()];
-        let size = format!("{w}x{h}");
-        let input = file.to_string_lossy().into_owned();
-        for (label, opts, graph) in [
-            (
-                "global fs",
-                EncodeOptions::default(),
-                "palettegen[p];[s1][p]paletteuse=dither=floyd_steinberg",
-            ),
-            (
-                "global none",
-                EncodeOptions {
-                    dither: Dither::None,
-                    ..EncodeOptions::default()
-                },
-                "palettegen[p];[s1][p]paletteuse=dither=none",
-            ),
-            (
-                "global ordered",
-                EncodeOptions {
-                    dither: Dither::Ordered,
-                    ..EncodeOptions::default()
-                },
-                "palettegen[p];[s1][p]paletteuse=dither=bayer",
-            ),
-            (
-                "per-frame ordered",
-                EncodeOptions {
-                    dither: Dither::Ordered,
-                    palette: PaletteMode::PerFrame,
-                    ..EncodeOptions::default()
-                },
-                "palettegen=stats_mode=single[p];[s1][p]paletteuse=new=1:dither=bayer",
-            ),
-        ] {
-            let mut gif = Vec::new();
-            let ours_s = timed(|| gif = encode(&src, &delays, opts).unwrap());
-            let ours_name = format!("speed-ours-{w}.gif");
-            std::fs::write(path(&ours_name), &gif).unwrap();
-            let ff_name = format!("speed-ff-{w}.gif");
-            let ff_s = timed(|| {
-                ffmpeg(&[
-                    "-f",
-                    "rawvideo",
-                    "-pix_fmt",
-                    "rgba",
-                    "-s",
-                    &size,
-                    "-r",
-                    "30",
-                    "-i",
-                    &input,
-                    "-filter_complex",
-                    &format!("split[s0][s1];[s0]{graph}"),
-                    &path(&ff_name),
-                ])
-            });
-            let a = ours(&ours_name);
-            let ff_len = std::fs::metadata(path(&ff_name)).unwrap().len();
-            let b = ffmpeg_decode(&ff_name, w, h);
-            let pa: f64 = a
-                .frames
-                .iter()
-                .zip(&src)
-                .map(|(f, s)| psnr(&f.0, s))
-                .sum::<f64>()
-                / a.frames.len() as f64;
-            let pb: f64 = b.iter().zip(&src).map(|(f, s)| psnr(f, s)).sum::<f64>() / b.len() as f64;
-            eprintln!(
-                "encode {w}x{h} {label}: ours {:.0} fps {:.2} MB {pa:.2} dB, ffmpeg {:.0} fps {:.2} MB {pb:.2} dB",
-                count / ours_s,
-                gif.len() as f64 / 1e6,
-                count / ff_s,
-                ff_len as f64 / 1e6
-            );
-        }
-        let ours_name = format!("speed-ours-{w}.gif");
-        let data = std::fs::read(path(&ours_name)).unwrap();
-        let mut frames = 0;
-        let mut first = 0.0;
-        let ours_s = timed(|| {
-            let t = std::time::Instant::now();
-            let mut d = Decoder::new(&data).unwrap();
-            while d.next_frame().unwrap().is_some() {
-                if frames == 0 {
-                    first = t.elapsed().as_secs_f64();
-                }
-                frames += 1;
-            }
-        });
-        let ff_s = timed(|| ffmpeg(&["-i", &path(&ours_name), "-f", "null", "-"]));
-        eprintln!(
-            "decode {w}x{h}: ours {:.0} fps (first frame {:.1} ms), ffmpeg {:.0} fps",
-            frames as f64 / ours_s,
-            first * 1e3,
-            frames as f64 / ff_s
-        );
-    }
+    let dispose = decode(&r.bytes("im-dispose.gif")).unwrap();
+    assert_eq!(dispose.loop_count, Some(2));
+    assert!(r.bytes("im-87.gif").starts_with(b"GIF87a"));
 }
 
 fn survive(bad: &[u8]) {
