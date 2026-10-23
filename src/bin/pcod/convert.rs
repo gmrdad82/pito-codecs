@@ -25,6 +25,7 @@ pub struct Options {
     pub add: Option<super::tracks::Add>,
     pub range: Option<Span>,
     pub still: Option<Still>,
+    pub crop: Option<super::stills::Crop>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1203,6 +1204,14 @@ pub fn run(options: Options) -> ExitCode {
         )
     } else if let Some(wav) = options.wav.as_ref().filter(|w| w.raw) {
         super::raw::run(&options, wav, &mut partial_path, &signals::STOP)
+    } else if let Some(crop) = options.crop {
+        super::stills::crop_png(
+            &options.request.input,
+            &options.request.output,
+            crop,
+            options.request.overwrite,
+            options.json,
+        )
     } else if let Some(wav) = &options.wav {
         super::extract::run(&options, wav, &mut partial_path)
     } else if let Some(add) = &options.add {

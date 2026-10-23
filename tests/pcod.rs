@@ -1327,16 +1327,18 @@ fn raw_s16_refusals_are_one_line_and_bad_flags_exit_2() {
         ("--no-audio", None),
         ("--add-audio", Some("bed.wav")),
     ] {
-        let mut args = vec!["in.mkv", "-", flag];
-        args.extend(value);
-        let got = run(&args);
-        let stderr = text(&got.stderr);
-        assert_eq!(got.status.code(), Some(2), "{flag}: {stderr}");
-        assert!(
-            stderr.starts_with(&format!("error: {flag} doesn't apply to raw PCM")),
-            "{flag}: {stderr}"
-        );
-        assert!(got.stdout.is_empty(), "{flag}");
+        for target in ["out.s16", "-"] {
+            let mut args = vec!["in.mkv", target, flag];
+            args.extend(value);
+            let got = run(&args);
+            let stderr = text(&got.stderr);
+            assert_eq!(got.status.code(), Some(2), "{args:?}: {stderr}");
+            assert!(
+                stderr.starts_with(&format!("error: {flag} doesn't apply to raw PCM")),
+                "{args:?}: {stderr}"
+            );
+            assert!(got.stdout.is_empty(), "{args:?}");
+        }
     }
 }
 

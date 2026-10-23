@@ -36,6 +36,7 @@ pub struct Job {
 const MAX_STILLS: usize = 10_000;
 const DEFAULT_COUNT: usize = 12;
 const DEFAULT_QUALITY: u8 = 85;
+pub const DEFAULT_HEIGHT: u32 = 360;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Format {
@@ -74,6 +75,146 @@ impl Format {
             Format::Webp => webp::encode(image, &webp::Options::lossy(f32::from(quality)))?,
         })
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Crop {
+    pub width: u32,
+    pub height: u32,
+    pub x: u32,
+    pub y: u32,
+}
+
+pub fn crop_of(text: &str) -> Result<Crop, String> {
+    let bad = || format!("'{text}' is not a crop such as 640:360:0:0 (width:height:x:y)");
+    let parts: Vec<u32> = text
+        .trim()
+        .split(':')
+        .map(|p| p.trim().parse::<u32>().map_err(|_| bad()))
+        .collect::<Result<_, _>>()?;
+    match parts[..] {
+        [width, height, x, y] => Ok(Crop {
+            width,
+            height,
+            x,
+            y,
+        }),
+        _ => Err(bad()),
+    }
+}
+
+impl Crop {
+    fn text(self) -> String {
+        format!("{}:{}:{}:{}", self.width, self.height, self.x, self.y)
+    }
+
+    pub fn check(self, (w, h): (u32, u32)) -> Result<(), Fail> {
+        if self.width == 0 || self.height == 0 {
+            return Err(
+                format!("--crop {} needs a width and height above zero", self.text()).into(),
+            );
+        }
+        if u64::from(self.x) + u64::from(self.width) > u64::from(w)
+            || u64::from(self.y) + u64::from(self.height) > u64::from(h)
+        {
+            return Err(format!("--crop {} falls outside the {w}x{h} frame", self.text()).into());
+        }
+        Ok(())
+    }
+
+    pub fn apply(self, image: &Rgba) -> Result<Rgba, Fail> {
+        self.check((image.width, image.height))?;
+        let mut out = Rgba::new(self.width, self.height);
+        let (row, from) = (out.stride(), image.stride());
+        let left = self.x as usize * 4;
+        for (dy, dst) in out.data.chunks_exact_mut(row).enumerate() {
+            let at = (self.y as usize + dy) * from + left;
+            let src = image
+                .data
+                .get(at..at + row)
+                .ok_or("the frame is shorter than its size")?;
+            dst.copy_from_slice(src);
+        }
+        Ok(out)
+    }
+
+    fn json(self) -> String {
+        format!(
+            "{{\"width\":{},\"height\":{},\"x\":{},\"y\":{}}}",
+            self.width, self.height, self.x, self.y
+        )
+    }
+}
+
+fn see_through(color: png::Color, image: &Rgba) -> bool {
+    matches!(color, png::Color::Rgba | png::Color::GreyAlpha)
+        || image.data.chunks_exact(4).any(|px| px[3] != 255)
+}
+
+fn part_of(output: &Path) -> PathBuf {
+    let mut name = output.file_name().unwrap_or_default().to_os_string();
+    name.push(".part");
+    output.with_file_name(name)
+}
+
+fn write_whole(output: &Path, bytes: &[u8]) -> Result<(), Fail> {
+    let part = part_of(output);
+    let done = std::fs::write(&part, bytes).and_then(|()| std::fs::rename(&part, output));
+    if let Err(e) = done {
+        let _ = std::fs::remove_file(&part);
+        return Err(about(output, e));
+    }
+    Ok(())
+}
+
+pub fn crop_png(
+    input: &Path,
+    output: &Path,
+    crop: Crop,
+    overwrite: bool,
+    json: bool,
+) -> Result<String, Fail> {
+    let started = Instant::now();
+    if super::plan::same_file(input, output) {
+        return Err("input and output are the same file".into());
+    }
+    if output.exists() && !overwrite {
+        return Err(format!(
+            "{} already exists; use --force to replace it",
+            output.display()
+        )
+        .into());
+    }
+    let data = std::fs::read(input).map_err(|e| about(input, e))?;
+    let info = png::info(&data).map_err(|e| about(input, e))?;
+    let image = png::decode(&data).map_err(|e| about(input, e))?;
+    let cut = crop.apply(&image).map_err(|e| about(input, e))?;
+    let bytes = Format::Png
+        .encode(&cut, DEFAULT_QUALITY, see_through(info.color, &image))
+        .map_err(|e| about(output, e))?;
+    write_whole(output, &bytes)?;
+    let elapsed = started.elapsed().as_secs_f64();
+    Ok(if json {
+        format!(
+            "{{\"input\":{},\"output\":{},\"source\":{{\"width\":{},\"height\":{}}},\"crop\":{},\"seconds\":{elapsed:.3}}}",
+            path_json(Some(input)),
+            path_json(Some(output)),
+            image.width,
+            image.height,
+            crop.json()
+        )
+    } else {
+        format!(
+            "{}x{} at {},{} of {}x{}  {}",
+            cut.width,
+            cut.height,
+            crop.x,
+            crop.y,
+            image.width,
+            image.height,
+            output.display()
+        )
+    })
 }
 
 struct Grid {
@@ -190,6 +331,10 @@ pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
             }
             done
         }
+        None if job.file.is_dir() => Err(about(
+            &job.file,
+            "is a folder of PNG frames; give --fps for their rate and --out for the frames",
+        )),
         None => run_stills(out, job),
     };
     if done.is_ok()
@@ -380,6 +525,8 @@ pub struct Range {
     pub every: Option<f64>,
     pub size: Option<Size>,
     pub force: bool,
+    pub crop: Option<Crop>,
+    pub hold: Option<f64>,
 }
 
 impl Range {
@@ -573,12 +720,358 @@ fn rate_text(fps: f64) -> String {
     }
 }
 
+fn same_size(image: &Rgba, (w, h): (u32, u32)) -> Result<(), Fail> {
+    if (image.width, image.height) != (w, h) {
+        return Err(format!(
+            "is {}x{} where the folder's first frame is {w}x{h}; every frame needs one size",
+            image.width, image.height
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn crop_unscaled(range: &Range) -> Result<(), Fail> {
+    if range.crop.is_some() && range.sized {
+        return Err(
+            "--crop cuts the frame as it is shown, unscaled; drop --size and --height".into(),
+        );
+    }
+    Ok(())
+}
+
+fn held_frames(range: &Range) -> Result<u64, Fail> {
+    let Some(hold) = range.hold else {
+        return Ok(0);
+    };
+    let Some((num, den)) = range.fps else {
+        return Err("--hold needs --fps, the rate it holds the last frame at".into());
+    };
+    if !(hold.is_finite() && hold > 0.0) {
+        return Err(format!("--hold {hold} is not a time above zero").into());
+    }
+    let frames = (hold * f64::from(num) / f64::from(den.max(1)))
+        .round()
+        .max(1.0);
+    Ok(if frames >= 9e15 {
+        u64::MAX
+    } else {
+        frames as u64
+    })
+}
+
+fn too_many(total: u64, from: f64, end: f64, force: bool) -> Result<(), Fail> {
+    if total > MAX_RANGE && !force {
+        return Err(format!(
+            "{total} frames from {from:.3} s to {end:.3} s is more than {MAX_RANGE}; use --force to write them all"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn hold_last(
+    dir: &Path,
+    files: &mut Vec<(u64, PathBuf, f64)>,
+    held: u64,
+    digits: usize,
+    ext: &str,
+) -> Result<(), Fail> {
+    let Some((k, last, time)) = files.last().cloned() else {
+        return Err(about(dir, "no frame was written to hold"));
+    };
+    for i in 1..=held {
+        let n = k
+            .checked_add(i)
+            .ok_or("--hold runs past the last frame number")?;
+        let path = dir.join(format!("{n:0digits$}.{ext}"));
+        std::fs::copy(&last, &path).map_err(|e| about(&path, e))?;
+        files.push((n, path, time));
+    }
+    Ok(())
+}
+
+fn finish(
+    files: &mut Vec<(u64, PathBuf, f64)>,
+    dir: &Path,
+    held: u64,
+    digits: usize,
+    ext: &str,
+) -> Result<(), Fail> {
+    files.sort_by_key(|(k, _, _)| *k);
+    let done = hold_last(dir, files, held, digits, ext);
+    if done.is_err() {
+        for (_, path, _) in files.iter() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    done
+}
+
+struct Written {
+    end: f64,
+    slots: Slots,
+    per_second: f64,
+    rate: (u32, u32),
+    size: (u32, u32),
+    digits: usize,
+    first_image: Option<f64>,
+    count: u64,
+    held: u64,
+    files: Vec<(u64, PathBuf, f64)>,
+}
+
+fn report(
+    out: &mut impl Write,
+    job: &Job,
+    range: &Range,
+    dir: &Path,
+    w: &Written,
+    elapsed: f64,
+) -> Result<(), Fail> {
+    let total = w.count.saturating_add(w.held);
+    let speed = if elapsed > 0.0 {
+        total as f64 / elapsed
+    } else {
+        0.0
+    };
+    let last = w.files.last().map_or_else(
+        || w.slots.at(total.saturating_sub(1)),
+        |(k, _, _)| w.slots.at(*k),
+    );
+    let quality = job.quality.unwrap_or(DEFAULT_QUALITY);
+    if job.json {
+        let mut listed = String::new();
+        for (i, (k, path, time)) in w.files.iter().enumerate() {
+            if i > 0 {
+                listed.push(',');
+            }
+            let _ = write!(
+                listed,
+                "{{\"index\":{k},\"slot\":{:.6},\"time\":{time:.6},\"path\":{}}}",
+                w.slots.at(*k),
+                path_json(Some(path))
+            );
+        }
+        writeln!(
+            out,
+            "{{\"file\":{},\"from\":{:.6},\"to\":{:.6},\"first\":{:.6},\"last\":{last:.6},\"count\":{total},\"expected\":{},\"held\":{},\"fps\":{},\"rate\":{},\"every\":{},\"format\":\"{}\",\"quality\":{},\"width\":{},\"height\":{},\"crop\":{},\"dir\":{},\"digits\":{},\"first_png\":{},\"seconds\":{elapsed:.3},\"frames_per_second\":{speed:.1},\"files\":[{listed}]}}",
+            path_json(Some(&job.file)),
+            range.from,
+            w.end,
+            w.slots.at(0),
+            w.slots.count,
+            w.held,
+            rate_text(w.per_second),
+            match range.every {
+                Some(_) => "null".to_string(),
+                None => format!("\"{}/{}\"", w.rate.0, w.rate.1),
+            },
+            range
+                .every
+                .map_or("null".to_string(), |e| format!("{e:.6}")),
+            job.format.name(),
+            match job.format {
+                Format::Png => "null".to_string(),
+                _ => quality.to_string(),
+            },
+            w.size.0,
+            w.size.1,
+            range.crop.map_or("null".to_string(), Crop::json),
+            path_json(Some(dir)),
+            w.digits,
+            w.first_image
+                .map_or("null".to_string(), |t| format!("{t:.3}")),
+        )?;
+    } else {
+        let cadence = match range.every {
+            Some(every) => format!("one every {every:.3} s"),
+            None => format!("at {} fps", rate_text(w.per_second)),
+        };
+        writeln!(
+            out,
+            "{total} {} frames, {}x{} {cadence}, {:.3} s to {last:.3} s, in {}",
+            job.format.name(),
+            w.size.0,
+            w.size.1,
+            w.slots.at(0),
+            dir.display()
+        )?;
+        if w.held > 0 {
+            writeln!(out, "the last frame held for {} more frames", w.held)?;
+        }
+        writeln!(
+            out,
+            "{elapsed:.2} s, {speed:.1} frames/s, the first image after {:.3} s",
+            w.first_image.unwrap_or(elapsed)
+        )?;
+        if w.count < w.slots.count {
+            writeln!(
+                out,
+                "note: the stream ends before its probed length: {} of {} frames written",
+                w.count, w.slots.count
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn same_folder(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+fn run_folder(out: &mut impl Write, job: &Job, range: &Range, dir: &Path) -> Result<(), Fail> {
+    let started = Instant::now();
+    crop_unscaled(range)?;
+    let held = held_frames(range)?;
+    if range.every.is_some() {
+        return Err(about(
+            &job.file,
+            "is a folder of PNG frames, taken at its --fps rate; --every fits a video",
+        ));
+    }
+    let Some(rate) = range.fps else {
+        return Err(about(
+            &job.file,
+            "is a folder of PNG frames; give --fps for their rate",
+        ));
+    };
+    if range.sized {
+        return Err(about(
+            &job.file,
+            "is a folder of PNG frames, written at their own size; drop --size and --height",
+        ));
+    }
+    let to = range.to.unwrap_or(f64::INFINITY);
+    if to <= range.from {
+        return Err(format!("--to {to} must come after --from {}", range.from).into());
+    }
+    let sources = source::listed(&job.file)?;
+    let media = source::frames_of(&job.file, sources.clone(), Some(rate))?;
+    let length = sources.len() as f64 * f64::from(rate.1) / f64::from(rate.0.max(1));
+    if range.from >= length {
+        return Err(about(
+            &job.file,
+            format!(
+                "--from {} is at or past the end of the frames ({length:.3} s)",
+                range.from
+            ),
+        ));
+    }
+    let end = to.min(length);
+    let slots = Slots::of(range.from, end, rate, None);
+    let first = u64::try_from(media::first_frame_at(range.from, rate)).unwrap_or(0);
+    if slots.count == 0 {
+        return Err(about(
+            &job.file,
+            format!("no frame starts between {:.3} s and {end:.3} s", range.from),
+        ));
+    }
+    too_many(
+        slots.count.saturating_add(held),
+        range.from,
+        end,
+        range.force,
+    )?;
+    let size = match range.crop {
+        Some(c) => {
+            c.check((media.width, media.height))
+                .map_err(|e| about(&job.file, e))?;
+            (c.width, c.height)
+        }
+        None => (media.width, media.height),
+    };
+    if same_folder(dir, &job.file) {
+        return Err(about(
+            dir,
+            "is the source folder; write the frames somewhere else",
+        ));
+    }
+    ready(dir, range.force, job.format)?;
+    let quality = job.quality.unwrap_or(DEFAULT_QUALITY);
+    let ext = job.format.ext();
+    let digits = slots
+        .count
+        .saturating_add(held)
+        .to_string()
+        .len()
+        .max(NAME_DIGITS);
+    let first_image: OnceLock<f64> = OnceLock::new();
+    let made: Mutex<Vec<(u64, PathBuf, f64)>> = Mutex::new(Vec::new());
+    let wrote = (0..slots.count)
+        .into_par_iter()
+        .try_for_each(|k| -> Result<(), Fail> {
+            let index = first.saturating_add(k);
+            let src = usize::try_from(index)
+                .ok()
+                .and_then(|i| sources.get(i))
+                .ok_or_else(|| about(&job.file, format!("has no frame {index}")))?;
+            let data = std::fs::read(src).map_err(|e| about(src, e))?;
+            let image = png::decode(&data).map_err(|e| about(src, e))?;
+            same_size(&image, (media.width, media.height)).map_err(|e| about(src, e))?;
+            let alpha = media.alpha || image.data.chunks_exact(4).any(|px| px[3] != 255);
+            let image = match range.crop {
+                Some(c) => c.apply(&image).map_err(|e| about(src, e))?,
+                None => image,
+            };
+            let bytes = job
+                .format
+                .encode(&image, quality, alpha)
+                .map_err(|e| about(src, e))?;
+            let path = dir.join(format!("{k:0digits$}.{ext}"));
+            std::fs::write(&path, bytes).map_err(|e| about(&path, e))?;
+            made.lock().unwrap_or_else(PoisonError::into_inner).push((
+                k,
+                path,
+                index as f64 * f64::from(rate.1) / f64::from(rate.0.max(1)),
+            ));
+            let _ = first_image.set(started.elapsed().as_secs_f64());
+            Ok(())
+        });
+    let mut files = made.into_inner().unwrap_or_else(PoisonError::into_inner);
+    if let Err(e) = wrote {
+        for (_, path, _) in files {
+            let _ = std::fs::remove_file(path);
+        }
+        return Err(e);
+    }
+    finish(&mut files, dir, held, digits, ext)?;
+    let written = Written {
+        end,
+        per_second: f64::from(rate.0) / f64::from(rate.1.max(1)),
+        rate,
+        size,
+        digits,
+        first_image: first_image.get().copied(),
+        count: slots.count,
+        held,
+        files,
+        slots,
+    };
+    report(
+        out,
+        job,
+        range,
+        dir,
+        &written,
+        started.elapsed().as_secs_f64(),
+    )
+}
+
 fn run_range(out: &mut impl Write, job: &Job, range: &Range) -> Result<(), Fail> {
     let started = Instant::now();
     let dir = job
         .out
         .as_deref()
         .ok_or("a frame range writes its frames into --out")?;
+    if job.file.is_dir() {
+        return run_folder(out, job, range, dir);
+    }
+    crop_unscaled(range)?;
+    let held = held_frames(range)?;
     let to = range.to.unwrap_or(f64::INFINITY);
     if to <= range.from {
         return Err(format!("--to {to} must come after --from {}", range.from).into());
@@ -618,18 +1111,29 @@ fn run_range(out: &mut impl Write, job: &Job, range: &Range) -> Result<(), Fail>
             format!("no frame starts between {:.3} s and {end:.3} s", range.from),
         ));
     }
-    if slots.count > MAX_RANGE && !range.force {
-        return Err(format!(
-            "{} frames from {:.3} s to {end:.3} s is more than {MAX_RANGE}; use --force to write them all",
-            slots.count, range.from
-        )
-        .into());
-    }
-    let size = range_size(&media, range, job.height)?;
+    too_many(
+        slots.count.saturating_add(held),
+        range.from,
+        end,
+        range.force,
+    )?;
+    let size = match range.crop {
+        Some(c) => {
+            let whole = media.display_size();
+            c.check(whole).map_err(|e| about(&job.file, e))?;
+            whole
+        }
+        None => range_size(&media, range, job.height)?,
+    };
     ready(dir, range.force, job.format)?;
     let quality = job.quality.unwrap_or(DEFAULT_QUALITY);
     let ext = job.format.ext();
-    let digits = slots.count.to_string().len().max(NAME_DIGITS);
+    let digits = slots
+        .count
+        .saturating_add(held)
+        .to_string()
+        .len()
+        .max(NAME_DIGITS);
     let lead = (slots.at(0) - f64::from(media.fps.1) / f64::from(media.fps.0)).max(0.0);
     let mut feed = Feed::open(&job.file, &media, lead, size, &job.prefs)?;
     let see_through = feed
@@ -671,18 +1175,19 @@ fn run_range(out: &mut impl Write, job: &Job, range: &Range) -> Result<(), Fail>
                         }
                         let wrote = (|| -> Result<(), Fail> {
                             let time = frame.time_base.seconds(frame.pts);
-                            let data = match (see_through, &mut fix) {
-                                (Some(a), _) => job.format.encode(
-                                    &a.apply(&frame, plane.as_ref())?,
-                                    quality,
-                                    true,
-                                ),
-                                (None, Some(fix)) => {
-                                    job.format.encode(&fix.apply(frame)?, quality, false)
-                                }
+                            let (image, alpha) = match (see_through, &mut fix) {
+                                (Some(a), _) => (a.apply(&frame, plane.as_ref())?, true),
+                                (None, Some(fix)) => (fix.apply(frame)?, false),
                                 (None, None) => return Err("no RGBA converter".into()),
-                            }
-                            .map_err(|e| about(dir, e))?;
+                            };
+                            let image = match range.crop {
+                                Some(c) => c.apply(&image)?,
+                                None => image,
+                            };
+                            let data = job
+                                .format
+                                .encode(&image, quality, alpha)
+                                .map_err(|e| about(dir, e))?;
                             for k in taken {
                                 let path = dir.join(format!("{k:0digits$}.{ext}"));
                                 std::fs::write(&path, &data).map_err(|e| about(&path, e))?;
@@ -762,122 +1267,28 @@ fn run_range(out: &mut impl Write, job: &Job, range: &Range) -> Result<(), Fail>
         ));
     }
     let mut files = made.into_inner().unwrap_or_else(PoisonError::into_inner);
-    files.sort_by_key(|(k, _, _)| *k);
-    let text = summary(
-        &Summary {
-            file: &job.file,
-            from: range.from,
-            to: end,
-            first: slots.at(0),
-            last: slots.at(count.saturating_sub(1)),
-            expected: slots.count,
-            per_second,
-            rate,
-            every: range.every,
-            format: job.format,
-            quality,
-            size,
-            dir,
-            digits,
-            first_png: first_png.get().copied(),
-            seconds: started.elapsed().as_secs_f64(),
-            files: files
-                .into_iter()
-                .map(|(k, path, time)| (k, slots.at(k), time, path))
-                .collect(),
-        },
-        job.json,
-    );
-    out.write_all(text.as_bytes())?;
-    Ok(())
-}
-
-struct Summary<'a> {
-    file: &'a Path,
-    from: f64,
-    to: f64,
-    first: f64,
-    last: f64,
-    expected: u64,
-    per_second: f64,
-    rate: (u32, u32),
-    every: Option<f64>,
-    format: Format,
-    quality: u8,
-    size: (u32, u32),
-    dir: &'a Path,
-    digits: usize,
-    first_png: Option<f64>,
-    seconds: f64,
-    files: Vec<(u64, f64, f64, PathBuf)>,
-}
-
-fn summary(s: &Summary, json: bool) -> String {
-    let count = s.files.len() as u64;
-    let speed = count as f64 / s.seconds.max(1e-9);
-    if json {
-        let mut listed = String::new();
-        for (i, (k, slot, time, path)) in s.files.iter().enumerate() {
-            if i > 0 {
-                listed.push(',');
-            }
-            let _ = write!(
-                listed,
-                "{{\"index\":{k},\"slot\":{slot:.6},\"time\":{time:.6},\"path\":{}}}",
-                path_json(Some(path))
-            );
-        }
-        return format!(
-            "{{\"file\":{},\"from\":{:.6},\"to\":{:.6},\"first\":{:.6},\"last\":{:.6},\"count\":{count},\"expected\":{},\"fps\":{},\"rate\":{},\"every\":{},\"format\":\"{}\",\"quality\":{},\"width\":{},\"height\":{},\"dir\":{},\"digits\":{},\"first_png\":{},\"seconds\":{:.3},\"frames_per_second\":{speed:.1},\"files\":[{listed}]}}\n",
-            path_json(Some(s.file)),
-            s.from,
-            s.to,
-            s.first,
-            s.last,
-            s.expected,
-            rate_text(s.per_second),
-            match s.every {
-                Some(_) => "null".to_string(),
-                None => format!("\"{}/{}\"", s.rate.0, s.rate.1),
-            },
-            s.every.map_or("null".to_string(), |e| format!("{e:.6}")),
-            s.format.name(),
-            match s.format {
-                Format::Png => "null".to_string(),
-                _ => s.quality.to_string(),
-            },
-            s.size.0,
-            s.size.1,
-            path_json(Some(s.dir)),
-            s.digits,
-            s.first_png
-                .map_or("null".to_string(), |t| format!("{t:.3}")),
-            s.seconds,
-        );
-    }
-    let cadence = match s.every {
-        Some(every) => format!("one every {every:.3} s"),
-        None => format!("at {} fps", rate_text(s.per_second)),
+    finish(&mut files, dir, held, digits, ext)?;
+    let shape = range.crop.map_or(size, |c| (c.width, c.height));
+    let written = Written {
+        end,
+        slots,
+        per_second,
+        rate,
+        size: shape,
+        digits,
+        first_image: first_png.get().copied(),
+        count,
+        held,
+        files,
     };
-    let mut text = format!(
-        "{count} {} frames, {}x{} {cadence}, {:.3} s to {:.3} s, in {}\n{:.2} s, {speed:.1} frames/s, the first image after {:.3} s\n",
-        s.format.name(),
-        s.size.0,
-        s.size.1,
-        s.first,
-        s.last,
-        s.dir.display(),
-        s.seconds,
-        s.first_png.unwrap_or(s.seconds)
-    );
-    if count < s.expected {
-        let _ = writeln!(
-            text,
-            "note: the stream ends before its probed length: {count} of {} frames written",
-            s.expected
-        );
-    }
-    text
+    report(
+        out,
+        job,
+        range,
+        dir,
+        &written,
+        started.elapsed().as_secs_f64(),
+    )
 }
 
 fn first_where(total: u64, at: impl Fn(u64) -> bool) -> u64 {
@@ -920,7 +1331,7 @@ fn gif_spans(
     (first..end, times)
 }
 
-struct Written {
+struct GifWritten {
     paths: Vec<(u64, PathBuf)>,
     failed: Option<Fail>,
 }
@@ -937,12 +1348,12 @@ struct GifOut<'a> {
 fn write_gif_batch(
     batch: &mut Vec<(Rgba, std::ops::Range<u64>)>,
     to: &GifOut,
-    written: &mut Written,
+    written: &mut GifWritten,
 ) {
-    let wrote: Vec<Written> = batch
+    let wrote: Vec<GifWritten> = batch
         .par_drain(..)
         .map(|(mut img, ticks)| {
-            let mut w = Written {
+            let mut w = GifWritten {
                 paths: Vec::new(),
                 failed: None,
             };
@@ -981,7 +1392,7 @@ fn write_gif_batch(
     }
 }
 
-fn undo(written: Written, read: Result<(), Fail>) -> Result<Vec<(u64, PathBuf)>, Fail> {
+fn undo(written: GifWritten, read: Result<(), Fail>) -> Result<Vec<(u64, PathBuf)>, Fail> {
     match read.err().or(written.failed) {
         Some(e) => {
             for (_, path) in written.paths {
@@ -1006,6 +1417,12 @@ fn run_gif_range(
     dir: &Path,
     started: Instant,
 ) -> Result<(), Fail> {
+    if range.crop.is_some() || range.hold.is_some() {
+        return Err(about(
+            &job.file,
+            "is a GIF; --crop and --hold take a video or a folder of PNG frames",
+        ));
+    }
     let data = std::fs::read(&job.file).map_err(|e| about(&job.file, e))?;
     let info = media::scan_gif(&data).map_err(|e| about(&job.file, e))?;
     let rate = match range.every {
@@ -1049,7 +1466,7 @@ fn run_gif_range(
     };
     let batch_size = gif_batch(rayon::current_num_threads(), (info.width, info.height));
     let mut batch = Vec::with_capacity(batch_size);
-    let mut written = Written {
+    let mut written = GifWritten {
         paths: Vec::new(),
         failed: None,
     };
@@ -1074,36 +1491,37 @@ fn run_gif_range(
     }
     let mut paths = undo(written, read)?;
     paths.sort_by_key(|(k, _)| *k);
-    let time = |k: u64| k as f64 * f64::from(rate.1) / f64::from(rate.0.max(1));
-    let text = summary(
-        &Summary {
-            file: &job.file,
-            from: range.from,
-            to: to.min(info.duration()),
+    let step = f64::from(rate.1) / f64::from(rate.0.max(1));
+    let files: Vec<(u64, PathBuf, f64)> = paths
+        .into_iter()
+        .map(|(k, path)| (k - kept.start, path, k as f64 * step))
+        .collect();
+    let written = Written {
+        end: to.min(info.duration()),
+        slots: Slots {
             first: times[0],
-            last: times[1],
-            expected: count,
-            per_second: range
-                .every
-                .map_or(f64::from(rate.0) / f64::from(rate.1.max(1)), |e| 1.0 / e),
-            rate,
-            every: range.every,
-            format: job.format,
-            quality,
-            size,
-            dir,
-            digits: target.digits,
-            first_png,
-            seconds: started.elapsed().as_secs_f64(),
-            files: paths
-                .into_iter()
-                .map(|(k, path)| (k - kept.start, time(k), time(k), path))
-                .collect(),
+            step,
+            count,
         },
-        job.json,
-    );
-    out.write_all(text.as_bytes())?;
-    Ok(())
+        per_second: range
+            .every
+            .map_or(f64::from(rate.0) / f64::from(rate.1.max(1)), |e| 1.0 / e),
+        rate,
+        size,
+        digits: target.digits,
+        first_image: first_png,
+        count: files.len() as u64,
+        held: 0,
+        files,
+    };
+    report(
+        out,
+        job,
+        range,
+        dir,
+        &written,
+        started.elapsed().as_secs_f64(),
+    )
 }
 
 #[cfg(test)]
@@ -1299,6 +1717,8 @@ mod tests {
             every: None,
             size: None,
             force: false,
+            crop: None,
+            hold: None,
         };
         assert_eq!(range_size(&m, &r, 180).unwrap(), (320, 180));
         assert_eq!(range_size(&m, &r, 241).unwrap(), (428, 241));
@@ -1340,6 +1760,8 @@ mod tests {
             every,
             size: None,
             force: false,
+            crop: None,
+            hold: None,
         };
         assert_eq!(r(None, None).step(), None);
         assert_eq!(r(Some((4, 1)), None).step(), Some(0.25));
@@ -1502,6 +1924,23 @@ mod tests {
         let note = quality_note(&job(Format::Png, Some(50))).unwrap();
         assert!(note.starts_with("pcod: ") && !note.contains('\n'));
     }
+    fn placed() -> Rgba {
+        let mut img = Rgba::new(40, 30);
+        for (i, px) in img.data.chunks_exact_mut(4).enumerate() {
+            let (x, y) = ((i % 40) as u8, (i / 40) as u8);
+            px.copy_from_slice(&[x, y, x ^ y, 200]);
+        }
+        img
+    }
+
+    fn crop(width: u32, height: u32, x: u32, y: u32) -> Crop {
+        Crop {
+            width,
+            height,
+            x,
+            y,
+        }
+    }
 
     fn gif(delays: &[u16]) -> media::GifInfo {
         media::GifInfo {
@@ -1511,6 +1950,362 @@ mod tests {
             delays_cs: delays.to_vec(),
             transparent: false,
         }
+    }
+
+    #[test]
+    fn a_hold_after_a_stream_that_ends_early_reports_its_last_file() {
+        let slots = Slots::of(0.0, 1.0, (4, 1), None);
+        assert_eq!(slots.count, 4);
+        let files: Vec<(u64, PathBuf, f64)> = (0..4)
+            .map(|k| (k, PathBuf::from(format!("{k:06}.png")), 0.25))
+            .collect();
+        let w = Written {
+            end: 1.0,
+            slots,
+            per_second: 4.0,
+            rate: (4, 1),
+            size: (8, 8),
+            digits: 6,
+            first_image: Some(0.01),
+            count: 2,
+            held: 2,
+            files,
+        };
+        let range = held_range(Some((4, 1)), Some(0.5));
+        let mut plain = Vec::new();
+        report(
+            &mut plain,
+            &job(Format::Png, None),
+            &range,
+            Path::new("out"),
+            &w,
+            1.0,
+        )
+        .unwrap();
+        let plain = String::from_utf8(plain).unwrap();
+        assert!(
+            plain.starts_with("4 png frames, 8x8 at 4 fps, 0.000 s to 0.750 s"),
+            "{plain}"
+        );
+        assert!(
+            plain.contains("the last frame held for 2 more frames"),
+            "{plain}"
+        );
+        assert!(plain.contains("2 of 4 frames written"), "{plain}");
+        let mut json = Vec::new();
+        let mut j = job(Format::Png, None);
+        j.json = true;
+        report(&mut json, &j, &range, Path::new("out"), &w, 1.0).unwrap();
+        let json = String::from_utf8(json).unwrap();
+        assert!(
+            json.contains("\"last\":0.750000,\"count\":4,\"expected\":4,\"held\":2"),
+            "{json}"
+        );
+        let mut gap = w;
+        for (file, k) in gap.files.iter_mut().zip([0, 2, 3, 4]) {
+            file.0 = k;
+        }
+        let mut gapped = Vec::new();
+        report(&mut gapped, &j, &range, Path::new("out"), &gap, 1.0).unwrap();
+        let gapped = String::from_utf8(gapped).unwrap();
+        assert!(gapped.contains("\"last\":1.000000"), "{gapped}");
+    }
+
+    struct Short(usize);
+
+    impl std::io::Write for Short {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.0 == 0 {
+                return Err(std::io::Error::other("the reader went away"));
+            }
+            let n = buf.len().min(self.0);
+            self.0 -= n;
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_report_that_cannot_be_written_fails_and_a_zero_time_reads_as_no_speed() {
+        let w = || Written {
+            end: 1.0,
+            slots: Slots::of(0.0, 1.0, (4, 1), None),
+            per_second: 4.0,
+            rate: (4, 1),
+            size: (8, 8),
+            digits: 6,
+            first_image: None,
+            count: 2,
+            held: 2,
+            files: Vec::new(),
+        };
+        let range = held_range(Some((4, 1)), Some(0.5));
+        let mut j = job(Format::Png, None);
+        for json in [false, true] {
+            j.json = json;
+            let mut full = Vec::new();
+            report(&mut full, &j, &range, Path::new("out"), &w(), 0.0).unwrap();
+            let text = String::from_utf8(full.clone()).unwrap();
+            if json {
+                assert!(text.contains("\"last\":0.750000"), "{text}");
+                assert!(text.contains("\"frames_per_second\":0.0"), "{text}");
+                assert!(text.contains("\"files\":[]"), "{text}");
+            } else {
+                assert_eq!(text.lines().count(), 4, "{text}");
+                assert!(text.contains("0.00 s, 0.0 frames/s"), "{text}");
+                assert!(text.contains("the first image after 0.000 s"), "{text}");
+            }
+            for cut in 0..full.len() {
+                let got = report(&mut Short(cut), &j, &range, Path::new("out"), &w(), 0.0);
+                assert!(got.is_err(), "json {json}, cut at {cut} of {}", full.len());
+            }
+            report(
+                &mut Short(full.len()),
+                &j,
+                &range,
+                Path::new("out"),
+                &w(),
+                0.0,
+            )
+            .unwrap();
+        }
+    }
+
+    fn held_range(fps: Option<(u32, u32)>, hold: Option<f64>) -> Range {
+        Range {
+            from: 0.0,
+            to: None,
+            fps,
+            sized: false,
+            every: None,
+            size: None,
+            force: false,
+            crop: None,
+            hold,
+        }
+    }
+
+    #[test]
+    fn a_crop_reads_width_height_x_and_y() {
+        assert_eq!(crop_of("640:360:10:20").unwrap(), crop(640, 360, 10, 20));
+        assert_eq!(crop_of(" 1:2:0:0 ").unwrap(), crop(1, 2, 0, 0));
+        assert_eq!(crop_of("0:0:0:0").unwrap(), crop(0, 0, 0, 0));
+        for bad in [
+            "",
+            "640:360",
+            "640:360:0",
+            "640:360:0:0:0",
+            "a:b:c:d",
+            "-1:2:3:4",
+            "1.5:2:3:4",
+            "640x360+0+0",
+        ] {
+            let e = crop_of(bad).unwrap_err();
+            assert!(e.contains("is not a crop such as"), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn a_crop_is_the_same_rectangle_of_the_full_frame_pixel_for_pixel() {
+        let full = placed();
+        let c = crop(7, 5, 30, 20);
+        let cut = c.apply(&full).unwrap();
+        assert_eq!((cut.width, cut.height), (7, 5));
+        for y in 0..5 {
+            for x in 0..7 {
+                let a = &cut.data[(y * 7 + x) * 4..][..4];
+                let b = &full.data[((y + 20) * 40 + x + 30) * 4..][..4];
+                assert_eq!(a, b, "{x},{y}");
+            }
+        }
+        assert_eq!(crop(40, 30, 0, 0).apply(&full).unwrap().data, full.data);
+        let corner = crop(1, 1, 39, 29).apply(&full).unwrap();
+        assert_eq!(corner.data, vec![39, 29, 39 ^ 29, 200]);
+    }
+
+    #[test]
+    fn a_crop_outside_the_frame_or_with_a_zero_side_is_refused_in_one_line() {
+        let full = placed();
+        for (c, words) in [
+            (crop(41, 1, 0, 0), "falls outside the 40x30 frame"),
+            (crop(1, 31, 0, 0), "falls outside the 40x30 frame"),
+            (crop(10, 10, 31, 0), "falls outside the 40x30 frame"),
+            (crop(10, 10, 0, 21), "falls outside the 40x30 frame"),
+            (crop(1, 1, u32::MAX, 0), "falls outside the 40x30 frame"),
+            (crop(u32::MAX, 1, 1, 0), "falls outside the 40x30 frame"),
+            (crop(0, 10, 0, 0), "needs a width and height above zero"),
+            (crop(10, 0, 0, 0), "needs a width and height above zero"),
+        ] {
+            let e = c.apply(&full).unwrap_err().to_string();
+            assert!(e.contains(words), "{c:?}: {e}");
+            assert!(e.starts_with("--crop "), "{e}");
+            assert!(!e.contains('\n'), "{e}");
+        }
+        assert!(crop(10, 10, 30, 20).check((40, 30)).is_ok());
+    }
+
+    #[test]
+    fn a_crop_refuses_a_frame_shorter_than_its_size() {
+        let mut short = placed();
+        short.data.truncate(40 * 4 * 10);
+        assert!(crop(5, 5, 0, 20).apply(&short).is_err());
+    }
+
+    #[test]
+    fn a_hold_is_its_length_at_the_fps_rate() {
+        assert_eq!(
+            held_frames(&held_range(Some((30, 1)), Some(2.0))).unwrap(),
+            60
+        );
+        assert_eq!(
+            held_frames(&held_range(Some((24, 1)), Some(0.5))).unwrap(),
+            12
+        );
+        assert_eq!(
+            held_frames(&held_range(Some((30000, 1001)), Some(1.0))).unwrap(),
+            30
+        );
+        assert_eq!(
+            held_frames(&held_range(Some((30, 1)), Some(0.001))).unwrap(),
+            1
+        );
+        assert_eq!(held_frames(&held_range(Some((30, 1)), None)).unwrap(), 0);
+        assert_eq!(held_frames(&held_range(None, None)).unwrap(), 0);
+        assert_eq!(
+            held_frames(&held_range(Some((240, 1)), Some(1e300))).unwrap(),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn a_hold_without_a_rate_or_a_time_is_refused() {
+        let e = held_frames(&held_range(None, Some(2.0)))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("--hold needs --fps"), "{e}");
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let e = held_frames(&held_range(Some((30, 1)), Some(bad)))
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("is not a time above zero"), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn a_crop_refuses_a_scale() {
+        let mut r = held_range(Some((30, 1)), None);
+        r.crop = Some(crop(10, 10, 0, 0));
+        assert!(crop_unscaled(&r).is_ok());
+        r.sized = true;
+        assert!(
+            crop_unscaled(&r)
+                .unwrap_err()
+                .to_string()
+                .contains("drop --size and --height")
+        );
+        r.crop = None;
+        assert!(crop_unscaled(&r).is_ok());
+        assert_eq!(held_frames(&r).unwrap(), 0);
+    }
+
+    #[test]
+    fn too_many_frames_need_force() {
+        assert!(too_many(MAX_RANGE, 0.0, 1.0, false).is_ok());
+        assert!(too_many(MAX_RANGE + 1, 0.0, 1.0, false).is_err());
+        assert!(too_many(MAX_RANGE + 1, 0.0, 1.0, true).is_ok());
+    }
+
+    #[test]
+    fn a_hold_copies_the_last_frame_numbered_on_and_cleans_up_on_failure() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/unit-stills-hold");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut files = Vec::new();
+        for (k, body) in [(1u64, b"b"), (0, b"a")] {
+            let path = dir.join(format!("{k:06}.png"));
+            std::fs::write(&path, body).unwrap();
+            files.push((k, path, k as f64));
+        }
+        finish(&mut files, &dir, 3, 6, "png").unwrap();
+        let ks: Vec<u64> = files.iter().map(|(k, _, _)| *k).collect();
+        assert_eq!(ks, vec![0, 1, 2, 3, 4]);
+        for k in 2..=4 {
+            assert_eq!(
+                std::fs::read(dir.join(format!("{k:06}.png"))).unwrap(),
+                b"b"
+            );
+            assert_eq!(files[k as usize].2, 1.0);
+        }
+        assert!(!dir.join("000005.png").exists());
+        let mut none = Vec::new();
+        assert!(finish(&mut none, &dir, 2, 6, "png").is_err());
+        let mut gone = vec![
+            (0u64, dir.join("000000.png"), 0.0),
+            (9u64, dir.join("missing.png"), 0.0),
+        ];
+        assert!(finish(&mut gone, &dir, 1, 6, "png").is_err());
+        assert!(!dir.join("000000.png").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_is_never_its_own_output() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/unit-stills-same");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("in")).unwrap();
+        assert!(same_folder(&dir.join("in"), &dir.join("in/../in")));
+        assert!(!same_folder(&dir.join("in"), &dir));
+        assert!(!same_folder(&dir.join("nowhere"), &dir.join("nowhere")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn transparency_is_kept_from_the_colour_type_or_the_pixels() {
+        let mut img = Rgba::new(2, 1);
+        img.data.fill(255);
+        assert!(!see_through(png::Color::Rgb, &img));
+        assert!(!see_through(png::Color::Palette, &img));
+        assert!(see_through(png::Color::Rgba, &img));
+        assert!(see_through(png::Color::GreyAlpha, &img));
+        img.data[7] = 0;
+        assert!(see_through(png::Color::Palette, &img));
+        assert!(see_through(png::Color::Rgb, &img));
+        assert!(see_through(png::Color::Grey, &img));
+    }
+
+    #[test]
+    fn a_whole_write_leaves_no_part_behind() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/unit-stills-whole");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("out.png");
+        assert_eq!(part_of(&out), dir.join("out.png.part"));
+        write_whole(&out, b"abc").unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"abc");
+        assert!(!part_of(&out).exists());
+        std::fs::create_dir_all(part_of(&dir.join("dir.png"))).unwrap();
+        assert!(write_whole(&dir.join("dir.png"), b"abc").is_err());
+        assert!(!dir.join("dir.png").exists());
+        let missing = dir.join("nowhere/out.png");
+        let e = write_whole(&missing, b"abc").unwrap_err().to_string();
+        assert!(e.contains("out.png"), "{e}");
+        assert!(!part_of(&missing).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_frame_of_another_size_is_refused() {
+        let img = Rgba::new(4, 2);
+        assert!(same_size(&img, (4, 2)).is_ok());
+        let e = same_size(&img, (4, 3)).unwrap_err().to_string();
+        assert!(
+            e.contains("is 4x2 where the folder's first frame is 4x3"),
+            "{e}"
+        );
+        assert!(same_size(&img, (2, 4)).is_err());
     }
 
     #[test]
@@ -1574,8 +2369,8 @@ mod tests {
         }
     }
 
-    fn unwritten() -> Written {
-        Written {
+    fn unwritten() -> GifWritten {
+        GifWritten {
             paths: Vec::new(),
             failed: None,
         }
@@ -1676,7 +2471,7 @@ mod tests {
             std::fs::write(p, b"x").unwrap();
         }
         std::fs::write(dir.join("keep.txt"), b"x").unwrap();
-        let written = Written {
+        let written = GifWritten {
             paths: paths
                 .iter()
                 .cloned()
@@ -1690,7 +2485,7 @@ mod tests {
         for p in &paths {
             std::fs::write(p, b"x").unwrap();
         }
-        let written = Written {
+        let written = GifWritten {
             paths: paths
                 .iter()
                 .cloned()
@@ -1703,7 +2498,7 @@ mod tests {
         assert_eq!(e.to_string(), "the GIF ends early");
         assert!(paths.iter().all(|p| !p.exists()));
         assert!(dir.join("keep.txt").exists());
-        let kept = Written {
+        let kept = GifWritten {
             paths: vec![(0, dir.join("keep.txt"))],
             failed: None,
         };
@@ -1721,46 +2516,56 @@ mod tests {
         assert_eq!(every_rate(1e12), (1000, u32::MAX));
     }
 
-    fn summed(
+    fn reported(
         every: Option<f64>,
-        files: Vec<(u64, f64, f64, PathBuf)>,
+        files: Vec<(u64, PathBuf, f64)>,
         expected: u64,
-    ) -> Summary<'static> {
-        Summary {
-            file: Path::new("in.gif"),
-            from: 0.0,
-            to: 1.0,
-            first: 0.0,
-            last: 0.4,
-            expected,
-            per_second: 5.0,
+        json: bool,
+    ) -> String {
+        let mut range = held_range(Some((5, 1)), None);
+        range.every = every;
+        let w = Written {
+            end: 1.0,
+            slots: Slots {
+                first: 0.0,
+                step: 0.2,
+                count: expected,
+            },
+            per_second: every.map_or(5.0, |e| 1.0 / e),
             rate: (5, 1),
-            every,
-            format: Format::Png,
-            quality: 85,
             size: (64, 48),
-            dir: Path::new("out"),
             digits: 6,
-            first_png: None,
-            seconds: 0.5,
+            first_image: None,
+            count: files.len() as u64,
+            held: 0,
             files,
-        }
+        };
+        let mut j = job(Format::Png, None);
+        j.file = PathBuf::from("in.gif");
+        j.json = json;
+        let mut out = Vec::new();
+        report(&mut out, &j, &range, Path::new("out"), &w, 0.5).unwrap();
+        String::from_utf8(out).unwrap()
     }
 
     #[test]
-    fn a_summary_lists_each_file_and_nulls_what_was_not_asked_or_done() {
+    fn a_report_lists_each_file_and_nulls_what_was_not_asked_or_done() {
         let files = vec![
-            (0, 0.0, 0.01, PathBuf::from("out/000000.png")),
-            (1, 0.2, 0.21, PathBuf::from("out/000001.png")),
+            (0, PathBuf::from("out/000000.png"), 0.01),
+            (1, PathBuf::from("out/000001.png"), 0.21),
         ];
         let v: serde_json::Value =
-            serde_json::from_str(&summary(&summed(None, files.clone(), 2), true)).unwrap();
+            serde_json::from_str(&reported(None, files.clone(), 2, true)).unwrap();
+        assert_eq!(v["file"], "in.gif");
         assert_eq!(v["count"], 2);
         assert_eq!(v["expected"], 2);
+        assert_eq!(v["held"], 0);
         assert_eq!(v["rate"], "5/1");
         assert_eq!(v["every"], serde_json::Value::Null);
         assert_eq!(v["quality"], serde_json::Value::Null);
+        assert_eq!(v["crop"], serde_json::Value::Null);
         assert_eq!(v["first_png"], serde_json::Value::Null);
+        assert_eq!(v["last"], 0.2);
         assert_eq!(v["frames_per_second"], 4.0);
         let listed = v["files"].as_array().unwrap();
         assert_eq!(listed.len(), 2);
@@ -1769,20 +2574,20 @@ mod tests {
         assert_eq!(listed[1]["time"], 0.21);
         assert_eq!(listed[1]["path"], "out/000001.png");
         let v: serde_json::Value =
-            serde_json::from_str(&summary(&summed(Some(0.2), files, 2), true)).unwrap();
+            serde_json::from_str(&reported(Some(0.2), files, 2, true)).unwrap();
         assert_eq!(v["rate"], serde_json::Value::Null);
         assert_eq!(v["every"], 0.2);
     }
 
     #[test]
-    fn a_summary_in_words_notes_a_short_stream() {
-        let files = vec![(0, 0.0, 0.0, PathBuf::from("out/000000.png"))];
-        let said = summary(&summed(Some(0.2), files.clone(), 1), false);
+    fn a_report_in_words_notes_a_short_stream() {
+        let files = vec![(0, PathBuf::from("out/000000.png"), 0.0)];
+        let said = reported(Some(0.2), files.clone(), 1, false);
         assert_eq!(
             said,
-            "1 png frames, 64x48 one every 0.200 s, 0.000 s to 0.400 s, in out\n0.50 s, 2.0 frames/s, the first image after 0.500 s\n"
+            "1 png frames, 64x48 one every 0.200 s, 0.000 s to 0.000 s, in out\n0.50 s, 2.0 frames/s, the first image after 0.500 s\n"
         );
-        let said = summary(&summed(None, files, 3), false);
+        let said = reported(None, files, 3, false);
         assert!(said.contains("64x48 at 5 fps"), "{said}");
         assert!(
             said.ends_with(

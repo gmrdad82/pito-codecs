@@ -8,6 +8,9 @@ mod quant;
 mod tests;
 mod writer;
 
+pub mod decode;
+pub use decode::decode;
+
 use crate::media::Rgba;
 use huffman::HuffmanTable;
 use quant::QuantTable;

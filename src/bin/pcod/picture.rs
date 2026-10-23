@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use pito_codecs::filter::{ColorSpec, Image, ImageMut, Kernel, Light, Scaler, Transfer};
 use pito_codecs::media::{PixelFormat, Rgba};
-use pito_codecs::{png, webp};
+use pito_codecs::{jpeg, png, webp};
 
 use super::Fail;
 use super::json::Json;
@@ -207,56 +207,23 @@ fn has_trns(data: &[u8]) -> bool {
 }
 
 pub fn jpeg_size(data: &[u8]) -> Result<(u32, u32, Option<&'static str>), String> {
-    let short = || "JPEG: the file ends before its frame header".to_string();
-    let mut at = 2;
-    loop {
-        if *data.get(at).ok_or_else(short)? != 0xff {
-            return Err(format!("JPEG: no marker at byte {at}"));
-        }
-        while *data.get(at).ok_or_else(short)? == 0xff {
-            at += 1;
-        }
-        let marker = data[at];
-        at += 1;
-        match marker {
-            0x01 | 0xd0..=0xd8 => continue,
-            0xd9 | 0xda => return Err("JPEG: no frame header before the image data".into()),
-            _ => {}
-        }
-        let len = data
-            .get(at..at + 2)
-            .map(|b| usize::from(u16::from_be_bytes([b[0], b[1]])))
-            .ok_or_else(short)?;
-        if len < 2 {
-            return Err(format!("JPEG: a segment of length {len}"));
-        }
-        if matches!(marker, 0xc0..=0xcf) && !matches!(marker, 0xc4 | 0xc8 | 0xcc) {
-            let body = data.get(at + 2..at + 8).ok_or_else(short)?;
-            let height = u32::from(u16::from_be_bytes([body[1], body[2]]));
-            let width = u32::from(u16::from_be_bytes([body[3], body[4]]));
-            if width == 0 || height == 0 {
-                return Err(format!("JPEG: a {width}x{height} frame"));
-            }
-            let parts = usize::from(body[5]);
-            let sampling: Vec<u8> = (0..parts)
-                .filter_map(|i| data.get(at + 9 + i * 3).copied())
-                .collect();
-            let pix_fmt = match (body[0], sampling.as_slice()) {
-                (8, [_]) => Some("gray"),
-                (8, [y, 0x11, 0x11]) => match y {
-                    0x11 => Some("yuvj444p"),
-                    0x21 => Some("yuvj422p"),
-                    0x22 => Some("yuvj420p"),
-                    0x12 => Some("yuvj440p"),
-                    0x41 => Some("yuvj411p"),
-                    _ => None,
-                },
+    let info = jpeg::decode::info(data).map_err(|e| e.to_string())?;
+    let pix_fmt = match info.sampling.as_slice() {
+        _ if info.precision != 8 => None,
+        [_] => Some("gray"),
+        [y, cb, cr] if cb == cr && y.0 % cb.0 == 0 && y.1 % cb.1 == 0 => {
+            match (y.0 / cb.0, y.1 / cb.1) {
+                (1, 1) => Some("yuvj444p"),
+                (2, 1) => Some("yuvj422p"),
+                (2, 2) => Some("yuvj420p"),
+                (1, 2) => Some("yuvj440p"),
+                (4, 1) => Some("yuvj411p"),
                 _ => None,
-            };
-            return Ok((width, height, pix_fmt));
+            }
         }
-        at += len;
-    }
+        _ => None,
+    };
+    Ok((info.width, info.height, pix_fmt))
 }
 
 pub fn webp_delays(data: &[u8]) -> Result<Vec<u32>, String> {
@@ -370,9 +337,40 @@ pub fn load(path: &Path) -> Result<Rgba, String> {
             }
             webp::decode(&data).map_err(|e| e.to_string())
         }
-        Some(Format::Jpeg) => Err("JPEG input is not supported".into()),
-        _ => Err("not a PNG or WebP still image".into()),
+        Some(Format::Jpeg) => {
+            let orientation = jpeg::decode::info(&data)
+                .map_err(|e| e.to_string())?
+                .orientation;
+            let image = jpeg::decode(&data).map_err(|e| e.to_string())?;
+            Ok(orient(image, orientation))
+        }
+        _ => Err("not a PNG, JPEG or WebP still image".into()),
     }
+}
+
+pub fn orient(image: Rgba, orientation: u8) -> Rgba {
+    let (w, h) = (image.width as usize, image.height as usize);
+    if !(2..=8).contains(&orientation) || image.data.len() < w * h * 4 {
+        return image;
+    }
+    let turned = orientation >= 5;
+    let (ow, oh) = if turned { (h, w) } else { (w, h) };
+    let mut out = Rgba::new(ow as u32, oh as u32);
+    for (i, px) in image.data.chunks_exact(4).take(w * h).enumerate() {
+        let (x, y) = (i % w, i / w);
+        let (ox, oy) = match orientation {
+            2 => (w - 1 - x, y),
+            3 => (w - 1 - x, h - 1 - y),
+            4 => (x, h - 1 - y),
+            5 => (y, x),
+            6 => (h - 1 - y, x),
+            7 => (h - 1 - y, w - 1 - x),
+            _ => (y, w - 1 - x),
+        };
+        let at = (oy * ow + ox) * 4;
+        out.data[at..at + 4].copy_from_slice(px);
+    }
+    out
 }
 
 pub fn resize(image: Rgba, width: u32, height: u32) -> Result<Rgba, String> {
@@ -418,6 +416,27 @@ pub fn encode(
     Ok((bytes, width, height))
 }
 
+pub fn encode_png(image: Rgba, size: Option<Size>) -> Result<(Vec<u8>, u32, u32), String> {
+    let (width, height) = match size {
+        Some(s) => s.resolve(image.width, image.height)?,
+        None => (image.width, image.height),
+    };
+    let image = resize(image, width, height)?;
+    let bytes = if image.data.chunks_exact(4).any(|px| px[3] != 255) {
+        png::encode_rgba(&image)
+    } else {
+        png::encode(&image)
+    }
+    .map_err(|e| e.to_string())?;
+    Ok((bytes, width, height))
+}
+
+pub fn is_png(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("png"))
+}
+
 pub fn convert(job: &Job, partial_path: &mut Option<PathBuf>) -> Result<String, Fail> {
     let started = Instant::now();
     if same_file(job.input, job.output) {
@@ -432,8 +451,13 @@ pub fn convert(job: &Job, partial_path: &mut Option<PathBuf>) -> Result<String, 
     }
     let shown = job.input.display();
     let image = load(job.input).map_err(|e| format!("{shown}: {e}"))?;
-    let (bytes, width, height) =
-        encode(image, job.size, job.still).map_err(|e| format!("{shown}: {e}"))?;
+    let png_out = is_png(job.output);
+    let (bytes, width, height) = if png_out {
+        encode_png(image, job.size)
+    } else {
+        encode(image, job.size, job.still)
+    }
+    .map_err(|e| format!("{shown}: {e}"))?;
     let part = partial(job.output)?;
     *partial_path = Some(part.clone());
     std::fs::write(&part, &bytes).map_err(|e| format!("{}: {e}", job.output.display()))?;
@@ -442,12 +466,15 @@ pub fn convert(job: &Job, partial_path: &mut Option<PathBuf>) -> Result<String, 
         return Ok(job.output.display().to_string());
     }
     let options = job.still.options();
-    let quality = (!job.still.lossless).then(|| job.still.quality.unwrap_or(DEFAULT_QUALITY));
-    let mut settings = vec![("lossless", Json::from(job.still.lossless))];
+    let quality =
+        (!png_out && !job.still.lossless).then(|| job.still.quality.unwrap_or(DEFAULT_QUALITY));
+    let mut settings = vec![("lossless", Json::from(png_out || job.still.lossless))];
     if let Some(q) = quality {
         settings.push(("quality", q.into()));
     }
-    settings.push(("compression_level", options.effort.into()));
+    if !png_out {
+        settings.push(("compression_level", options.effort.into()));
+    }
     let seconds = started.elapsed().as_secs_f64();
     let document = manifest::Manifest {
         sources: vec![manifest::Source {
@@ -458,7 +485,7 @@ pub fn convert(job: &Job, partial_path: &mut Option<PathBuf>) -> Result<String, 
         params: manifest::Params {
             profile: "still".into(),
             encoder: manifest::Encoder {
-                encoder: "webp".into(),
+                encoder: if png_out { "png" } else { "webp" }.into(),
                 codec: None,
                 settings,
             },
@@ -730,6 +757,79 @@ mod tests {
     }
 
     #[test]
+    fn jpeg_sampling_maps_by_its_chroma_ratio() {
+        let j = jpeg(0xc0, 16, 16, &[0x12, 0x12, 0x12]);
+        assert_eq!(jpeg_size(&j).unwrap(), (16, 16, Some("yuvj444p")));
+        let j = jpeg(0xc0, 16, 16, &[0x22, 0x12, 0x12]);
+        assert_eq!(jpeg_size(&j).unwrap(), (16, 16, Some("yuvj422p")));
+        let j = jpeg(0xc0, 16, 16, &[0x44, 0x22, 0x22]);
+        assert_eq!(jpeg_size(&j).unwrap(), (16, 16, Some("yuvj420p")));
+        let j = jpeg(0xc0, 16, 16, &[0x12, 0x11, 0x11]);
+        assert_eq!(jpeg_size(&j).unwrap(), (16, 16, Some("yuvj440p")));
+        let j = jpeg(0xc0, 16, 16, &[0x41, 0x11, 0x11]);
+        assert_eq!(jpeg_size(&j).unwrap(), (16, 16, Some("yuvj411p")));
+        let j = jpeg(0xc0, 16, 16, &[0x31, 0x21, 0x21]);
+        assert_eq!(jpeg_size(&j).unwrap(), (16, 16, None));
+        let j = jpeg(0xc0, 16, 16, &[0x22, 0x21, 0x11]);
+        assert_eq!(jpeg_size(&j).unwrap(), (16, 16, None));
+    }
+
+    #[test]
+    fn probe_measures_jpegs_the_decoder_refuses() {
+        for sof in [0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf] {
+            let j = jpeg(sof, 30, 40, &[0x22, 0x11, 0x11]);
+            assert_eq!(
+                jpeg_size(&j).unwrap(),
+                (40, 30, Some("yuvj420p")),
+                "0x{sof:02X}"
+            );
+            assert!(jpeg::decode(&j).is_err(), "0x{sof:02X}");
+        }
+        let mut twelve = jpeg(0xc1, 30, 40, &[0x22, 0x11, 0x11]);
+        twelve[25] = 12;
+        assert_eq!(jpeg_size(&twelve).unwrap(), (40, 30, None));
+        let i = jpeg::decode::info(&twelve).unwrap();
+        assert_eq!((i.precision, i.decodable), (12, false));
+        assert!(
+            jpeg::decode(&twelve)
+                .unwrap_err()
+                .to_string()
+                .contains("12-bit")
+        );
+        let i = jpeg::decode::info(&jpeg(0xc0, 30, 40, &[0x22, 0x11, 0x11])).unwrap();
+        assert_eq!((i.precision, i.decodable), (8, true));
+        let mut dac = jpeg(0xc9, 30, 40, &[0x22, 0x11, 0x11]);
+        dac.splice(20..20, [0xff, 0xcc, 0, 4, 0, 0]);
+        assert_eq!(jpeg_size(&dac).unwrap(), (40, 30, Some("yuvj420p")));
+    }
+
+    #[test]
+    fn orient_follows_each_exif_orientation() {
+        let mut img = Rgba::new(3, 2);
+        for (i, px) in img.data.chunks_exact_mut(4).enumerate() {
+            px.copy_from_slice(&[i as u8, 0, 0, 255]);
+        }
+        let order = |o: u8| -> (u32, u32, Vec<u8>) {
+            let r = orient(img.clone(), o);
+            (
+                r.width,
+                r.height,
+                r.data.chunks_exact(4).map(|p| p[0]).collect(),
+            )
+        };
+        for o in [0, 1, 9] {
+            assert_eq!(order(o), (3, 2, vec![0, 1, 2, 3, 4, 5]), "{o}");
+        }
+        assert_eq!(order(2), (3, 2, vec![2, 1, 0, 5, 4, 3]));
+        assert_eq!(order(3), (3, 2, vec![5, 4, 3, 2, 1, 0]));
+        assert_eq!(order(4), (3, 2, vec![3, 4, 5, 0, 1, 2]));
+        assert_eq!(order(5), (2, 3, vec![0, 3, 1, 4, 2, 5]));
+        assert_eq!(order(6), (2, 3, vec![3, 0, 4, 1, 5, 2]));
+        assert_eq!(order(7), (2, 3, vec![5, 2, 4, 1, 3, 0]));
+        assert_eq!(order(8), (2, 3, vec![2, 5, 1, 4, 0, 3]));
+    }
+
+    #[test]
     fn a_jpeg_without_a_usable_frame_header_is_refused() {
         let no_sof = [0xff, 0xd8, 0xff, 0xda, 0, 2, 0xff, 0xd9];
         assert!(jpeg_size(&no_sof).unwrap_err().contains("no frame header"));
@@ -996,6 +1096,116 @@ mod tests {
         assert_eq!((w, h), (1001, 9));
     }
 
+    fn png_of(color: ::png::ColorType, depth: ::png::BitDepth, trns: bool) -> Vec<u8> {
+        let (w, h) = (9u32, 2u32);
+        let channels = match color {
+            ::png::ColorType::Rgb => 3,
+            ::png::ColorType::GrayscaleAlpha => 2,
+            ::png::ColorType::Rgba => 4,
+            _ => 1,
+        };
+        let row = (w as usize * channels * depth as usize).div_ceil(8);
+        let mut out = Vec::new();
+        let mut enc = ::png::Encoder::new(&mut out, w, h);
+        enc.set_color(color);
+        enc.set_depth(depth);
+        if color == ::png::ColorType::Indexed {
+            enc.set_palette(vec![0u8, 0, 0, 255, 255, 255]);
+        }
+        if trns {
+            enc.set_trns(vec![0u8]);
+        }
+        enc.write_header()
+            .unwrap()
+            .write_image_data(&vec![0u8; row * h as usize])
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn png_facts_name_every_colour_type_and_depth() {
+        use ::png::BitDepth::{Eight, One, Sixteen};
+        use ::png::ColorType::{Grayscale, GrayscaleAlpha, Indexed, Rgb, Rgba};
+        for (color, depth, trns, pix_fmt, alpha) in [
+            (Grayscale, One, false, "monob", false),
+            (Grayscale, Eight, false, "gray", false),
+            (Grayscale, Sixteen, false, "gray16be", false),
+            (Rgb, Sixteen, false, "rgb48be", false),
+            (Indexed, Eight, false, "pal8", false),
+            (Indexed, Eight, true, "pal8", true),
+            (GrayscaleAlpha, Eight, false, "ya8", true),
+            (GrayscaleAlpha, Sixteen, false, "ya16be", true),
+            (Rgba, Sixteen, false, "rgba64be", true),
+        ] {
+            let data = png_of(color, depth, trns);
+            let f = facts(Format::Png, &data).unwrap();
+            assert_eq!(
+                (f.width, f.height, f.pix_fmt, f.alpha),
+                (9, 2, Some(pix_fmt), alpha),
+                "{color:?} {depth:?} trns {trns}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_jpeg_sampling_ffmpeg_has_no_name_for_gives_no_pix_fmt() {
+        for sampling in [[0x31, 0x11, 0x11], [0x13, 0x11, 0x11], [0x42, 0x11, 0x11]] {
+            let j = jpeg(0xc0, 16, 16, &sampling);
+            assert_eq!(jpeg_size(&j).unwrap(), (16, 16, None), "{sampling:02x?}");
+        }
+        let j = jpeg(0xc0, 16, 16, &[0x42, 0x21, 0x21]);
+        assert_eq!(jpeg_size(&j).unwrap(), (16, 16, Some("yuvj420p")));
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tmp/unit-picture")
+            .join(format!(
+                "{name}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_folder_or_an_unknown_file_sniffs_as_nothing() {
+        let dir = scratch("sniff");
+        assert_eq!(Format::of(&dir), None);
+        assert_eq!(probe(&dir).unwrap(), None);
+        assert!(!still_input(&dir));
+        let text = dir.join("notes.png");
+        std::fs::write(&text, b"plain text").unwrap();
+        assert_eq!(Format::of(&text), None);
+        assert!(!still_input(&text));
+        assert_eq!(Format::of(&dir.join("missing.png")), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_refuses_what_is_no_still_image() {
+        let dir = scratch("load");
+        let animated = dir.join("moving.gif");
+        std::fs::write(&animated, gif(&[4, 4])).unwrap();
+        let text = dir.join("notes.png");
+        std::fs::write(&text, b"plain text").unwrap();
+        for path in [&animated, &text] {
+            let e = load(path).unwrap_err();
+            assert_eq!(
+                e,
+                "not a PNG, JPEG or WebP still image",
+                "{}",
+                path.display()
+            );
+        }
+        assert!(load(&dir.join("missing.png")).is_err());
+        let png = dir.join("one.png");
+        std::fs::write(&png, png::encode(&pattern(5, 4, false)).unwrap()).unwrap();
+        assert_eq!(load(&png).unwrap(), pattern(5, 4, false));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn every_png_colour_and_depth_names_ffprobes_pixel_format() {
         let named = |color, depth| {
@@ -1039,28 +1249,6 @@ mod tests {
         let data = webp::encode(&pattern(30, 20, true), &webp::Options::lossy(80.0)).unwrap();
         let f = facts(Format::Webp, &data).unwrap();
         assert_eq!((f.alpha, f.pix_fmt), (true, Some("yuva420p")));
-    }
-
-    #[test]
-    fn load_refuses_what_is_not_a_png_or_webp_still() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/unit-picture-load");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let text = dir.join("notes.png");
-        std::fs::write(&text, b"plain words").unwrap();
-        assert_eq!(load(&text).unwrap_err(), "not a PNG or WebP still image");
-        let photo = dir.join("photo.jpg");
-        std::fs::write(&photo, jpeg(0xc0, 8, 8, &[0x22, 0x11, 0x11])).unwrap();
-        assert_eq!(load(&photo).unwrap_err(), "JPEG input is not supported");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_path_that_opens_but_cannot_be_read_has_no_format() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/unit-picture-of-dir");
-        std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(Format::of(&dir), None);
-        assert_eq!(Format::of(&dir.join("missing.png")), None);
     }
 
     #[test]

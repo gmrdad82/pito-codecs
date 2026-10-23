@@ -91,9 +91,15 @@ pub fn listed(dir: &Path) -> Result<Vec<PathBuf>, Fail> {
 }
 
 pub fn frames(dir: &Path, fps: Option<(u32, u32)>) -> Result<Media, Fail> {
-    let files = listed(dir)?;
-    let first = std::fs::read(&files[0]).map_err(|e| format!("{}: {e}", files[0].display()))?;
-    let info = png::info(&first).map_err(|e| format!("{}: {e}", files[0].display()))?;
+    frames_of(dir, listed(dir)?, fps)
+}
+
+pub fn frames_of(dir: &Path, files: Vec<PathBuf>, fps: Option<(u32, u32)>) -> Result<Media, Fail> {
+    let head = files
+        .first()
+        .ok_or_else(|| format!("{}: no .png files", dir.display()))?;
+    let first = std::fs::read(head).map_err(|e| format!("{}: {e}", head.display()))?;
+    let info = png::info(&first).map_err(|e| format!("{}: {e}", head.display()))?;
     let rate = fps.unwrap_or((30, 1));
     let count = files.len() as u64;
     Ok(Media {

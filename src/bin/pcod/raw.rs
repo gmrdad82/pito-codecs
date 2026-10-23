@@ -257,6 +257,7 @@ mod tests {
             add: None,
             range: None,
             still: None,
+            crop: None,
         };
         let wav = Wav {
             from: 0.0,

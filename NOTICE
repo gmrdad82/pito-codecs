@@ -514,9 +514,47 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
+The JPEG decoder in src/jpeg/decode.rs and src/jpeg/decode/ is adapted from
+zune-jpeg 0.5.15 (https://github.com/etemesi254/zune-image, crates/zune-jpeg,
+commit 31d81fed7551c8ccea456d9d8e2b1fd8bebb6995), licensed MIT OR Apache-2.0
+OR Zlib; the MIT terms are taken. From it: the Huffman table derivation with
+its 9-bit lookahead and fast AC table, the bit reader's marker and stuffing
+handling, the baseline block decode, the progressive DC and AC first and
+refinement passes, the scalar integer IDCT (its port of stb_image's), the
+fancy horizontal, vertical and 2x2 upsampling and the 14-bit YCbCr to RGB
+conversion. Changed here: the reader works on a byte slice and refuses data
+consumed past the end of the file or a marker, frames decode into whole
+planes that upsample row by row, the IDCT writes bytes, the refinement pass follows libjpeg's
+loop, and EXIF orientation, Adobe RGB and the CMYK and YCCK refusals are new.
+Its MIT notice:
+
+MIT License
+
+Copyright (c) zune-image developers
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 The forward DCT in src/jpeg/dct.rs (jpeg-encoder's port of jfdctint.c, the
-slow-but-accurate integer DCT, through mozjpeg and libjpeg-turbo) is based in
-part on the work of the Independent JPEG Group. It carries this notice:
+slow-but-accurate integer DCT, through mozjpeg and libjpeg-turbo) and the
+progressive AC refinement loop in src/jpeg/decode/bits.rs (after jdphuff.c)
+are based in part on the work of the Independent JPEG Group. They carry this
+notice:
 
 This software is copyright (C) 1991-2020, Thomas G. Lane, Guido Vollbeding.
 All Rights Reserved except as specified below. libjpeg-turbo Modifications:

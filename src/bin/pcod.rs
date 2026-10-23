@@ -80,7 +80,7 @@ struct Cli {
     command: Option<Command>,
     #[arg(
         value_name = "INPUT",
-        help = "A video file, a folder of PNG frames, or a PNG or WebP still for a .webp"
+        help = "A video file, a folder of PNG frames, or a PNG, JPEG or WebP still for a .webp or .png"
     )]
     input: Option<PathBuf>,
     #[arg(
@@ -293,12 +293,14 @@ enum Command {
     },
     #[command(
         about = "Write stills of a video as PNGs and/or one contact sheet",
-        long_about = "Write stills of a video as PNGs and/or one contact sheet\n\nThe stills are N evenly spaced over the video (--count, 12 by default, or rows x cols when both are given for a sheet) or at the given times (--at). Each is scaled to --height keeping its shape. --out writes still-001.png, still-002.png, ... into a folder; --sheet writes one PNG of rows x cols stills on black with --pad pixels between and around them. --json prints each still's time, size and path.\n\nWith --from and --to, every frame from the first at or after --from to the last before --to goes to --out as 000000.png, 000001.png, ... (the names pcod frames reads), at the source's rate, at --fps or one per --every interval (the nearest frame for each), scaled to --size or to --height keeping the shape. --fps or --every without --from and --to takes the whole video. A GIF holds each frame for its delay (a 0 delay counts as 10 cs) and gives the frame held at each tick of --fps or --every, at its own size unless --size or --height is given. One decode pass, each frame written as it decodes. A range of more than 100,000 frames is refused unless --force, which also replaces the numbered frames --out already holds; a folder with any other PNG is refused for PNG frames. --json prints the count, rate, size, folder and each written file with its time.\n\n--format writes the --out images as png (the default), jpeg or webp, with --quality from 1 to 100 for jpeg and webp (85 by default); the sheet stays PNG.",
+        long_about = "Write stills of a video as PNGs and/or one contact sheet\n\nThe stills are N evenly spaced over the video (--count, 12 by default, or rows x cols when both are given for a sheet) or at the given times (--at). Each is scaled to --height keeping its shape. --out writes still-001.png, still-002.png, ... into a folder; --sheet writes one PNG of rows x cols stills on black with --pad pixels between and around them. --json prints each still's time, size and path.\n\nWith --from and --to, every frame from the first at or after --from to the last before --to goes to --out as 000000.png, 000001.png, ... (the names pcod frames reads), at the source's rate, at --fps or one per --every interval (the nearest frame for each), scaled to --size or to --height keeping the shape. --fps or --every without --from and --to takes the whole video. A GIF holds each frame for its delay (a 0 delay counts as 10 cs) and gives the frame held at each tick of --fps or --every, at its own size unless --size or --height is given. One decode pass, each frame written as it decodes. A range of more than 100,000 frames is refused unless --force, which also replaces the numbered frames --out already holds; a folder with any other PNG is refused for PNG frames. --json prints the count, rate, size, folder and each written file with its time.\n\n--format writes the --out images as png (the default), jpeg or webp, with --quality from 1 to 100 for jpeg and webp (85 by default); the sheet stays PNG.\n\n--crop W:H:X:Y writes only that rectangle of each frame, in the pixels the frame is shown at (after rotation and non-square pixels: the video's own shown size, what --size <its width> writes), with no scaling; a rectangle outside the frame or with a zero side is refused. --hold repeats the last written frame for that long at the --fps rate (at least one frame), numbered on; in --json, count is every file written, held frames included, expected the frames the range asked for and held the frames --hold added. A folder of PNG frames in name order is a source too: --fps gives their rate, --from and --to a window of it, and its frames keep their own size.",
         group(ArgGroup::new("written").args(["out", "sheet"]).required(true).multiple(true)),
         group(ArgGroup::new("range").args(["from", "to", "fps", "every"]).multiple(true))
     )]
     Stills {
-        #[arg(help = "The video: MP4, MOV, MKV or WebM, or a GIF with --fps, --every or --from")]
+        #[arg(
+            help = "The video: MP4, MOV, MKV or WebM, a GIF with --fps, --every or --from, or a folder of PNG frames in name order with --fps for their rate"
+        )]
         file: PathBuf,
         #[arg(
             long,
@@ -362,6 +364,21 @@ enum Command {
             help = "Height of each still in pixels [default: 360; a GIF's frames keep its own size]"
         )]
         height: Option<u32>,
+        #[arg(
+            long,
+            value_parser = stills::crop_of,
+            requires = "range",
+            conflicts_with_all = ["size", "height"],
+            help = "With --from, --to, --fps or --every: write only this rectangle of each frame, W:H:X:Y in the pixels the full frame is shown at"
+        )]
+        crop: Option<stills::Crop>,
+        #[arg(
+            long,
+            value_parser = args::every_of,
+            requires = "fps",
+            help = "With --fps: repeat the last written frame for this long at that rate (2s, 500ms, 1.5 or 0:01), numbered on"
+        )]
+        hold: Option<f64>,
         #[arg(long, help = "A folder to write one image per still into")]
         out: Option<PathBuf>,
         #[arg(
@@ -723,6 +740,8 @@ fn run(command: Command) -> Result<(), Fail> {
             force,
             at,
             height,
+            crop,
+            hold,
             out: dir,
             format,
             quality,
@@ -739,7 +758,7 @@ fn run(command: Command) -> Result<(), Fail> {
                 file,
                 count,
                 at,
-                height: height.unwrap_or(360),
+                height: height.unwrap_or(stills::DEFAULT_HEIGHT),
                 out: dir,
                 sheet,
                 rows,
@@ -766,6 +785,8 @@ fn run(command: Command) -> Result<(), Fail> {
                         sized: size.is_some() || height.is_some(),
                         size,
                         force,
+                        crop,
+                        hold,
                     },
                 ),
             },

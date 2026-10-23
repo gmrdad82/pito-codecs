@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use pito_codecs::media::Rgba;
-use pito_codecs::{gif, png, webp};
+use pito_codecs::{gif, jpeg, png, webp};
 use serde_json::Value;
 
 fn dir(name: &str) -> PathBuf {
@@ -425,7 +425,7 @@ fn bad_still_inputs_are_refused() {
     assert!(err.contains("zero width"), "{err}");
     let jpg = put(&out, "in.jpg", &jpeg_header(64, 48));
     let err = refused(&run(&[s(&jpg), s(&out.join("jpg.webp"))]), 1);
-    assert!(err.contains("JPEG input is not supported"), "{err}");
+    assert!(err.contains("no start-of-scan"), "{err}");
     let mut anim = webp::AnimEncoder::new(16, 16, webp::Options::lossy(70.0), 0).unwrap();
     for n in 0..2u8 {
         let mut img = pattern(16, 16, false);
@@ -542,4 +542,128 @@ fn lossless_sizes(out: &Path, name: &str, input: &Path) -> (f64, f64) {
     let a = fs::metadata(&ours).unwrap().len() as f64;
     let b = fs::metadata(&theirs).unwrap().len() as f64;
     (a, b)
+}
+
+fn with_orientation(file: &[u8], orientation: u16) -> Vec<u8> {
+    let mut tiff = b"Exif\0\0MM\0\x2a\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01".to_vec();
+    tiff.extend_from_slice(&orientation.to_be_bytes());
+    tiff.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+    let mut out = file[..2].to_vec();
+    out.extend_from_slice(&[0xff, 0xe1]);
+    out.extend_from_slice(&((tiff.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(&tiff);
+    out.extend_from_slice(&file[2..]);
+    out
+}
+
+#[test]
+fn a_jpeg_becomes_a_still_webp_or_png() {
+    let out = dir("jpeg-in");
+    let src = pattern(161, 91, false);
+    let file = jpeg::encode(&src, 92).unwrap();
+    let input = put(&out, "in.jpg", &file);
+    let v = probe(&input);
+    assert_eq!(
+        (v["width"].as_u64(), v["height"].as_u64()),
+        (Some(161), Some(91)),
+        "{v}"
+    );
+    assert_eq!(v["pix_fmt"], "yuvj420p", "{v}");
+    let webp_out = out.join("out.webp");
+    ok(&run(&[s(&input), s(&webp_out), "--quality", "90"]));
+    let back = webp::decode(&fs::read(&webp_out).unwrap()).unwrap();
+    assert_eq!((back.width, back.height), (161, 91));
+    assert!(psnr(&src, &back) > 30.0, "{:.2} dB", psnr(&src, &back));
+    let png_out = out.join("out.png");
+    let json = run(&[s(&input), s(&png_out), "--json"]);
+    ok(&json);
+    let m: Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(m["params"]["encoder"]["encoder"], "png", "{m}");
+    let decoded = png::decode(&fs::read(&png_out).unwrap()).unwrap();
+    assert_eq!(decoded, jpeg::decode(&file).unwrap());
+    let small = out.join("small.png");
+    ok(&run(&[s(&input), s(&small), "--size", "80"]));
+    let p = png::info(&fs::read(&small).unwrap()).unwrap();
+    assert_eq!(p.width, 80);
+}
+
+#[test]
+fn a_jpeg_is_turned_upright_by_its_exif_orientation() {
+    let out = dir("jpeg-orient");
+    let mut src = pattern(48, 32, false);
+    for y in 0..4 {
+        for x in 0..4 {
+            let at = (y * 48 + x) * 4;
+            src.data[at..at + 4].copy_from_slice(&[255, 0, 0, 255]);
+        }
+    }
+    let file = jpeg::encode(&src, 100).unwrap();
+    for (o, w, h, corner) in [
+        (1u16, 48u32, 32u32, (0usize, 0usize)),
+        (3, 48, 32, (47, 31)),
+        (6, 32, 48, (31, 0)),
+        (8, 32, 48, (0, 47)),
+    ] {
+        let input = put(&out, &format!("o{o}.jpg"), &with_orientation(&file, o));
+        let output = out.join(format!("o{o}.png"));
+        ok(&run(&[s(&input), s(&output)]));
+        let img = png::decode(&fs::read(&output).unwrap()).unwrap();
+        assert_eq!((img.width, img.height), (w, h), "orientation {o}");
+        let at = (corner.1 * w as usize + corner.0) * 4;
+        let px = &img.data[at..at + 3];
+        assert!(
+            px[0] > 150 && px[1] < 100,
+            "orientation {o}: the red corner moved to {px:?}"
+        );
+        let v = probe(&input);
+        assert_eq!(v["width"].as_u64(), Some(48), "probe gives the stored size");
+    }
+}
+
+#[test]
+fn bad_jpeg_inputs_are_refused_in_one_line() {
+    let out = dir("jpeg-bad");
+    let file = jpeg::encode(&pattern(64, 48, false), 80).unwrap();
+    let cut = put(&out, "cut.jpg", &file[..file.len() / 2]);
+    let err = refused(&run(&[s(&cut), s(&out.join("cut.webp"))]), 1);
+    assert!(err.contains("JPEG: the file ends"), "{err}");
+    assert!(!out.join("cut.webp").exists());
+    let mut cmyk = vec![0xff, 0xd8, 0xff, 0xc0, 0, 20, 8, 0, 8, 0, 8, 4];
+    for id in 1..=4 {
+        cmyk.extend_from_slice(&[id, 0x11, 0]);
+    }
+    cmyk.extend_from_slice(&[
+        0xff, 0xda, 0, 14, 4, 1, 0, 2, 0, 3, 0, 4, 0, 0, 63, 0, 0xff, 0xd9,
+    ]);
+    let cmyk = put(&out, "cmyk.jpg", &cmyk);
+    let err = refused(&run(&[s(&cmyk), s(&out.join("cmyk.png"))]), 1);
+    assert!(err.contains("CMYK"), "{err}");
+    let good = put(&out, "good.jpg", &file);
+    refused(
+        &run(&[s(&good), s(&out.join("q.png")), "--quality", "80"]),
+        2,
+    );
+    refused(&run(&[s(&good), s(&out.join("l.png")), "--lossless"]), 2);
+}
+
+#[test]
+fn a_still_with_alpha_keeps_it_as_a_png() {
+    let out = dir("alpha-png");
+    let src = pattern(64, 40, true);
+    let input = put(
+        &out,
+        "in.webp",
+        &webp::encode(&src, &webp::Options::lossless()).unwrap(),
+    );
+    let output = out.join("out.png");
+    ok(&run(&[s(&input), s(&output)]));
+    let back = png::decode(&fs::read(&output).unwrap()).unwrap();
+    assert_eq!(back.data, src.data);
+    let opaque = put(&out, "opaque.png", &rgb_png(&pattern(64, 40, false)));
+    let flat = out.join("flat.png");
+    ok(&run(&[s(&opaque), s(&flat)]));
+    assert_eq!(
+        png::info(&fs::read(&flat).unwrap()).unwrap().color,
+        png::Color::Rgb
+    );
 }

@@ -20,7 +20,7 @@ pub const USAGE: &str = "pcod [OPTIONS] <INPUT> <OUTPUT>\n       pcod <COMMAND>"
 
 pub fn help() -> String {
     format!(
-        "The output's extension picks the container: mp4, mov, mkv (H.264 and AAC), webm (VP9 and Opus), gif or webp (animated, looping, {ANIMATED_WIDTH} px wide at {ANIMATED_FPS} fps by default, or the source's width and rate where smaller). --from and --to cut a window of the input, video and audio in sync, starting at 0: the first frame at or after --from to the last before --to. With no video option the cut copies whole GOPs and re-encodes only the frames at its edges where the container carries the source's codec; a video option re-encodes it all. A .wav output is the audio alone: the first audio track as 16-bit PCM, stereo at the source's rate when it is 44100 or 48000 Hz (else 48000), with --from and --to for a range, --mono, --rate and --loudness. A .s16 output, or - for stdout, is one audio stream as raw 16-bit little-endian PCM from --from to its end: --track N picks the stream as the container numbers it (the first audio stream by default), --mono mixes it to one channel and --rate resamples it (the stream's own channels and rate by default). A .opus (or .ogg) output is the audio alone as Ogg Opus at 48000 Hz, 64k stereo or 32k with --mono by default, --audio-bitrate KBPS from 16 to 510, with --from, --to, --mono and --loudness. The input is a video file, an animated GIF or a folder of PNG frames in name order (--fps gives their rate). A PNG or WebP still to a .webp writes a still WebP (no animation) at the source's size or --size, resized with Lanczos: lossy at --quality 0 to 100 on libwebp's scale (75 by default), or --lossless (VP8L at method 6, as ffmpeg's compression_level 6; fully transparent pixels keep their alpha, not their colour, as libwebp does by default), keeping alpha; a JPEG input is refused. probe also reads PNG, JPEG, WebP and GIF files; a GIF's frame rate is 100 over its delay when every delay matches, else the whole or NTSC rate its frames start on to the hundredth of a second or its mean comes within 1% of, else that mean.
+        "The output's extension picks the container: mp4, mov, mkv (H.264 and AAC), webm (VP9 and Opus), gif or webp (animated, looping, {ANIMATED_WIDTH} px wide at {ANIMATED_FPS} fps by default, or the source's width and rate where smaller). --from and --to cut a window of the input, video and audio in sync, starting at 0: the first frame at or after --from to the last before --to. With no video option the cut copies whole GOPs and re-encodes only the frames at its edges where the container carries the source's codec; a video option re-encodes it all. A .wav output is the audio alone: the first audio track as 16-bit PCM, stereo at the source's rate when it is 44100 or 48000 Hz (else 48000), with --from and --to for a range, --mono, --rate and --loudness. A .s16 output, or - for stdout, is one audio stream as raw 16-bit little-endian PCM from --from to its end: --track N picks the stream as the container numbers it (the first audio stream by default), --mono mixes it to one channel and --rate resamples it (the stream's own channels and rate by default). A .opus (or .ogg) output is the audio alone as Ogg Opus at 48000 Hz, 64k stereo or 32k with --mono by default, --audio-bitrate KBPS from 16 to 510, with --from, --to, --mono and --loudness. The input is a video file, an animated GIF or a folder of PNG frames in name order (--fps gives their rate). A PNG, JPEG or WebP still to a .webp writes a still WebP (no animation) at the source's size or --size, resized with Lanczos: lossy at --quality 0 to 100 on libwebp's scale (75 by default), or --lossless (VP8L at method 6, as ffmpeg's compression_level 6; fully transparent pixels keep their alpha, not their colour, as libwebp does by default), keeping alpha; to a .png it writes a PNG. A JPEG is turned upright by its EXIF orientation first. probe also reads PNG, JPEG, WebP and GIF files; a GIF's frame rate is 100 over its delay when every delay matches, else the whole or NTSC rate its frames start on to the hundredth of a second or its mean comes within 1% of, else that mean.
 Profiles: balanced (the default) and best are H.264 on the CPU at CRF 20 and 18 on x264's scale; fast is H.264 on the GPU at QP 25, on the CPU where no GPU encoder is found. For .webm, balanced is VP9 at CRF 32 and best at 28 on libvpx's scale.
 Light web: --profile best --crf {LIGHT_WEB_CRF} (.webm: --crf {VP9_LIGHT_WEB_CRF})
 For screen recordings: --tune animation
@@ -135,6 +135,8 @@ pub struct ConvertArgs {
         help = "For a still .webp: lossless (VP8L at method 6, as ffmpeg's compression_level 6)"
     )]
     pub lossless: bool,
+    #[arg(long, value_parser = super::stills::crop_of, help = "For one PNG to a PNG: write only this rectangle, W:H:X:Y")]
+    pub crop: Option<super::stills::Crop>,
     #[arg(
         long,
         help = "Write no audio track; with no video option the video is copied as it is, index first"
@@ -233,6 +235,9 @@ pub fn options(
             "invalid UTF-8 was detected in one or more arguments",
         );
     }
+    if let Some(crop) = args.crop {
+        return png_crop(sub, input, joining, output, crop, args);
+    }
     if is_raw(&output) {
         return raw(sub, input, joining, output, args);
     }
@@ -246,14 +251,14 @@ pub fn options(
     if is_wav(&output) || is_opus(&output) {
         return wav(sub, input, joining, output, args);
     }
-    if !joining && is_webp(&output) && picture::still_input(&input) {
+    if !joining && (is_webp(&output) || picture::is_png(&output)) && picture::still_input(&input) {
         return still(sub, input, output, args);
     }
     if args.quality.is_some() || args.lossless {
         usage_error(
             sub,
             ErrorKind::ArgumentConflict,
-            "--quality and --lossless fit a still .webp made from a .png or .webp",
+            "--quality and --lossless fit a still .webp made from a .png, .jpg or .webp",
         );
     }
     if let Some(wav) = args.add_audio.clone() {
@@ -352,6 +357,7 @@ pub fn options(
             to: args.to,
         }),
         still: None,
+        crop: None,
     }
 }
 
@@ -381,7 +387,14 @@ fn still(sub: Option<&str>, input: PathBuf, output: PathBuf, args: ConvertArgs) 
         usage_error(
             sub,
             ErrorKind::ArgumentConflict,
-            format!("{flag} doesn't apply to a still .webp made from a still image"),
+            format!("{flag} doesn't apply to a still image output"),
+        );
+    }
+    if picture::is_png(&output) && (args.quality.is_some() || args.lossless) {
+        usage_error(
+            sub,
+            ErrorKind::ArgumentConflict,
+            "--quality and --lossless fit a .webp; a .png still is always lossless",
         );
     }
     let mut request = Request::new(input, output);
@@ -398,6 +411,7 @@ fn still(sub: Option<&str>, input: PathBuf, output: PathBuf, args: ConvertArgs) 
             quality: args.quality,
             lossless: args.lossless,
         }),
+        crop: None,
     }
 }
 
@@ -496,6 +510,7 @@ fn wav(
         add: None,
         range: None,
         still: None,
+        crop: None,
     }
 }
 
@@ -564,6 +579,101 @@ fn added(
         }),
         range: None,
         still: None,
+        crop: None,
+    }
+}
+
+pub fn crop_conflict(
+    input: &Path,
+    joining: bool,
+    output: &Path,
+    args: &ConvertArgs,
+) -> Option<String> {
+    if joining {
+        return Some("--crop cuts one PNG; join takes clips".into());
+    }
+    if input.is_dir() || !picture::is_png(input) || !picture::is_png(output) {
+        return Some(
+            "--crop here cuts one PNG into a PNG (pcod in.png out.png --crop W:H:X:Y); for video frames use pcod stills --crop"
+                .into(),
+        );
+    }
+    let ConvertArgs {
+        profile,
+        size,
+        fps,
+        crf,
+        qp,
+        tune,
+        loudness,
+        true_peak,
+        linear,
+        audio_bitrate,
+        from,
+        to,
+        mono,
+        rate,
+        quality,
+        lossless,
+        track,
+        no_audio,
+        add_audio,
+        title,
+        crop: _,
+        force: _,
+        json: _,
+        no_progress: _,
+    } = args;
+    let flags = [
+        (profile.is_some(), "--profile"),
+        (size.is_some(), "--size"),
+        (fps.is_some(), "--fps"),
+        (crf.is_some(), "--crf"),
+        (qp.is_some(), "--qp"),
+        (tune.is_some(), "--tune"),
+        (loudness.is_some(), "--loudness"),
+        (true_peak.is_some(), "--true-peak"),
+        (*linear, "--linear"),
+        (audio_bitrate.is_some(), "--audio-bitrate"),
+        (from.is_some(), "--from"),
+        (to.is_some(), "--to"),
+        (*mono, "--mono"),
+        (rate.is_some(), "--rate"),
+        (quality.is_some(), "--quality"),
+        (*lossless, "--lossless"),
+        (track.is_some(), "--track"),
+        (*no_audio, "--no-audio"),
+        (add_audio.is_some(), "--add-audio"),
+        (!title.is_empty(), "--title"),
+    ];
+    flags
+        .iter()
+        .find(|(set, _)| *set)
+        .map(|(_, flag)| format!("{flag} doesn't apply to a PNG crop"))
+}
+
+fn png_crop(
+    sub: Option<&str>,
+    input: PathBuf,
+    joining: bool,
+    output: PathBuf,
+    crop: super::stills::Crop,
+    args: ConvertArgs,
+) -> Options {
+    if let Some(message) = crop_conflict(&input, joining, &output, &args) {
+        usage_error(sub, ErrorKind::ArgumentConflict, message);
+    }
+    let mut request = Request::new(input, output);
+    request.overwrite = args.force;
+    Options {
+        request,
+        json: args.json,
+        progress: false,
+        wav: None,
+        add: None,
+        range: None,
+        still: None,
+        crop: Some(crop),
     }
 }
 
@@ -660,6 +770,7 @@ fn raw(
         add: None,
         range: None,
         still: None,
+        crop: None,
     }
 }
 
@@ -682,6 +793,88 @@ pub fn every_of(text: &str) -> Result<f64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn conflict(args: ConvertArgs) -> Option<String> {
+        crop_conflict(Path::new("in.png"), false, Path::new("out.png"), &args)
+    }
+
+    #[test]
+    fn a_png_crop_names_every_flag_it_ignores() {
+        assert_eq!(conflict(ConvertArgs::default()), None);
+        let quiet = ConvertArgs {
+            force: true,
+            json: true,
+            no_progress: true,
+            ..ConvertArgs::default()
+        };
+        assert_eq!(conflict(quiet), None);
+        let peak = ConvertArgs {
+            true_peak: Some(-2.0),
+            ..ConvertArgs::default()
+        };
+        assert_eq!(
+            conflict(peak).as_deref(),
+            Some("--true-peak doesn't apply to a PNG crop")
+        );
+        let linear = ConvertArgs {
+            linear: true,
+            ..ConvertArgs::default()
+        };
+        assert_eq!(
+            conflict(linear).as_deref(),
+            Some("--linear doesn't apply to a PNG crop")
+        );
+        let mono = ConvertArgs {
+            mono: true,
+            ..ConvertArgs::default()
+        };
+        assert_eq!(
+            conflict(mono).as_deref(),
+            Some("--mono doesn't apply to a PNG crop")
+        );
+        let track = ConvertArgs {
+            track: Some(1),
+            ..ConvertArgs::default()
+        };
+        assert_eq!(
+            conflict(track).as_deref(),
+            Some("--track doesn't apply to a PNG crop")
+        );
+        let bare = ConvertArgs {
+            no_audio: true,
+            ..ConvertArgs::default()
+        };
+        assert_eq!(
+            conflict(bare).as_deref(),
+            Some("--no-audio doesn't apply to a PNG crop")
+        );
+        let added = ConvertArgs {
+            add_audio: Some(PathBuf::from("bed.wav")),
+            title: vec!["Voice".into()],
+            ..ConvertArgs::default()
+        };
+        assert_eq!(
+            conflict(added).as_deref(),
+            Some("--add-audio doesn't apply to a PNG crop")
+        );
+        let titled = ConvertArgs {
+            title: vec!["Voice".into()],
+            ..ConvertArgs::default()
+        };
+        assert_eq!(
+            conflict(titled).as_deref(),
+            Some("--title doesn't apply to a PNG crop")
+        );
+    }
+
+    #[test]
+    fn a_png_crop_wants_a_png_on_both_sides() {
+        let args = ConvertArgs::default();
+        let e = crop_conflict(Path::new("in.mp4"), false, Path::new("out.png"), &args).unwrap();
+        assert!(e.contains("cuts one PNG into a PNG"), "{e}");
+        let e = crop_conflict(Path::new("in.png"), true, Path::new("out.png"), &args).unwrap();
+        assert!(e.contains("join takes clips"), "{e}");
+    }
 
     #[test]
     fn an_interval_reads_seconds_milliseconds_and_clock_times() {

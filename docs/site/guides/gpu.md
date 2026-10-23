@@ -11,11 +11,11 @@ The front tries the GPU first and our own CPU code second, for every decode and 
 | --- | --- | --- | --- | --- |
 | VA-API, AMD (Mesa radeonsi) | Linux | H.264, H.265, VP9 | H.264, H.265; overlays composed on the card | AMD Radeon RX 9060 XT (RDNA 4), before every release |
 | VA-API, Intel (iHD) | Linux | H.264, H.265, VP9 | H.264, H.265 | Built, untested on Intel hardware |
-| VideoToolbox | macOS | H.264, H.265 | H.264, H.265 | GitHub's Apple Silicon runners on every push: decode bit-exact with ffmpeg, encodes decoded back |
+| VideoToolbox | macOS | H.264, H.265 | H.264, H.265 | An Apple Silicon Mac before every release: the test suite runs there, decodes compared with ffmpeg where it is installed, encodes decoded back |
 | NVENC | Linux, Windows | — | H.264, H.265 | Built and unit-tested, untested on NVIDIA hardware |
 | Media Foundation | Windows | H.264, H.265 | — | Built and unit-tested, untested on GPU hardware |
 
-The CPU codecs run and are tested on every push on Linux x86-64 and arm64, Windows x86-64 and macOS on Apple Silicon, with AVX2 kernels on x86-64 and NEON or portable paths on arm64.
+The CPU codecs target Linux x86-64 and arm64, Windows x86-64 and macOS on Apple Silicon, with AVX2 kernels on x86-64 and NEON or portable paths on arm64. Every merge is checked for all four (format, lints and a full type-check) and runs the whole test suite on Linux x86-64; every release also runs the suite on an Apple Silicon Mac and the GPU suite on the AMD card above, and builds the Linux x86-64, Windows x86-64 and macOS binaries. No hosted CI runs this repository.
 
 ## See what this machine has
 

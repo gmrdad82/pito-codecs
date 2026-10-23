@@ -591,6 +591,7 @@ mod tests {
             add: None,
             range: None,
             still: None,
+            crop: None,
         };
         let add = Add {
             wav,
