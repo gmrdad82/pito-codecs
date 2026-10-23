@@ -1,9 +1,10 @@
 # Changelog
 
-## v2.0.0 — 2026-10-22
+## v2.0.0 — 2026-10-23
 
 ### Added
 
+- VP9 streams whose container carries no colour take the colour space and range from their keyframe header, on the CPU and GPU routes.
 - FLAC and ALAC decode, bit-exact, in bare .flac, MP4/M4A and Matroska, through the media front and pcod (FLAC at 1.6 to 1.9 times the speed of `flac -d`).
 - `pcod <in> <out> --from S --to E` cuts MP4, MOV, MKV and WebM by smart cut (whole GOPs copied, only the edges re-encoded, frame-exact), and takes a window for GIF, WebP and PNG-folder outputs too; a WebM with alpha keeps its alpha.
 - `pcod stills <video> --from S --to E [--fps N] --out <dir>` writes every frame of a range (or the nearest frame per slot) as numbered PNGs in one decode pass.
@@ -13,12 +14,17 @@
 
 ### Changed
 
+- The README says plainly that the NVIDIA paths (NVENC) are built and unit-tested but untested on NVIDIA hardware here, and how the CPU H.264 and VP9 encoders measure against x264 and libvpx; contributions are welcome.
+- `pcod --loudness` without `--linear` converges on its target, and says in one line when the true-peak ceiling keeps it from getting there.
 - **Breaking:** the ffmpeg route is gone. Every file is read by pito-codecs' own code, and what it can't read is refused by name when it opens ("MPEG-TS files are not supported", "10-bit 4:2:2 H.264 video is not supported", "Vorbis audio is not supported"). The route's preferences and enum variants are removed, `AudioTrack` gained `bits`, and a `Probe` can no longer be built as a literal outside the crate.
 - `pcod probe --json` names a video variant it can't decode.
 - Join and export copy a stream they never need to decode, such as 10-bit 4:2:2 H.264, instead of refusing it, and an export with an audio track nothing decodes is refused before any work.
 
 ### Fixed
 
+- Short Matroska and WebM files probe at their exact frame rate, so `pcod join` copies parts made at the same rate instead of re-encoding them.
+- `--from/--to`: GIF and WebP windows no longer round-trip through an MP4, a stream that ends before its probed length no longer repeats its last frame, stills ranges of an alpha WebM keep the alpha, and the `--json` manifest names what really encoded a cut's edges.
+- GPU smart cuts carry the source's sample aspect ratio and colour tags into re-encoded HEVC and H.264 edges.
 - VP9 encode no longer fails on widths that aren't a multiple of 64 (1080x1920 portrait, 1080x1080 and the like); geometry errors are reported in one line instead of a caught assertion.
 - H.264 encode rate control gives the same output on every run, keeps the QP at 51 or below, and clamps bitrates to their caps.
 - PNG decode checks chunk CRCs; a failed VP9 alpha packet no longer holds back or corrupts the colour frames; the AV1 decoder no longer overflows on a truncated sequence header.
