@@ -5,11 +5,11 @@ use std::path::Path;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::reference::Reference;
+
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
-const SUB: &str = "RYZEN 9 9950X, RADEON RX 9060 XT (VA-API), FFMPEG 9.0.1";
 const US: &str = "PITO-CODECS";
-const FF: &str = "FFMPEG 9.0.1";
 const NOW: &str = "2026-10-14";
 const RES: [&str; 2] = ["1080", "1440"];
 const LIMIT: f64 = 0.05;
@@ -128,6 +128,17 @@ fn fixed(label: &str, ours: f64, other: f64) -> Bar {
 struct Docs<'a> {
     rows: &'a Rows,
     out: &'a Path,
+    sub: String,
+    ff: String,
+}
+
+pub fn ffmpeg_names(r: &Reference) -> (String, String) {
+    let ff = format!("FFMPEG {}", r.version());
+    let sub = format!(
+        "RYZEN 9 9950X, RADEON RX 9060 XT (VA-API), {ff} RECORDED {}",
+        r.date
+    );
+    (sub, ff)
 }
 
 impl Docs<'_> {
@@ -164,9 +175,9 @@ impl Docs<'_> {
             title,
             unit,
             better,
-            subtitle: SUB,
+            subtitle: &self.sub,
             date: &self.rows.date,
-            parties: vec![Party { name: US }, Party { name: FF }],
+            parties: vec![Party { name: US }, Party { name: &self.ff }],
             groups: Vec::new(),
             suffix: None,
             notes: None,
@@ -486,10 +497,17 @@ impl Docs<'_> {
     }
 }
 
-pub fn charts(results: &Path, out: &Path) -> Res<()> {
+pub fn charts(results: &Path, out: &Path, reference: &Reference) -> Res<()> {
     let rows = Rows::read(results)?;
     fs::create_dir_all(out)?;
-    Docs { rows: &rows, out }.all()
+    let (sub, ff) = ffmpeg_names(reference);
+    Docs {
+        rows: &rows,
+        out,
+        sub,
+        ff,
+    }
+    .all()
 }
 
 pub fn check(new: &Path, baseline: &Path) -> Res<()> {

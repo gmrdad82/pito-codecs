@@ -5,12 +5,15 @@ mod charts;
 mod fail;
 #[path = "bench/docs.rs"]
 mod docs;
+#[path = "bench/reference.rs"]
+mod reference;
 
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
@@ -24,6 +27,7 @@ use pito_codecs::media::{
     export, first_frame, frames_at,
 };
 use pito_codecs::mp4::{CodecConfig, Reader};
+use reference::{Case, Reference};
 use serde::{Deserialize, Serialize};
 
 type Res<T> = Result<T, Box<dyn Error>>;
@@ -32,7 +36,30 @@ const CLIP_SECONDS: u32 = 20;
 const ENCODE_FRAMES: usize = 240;
 const ALL_SIZES: [(u32, u32); 2] = [(1920, 1080), (2560, 1440)];
 
+const USAGE: &str = "usage: bench [--runs N] [--quick] [--only ID]... [--out DIR] [--images DIR] [--fixtures DIR] [--reference FILE] [--charts-only] [--no-charts]
+       bench --check <new results.json> [baseline.json]
+       bench --chart-docs <results.json> <dir> [reference.toml]
+       bench --record-ffmpeg [--runs N] [--only ID]... [--out DIR] [--fixtures DIR] [--reference FILE]
+
+The bench times pito-codecs and reads every ffmpeg column from the reference file
+(bench/ffmpeg-reference.toml): it never runs ffmpeg. --record-ffmpeg is the one path
+that runs ffmpeg: it times the ffmpeg on PATH on the bench's cases, makes the inputs,
+and rewrites the reference file. Re-recording is the owner's call, made only on his word.";
+
 static QUICK: AtomicBool = AtomicBool::new(false);
+static FFMPEG: OnceLock<PathBuf> = OnceLock::new();
+
+fn recording() -> bool {
+    FFMPEG.get().is_some()
+}
+
+fn ours_runs(runs: usize) -> usize {
+    if recording() { 0 } else { runs }
+}
+
+fn ffmpeg_runs(runs: usize) -> usize {
+    if recording() { runs } else { 0 }
+}
 
 fn sizes() -> &'static [(u32, u32)] {
     if QUICK.load(Ordering::Relaxed) {
@@ -125,8 +152,11 @@ fn render_node() -> String {
 }
 
 fn ffmpeg_run(args: &[&str], info: bool) -> Res<(f64, String)> {
+    let exe = FFMPEG
+        .get()
+        .ok_or("ffmpeg runs only under bench --record-ffmpeg")?;
     let t = Instant::now();
-    let out = Command::new("ffmpeg")
+    let out = Command::new(exe)
         .args([
             "-hide_banner",
             "-nostdin",
@@ -141,7 +171,10 @@ fn ffmpeg_run(args: &[&str], info: bool) -> Res<(f64, String)> {
     if !out.status.success() {
         return Err(format!("ffmpeg {}: {}", args.join(" "), stderr.trim()).into());
     }
-    Ok((secs, stderr))
+    Ok((
+        secs,
+        format!("{}{stderr}", String::from_utf8_lossy(&out.stdout)),
+    ))
 }
 
 fn ffmpeg_time(args: &[&str]) -> Res<f64> {
@@ -311,6 +344,12 @@ fn packet_of(r: &Reader, track: usize, index: usize, buf: &mut Vec<u8>) -> Res<P
         dts: s.dts.saturating_add(t.edit_offset),
         keyframe: s.keyframe,
     })
+}
+
+fn frame_count(path: &Path) -> Res<u64> {
+    let r = Reader::open(path)?;
+    let track = r.video().ok_or("no video track")?;
+    Ok(r.tracks[track].samples.len() as u64)
 }
 
 fn decode_ours(path: &Path, mode: Dec) -> Res<(u64, f64)> {
@@ -517,6 +556,39 @@ struct Bench {
     only: Vec<String>,
     rows: Vec<Row>,
     node: String,
+    reference: Reference,
+    missing: Vec<String>,
+}
+
+fn compare(reference: &Reference, row: &mut Row) -> bool {
+    let Some(c) = reference.cases.get(&row.id).filter(|c| c.unit == row.unit) else {
+        return false;
+    };
+    row.ffmpeg = Some(c.value);
+    row.ffmpeg_runs = c.runs.clone();
+    row.details.extend(c.details.clone());
+    true
+}
+
+fn record(reference: &mut Reference, row: &Row) {
+    let Some(value) = row.ffmpeg else {
+        return;
+    };
+    let details = row
+        .details
+        .iter()
+        .filter(|(k, _)| k.starts_with("ffmpeg_"))
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    reference.cases.insert(
+        row.id.clone(),
+        Case {
+            unit: row.unit.clone(),
+            value,
+            runs: row.ffmpeg_runs.clone(),
+            details,
+        },
+    );
 }
 
 impl Bench {
@@ -553,15 +625,20 @@ impl Bench {
             Ok(m) => {
                 row.ours = median(&m.ours);
                 row.ffmpeg = median(&m.ffmpeg);
-                row.speedup = row
-                    .ours
-                    .zip(row.ffmpeg)
-                    .map(|(o, f)| if higher { o / f } else { f / o });
                 row.ours_runs = m.ours;
                 row.ffmpeg_runs = m.ffmpeg;
                 row.route = m.route;
                 row.note = m.note;
                 row.details = m.details;
+                if recording() {
+                    record(&mut self.reference, &row);
+                } else if !compare(&self.reference, &mut row) {
+                    self.missing.push(row.id.clone());
+                }
+                row.speedup = row
+                    .ours
+                    .zip(row.ffmpeg)
+                    .map(|(o, f)| if higher { o / f } else { f / o });
             }
             Err(e) => row.skipped = Some(e.to_string()),
         }
@@ -611,11 +688,14 @@ impl Bench {
                             .into(),
                             ..Measured::default()
                         };
-                        let (mut n, _) = decode_ours(&path, mode)?;
-                        for _ in 0..runs {
-                            let (count, s) = decode_ours(&path, mode)?;
-                            n = count;
-                            m.ours.push(count as f64 / s);
+                        let mut n = frame_count(&path)?;
+                        if !recording() {
+                            decode_ours(&path, mode)?;
+                            for _ in 0..runs {
+                                let (count, s) = decode_ours(&path, mode)?;
+                                n = count;
+                                m.ours.push(count as f64 / s);
+                            }
                         }
                         let threads = match mode {
                             Dec::Cpu(1) => vec!["-threads", "1"],
@@ -641,8 +721,10 @@ impl Bench {
                             "null",
                             "-",
                         ]);
-                        ffmpeg_time(&args)?;
-                        m.ffmpeg = repeat(runs, || Ok(n as f64 / ffmpeg_time(&args)?))?;
+                        if recording() {
+                            ffmpeg_time(&args)?;
+                            m.ffmpeg = repeat(runs, || Ok(n as f64 / ffmpeg_time(&args)?))?;
+                        }
                         m.details.insert("frames".into(), n as f64);
                         Ok(m)
                     })();
@@ -705,23 +787,19 @@ impl Bench {
                 let refs: Vec<&str> = args.iter().map(String::as_str).collect();
                 ffmpeg_time(&refs)
             };
-            let with_quality =
-                |m: &mut Measured, ours: &[u8], theirs: &Path, ext: &str, fmt: &str| {
-                    let ours_path = dir.join(format!("ours-{h}.{ext}"));
-                    if fs::write(&ours_path, ours).is_ok()
-                        && let Some(p) = psnr(&ours_path, fmt, &raw, w, h)
-                    {
-                        m.details.insert("ours_psnr_db".into(), p);
-                    }
-                    if let Some(p) = psnr(theirs, fmt, &raw, w, h) {
-                        m.details.insert("ffmpeg_psnr_db".into(), p);
-                    }
+            let with_quality = |m: &mut Measured, ours: &[u8], theirs: &Path, fmt: &str| {
+                if !recording() {
                     m.details.insert("ours_bytes".into(), ours.len() as f64);
-                    m.details.insert(
-                        "ffmpeg_bytes".into(),
-                        fs::metadata(theirs).map_or(0.0, |x| x.len() as f64),
-                    );
-                };
+                    return;
+                }
+                if let Some(p) = psnr(theirs, fmt, &raw, w, h) {
+                    m.details.insert("ffmpeg_psnr_db".into(), p);
+                }
+                m.details.insert(
+                    "ffmpeg_bytes".into(),
+                    fs::metadata(theirs).map_or(0.0, |x| x.len() as f64),
+                );
+            };
 
             for (key, preset) in [("medium", "medium"), ("veryfast", "veryfast")] {
                 let id = format!("encode.{h}.h264.cpu.{key}");
@@ -737,7 +815,7 @@ impl Bench {
                         ..Measured::default()
                     };
                     let mut last = Vec::new();
-                    for _ in 0..runs {
+                    for _ in 0..ours_runs(runs) {
                         let (s, out) = encode_cpu(&frames, w, h)?;
                         m.ours.push(n / s);
                         last = out;
@@ -752,10 +830,10 @@ impl Bench {
                         &path_str(&out),
                         false,
                     );
-                    for _ in 0..runs {
+                    for _ in 0..ffmpeg_runs(runs) {
                         m.ffmpeg.push(n / run_ff(&args)?);
                     }
-                    with_quality(&mut m, &last, &out, "h264", "h264");
+                    with_quality(&mut m, &last, &out, "h264");
                     Ok(m)
                 })();
                 self.add(
@@ -787,10 +865,12 @@ impl Bench {
                         ),
                         ..Measured::default()
                     };
-                    let (_, _, driver) = encode_gpu(&frames[..8], w, h, codec)?;
-                    m.note.push_str(&format!("; backend {driver}"));
                     let mut last = Vec::new();
-                    for _ in 0..runs {
+                    if !recording() {
+                        let (_, _, driver) = encode_gpu(&frames[..8], w, h, codec)?;
+                        m.note.push_str(&format!("; backend {driver}"));
+                    }
+                    for _ in 0..ours_runs(runs) {
                         let (s, out, _) = encode_gpu(&frames, w, h, codec)?;
                         m.ours.push(n / s);
                         last = out;
@@ -802,10 +882,10 @@ impl Bench {
                         &path_str(&out),
                         true,
                     );
-                    for _ in 0..runs {
+                    for _ in 0..ffmpeg_runs(runs) {
                         m.ffmpeg.push(n / run_ff(&args)?);
                     }
-                    with_quality(&mut m, &last, &out, name, fmt);
+                    with_quality(&mut m, &last, &out, fmt);
                     Ok(m)
                 })();
                 self.add(
@@ -880,11 +960,14 @@ impl Bench {
                     enc.flush()?;
                     Ok((frames, t0.elapsed().as_secs_f64()))
                 };
-                let (mut n, _) = one()?;
-                for _ in 0..runs {
-                    let (c, s) = one()?;
-                    n = c;
-                    m.ours.push(c as f64 / s);
+                let mut n = frame_count(&path)?;
+                if !recording() {
+                    one()?;
+                    for _ in 0..runs {
+                        let (c, s) = one()?;
+                        n = c;
+                        m.ours.push(c as f64 / s);
+                    }
                 }
                 let encoder = if codec == Codec::H264 {
                     "h264_vaapi"
@@ -913,7 +996,7 @@ impl Bench {
                     if codec == Codec::H264 { "h264" } else { "hevc" },
                     &out,
                 ];
-                for _ in 0..runs {
+                for _ in 0..ffmpeg_runs(runs) {
                     m.ffmpeg.push(n as f64 / ffmpeg_time(&args)?);
                 }
                 Ok(m)
@@ -957,11 +1040,15 @@ impl Bench {
                     note: format!("{seconds:.0} s of 48 kHz stereo AAC-LC"),
                     ..Measured::default()
                 };
-                one()?;
-                m.ours = repeat(runs, || Ok(seconds / one()?))?;
+                if !recording() {
+                    one()?;
+                    m.ours = repeat(runs, || Ok(seconds / one()?))?;
+                }
                 let args = ["-i", &sstr, "-vn", "-f", "null", "-"];
-                ffmpeg_time(&args)?;
-                m.ffmpeg = repeat(runs, || Ok(seconds / ffmpeg_time(&args)?))?;
+                if recording() {
+                    ffmpeg_time(&args)?;
+                    m.ffmpeg = repeat(runs, || Ok(seconds / ffmpeg_time(&args)?))?;
+                }
                 Ok(m)
             })();
             self.add(
@@ -1011,20 +1098,24 @@ impl Bench {
                     ),
                     ..Measured::default()
                 };
-                let (_, size) = one()?;
-                m.ours = repeat(runs, || Ok(seconds / one()?.0))?;
-                m.details.insert("ours_bytes".into(), size as f64);
+                if !recording() {
+                    let (_, size) = one()?;
+                    m.ours = repeat(runs, || Ok(seconds / one()?.0))?;
+                    m.details.insert("ours_bytes".into(), size as f64);
+                }
                 let out = path_str(&dir.join("ffmpeg.aac"));
                 let args = [
                     "-f", "f32le", "-ar", "48000", "-ac", "2", "-i", &pstr, "-c:a", "aac", "-b:a",
                     "128k", "-f", "adts", &out,
                 ];
-                ffmpeg_time(&args)?;
-                m.ffmpeg = repeat(runs, || Ok(seconds / ffmpeg_time(&args)?))?;
-                m.details.insert(
-                    "ffmpeg_bytes".into(),
-                    fs::metadata(&out).map_or(0.0, |x| x.len() as f64),
-                );
+                if recording() {
+                    ffmpeg_time(&args)?;
+                    m.ffmpeg = repeat(runs, || Ok(seconds / ffmpeg_time(&args)?))?;
+                    m.details.insert(
+                        "ffmpeg_bytes".into(),
+                        fs::metadata(&out).map_or(0.0, |x| x.len() as f64),
+                    );
+                }
                 Ok(m)
             })();
             self.add(
@@ -1063,9 +1154,11 @@ impl Bench {
                     ),
                     ..Measured::default()
                 };
-                let (_, lufs) = one()?;
-                m.ours = repeat(runs, || Ok(seconds / one()?.0))?;
-                m.details.insert("ours_lufs".into(), lufs);
+                if !recording() {
+                    let (_, lufs) = one()?;
+                    m.ours = repeat(runs, || Ok(seconds / one()?.0))?;
+                    m.details.insert("ours_lufs".into(), lufs);
+                }
                 let args = [
                     "-f",
                     "f32le",
@@ -1081,6 +1174,9 @@ impl Bench {
                     "null",
                     "-",
                 ];
+                if !recording() {
+                    return Ok(m);
+                }
                 let (_, log) = ffmpeg_run(&args, true)?;
                 if let Some(at) = log.rfind("I:")
                     && let Some(v) = log[at + 2..]
@@ -1132,7 +1228,7 @@ impl Bench {
                         note: "a cold file each time: opened, parsed, first frame decoded, scaled to 240 px; ffmpeg includes starting the process".into(),
                         ..Measured::default()
                     };
-                    for i in 0..runs {
+                    for i in 0..ours_runs(runs) {
                         let copy = dir.join(format!("{name}-{key}-{i}.mp4"));
                         let _ = fs::remove_file(&copy);
                         fs::hard_link(&path, &copy)?;
@@ -1159,7 +1255,7 @@ impl Bench {
                         "null",
                         "-",
                     ]);
-                    m.ffmpeg = repeat(runs, || Ok(ffmpeg_time(&args)? * 1e3))?;
+                    m.ffmpeg = repeat(ffmpeg_runs(runs), || Ok(ffmpeg_time(&args)? * 1e3))?;
                     Ok(m)
                 })();
                 self.add(
@@ -1202,12 +1298,15 @@ impl Bench {
                             note: "12 stills at 240 px, snapped to keyframes; ffmpeg runs 12 processes (-noaccurate_seek), 8 at a time".into(),
                             ..Measured::default()
                         };
-                        frames_at(&path, &times, 240, &prefs)?;
-                        m.ours = repeat(runs, || {
-                            let t0 = Instant::now();
+                        if !recording() {
                             frames_at(&path, &times, 240, &prefs)?;
-                            Ok(12.0 / t0.elapsed().as_secs_f64())
-                        })?;
+                            m.ours = repeat(runs, || {
+                                let t0 = Instant::now();
+                                frames_at(&path, &times, 240, &prefs)?;
+                                Ok(12.0 / t0.elapsed().as_secs_f64())
+                            })?;
+                            return Ok(m);
+                        }
                         let strs: Vec<String> = times.iter().map(|t| format!("{t:.3}")).collect();
                         let one = |t: &str| -> Res<f64> {
                             ffmpeg_time(&[
@@ -1291,6 +1390,9 @@ impl Bench {
             let spans: [(f64, f64); 3] = [(2.3, 7.6), (11.1, 13.9), (14.2, 19.1)];
             let seconds: f64 = spans.iter().map(|(a, b)| b - a).sum();
             let ours = (|| -> Res<(Vec<f64>, f64, u64, u64)> {
+                if recording() {
+                    return Ok((Vec::new(), 0.0, 0, 0));
+                }
                 fs::create_dir_all(&dir)?;
                 let out = dir.join("ours.mp4");
                 let pieces: Vec<Piece> = spans
@@ -1363,7 +1465,11 @@ impl Bench {
                 let m = (|| -> Res<Measured> {
                     let (o, o_size, copied, encoded) =
                         ours.as_ref().map_err(|e| e.to_string())?.clone();
-                    let (f, f_size) = theirs(reencode)?;
+                    let (f, f_size) = if recording() {
+                        theirs(reencode)?
+                    } else {
+                        (Vec::new(), 0.0)
+                    };
                     let mut m = Measured {
                         route: "auto".into(),
                         note: if reencode {
@@ -1375,11 +1481,14 @@ impl Bench {
                         ffmpeg: f,
                         ..Measured::default()
                     };
-                    m.details.insert("ours_bytes".into(), o_size);
-                    m.details.insert("ffmpeg_bytes".into(), f_size);
-                    m.details.insert("ours_frames_copied".into(), copied as f64);
-                    m.details
-                        .insert("ours_frames_encoded".into(), encoded as f64);
+                    if recording() {
+                        m.details.insert("ffmpeg_bytes".into(), f_size);
+                    } else {
+                        m.details.insert("ours_bytes".into(), o_size);
+                        m.details.insert("ours_frames_copied".into(), copied as f64);
+                        m.details
+                            .insert("ours_frames_encoded".into(), encoded as f64);
+                    }
                     Ok(m)
                 })();
                 self.add(
@@ -1429,7 +1538,9 @@ impl Bench {
                     }
                     Ok(frames.len() as f64 / t0.elapsed().as_secs_f64())
                 };
-                one(&mut dst)?;
+                if !recording() {
+                    one(&mut dst)?;
+                }
                 let mut m = Measured {
                     route: "cpu".into(),
                     note: format!(
@@ -1438,7 +1549,7 @@ impl Bench {
                     ),
                     ..Measured::default()
                 };
-                m.ours = repeat(runs, || one(&mut dst))?;
+                m.ours = repeat(ours_runs(runs), || one(&mut dst))?;
                 let size = format!("{sw}x{sh}");
                 let vf = format!("scale={dw}:{dh}:flags=bicubic");
                 let n = frames.len() as f64;
@@ -1459,8 +1570,10 @@ impl Bench {
                     "null",
                     "-",
                 ];
-                ffmpeg_time(&args)?;
-                m.ffmpeg = repeat(runs, || Ok(n / ffmpeg_time(&args)?))?;
+                if recording() {
+                    ffmpeg_time(&args)?;
+                    m.ffmpeg = repeat(runs, || Ok(n / ffmpeg_time(&args)?))?;
+                }
                 Ok(m)
             })();
             self.add(
@@ -1483,7 +1596,7 @@ fn shell(cmd: &str, args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
-fn machine() -> Machine {
+fn machine(ffmpeg: &str) -> Machine {
     let cpu = fs::read_to_string("/proc/cpuinfo")
         .ok()
         .and_then(|s| {
@@ -1518,11 +1631,7 @@ fn machine() -> Machine {
         threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
         gpu,
         driver,
-        ffmpeg: shell("ffmpeg", &["-version"])
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .to_string(),
+        ffmpeg: ffmpeg.to_string(),
         os: shell("uname", &["-sr"]),
     }
 }
@@ -1753,11 +1862,18 @@ fn run() -> Res<()> {
                 .map_or(".dev/bench/baseline.json", String::as_str);
             return docs::check(Path::new(&given[1]), Path::new(baseline));
         }
-        Some("--chart-docs") if given.len() == 3 => {
-            return docs::charts(Path::new(&given[1]), Path::new(&given[2]));
+        Some("--chart-docs") if (3..=4).contains(&given.len()) => {
+            let reference = Reference::read(Path::new(
+                given.get(3).map_or(reference::PATH, String::as_str),
+            ))?;
+            return docs::charts(Path::new(&given[1]), Path::new(&given[2]), &reference);
         }
         Some("--check" | "--chart-docs") => {
-            return Err("usage: bench --check <new results.json> [baseline.json] | bench --chart-docs <results.json> <dir>".into());
+            return Err("usage: bench --check <new results.json> [baseline.json] | bench --chart-docs <results.json> <dir> [reference.toml]".into());
+        }
+        Some("--help" | "-h") => {
+            say!("{USAGE}")?;
+            return Ok(());
         }
         _ => {}
     }
@@ -1770,6 +1886,8 @@ fn run() -> Res<()> {
     let mut fixtures = PathBuf::from("tmp/bench/fixtures");
     let mut charts_only = false;
     let mut no_charts = false;
+    let mut record_ffmpeg = false;
+    let mut reference_path = PathBuf::from(reference::PATH);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--runs" => runs = args.next().ok_or("--runs N")?.parse()?,
@@ -1783,12 +1901,9 @@ fn run() -> Res<()> {
             "--fixtures" => fixtures = args.next().ok_or("--fixtures DIR")?.into(),
             "--charts-only" => charts_only = true,
             "--no-charts" => no_charts = true,
-            _ => {
-                return Err(format!(
-                    "usage: bench [--runs N] [--quick] [--only ID]... [--out DIR] [--images DIR] [--fixtures DIR] [--charts-only] [--no-charts] (unknown {a})"
-                )
-                .into());
-            }
+            "--record-ffmpeg" => record_ffmpeg = true,
+            "--reference" => reference_path = args.next().ok_or("--reference FILE")?.into(),
+            _ => return Err(format!("unknown {a}; bench --help gives the usage").into()),
         }
     }
     QUICK.store(quick, Ordering::Relaxed);
@@ -1802,6 +1917,28 @@ fn run() -> Res<()> {
         charts(&r.rows, &images, &r.machine, &r.date)?;
         return Ok(());
     }
+    let reference = if record_ffmpeg {
+        let _ = FFMPEG.set(ffmpeg_on(std::env::var_os("PATH").as_deref())?);
+        let mut r = if only.is_empty() {
+            Reference::default()
+        } else {
+            Reference::read(&reference_path).unwrap_or_default()
+        };
+        let (_, version) = ffmpeg_run(&["-version"], false)?;
+        let line = |p: &str| {
+            version
+                .lines()
+                .find(|l| l.starts_with(p))
+                .map(str::to_string)
+        };
+        r.ffmpeg = line("ffmpeg version ").ok_or("ffmpeg -version gave no version line")?;
+        r.configuration = line("configuration:").unwrap_or_default();
+        r
+    } else {
+        let r = Reference::read(&reference_path)?;
+        r.check_inputs(&out)?;
+        r
+    };
     let load_start = fs::read_to_string("/proc/loadavg").unwrap_or_default();
     let assets = prepare(&out, &fixtures)?;
     let mut b = Bench {
@@ -1809,6 +1946,8 @@ fn run() -> Res<()> {
         only,
         rows: Vec::new(),
         node: render_node(),
+        reference,
+        missing: Vec::new(),
     };
     b.decode(&assets);
     b.encode(&assets);
@@ -1819,6 +1958,13 @@ fn run() -> Res<()> {
     b.smart_cut(&assets);
     b.scale(&assets);
     let date = shell("date", &["-u", "+%Y-%m-%d"]);
+    let machine = machine(&b.reference.ffmpeg);
+    if record_ffmpeg {
+        return write_reference(b.reference, machine, date, b.runs, &assets, &reference_path);
+    }
+    if let Some(line) = missing_line(&b.missing, &reference_path) {
+        note!("bench: {line}");
+    }
     let results = Results {
         date: date.clone(),
         command: format!(
@@ -1832,7 +1978,7 @@ fn run() -> Res<()> {
         input: format!(
             "{CLIP_SECONDS} s of the public-domain NASA 'A Message of Resilience from the International Space Station' clip, 720p60 scaled to 1080p and 1440p and re-encoded with libx264 (CRF 20) and libx265 (CRF 23); audio from the NASA solstice interview"
         ),
-        machine: machine(),
+        machine,
         load_average_start: load_start.trim().to_string(),
         load_average_end: fs::read_to_string("/proc/loadavg")
             .unwrap_or_default()
@@ -1852,6 +1998,54 @@ fn run() -> Res<()> {
         charts(&merged.rows, &images, &merged.machine, &merged.date)?;
         say!("wrote charts to {}", images.display())?;
     }
+    Ok(())
+}
+
+fn ffmpeg_on(path: Option<&std::ffi::OsStr>) -> Res<PathBuf> {
+    Ok(reference::find_on_path(path, "ffmpeg").ok_or("--record-ffmpeg needs ffmpeg on PATH")?)
+}
+
+fn missing_line(missing: &[String], path: &Path) -> Option<String> {
+    (!missing.is_empty()).then(|| {
+        format!(
+            "no ffmpeg reference for {} cases in {}, not measured: {}",
+            missing.len(),
+            path.display(),
+            missing.join(", ")
+        )
+    })
+}
+
+fn write_reference(
+    mut r: Reference,
+    m: Machine,
+    date: String,
+    runs: usize,
+    a: &Assets,
+    path: &Path,
+) -> Res<()> {
+    r.date = date;
+    r.runs = runs;
+    r.cpu = m.cpu;
+    r.threads = m.threads;
+    r.gpu = m.gpu;
+    r.driver = m.driver;
+    r.os = m.os;
+    let files = a.video.values().chain(a.raw.values()).chain([&a.pcm]);
+    for f in files {
+        let name = f.file_name().and_then(|n| n.to_str()).ok_or("input name")?;
+        r.inputs.insert(name.to_string(), fs::metadata(f)?.len());
+    }
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        fs::create_dir_all(dir)?;
+    }
+    fs::write(path, r.render())?;
+    say!(
+        "wrote {} cases to {} with {}",
+        r.cases.len(),
+        path.display(),
+        r.ffmpeg
+    )?;
     Ok(())
 }
 
@@ -1937,5 +2131,195 @@ mod tests {
         let (clip, speech) = speech_media(&s.0).unwrap();
         assert_eq!(clip, s.0.join("clips/resilience.mp4"));
         assert_eq!(speech, s.0.join("clips/solstice.mp4"));
+    }
+
+    fn bench_with(reference: Reference) -> Bench {
+        Bench {
+            runs: 3,
+            only: Vec::new(),
+            rows: Vec::new(),
+            node: String::new(),
+            reference,
+            missing: Vec::new(),
+        }
+    }
+
+    fn ours(values: &[f64]) -> Res<Measured> {
+        Ok(Measured {
+            ours: values.to_vec(),
+            route: "cpu".into(),
+            ..Measured::default()
+        })
+    }
+
+    #[test]
+    fn every_reference_case_gives_a_comparison_row_without_running_ffmpeg() {
+        let r = reference::tests::sample();
+        let mut b = bench_with(r.clone());
+        b.add(
+            "decode.h264.1080.cpu-1t",
+            "decode",
+            "H.264 1080P DECODE",
+            "fps",
+            true,
+            ours(&[800.0, 825.0, 850.0]),
+        );
+        b.add(
+            "first-frame.h264.1440.cpu",
+            "pipeline",
+            "FIRST FRAME",
+            "ms",
+            false,
+            ours(&[4.0, 4.26, 5.0]),
+        );
+        assert!(b.missing.is_empty());
+        assert_eq!(b.rows.len(), r.cases.len());
+        let decode = &b.rows[0];
+        assert_eq!(decode.ffmpeg, Some(412.5));
+        assert_eq!(decode.ffmpeg_runs, vec![410.0, 412.5, 415.25]);
+        assert_eq!(decode.speedup, Some(2.0));
+        assert_eq!(decode.details.get("ffmpeg_psnr_db"), Some(&41.2));
+        let first = &b.rows[1];
+        assert_eq!(first.ffmpeg, Some(85.2));
+        assert!((first.speedup.unwrap() - 20.0).abs() < 1e-9);
+        assert!(FFMPEG.get().is_none());
+    }
+
+    #[test]
+    fn a_case_with_no_reference_is_reported_missing_not_measured() {
+        let mut b = bench_with(reference::tests::sample());
+        b.add(
+            "scale.1440to1080",
+            "pipeline",
+            "SCALE",
+            "fps",
+            true,
+            ours(&[900.0]),
+        );
+        b.add(
+            "decode.h264.1080.cpu-1t",
+            "decode",
+            "H.264 1080P DECODE",
+            "ms",
+            true,
+            ours(&[1.0]),
+        );
+        assert_eq!(b.missing, ["scale.1440to1080", "decode.h264.1080.cpu-1t"]);
+        for row in &b.rows {
+            assert_eq!(row.ffmpeg, None);
+            assert!(row.ffmpeg_runs.is_empty());
+            assert_eq!(row.speedup, None);
+            assert!(row.ours.is_some());
+        }
+        let line = missing_line(&b.missing, Path::new("bench/ffmpeg-reference.toml")).unwrap();
+        assert_eq!(
+            line,
+            "no ffmpeg reference for 2 cases in bench/ffmpeg-reference.toml, not measured: scale.1440to1080, decode.h264.1080.cpu-1t"
+        );
+        assert_eq!(missing_line(&[], Path::new("x")), None);
+    }
+
+    #[test]
+    fn a_skipped_case_is_neither_compared_nor_missing() {
+        let mut b = bench_with(reference::tests::sample());
+        b.add(
+            "decode.h264.1080.cpu-1t",
+            "decode",
+            "H.264 1080P DECODE",
+            "fps",
+            true,
+            Err("no VA-API device".into()),
+        );
+        assert!(b.missing.is_empty());
+        assert_eq!(b.rows[0].skipped.as_deref(), Some("no VA-API device"));
+        assert_eq!(b.rows[0].ffmpeg, None);
+    }
+
+    #[test]
+    fn recording_keeps_only_ffmpeg_details() {
+        let mut r = Reference::default();
+        let row = Row {
+            id: "encode.1080.h264.gpu".into(),
+            unit: "fps".into(),
+            ffmpeg: Some(300.0),
+            ffmpeg_runs: vec![290.0, 300.0, 310.0],
+            details: BTreeMap::from([
+                ("ffmpeg_bytes".into(), 1000.0),
+                ("ours_bytes".into(), 900.0),
+            ]),
+            ..Row::default()
+        };
+        record(&mut r, &row);
+        record(
+            &mut r,
+            &Row {
+                id: "skipped".into(),
+                ..Row::default()
+            },
+        );
+        assert_eq!(r.cases.len(), 1);
+        let c = &r.cases["encode.1080.h264.gpu"];
+        assert_eq!(c.value, 300.0);
+        assert_eq!(c.unit, "fps");
+        assert_eq!(c.runs, vec![290.0, 300.0, 310.0]);
+        assert_eq!(c.details, BTreeMap::from([("ffmpeg_bytes".into(), 1000.0)]));
+    }
+
+    #[test]
+    fn ffmpeg_refuses_to_run_outside_record_ffmpeg() {
+        assert!(FFMPEG.get().is_none());
+        let err = ffmpeg_run(&["-version"], false).unwrap_err().to_string();
+        assert_eq!(err, "ffmpeg runs only under bench --record-ffmpeg");
+        assert!(ffmpeg_time(&["-i", "x"]).is_err());
+        assert!(psnr(Path::new("a"), "h264", Path::new("b"), 352, 240).is_none());
+    }
+
+    #[test]
+    fn only_the_gated_ffmpeg_run_spawns_a_process() {
+        let src = include_str!("bench.rs");
+        let spawn = concat!("Command::", "new(");
+        let targets: Vec<&str> = src
+            .match_indices(spawn)
+            .filter_map(|(i, _)| src[i + spawn.len()..].split(')').next())
+            .collect();
+        assert_eq!(targets, ["exe", "cmd", "\"vainfo\""]);
+        let gate = &src[src.find("fn ffmpeg_run(").unwrap()..];
+        let gate = &gate[..gate.find(&format!("{spawn}exe)")).unwrap()];
+        assert!(gate.contains("let exe = FFMPEG\n        .get()"));
+        let shells: Vec<&str> = src
+            .match_indices("shell(\"")
+            .filter_map(|(i, _)| src[i + 7..].split('"').next())
+            .collect();
+        assert_eq!(shells, ["uname", "date", "git"]);
+        let sets = src.matches(concat!("FFMPEG", ".set(")).count();
+        assert_eq!(sets, 1);
+        let set_at = src.find(concat!("FFMPEG", ".set(")).unwrap();
+        let before = &src[..set_at];
+        assert!(
+            before[before.rfind("let reference = if ").unwrap()..].contains("if record_ffmpeg {")
+        );
+    }
+
+    #[test]
+    fn record_ffmpeg_without_ffmpeg_on_path_fails_in_one_line() {
+        let s = scratch("no-ffmpeg");
+        let err = ffmpeg_on(Some(s.0.as_os_str())).unwrap_err().to_string();
+        assert_eq!(err, "--record-ffmpeg needs ffmpeg on PATH");
+        assert_eq!(
+            ffmpeg_on(None).unwrap_err().to_string(),
+            "--record-ffmpeg needs ffmpeg on PATH"
+        );
+        fs::write(s.0.join("ffmpeg"), b"").unwrap();
+        assert_eq!(
+            ffmpeg_on(Some(s.0.as_os_str())).unwrap(),
+            s.0.join("ffmpeg")
+        );
+    }
+
+    #[test]
+    fn chart_docs_name_the_reference_version_and_date() {
+        let (sub, ff) = docs::ffmpeg_names(&reference::tests::sample());
+        assert_eq!(ff, "FFMPEG 9.0.1");
+        assert!(sub.ends_with("FFMPEG 9.0.1 RECORDED 2026-10-23"), "{sub}");
     }
 }
