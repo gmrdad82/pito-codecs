@@ -166,6 +166,10 @@ const GENERIC: [&str; 6] = [
 ];
 
 pub fn probe(path: &Path) -> Result<Probe> {
+    #[cfg(feature = "gif")]
+    if super::gif::is_gif_file(path) {
+        return super::gif::probe(path);
+    }
     if let Some(kind) = super::bare::sniff(path) {
         return super::bare::probe(path, kind);
     }

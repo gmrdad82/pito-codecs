@@ -537,6 +537,7 @@ fn audio_only_wavs_probe_as_audio() {
             ("chroma", "null"),
             ("interlaced", "null"),
             ("variant", "null"),
+            ("frames", "null"),
         ] {
             assert_eq!(field(&json, key), Some(want), "{name} {key}: {json}");
         }
@@ -632,6 +633,7 @@ fn probe_json_and_text_name_the_video_variant() {
             ("interlaced", interlaced),
             ("variant", variant),
             ("pix_fmt", pix_fmt),
+            ("frames", "15"),
         ] {
             assert_eq!(field(&json, key), Some(want), "{name} {key}: {json}");
         }
@@ -1034,6 +1036,143 @@ fn an_id3_tagged_flac_is_labelled_flac() {
     assert!(text(&plain.stdout).starts_with("container  FLAC"));
 }
 
+#[test]
+fn frames_refuses_an_existing_output_without_force_and_replaces_it_with() {
+    let folder = dir("frames-force");
+    let input = frames("frames-force").to_str().unwrap().to_string();
+    let output = folder.join("out.mp4");
+    let path = output.to_str().unwrap();
+    fs::write(&output, b"old").unwrap();
+    let args = ["frames", &input, path, "--fps", "10", "--route", "cpu"];
+    let out = run(&args);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert_eq!(
+        stderr,
+        format!("pcod: {path} already exists; use --force to replace it\n")
+    );
+    assert!(out.stdout.is_empty(), "{}", text(&out.stdout));
+    assert_eq!(fs::read(&output).unwrap(), b"old");
+    let forced = run(&[&args[..], &["--force"]].concat());
+    ok(&forced);
+    assert_ne!(fs::read(&output).unwrap(), b"old");
+    let p = probe(&output, &Prefs::default()).unwrap();
+    assert_eq!((p.width, p.height, p.frames), (320, 240, Some(20)));
+    assert!(partials(&folder).is_empty());
+    let fresh = folder.join("fresh.mp4");
+    ok(&run(&[
+        "frames",
+        &input,
+        fresh.to_str().unwrap(),
+        "--fps",
+        "10",
+        "--route",
+        "cpu",
+    ]));
+    assert!(fresh.exists());
+    assert!(partials(&folder).is_empty());
+}
+
+#[test]
+fn frames_that_fail_leave_neither_output_nor_partial() {
+    let folder = dir("frames-fail");
+    let input = frames("frames-fail");
+    fs::write(input.join("0005.png"), b"not a png").unwrap();
+    let output = folder.join("out.mp4");
+    let out = run(&[
+        "frames",
+        input.to_str().unwrap(),
+        output.to_str().unwrap(),
+        "--fps",
+        "10",
+        "--route",
+        "cpu",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).starts_with("pcod: "));
+    assert!(!output.exists());
+    assert!(partials(&folder).is_empty());
+    fs::write(&output, b"old").unwrap();
+    let forced = run(&[
+        "frames",
+        input.to_str().unwrap(),
+        output.to_str().unwrap(),
+        "--fps",
+        "10",
+        "--route",
+        "cpu",
+        "--force",
+    ]);
+    assert_eq!(forced.status.code(), Some(1));
+    assert!(
+        !text(&forced.stdout).contains("wrote"),
+        "{}",
+        text(&forced.stdout)
+    );
+    assert_eq!(fs::read(&output).unwrap(), b"old");
+    assert!(partials(&folder).is_empty());
+}
+
+#[test]
+fn frames_crf_0_is_near_lossless_against_the_source() {
+    use pito_codecs::filter::{ColorSpec, Order, Packed, packed_to_yuv};
+    use pito_codecs::media::{Frame, PixelFormat, TimeBase};
+    let folder = dir("frames-crf0");
+    let input = frames("frames-crf0");
+    let output = folder.join("crf0.mp4");
+    ok(&run(&[
+        "frames",
+        input.to_str().unwrap(),
+        output.to_str().unwrap(),
+        "--fps",
+        "10",
+        "--crf",
+        "0",
+        "--route",
+        "cpu",
+    ]));
+    let decoded = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(&output)
+        .args(["-f", "rawvideo", "-pix_fmt", "yuv420p", "-"])
+        .output()
+        .unwrap();
+    assert!(decoded.status.success(), "{}", text(&decoded.stderr));
+    let (w, h) = (320usize, 240usize);
+    let picture = w * h * 3 / 2;
+    assert_eq!(decoded.stdout.len(), picture * 20);
+    let mut squared = 0f64;
+    let mut identical = true;
+    for n in 0..20 {
+        let png = fs::read(input.join(format!("{n:04}.png"))).unwrap();
+        let rgba = pito_codecs::png::decode(&png).unwrap();
+        let mut want = Frame::new(PixelFormat::Yuv420p8, 320, 240, 0, TimeBase::new(1, 1));
+        let source = Packed::new(rgba.width, rgba.height, Order::Rgbx, &rgba.data);
+        packed_to_yuv(source, ColorSpec::BT709, PixelFormat::Yuv420p8, &mut want).unwrap();
+        let luma = &want.planes[0];
+        let got = &decoded.stdout[n * picture..n * picture + w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let d = f64::from(luma.data[y * luma.stride + x]) - f64::from(got[y * w + x]);
+                identical &= d == 0.0;
+                squared += d * d;
+            }
+        }
+    }
+    let mse = squared / (w * h * 20) as f64;
+    let psnr = if mse == 0.0 {
+        f64::INFINITY
+    } else {
+        10.0 * (255.0 * 255.0 / mse).log10()
+    };
+    eprintln!("frames --crf 0 luma PSNR: {psnr:.2} dB");
+    assert!(psnr > 54.0, "{psnr}");
+    assert!(
+        !identical,
+        "--crf 0 came back bit-exact; the help says it is not"
+    );
+}
+
 fn ramp_wav(seconds: usize) -> (Vec<u8>, Vec<i16>) {
     let frames = 48_000 * seconds;
     let samples: Vec<i16> = (0..frames)
@@ -1181,6 +1320,23 @@ fn raw_s16_refusals_are_one_line_and_bad_flags_exit_2() {
         assert_eq!(got.status.code(), Some(2), "{args:?}: {stderr}");
         assert!(stderr.starts_with("error: "), "{args:?}: {stderr}");
         assert!(got.stdout.is_empty(), "{args:?}");
+    }
+    for (flag, value) in [
+        ("--quality", Some("80")),
+        ("--lossless", None),
+        ("--no-audio", None),
+        ("--add-audio", Some("bed.wav")),
+    ] {
+        let mut args = vec!["in.mkv", "-", flag];
+        args.extend(value);
+        let got = run(&args);
+        let stderr = text(&got.stderr);
+        assert_eq!(got.status.code(), Some(2), "{flag}: {stderr}");
+        assert!(
+            stderr.starts_with(&format!("error: {flag} doesn't apply to raw PCM")),
+            "{flag}: {stderr}"
+        );
+        assert!(got.stdout.is_empty(), "{flag}");
     }
 }
 

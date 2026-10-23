@@ -618,6 +618,25 @@ fn produce_frames(
     Ok(Vec::new())
 }
 
+fn produce_gif(
+    job: &Job,
+    want: Want,
+    tx: &SyncSender<Result<Pic, Fail>>,
+) -> Result<Vec<String>, Fail> {
+    let media = job.media;
+    let fix = RgbaFix::new((media.width, media.height), job.size, want, Transfer::Srgb)?;
+    media::gif_frames(&media.path, Some(job.fps), |f| -> Result<(), Fail> {
+        stopped(job.stop)?;
+        if f.ticks.is_empty() {
+            return Ok(());
+        }
+        let span = i64::try_from(f.ticks.start).unwrap_or(i64::MAX)
+            ..i64::try_from(f.ticks.end).unwrap_or(i64::MAX);
+        send_span(tx, fix.apply(f.image.clone())?, span)
+    })?;
+    Ok(Vec::new())
+}
+
 enum VEnc {
     H264(Box<h264::Encoder>),
     Gpu(Box<HwEncoder>),
@@ -1268,6 +1287,7 @@ fn produce(
         Kind::File if job.media.alpha => produce_alpha(job, want, &tx),
         Kind::File => produce_file(job, want == Want::Rgba, &tx),
         Kind::Frames(files) => produce_frames(job, files, want, &tx),
+        Kind::Gif => produce_gif(job, want, &tx),
     };
     if let Err(e) = &made {
         let _ = tx.send(Err(e.to_string().into()));

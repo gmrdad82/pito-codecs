@@ -488,3 +488,43 @@ fn b_frames_keep_one_tick_per_sample_and_decode_every_frame() {
     assert!(raw.status.success());
     assert_eq!(raw.stdout.len(), n * 320 * 240);
 }
+
+#[test]
+fn a_track_title_is_written_as_udta_name_and_read_back() {
+    let entry = || SampleEntry::aac(vec![0x11, 0x90], 2, 48_000, 0);
+    let mut w = Writer::new(std::io::Cursor::new(Vec::new()), Options::default()).unwrap();
+    let mut titled = TrackConfig::new(entry(), 48_000);
+    titled.title = Some("Voice ü".into());
+    let a = w.add_track(titled).unwrap();
+    let mut blank = TrackConfig::new(entry(), 48_000);
+    blank.title = Some(String::new());
+    let b = w.add_track(blank).unwrap();
+    let c = w.add_track(TrackConfig::new(entry(), 48_000)).unwrap();
+    for t in [a, b, c] {
+        for k in 0..3 {
+            w.push_sample(t, &[0x21, 0x10, 0x04], k * 1024, k * 1024, 1024, true)
+                .unwrap();
+        }
+    }
+    let bytes = w.finish_faststart().unwrap().into_inner();
+    let title = "Voice ü".as_bytes();
+    let needle = [
+        &(16 + title.len() as u32).to_be_bytes()[..],
+        b"udta",
+        &(8 + title.len() as u32).to_be_bytes(),
+        b"name",
+        title,
+    ]
+    .concat();
+    assert_eq!(
+        bytes
+            .windows(needle.len())
+            .filter(|w| *w == &needle[..])
+            .count(),
+        1
+    );
+    assert_eq!(bytes.windows(4).filter(|w| *w == b"udta").count(), 1);
+    let r = Reader::new(bytes).unwrap();
+    let names: Vec<&str> = r.tracks.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, ["Voice ü", "SoundHandler", "SoundHandler"]);
+}

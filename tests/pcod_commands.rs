@@ -974,3 +974,57 @@ fn join_through_pcod_reports_its_method_and_hashes_every_clip() {
         "use --force to replace it",
     );
 }
+
+#[test]
+fn frames_with_loudness_measures_the_mp4_it_lands() {
+    let out = dir("frames-loudness");
+    let folder = out.join("frames");
+    write_frames(&folder);
+    let wav = out.join("voice.wav");
+    fs::write(&wav, wav_bytes(RATE as usize)).unwrap();
+    let mp4 = out.join("out.mp4");
+    let args = [
+        "frames",
+        s(&folder),
+        s(&mp4),
+        "--fps",
+        "24",
+        "--audio",
+        s(&wav),
+        "--loudness",
+        "-16",
+        "--route",
+        "cpu",
+    ];
+    let said = ok(&run(&args));
+    let after = said
+        .lines()
+        .find(|l| l.starts_with("after   "))
+        .unwrap_or_else(|| panic!("{said}"));
+    assert!(after.ends_with("dBTP (the MP4's AAC)"), "{after}");
+    let peak: f64 = after
+        .split("true peak ")
+        .nth(1)
+        .and_then(|t| t.split(' ').next())
+        .and_then(|t| t.parse().ok())
+        .unwrap();
+    assert!(peak <= -1.0 + 0.005, "{after}");
+    assert!(
+        said.lines().last().unwrap().starts_with("wrote   "),
+        "{said}"
+    );
+    let first = fs::read(&mp4).unwrap();
+    assert!(!first.is_empty());
+    let leftovers: Vec<_> = fs::read_dir(&out)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n != "frames" && n != "voice.wav" && n != "out.mp4")
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+
+    refused(&run(&args), "already exists; use --force to replace it");
+    assert_eq!(fs::read(&mp4).unwrap(), first);
+    let mut forced = args.to_vec();
+    forced.push("--force");
+    ok(&run(&forced));
+}

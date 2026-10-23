@@ -12,8 +12,8 @@ use pito_codecs::media::{
 use pito_codecs::png;
 
 use super::Fail;
-use super::convert::{ceiling_held, target_of};
-use super::plan::Loudness;
+use super::convert::{ceiling_held, land, target_of};
+use super::plan::{Loudness, partial};
 
 pub const AAC_KBPS: u32 = 192;
 const RATE: u32 = 48_000;
@@ -32,6 +32,7 @@ pub struct Job {
     pub prefs: Prefs,
     pub crf: u8,
     pub threads: usize,
+    pub overwrite: bool,
 }
 
 fn listed(dir: &Path) -> Result<Vec<PathBuf>, Fail> {
@@ -91,7 +92,7 @@ fn name(p: &Path) -> String {
         .unwrap_or_default()
 }
 
-fn sound(path: &Path) -> Result<AudioBuffer, Fail> {
+pub fn sound(path: &Path) -> Result<AudioBuffer, Fail> {
     let at = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let data = std::fs::read(path).map_err(|e| at(&e))?;
     let mut buf = wav::decode(&data).map_err(|e| at(&e))?;
@@ -222,6 +223,13 @@ fn shown(s: &media::LoudnessStats) -> String {
 pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
     if let Some(l) = &job.loudness {
         l.check()?;
+    }
+    if !job.overwrite && job.output.exists() {
+        return Err(format!(
+            "{} already exists; use --force to replace it",
+            job.output.display()
+        )
+        .into());
     }
     let files = listed(&job.dir)?;
     let first = std::fs::read(&files[0]).map_err(|e| format!("{}: {e}", files[0].display()))?;
@@ -367,12 +375,13 @@ pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
             channels: 2,
         })
     };
+    let part = Partial(partial(&job.output)?);
     let made = std::thread::scope(|s| {
         for _ in 0..threads {
             s.spawn(|| pool.work());
         }
         let result = export_frames(
-            &job.output,
+            &part.0,
             canvas,
             opts,
             |n, spent| {
@@ -410,27 +419,173 @@ pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
         done.frames,
         done.frames as f64 / took
     )?;
-    writeln!(
-        out,
-        "wrote   {} ({:.1} MB)",
-        job.output.display(),
-        std::fs::metadata(&job.output)?.len() as f64 / 1e6
-    )?;
-    if job.loudness.is_some() {
-        let after = media::measure_loudness(&job.output, 0, &Prefs::default(), |_| true)
-            .map_err(|e| format!("{}: {e}", job.output.display()))?;
+    land_held(out, &part.0, job, |p| {
+        media::measure_loudness(p, 0, &Prefs::default(), |_| true)
+    })
+}
+
+fn land_held(
+    out: &mut impl Write,
+    part: &Path,
+    job: &Job,
+    measure: impl FnOnce(&Path) -> media::Result<media::LoudnessStats>,
+) -> Result<(), Fail> {
+    if let Some(l) = &job.loudness {
+        let after = measure(part).map_err(|e| format!("{}: {e}", job.output.display()))?;
         writeln!(out, "after   {} (the MP4's AAC)", shown(&after))?;
-        if let Some(l) = &job.loudness
-            && let Err(e) = ceiling_held(after.true_peak, l.true_peak)
-        {
-            let _ = std::fs::remove_file(&job.output);
-            return Err(format!("{}: {e}", job.output.display()).into());
-        }
+        ceiling_held(after.true_peak, l.true_peak)
+            .map_err(|e| format!("{}: {e}", job.output.display()))?;
     }
+    let size = std::fs::metadata(part)?.len() as f64 / 1e6;
+    land(part, &job.output, job.overwrite)?;
+    writeln!(out, "wrote   {} ({size:.1} MB)", job.output.display())?;
     Ok(())
+}
+
+struct Partial(PathBuf);
+
+impl Drop for Partial {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 fn trim(v: f64) -> String {
     let s = format!("{v:.3}");
     s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn job(dir: &Path, overwrite: bool) -> Job {
+        Job {
+            dir: dir.to_path_buf(),
+            output: dir.join("out.mp4"),
+            fps: (24, 1),
+            audio: None,
+            loudness: Some(Loudness {
+                integrated: -16.0,
+                true_peak: -1.0,
+                linear: false,
+            }),
+            audio_kbps: 320,
+            codec: Codec::H264,
+            prefs: Prefs::default(),
+            crf: 23,
+            threads: 1,
+            overwrite,
+        }
+    }
+
+    fn peak(true_peak: f64) -> media::LoudnessStats {
+        media::LoudnessStats {
+            integrated: -16.0,
+            range: 0.0,
+            true_peak,
+            threshold: -70.0,
+        }
+    }
+
+    fn fresh(name: &str) -> PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tmp/unit-frames-land")
+            .join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_held_ceiling_measures_the_partial_then_lands_it() {
+        let dir = fresh("held");
+        let part = dir.join("part.mp4");
+        std::fs::write(&part, b"new").unwrap();
+        let mut said = Vec::new();
+        let mut measured = None;
+        land_held(&mut said, &part, &job(&dir, false), |p| {
+            measured = Some(p.to_path_buf());
+            Ok(peak(-1.004))
+        })
+        .unwrap();
+        assert_eq!(measured.as_deref(), Some(part.as_path()));
+        assert_eq!(std::fs::read(dir.join("out.mp4")).unwrap(), b"new");
+        assert!(!part.exists());
+        let said = String::from_utf8(said).unwrap();
+        assert!(
+            said.starts_with(
+                "after   -16.00 LUFS, LRA 0.00 LU, true peak -1.00 dBTP (the MP4's AAC)\nwrote   "
+            ),
+            "{said}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missed_ceiling_writes_nothing() {
+        let dir = fresh("missed");
+        let part = dir.join("part.mp4");
+        std::fs::write(&part, b"new").unwrap();
+        let e = land_held(&mut Vec::new(), &part, &job(&dir, false), |_| {
+            Ok(peak(-0.5))
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.ends_with("out.mp4: the encoded audio peaks at -0.50 dBTP, over the -1 dBTP ceiling, so nothing was written; ask for a lower --true-peak or a higher --audio-bitrate"),
+            "{e}"
+        );
+        assert!(!e.contains('\n'));
+        assert!(!dir.join("out.mp4").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missed_ceiling_with_force_keeps_the_old_output() {
+        let dir = fresh("forced");
+        let part = dir.join("part.mp4");
+        std::fs::write(&part, b"new").unwrap();
+        std::fs::write(dir.join("out.mp4"), b"old render").unwrap();
+        let e = land_held(&mut Vec::new(), &part, &job(&dir, true), |_| Ok(peak(0.2)));
+        assert!(
+            e.unwrap_err()
+                .to_string()
+                .contains("over the -1 dBTP ceiling")
+        );
+        assert_eq!(std::fs::read(dir.join("out.mp4")).unwrap(), b"old render");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_measure_is_refused_and_lands_nothing() {
+        let dir = fresh("unmeasured");
+        let part = dir.join("part.mp4");
+        std::fs::write(&part, b"new").unwrap();
+        let e = land_held(&mut Vec::new(), &part, &job(&dir, true), |_| {
+            Err(Error::Unsupported("no audio track".into()))
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.starts_with(&dir.join("out.mp4").display().to_string()),
+            "{e}"
+        );
+        assert!(!dir.join("out.mp4").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn without_loudness_nothing_is_measured() {
+        let dir = fresh("plain");
+        let part = dir.join("part.mp4");
+        std::fs::write(&part, b"new").unwrap();
+        let mut plain = job(&dir, false);
+        plain.loudness = None;
+        let mut said = Vec::new();
+        land_held(&mut said, &part, &plain, |_| panic!("measured")).unwrap();
+        assert!(String::from_utf8(said).unwrap().starts_with("wrote   "));
+        assert_eq!(std::fs::read(dir.join("out.mp4")).unwrap(), b"new");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

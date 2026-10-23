@@ -6,6 +6,13 @@ use pito_codecs::png;
 
 use super::Fail;
 
+const SRGB: Color = Color {
+    primaries: 1,
+    transfer: 13,
+    matrix: 0,
+    full_range: true,
+};
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sound {
     pub codec: String,
@@ -18,6 +25,7 @@ pub struct Sound {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Kind {
     File,
+    Gif,
     Frames(Vec<PathBuf>),
 }
 
@@ -98,12 +106,7 @@ pub fn frames(dir: &Path, fps: Option<(u32, u32)>) -> Result<Media, Fail> {
         codec: "png".into(),
         bit_depth: info.depth.max(8),
         alpha: matches!(info.color, png::Color::Rgba | png::Color::GreyAlpha),
-        color: Color {
-            primaries: 1,
-            transfer: 13,
-            matrix: 0,
-            full_range: true,
-        },
+        color: SRGB,
         rotation: 0,
         sar: (1, 1),
         audio: None,
@@ -121,6 +124,9 @@ pub fn file(path: &Path) -> Result<Media, Fail> {
             format!("{shown}: {text}").into()
         }
     };
+    if media::is_gif_file(path) {
+        return gif(path).map_err(|e| at(&e));
+    }
     let p = media::probe(path, &Prefs::default()).map_err(|e| at(&e))?;
     if p.width == 0 || p.height == 0 {
         return Err(at(&"the video stream has no width and height"));
@@ -148,6 +154,26 @@ pub fn file(path: &Path) -> Result<Media, Fail> {
         rotation: p.rotation % 360,
         sar: look.map_or((1, 1), |l| l.sar),
         audio,
+    })
+}
+
+fn gif(path: &Path) -> Result<Media, media::Error> {
+    let info = media::gif_info(path)?;
+    Ok(Media {
+        path: path.to_path_buf(),
+        kind: Kind::Gif,
+        width: info.width,
+        height: info.height,
+        fps: info.every_frame_fps(),
+        seconds: Some(info.duration()),
+        frames: Some(info.frames()),
+        codec: "gif".into(),
+        bit_depth: 8,
+        alpha: false,
+        color: SRGB,
+        rotation: 0,
+        sar: (1, 1),
+        audio: None,
     })
 }
 

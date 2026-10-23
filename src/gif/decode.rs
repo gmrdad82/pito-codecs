@@ -191,6 +191,10 @@ impl<'a> Decoder<'a> {
                 }
                 self.sub_blocks(None)
             }
+            0x01 => {
+                self.gce = None;
+                self.sub_blocks(None)
+            }
             _ => self.sub_blocks(None),
         }
     }

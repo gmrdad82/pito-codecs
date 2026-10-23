@@ -48,6 +48,8 @@ mod feed;
     feature = "vp9"
 ))]
 mod frames;
+#[cfg(feature = "gif")]
+mod gif;
 #[cfg(all(
     feature = "h264",
     feature = "hevc",
@@ -214,6 +216,11 @@ pub use export::{
     feature = "vp9"
 ))]
 pub use frames::{Canvas, export_frames};
+#[cfg(feature = "gif")]
+pub use gif::{
+    GifFrame, GifInfo, decode_gif, decode_scanned, flatten_alpha, gif_frames, gif_info, gif_rate,
+    is_gif, is_gif_file, scan_gif,
+};
 #[cfg(all(
     feature = "h264",
     feature = "hevc",

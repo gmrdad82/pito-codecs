@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use super::Fail;
 use super::manifest;
+use super::picture::{self, Still};
 use super::pipeline::{self, Audio, Stopped};
 use super::plan::{AAC_KBPS, Container, OPUS_KBPS, Request, SAMPLE_RATE, partial, same_file};
 use super::profile::{ANIMATED_FPS, ANIMATED_WIDTH, Encoder, Profile};
@@ -21,7 +22,9 @@ pub struct Options {
     pub json: bool,
     pub progress: bool,
     pub wav: Option<super::extract::Wav>,
+    pub add: Option<super::tracks::Add>,
     pub range: Option<Span>,
+    pub still: Option<Still>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -232,6 +235,9 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
     let mut media = source::open(&request.input, request.fps)?;
     let mut window = None;
     let mut cut = None;
+    if options.range.is_some() && media.kind == Kind::Gif {
+        return Err("a GIF converts whole: --from and --to cut video files".into());
+    }
     if let Some(span) = options.range {
         let to = span.to.unwrap_or(f64::INFINITY);
         if to <= span.from {
@@ -276,6 +282,9 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
         request.fps = None;
     }
     let mut planned = plan(&request, &media)?;
+    if request.no_audio {
+        planned.audio = None;
+    }
     if window.is_some()
         && let Some(Audio::Copy { .. }) = planned.audio
     {
@@ -283,7 +292,7 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
     }
     let source_hash = match (&media.kind, options.json, origin) {
         (Kind::File, true, Some(o)) => hash(&o.path)?,
-        (Kind::File, true, None) => hash(&media.path)?,
+        (Kind::File | Kind::Gif, true, None) => hash(&media.path)?,
         _ => String::new(),
     };
     let part = partial(&request.output)?;
@@ -1180,10 +1189,24 @@ pub fn run(options: Options) -> ExitCode {
     signals::catch();
     let mut partial_path = None;
     let raw = options.wav.as_ref().is_some_and(|w| w.raw);
-    let outcome = if let Some(wav) = options.wav.as_ref().filter(|w| w.raw) {
+    let outcome = if let Some(still) = options.still {
+        picture::convert(
+            &picture::Job {
+                input: &options.request.input,
+                output: &options.request.output,
+                size: options.request.size,
+                still,
+                overwrite: options.request.overwrite,
+                json: options.json,
+            },
+            &mut partial_path,
+        )
+    } else if let Some(wav) = options.wav.as_ref().filter(|w| w.raw) {
         super::raw::run(&options, wav, &mut partial_path, &signals::STOP)
     } else if let Some(wav) = &options.wav {
         super::extract::run(&options, wav, &mut partial_path)
+    } else if let Some(add) = &options.add {
+        super::tracks::run(&options, add, &mut partial_path)
     } else if options.request.joins.is_empty() {
         convert(&options, &mut partial_path)
     } else {

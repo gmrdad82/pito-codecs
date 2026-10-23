@@ -9,21 +9,24 @@ use super::extract::{
     OPUS_KBPS_HIGHEST, OPUS_KBPS_LOWEST, OPUS_KBPS_MONO, OPUS_KBPS_STEREO, RATES, Wav, is_opus,
     is_wav,
 };
-use super::plan::{Loudness, Request};
+use super::picture::{self, Still};
+use super::plan::{AUDIO_KBPS_HIGHEST, AUDIO_KBPS_LOWEST, Loudness, Request};
 use super::profile::{ANIMATED_FPS, ANIMATED_WIDTH, LIGHT_WEB_CRF, Profile, VP9_LIGHT_WEB_CRF};
 use super::raw::is_raw;
 use super::size::Size;
+use super::tracks::Add;
 
 pub const USAGE: &str = "pcod [OPTIONS] <INPUT> <OUTPUT>\n       pcod <COMMAND>";
 
 pub fn help() -> String {
     format!(
-        "The output's extension picks the container: mp4, mov, mkv (H.264 and AAC), webm (VP9 and Opus), gif or webp (animated, looping, {ANIMATED_WIDTH} px wide at {ANIMATED_FPS} fps by default, or the source's width and rate where smaller). --from and --to cut a window of the input, video and audio in sync, starting at 0: the first frame at or after --from to the last before --to. With no video option the cut copies whole GOPs and re-encodes only the frames at its edges where the container carries the source's codec; a video option re-encodes it all. A .wav output is the audio alone: the first audio track as 16-bit PCM, stereo at the source's rate when it is 44100 or 48000 Hz (else 48000), with --from and --to for a range, --mono, --rate and --loudness. A .s16 output, or - for stdout, is one audio stream as raw 16-bit little-endian PCM from --from to its end: --track N picks the stream as the container numbers it (the first audio stream by default), --mono mixes it to one channel and --rate resamples it (the stream's own channels and rate by default). A .opus (or .ogg) output is the audio alone as Ogg Opus at 48000 Hz, 64k stereo or 32k with --mono by default, --audio-bitrate KBPS from 16 to 510, with --from, --to, --mono and --loudness. The input is a video file or a folder of PNG frames in name order (--fps gives their rate).
+        "The output's extension picks the container: mp4, mov, mkv (H.264 and AAC), webm (VP9 and Opus), gif or webp (animated, looping, {ANIMATED_WIDTH} px wide at {ANIMATED_FPS} fps by default, or the source's width and rate where smaller). --from and --to cut a window of the input, video and audio in sync, starting at 0: the first frame at or after --from to the last before --to. With no video option the cut copies whole GOPs and re-encodes only the frames at its edges where the container carries the source's codec; a video option re-encodes it all. A .wav output is the audio alone: the first audio track as 16-bit PCM, stereo at the source's rate when it is 44100 or 48000 Hz (else 48000), with --from and --to for a range, --mono, --rate and --loudness. A .s16 output, or - for stdout, is one audio stream as raw 16-bit little-endian PCM from --from to its end: --track N picks the stream as the container numbers it (the first audio stream by default), --mono mixes it to one channel and --rate resamples it (the stream's own channels and rate by default). A .opus (or .ogg) output is the audio alone as Ogg Opus at 48000 Hz, 64k stereo or 32k with --mono by default, --audio-bitrate KBPS from 16 to 510, with --from, --to, --mono and --loudness. The input is a video file, an animated GIF or a folder of PNG frames in name order (--fps gives their rate). A PNG or WebP still to a .webp writes a still WebP (no animation) at the source's size or --size, resized with Lanczos: lossy at --quality 0 to 100 on libwebp's scale (75 by default), or --lossless (VP8L at method 6, as ffmpeg's compression_level 6; fully transparent pixels keep their alpha, not their colour, as libwebp does by default), keeping alpha; a JPEG input is refused. probe also reads PNG, JPEG, WebP and GIF files; a GIF's frame rate is 100 over its delay when every delay matches, else the whole or NTSC rate its frames start on to the hundredth of a second or its mean comes within 1% of, else that mean.
 Profiles: balanced (the default) and best are H.264 on the CPU at CRF 20 and 18 on x264's scale; fast is H.264 on the GPU at QP 25, on the CPU where no GPU encoder is found. For .webm, balanced is VP9 at CRF 32 and best at 28 on libvpx's scale.
 Light web: --profile best --crf {LIGHT_WEB_CRF} (.webm: --crf {VP9_LIGHT_WEB_CRF})
 For screen recordings: --tune animation
 --size takes a width (the height follows the aspect), WxH within 1% of the aspect, or 720p, 1080p, 1440p, 2160p; pcod never stretches a picture.
 Audio is AAC-LC 320k stereo at 48000 Hz, or Opus 128k in .webm; an AAC source is copied when nothing changes its audio. --audio-bitrate KBPS (32–512) sets the rate.
+--no-audio writes the video alone: with no video option it is copied as it is, index first. --add-audio WAV keeps the video and the first audio track as they are and adds the WAV as another AAC track, 160k stereo at 48000 Hz (--audio-bitrate sets it), the file cut to the shorter of the video and the WAV; --title Voice,Music titles each audio track in order; .mp4 or .mov only.
 An existing output is refused unless --force is given; pcod writes a hidden partial file beside the output and renames it into place at the end.
 While it works, pcod draws one progress line on stderr when stderr is a terminal; never with --json, --no-progress, TERM=dumb or when stderr is a pipe or a file. --json prints one JSON manifest with each file's sha256.
 Exit codes: 0 it worked, 1 refused or failed (one line on stderr starting pcod:), 2 the command line is wrong, 128 plus the signal number when a signal stopped it."
@@ -122,6 +125,38 @@ pub struct ConvertArgs {
     pub rate: Option<u32>,
     #[arg(
         long,
+        value_parser = clap::value_parser!(u8).range(0..=100),
+        help = "For a still .webp: lossy quality on libwebp's scale, 0 to 100 [default: 75]"
+    )]
+    pub quality: Option<u8>,
+    #[arg(
+        long,
+        conflicts_with = "quality",
+        help = "For a still .webp: lossless (VP8L at method 6, as ffmpeg's compression_level 6)"
+    )]
+    pub lossless: bool,
+    #[arg(
+        long,
+        help = "Write no audio track; with no video option the video is copied as it is, index first"
+    )]
+    pub no_audio: bool,
+    #[arg(
+        long,
+        value_name = "WAV",
+        conflicts_with = "no_audio",
+        help = "Keep the video and the first audio track as they are and add this WAV as another AAC track (160 kbps, --audio-bitrate sets it), cut to the shorter of the video and the WAV; .mp4 or .mov"
+    )]
+    pub add_audio: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "TITLES",
+        value_delimiter = ',',
+        requires = "add_audio",
+        help = "With --add-audio: a title for each audio track, in order, separated by commas"
+    )]
+    pub title: Vec<String>,
+    #[arg(
+        long,
         value_name = "N",
         help = "For .s16 or -: the audio stream, numbered as the container numbers its streams (ffmpeg's -map 0:N) [default: the first audio stream]"
     )]
@@ -211,6 +246,19 @@ pub fn options(
     if is_wav(&output) || is_opus(&output) {
         return wav(sub, input, joining, output, args);
     }
+    if !joining && is_webp(&output) && picture::still_input(&input) {
+        return still(sub, input, output, args);
+    }
+    if args.quality.is_some() || args.lossless {
+        usage_error(
+            sub,
+            ErrorKind::ArgumentConflict,
+            "--quality and --lossless fit a still .webp made from a .png or .webp",
+        );
+    }
+    if let Some(wav) = args.add_audio.clone() {
+        return added(sub, input, joining, output, wav, args);
+    }
     let ranged = args.from.is_some() || args.to.is_some();
     if joining && ranged {
         usage_error(
@@ -224,6 +272,20 @@ pub fn options(
             sub,
             ErrorKind::ArgumentConflict,
             "--mono fits a .wav or .opus output, --rate a .wav",
+        );
+    }
+    if args.no_audio && (joining || ranged) {
+        usage_error(
+            sub,
+            ErrorKind::ArgumentConflict,
+            "--no-audio takes one whole file: cut or join first, then drop the audio",
+        );
+    }
+    if args.no_audio && (args.loudness.is_some() || args.audio_bitrate.is_some()) {
+        usage_error(
+            sub,
+            ErrorKind::ArgumentConflict,
+            "--no-audio writes no audio for --loudness or --audio-bitrate to change",
         );
     }
     let picture = args.profile.is_some()
@@ -250,9 +312,11 @@ pub fn options(
     request.quality = args.crf.or(args.qp);
     request.tune = args.tune;
     request.overwrite = args.force;
-    request.copy_video = (joining || ranged || loudness.is_some() || args.audio_bitrate.is_some())
-        && !picture
-        && !folder;
+    request.copy_video =
+        (joining || ranged || loudness.is_some() || args.audio_bitrate.is_some() || args.no_audio)
+            && !picture
+            && !folder;
+    request.no_audio = args.no_audio;
     request.loudness = loudness;
     request.audio_bitrate = args.audio_bitrate;
     let mut checked = request.clone();
@@ -282,9 +346,57 @@ pub fn options(
         json: args.json,
         progress: super::progress::enabled(args.json, args.no_progress),
         wav: None,
+        add: None,
         range: ranged.then(|| Span {
             from: args.from.unwrap_or(0.0),
             to: args.to,
+        }),
+        still: None,
+    }
+}
+
+fn is_webp(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("webp"))
+}
+
+fn still(sub: Option<&str>, input: PathBuf, output: PathBuf, args: ConvertArgs) -> Options {
+    let video = [
+        (args.profile.is_some(), "--profile"),
+        (args.fps.is_some(), "--fps"),
+        (args.crf.is_some(), "--crf"),
+        (args.qp.is_some(), "--qp"),
+        (args.tune.is_some(), "--tune"),
+        (args.loudness.is_some(), "--loudness"),
+        (args.audio_bitrate.is_some(), "--audio-bitrate"),
+        (args.from.is_some(), "--from"),
+        (args.to.is_some(), "--to"),
+        (args.mono, "--mono"),
+        (args.rate.is_some(), "--rate"),
+        (args.no_audio, "--no-audio"),
+        (args.add_audio.is_some(), "--add-audio"),
+    ];
+    if let Some((_, flag)) = video.iter().find(|(set, _)| *set) {
+        usage_error(
+            sub,
+            ErrorKind::ArgumentConflict,
+            format!("{flag} doesn't apply to a still .webp made from a still image"),
+        );
+    }
+    let mut request = Request::new(input, output);
+    request.size = args.size;
+    request.overwrite = args.force;
+    Options {
+        request,
+        json: args.json,
+        progress: super::progress::enabled(args.json, args.no_progress),
+        wav: None,
+        add: None,
+        range: None,
+        still: Some(Still {
+            quality: args.quality,
+            lossless: args.lossless,
         }),
     }
 }
@@ -318,6 +430,10 @@ fn wav(
         (args.tune.is_some(), "--tune"),
         (args.audio_bitrate.is_some() && !opus, "--audio-bitrate"),
         (args.rate.is_some() && opus, "--rate"),
+        (args.quality.is_some(), "--quality"),
+        (args.lossless, "--lossless"),
+        (args.no_audio, "--no-audio"),
+        (args.add_audio.is_some(), "--add-audio"),
     ];
     if let Some((_, flag)) = picture.iter().find(|(set, _)| *set) {
         conflict(&if opus {
@@ -377,7 +493,77 @@ fn wav(
                 })
             }),
         }),
+        add: None,
         range: None,
+        still: None,
+    }
+}
+
+fn added(
+    sub: Option<&str>,
+    input: PathBuf,
+    joining: bool,
+    output: PathBuf,
+    wav: PathBuf,
+    args: ConvertArgs,
+) -> Options {
+    let conflict = |message: &str| usage_error(sub, ErrorKind::ArgumentConflict, message);
+    if joining {
+        conflict("--add-audio works on one file, not join: join first, then add the track");
+    }
+    if input.is_dir() {
+        conflict("--add-audio copies the video of a file, not a folder of frames");
+    }
+    if wav.to_str().is_none() {
+        usage_error(
+            sub,
+            ErrorKind::InvalidUtf8,
+            "invalid UTF-8 was detected in one or more arguments",
+        );
+    }
+    let changes = [
+        (args.profile.is_some(), "--profile"),
+        (args.size.is_some(), "--size"),
+        (args.fps.is_some(), "--fps"),
+        (args.crf.is_some(), "--crf"),
+        (args.qp.is_some(), "--qp"),
+        (args.tune.is_some(), "--tune"),
+        (args.loudness.is_some(), "--loudness"),
+        (args.from.is_some(), "--from"),
+        (args.to.is_some(), "--to"),
+        (args.mono, "--mono"),
+        (args.rate.is_some(), "--rate"),
+    ];
+    if let Some((_, flag)) = changes.iter().find(|(set, _)| *set) {
+        conflict(&format!(
+            "{flag} doesn't apply with --add-audio, which copies the video and the first audio track as they are"
+        ));
+    }
+    if let Some(kbps) = args.audio_bitrate
+        && !(AUDIO_KBPS_LOWEST..=AUDIO_KBPS_HIGHEST).contains(&kbps)
+    {
+        usage_error(
+            sub,
+            ErrorKind::ValueValidation,
+            format!(
+                "audio bitrate {kbps} kbps is outside {AUDIO_KBPS_LOWEST}–{AUDIO_KBPS_HIGHEST}"
+            ),
+        );
+    }
+    let mut request = Request::new(input, output);
+    request.overwrite = args.force;
+    request.audio_bitrate = args.audio_bitrate;
+    Options {
+        request,
+        json: args.json,
+        progress: super::progress::enabled(args.json, args.no_progress),
+        wav: None,
+        add: Some(Add {
+            wav,
+            titles: args.title,
+        }),
+        range: None,
+        still: None,
     }
 }
 
@@ -446,6 +632,10 @@ fn raw(
         (args.loudness.is_some(), "--loudness"),
         (args.to.is_some(), "--to"),
         (args.json, "--json"),
+        (args.quality.is_some(), "--quality"),
+        (args.lossless, "--lossless"),
+        (args.no_audio, "--no-audio"),
+        (args.add_audio.is_some(), "--add-audio"),
     ];
     if let Some((_, flag)) = other.iter().find(|(set, _)| *set) {
         conflict(&format!(
@@ -467,7 +657,9 @@ fn raw(
             track: args.track,
             raw: true,
         }),
+        add: None,
         range: None,
+        still: None,
     }
 }
 

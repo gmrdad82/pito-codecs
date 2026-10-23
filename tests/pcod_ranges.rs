@@ -697,6 +697,49 @@ fn a_range_past_a_hundred_thousand_frames_needs_force() {
         "use --force",
     );
     assert!(!out.join("000000.png").exists());
+    refused(
+        &run(&[
+            "stills",
+            s(&long),
+            "--fps",
+            "1000",
+            "--route",
+            "cpu",
+            "--out",
+            s(&out),
+        ]),
+        "101000 frames from 0.000 s to 101.000 s is more than 100000; use --force",
+    );
+    assert!(!out.join("000000.png").exists());
+}
+
+#[test]
+fn fps_alone_takes_every_frame_from_the_start_to_the_end() {
+    let work = dir("fps-alone");
+    let out = work.join("frames");
+    let json = ok(&run(&[
+        "stills",
+        s(&sources().mp4),
+        "--fps",
+        "10",
+        "--route",
+        "cpu",
+        "--out",
+        s(&out),
+        "--json",
+    ]));
+    let names = listed(&out);
+    let want: Vec<String> = (0..50).map(|n| format!("{n:06}.png")).collect();
+    assert_eq!(names, want);
+    let got: Vec<u32> = names.iter().map(|n| png_number(&out.join(n))).collect();
+    let nearest: Vec<u32> = (0..50)
+        .map(|k| (f64::from(k) * 2.4).round() as u32)
+        .collect();
+    assert_eq!(got, nearest);
+    assert_eq!(number(&json, "count"), 50.0);
+    assert_eq!(field(&json, "rate"), Some("10/1"));
+    assert!(number(&json, "first").abs() < 1e-6, "{json}");
+    assert!((number(&json, "last") - 4.9).abs() < 1e-6, "{json}");
 }
 
 #[test]

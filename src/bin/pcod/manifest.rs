@@ -212,7 +212,7 @@ impl Manifest {
             ]),
         )];
         match &self.join {
-            None => {
+            None if self.sources.len() <= 1 => {
                 let source = self.sources.first().map_or(Json::Null, |s| {
                     Json::Obj(vec![
                         ("path", s.path.as_str().into()),
@@ -222,7 +222,7 @@ impl Manifest {
                 });
                 fields.push(("source", source));
             }
-            Some(_) => {
+            _ => {
                 let sources = self
                     .sources
                     .iter()

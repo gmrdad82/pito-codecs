@@ -37,6 +37,7 @@ pub struct TrackConfig {
     pub timescale: u32,
     pub language: String,
     pub name: Option<String>,
+    pub title: Option<String>,
     pub matrix: [i32; 9],
     pub edits: Vec<Edit>,
     pub media_start: Option<i64>,
@@ -49,6 +50,7 @@ impl TrackConfig {
             timescale,
             language: "und".into(),
             name: None,
+            title: None,
             matrix: IDENTITY,
             edits: Vec::new(),
             media_start: None,
@@ -491,6 +493,11 @@ fn write_trak(
     b.end(stbl);
     b.end(minf);
     b.end(mdia);
+    if let Some(title) = t.cfg.title.as_deref().filter(|s| !s.is_empty()) {
+        let u = b.start(b"udta");
+        b.leaf(b"name", title.as_bytes());
+        b.end(u);
+    }
     b.end(trak);
     Ok(())
 }
@@ -1034,6 +1041,7 @@ impl TrackConfig {
             timescale: track.timescale,
             language: track.language.clone(),
             name: (!track.name.is_empty()).then(|| track.name.clone()),
+            title: None,
             matrix: track.matrix,
             edits: Vec::new(),
             media_start: None,

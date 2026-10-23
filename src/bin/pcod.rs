@@ -26,6 +26,8 @@ mod frames;
 mod json;
 #[path = "pcod/manifest.rs"]
 mod manifest;
+#[path = "pcod/picture.rs"]
+mod picture;
 #[path = "pcod/probe_json.rs"]
 mod probe_json;
 #[path = "pcod/progress.rs"]
@@ -61,6 +63,8 @@ mod source;
 mod spectrum;
 #[path = "pcod/synth.rs"]
 mod synth;
+#[path = "pcod/tracks.rs"]
+mod tracks;
 
 #[derive(Parser)]
 #[command(
@@ -74,7 +78,10 @@ mod synth;
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
-    #[arg(value_name = "INPUT", help = "A video file, or a folder of PNG frames")]
+    #[arg(
+        value_name = "INPUT",
+        help = "A video file, a folder of PNG frames, or a PNG or WebP still for a .webp"
+    )]
     input: Option<PathBuf>,
     #[arg(
         value_name = "OUTPUT",
@@ -107,7 +114,7 @@ enum Command {
     },
     #[command(about = "List the profiles and what each one does")]
     Profiles,
-    #[command(about = "Show what is in a video file")]
+    #[command(about = "Show what is in a video, audio or image file (PNG, JPEG, WebP, GIF)")]
     Probe {
         file: PathBuf,
         #[arg(long, help = "Print what pcod reads as JSON")]
@@ -221,7 +228,7 @@ enum Command {
     },
     #[command(
         about = "Encode a folder of PNG frames and an optional WAV into an MP4",
-        long_about = "Encode a folder of PNG frames and an optional WAV into an MP4\n\nThe frames are the folder's .png files in name order (000000.png, 000001.png, ...), all of one even size. The video is 8-bit 4:2:0 BT.709, the audio AAC at 48 kHz stereo, and the file is written with its index first (faststart). The audio is cut or padded with silence to the length of the video; without --audio the MP4 carries a silent stereo track."
+        long_about = "Encode a folder of PNG frames and an optional WAV into an MP4\n\nThe frames are the folder's .png files in name order (000000.png, 000001.png, ...), all of one even size. The video is 8-bit 4:2:0 BT.709, the audio AAC at 48 kHz stereo, and the file is written with its index first (faststart). The audio is cut or padded with silence to the length of the video; without --audio the MP4 carries a silent stereo track. An existing output is refused unless --force is given; pcod writes a hidden partial file beside the output and renames it into place at the end."
     )]
     Frames {
         #[arg(help = "The folder of PNG frames")]
@@ -273,19 +280,25 @@ enum Command {
             help = "Encode on the GPU, falling back to the CPU, or on the CPU only"
         )]
         route: Where,
-        #[arg(long, default_value_t = 18, help = "Quality, 0 to 51, lower is better")]
+        #[arg(
+            long,
+            default_value_t = 18,
+            help = "Quality, 0 to 51, lower is better; 0 is near-lossless, not bit-exact (57 to 68 dB luma PSNR measured, by content and route): pcod's encoders have no lossless mode"
+        )]
         crf: u8,
         #[arg(long, help = "PNG decode threads [default: one per core, at most 16]")]
         threads: Option<usize>,
+        #[arg(long, help = "Replace an existing output")]
+        force: bool,
     },
     #[command(
         about = "Write stills of a video as PNGs and/or one contact sheet",
-        long_about = "Write stills of a video as PNGs and/or one contact sheet\n\nThe stills are N evenly spaced over the video (--count, 12 by default, or rows x cols when both are given for a sheet) or at the given times (--at). Each is scaled to --height keeping its shape. --out writes still-001.png, still-002.png, ... into a folder; --sheet writes one PNG of rows x cols stills on black with --pad pixels between and around them. --json prints each still's time, size and path.\n\nWith --from and --to, every frame from the first at or after --from to the last before --to goes to --out as 000000.png, 000001.png, ... (the names pcod frames reads), at the source's rate, at --fps or one per --every interval (the nearest frame for each), scaled to --size or to --height keeping the shape. --fps or --every without --from and --to takes the whole video. One decode pass, each frame written as it decodes. A range of more than 100,000 frames is refused unless --force, which also replaces the numbered frames --out already holds; a folder with any other PNG is refused for PNG frames. --json prints the count, rate, size, folder and each written file with its time.\n\n--format writes the --out images as png (the default), jpeg or webp, with --quality from 1 to 100 for jpeg and webp (85 by default); the sheet stays PNG.",
+        long_about = "Write stills of a video as PNGs and/or one contact sheet\n\nThe stills are N evenly spaced over the video (--count, 12 by default, or rows x cols when both are given for a sheet) or at the given times (--at). Each is scaled to --height keeping its shape. --out writes still-001.png, still-002.png, ... into a folder; --sheet writes one PNG of rows x cols stills on black with --pad pixels between and around them. --json prints each still's time, size and path.\n\nWith --from and --to, every frame from the first at or after --from to the last before --to goes to --out as 000000.png, 000001.png, ... (the names pcod frames reads), at the source's rate, at --fps or one per --every interval (the nearest frame for each), scaled to --size or to --height keeping the shape. --fps or --every without --from and --to takes the whole video. A GIF holds each frame for its delay (a 0 delay counts as 10 cs) and gives the frame held at each tick of --fps or --every, at its own size unless --size or --height is given. One decode pass, each frame written as it decodes. A range of more than 100,000 frames is refused unless --force, which also replaces the numbered frames --out already holds; a folder with any other PNG is refused for PNG frames. --json prints the count, rate, size, folder and each written file with its time.\n\n--format writes the --out images as png (the default), jpeg or webp, with --quality from 1 to 100 for jpeg and webp (85 by default); the sheet stays PNG.",
         group(ArgGroup::new("written").args(["out", "sheet"]).required(true).multiple(true)),
         group(ArgGroup::new("range").args(["from", "to", "fps", "every"]).multiple(true))
     )]
     Stills {
-        #[arg(help = "The video: MP4, MOV, MKV or WebM")]
+        #[arg(help = "The video: MP4, MOV, MKV or WebM, or a GIF with --fps, --every or --from")]
         file: PathBuf,
         #[arg(
             long,
@@ -312,7 +325,7 @@ enum Command {
             long,
             value_parser = args::rate_of,
             conflicts_with_all = ["count", "at", "sheet", "seek"],
-            help = "The rate to take frames at, the nearest frame for each, over --from and --to or the whole video [default: the source's]"
+            help = "The rate to take frames at, the nearest frame for each (for a GIF, the frame held at each tick), over --from and --to or the whole video [default: the source's]"
         )]
         fps: Option<(u32, u32)>,
         #[arg(
@@ -344,8 +357,11 @@ enum Command {
             help = "Times to take, comma separated: seconds, m:ss or h:mm:ss"
         )]
         at: Vec<f64>,
-        #[arg(long, default_value_t = 360, help = "Height of each still in pixels")]
-        height: u32,
+        #[arg(
+            long,
+            help = "Height of each still in pixels [default: 360; a GIF's frames keep its own size]"
+        )]
+        height: Option<u32>,
         #[arg(long, help = "A folder to write one image per still into")]
         out: Option<PathBuf>,
         #[arg(
@@ -675,6 +691,7 @@ fn run(command: Command) -> Result<(), Fail> {
             route,
             crf,
             threads,
+            force,
         } => frames::run(
             &mut out,
             &frames::Job {
@@ -692,6 +709,7 @@ fn run(command: Command) -> Result<(), Fail> {
                 prefs: route.prefs(),
                 crf,
                 threads: threads_of(threads),
+                overwrite: force,
             },
         ),
         Command::Stills {
@@ -721,7 +739,7 @@ fn run(command: Command) -> Result<(), Fail> {
                 file,
                 count,
                 at,
-                height,
+                height: height.unwrap_or(360),
                 out: dir,
                 sheet,
                 rows,
@@ -745,6 +763,7 @@ fn run(command: Command) -> Result<(), Fail> {
                         to,
                         fps,
                         every,
+                        sized: size.is_some() || height.is_some(),
                         size,
                         force,
                     },
@@ -874,6 +893,12 @@ fn about(file: &Path, e: impl std::fmt::Display) -> Fail {
 }
 
 fn show(out: &mut impl Write, file: &Path) -> Result<(), Fail> {
+    if let Some(facts) = picture::probe(file).map_err(|e| about(file, e))? {
+        for line in picture::lines(&facts) {
+            writeln!(out, "{line}")?;
+        }
+        return Ok(());
+    }
     let p = probe(file, &Prefs::default()).map_err(|e| about(file, e))?;
     let (w, h) = p.shown_size();
     let pcm = media::wav::Reader::open(file).ok().map(|r| r.layout);

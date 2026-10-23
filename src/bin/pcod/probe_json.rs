@@ -5,9 +5,12 @@ use pito_codecs::media::wav::{self, Layout};
 use pito_codecs::media::{Chroma, Prefs, Probe, VideoLook, probe, video_look};
 
 use super::json::Json;
-use super::{Fail, about};
+use super::{Fail, about, picture};
 
 pub fn probe_json(path: &Path) -> Result<String, Fail> {
+    if let Some(facts) = picture::probe(path).map_err(|e| about(path, e))? {
+        return Ok(picture::json(&facts).text());
+    }
     let p = probe(path, &Prefs::default()).map_err(|e| about(path, e))?;
     let video = p.width > 0 && p.height > 0;
     if !video && p.audio.is_empty() {
@@ -151,6 +154,7 @@ fn media(p: &Probe, look: Option<VideoLook>, video: bool, pcm: Option<Layout>) -
         ),
         ("interlaced", when(video, p.interlaced)),
         ("variant", when(video, p.video_variant())),
+        ("frames", p.frames.filter(|_| video).into()),
     ])
 }
 

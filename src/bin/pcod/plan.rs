@@ -108,6 +108,7 @@ pub struct Request {
     pub loudness: Option<Loudness>,
     pub audio_bitrate: Option<u32>,
     pub copy_video: bool,
+    pub no_audio: bool,
     pub joins: Vec<PathBuf>,
 }
 
@@ -125,6 +126,7 @@ impl Request {
             loudness: None,
             audio_bitrate: None,
             copy_video: false,
+            no_audio: false,
             joins: Vec::new(),
         }
     }

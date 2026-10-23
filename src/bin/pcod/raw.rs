@@ -254,7 +254,9 @@ mod tests {
             json: false,
             progress: false,
             wav: None,
+            add: None,
             range: None,
+            still: None,
         };
         let wav = Wav {
             from: 0.0,

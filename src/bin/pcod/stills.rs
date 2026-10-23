@@ -376,6 +376,7 @@ pub struct Range {
     pub from: f64,
     pub to: Option<f64>,
     pub fps: Option<(u32, u32)>,
+    pub sized: bool,
     pub every: Option<f64>,
     pub size: Option<Size>,
     pub force: bool,
@@ -583,6 +584,9 @@ fn run_range(out: &mut impl Write, job: &Job, range: &Range) -> Result<(), Fail>
         return Err(format!("--to {to} must come after --from {}", range.from).into());
     }
     let media = source::file(&job.file)?;
+    if media.kind == source::Kind::Gif {
+        return run_gif_range(out, job, range, &media, dir, started);
+    }
     let length = media::track_length(media.seconds, media.frames, media.fps);
     if let Some(length) = length
         && range.from >= length
@@ -759,79 +763,346 @@ fn run_range(out: &mut impl Write, job: &Job, range: &Range) -> Result<(), Fail>
     }
     let mut files = made.into_inner().unwrap_or_else(PoisonError::into_inner);
     files.sort_by_key(|(k, _, _)| *k);
-    let elapsed = started.elapsed().as_secs_f64();
-    let first = first_png.get().copied();
-    let speed = if elapsed > 0.0 {
-        count as f64 / elapsed
-    } else {
-        0.0
-    };
-    let last = slots.at(count.saturating_sub(1));
-    if job.json {
+    let text = summary(
+        &Summary {
+            file: &job.file,
+            from: range.from,
+            to: end,
+            first: slots.at(0),
+            last: slots.at(count.saturating_sub(1)),
+            expected: slots.count,
+            per_second,
+            rate,
+            every: range.every,
+            format: job.format,
+            quality,
+            size,
+            dir,
+            digits,
+            first_png: first_png.get().copied(),
+            seconds: started.elapsed().as_secs_f64(),
+            files: files
+                .into_iter()
+                .map(|(k, path, time)| (k, slots.at(k), time, path))
+                .collect(),
+        },
+        job.json,
+    );
+    out.write_all(text.as_bytes())?;
+    Ok(())
+}
+
+struct Summary<'a> {
+    file: &'a Path,
+    from: f64,
+    to: f64,
+    first: f64,
+    last: f64,
+    expected: u64,
+    per_second: f64,
+    rate: (u32, u32),
+    every: Option<f64>,
+    format: Format,
+    quality: u8,
+    size: (u32, u32),
+    dir: &'a Path,
+    digits: usize,
+    first_png: Option<f64>,
+    seconds: f64,
+    files: Vec<(u64, f64, f64, PathBuf)>,
+}
+
+fn summary(s: &Summary, json: bool) -> String {
+    let count = s.files.len() as u64;
+    let speed = count as f64 / s.seconds.max(1e-9);
+    if json {
         let mut listed = String::new();
-        for (i, (k, path, time)) in files.iter().enumerate() {
+        for (i, (k, slot, time, path)) in s.files.iter().enumerate() {
             if i > 0 {
                 listed.push(',');
             }
             let _ = write!(
                 listed,
-                "{{\"index\":{k},\"slot\":{:.6},\"time\":{time:.6},\"path\":{}}}",
-                slots.at(*k),
+                "{{\"index\":{k},\"slot\":{slot:.6},\"time\":{time:.6},\"path\":{}}}",
                 path_json(Some(path))
             );
         }
-        writeln!(
-            out,
-            "{{\"file\":{},\"from\":{:.6},\"to\":{end:.6},\"first\":{:.6},\"last\":{last:.6},\"count\":{count},\"expected\":{},\"fps\":{},\"rate\":{},\"every\":{},\"format\":\"{}\",\"quality\":{},\"width\":{},\"height\":{},\"dir\":{},\"digits\":{digits},\"first_png\":{},\"seconds\":{elapsed:.3},\"frames_per_second\":{speed:.1},\"files\":[{listed}]}}",
-            path_json(Some(&job.file)),
-            range.from,
-            slots.at(0),
-            slots.count,
-            rate_text(per_second),
-            match range.every {
+        return format!(
+            "{{\"file\":{},\"from\":{:.6},\"to\":{:.6},\"first\":{:.6},\"last\":{:.6},\"count\":{count},\"expected\":{},\"fps\":{},\"rate\":{},\"every\":{},\"format\":\"{}\",\"quality\":{},\"width\":{},\"height\":{},\"dir\":{},\"digits\":{},\"first_png\":{},\"seconds\":{:.3},\"frames_per_second\":{speed:.1},\"files\":[{listed}]}}\n",
+            path_json(Some(s.file)),
+            s.from,
+            s.to,
+            s.first,
+            s.last,
+            s.expected,
+            rate_text(s.per_second),
+            match s.every {
                 Some(_) => "null".to_string(),
-                None => format!("\"{}/{}\"", rate.0, rate.1),
+                None => format!("\"{}/{}\"", s.rate.0, s.rate.1),
             },
-            range
-                .every
-                .map_or("null".to_string(), |e| format!("{e:.6}")),
-            job.format.name(),
-            match job.format {
+            s.every.map_or("null".to_string(), |e| format!("{e:.6}")),
+            s.format.name(),
+            match s.format {
                 Format::Png => "null".to_string(),
-                _ => quality.to_string(),
+                _ => s.quality.to_string(),
             },
-            size.0,
-            size.1,
-            path_json(Some(dir)),
-            first.map_or("null".to_string(), |t| format!("{t:.3}")),
-        )?;
-    } else {
-        let cadence = match range.every {
-            Some(every) => format!("one every {every:.3} s"),
-            None => format!("at {} fps", rate_text(per_second)),
-        };
-        writeln!(
-            out,
-            "{count} {} frames, {}x{} {cadence}, {:.3} s to {last:.3} s, in {}",
-            job.format.name(),
-            size.0,
-            size.1,
-            slots.at(0),
-            dir.display()
-        )?;
-        writeln!(
-            out,
-            "{elapsed:.2} s, {speed:.1} frames/s, the first image after {:.3} s",
-            first.unwrap_or(elapsed)
-        )?;
-        if count < slots.count {
-            writeln!(
-                out,
-                "note: the stream ends before its probed length: {count} of {} frames written",
-                slots.count
-            )?;
+            s.size.0,
+            s.size.1,
+            path_json(Some(s.dir)),
+            s.digits,
+            s.first_png
+                .map_or("null".to_string(), |t| format!("{t:.3}")),
+            s.seconds,
+        );
+    }
+    let cadence = match s.every {
+        Some(every) => format!("one every {every:.3} s"),
+        None => format!("at {} fps", rate_text(s.per_second)),
+    };
+    let mut text = format!(
+        "{count} {} frames, {}x{} {cadence}, {:.3} s to {:.3} s, in {}\n{:.2} s, {speed:.1} frames/s, the first image after {:.3} s\n",
+        s.format.name(),
+        s.size.0,
+        s.size.1,
+        s.first,
+        s.last,
+        s.dir.display(),
+        s.seconds,
+        s.first_png.unwrap_or(s.seconds)
+    );
+    if count < s.expected {
+        let _ = writeln!(
+            text,
+            "note: the stream ends before its probed length: {count} of {} frames written",
+            s.expected
+        );
+    }
+    text
+}
+
+fn first_where(total: u64, at: impl Fn(u64) -> bool) -> u64 {
+    let (mut lo, mut hi) = (0, total);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if at(mid) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
         }
     }
+    lo
+}
+
+const GIF_BATCH_BYTES: u64 = 64 << 20;
+
+fn gif_batch(threads: usize, size: (u32, u32)) -> usize {
+    let frame = (u64::from(size.0) * u64::from(size.1) * 4).max(1);
+    let fits = usize::try_from(GIF_BATCH_BYTES / frame).unwrap_or(usize::MAX);
+    (threads.clamp(2, 32) * 2).min(fits).max(2)
+}
+
+fn gif_spans(
+    info: &media::GifInfo,
+    (num, den): (u32, u32),
+    from: f64,
+    to: f64,
+) -> (std::ops::Range<u64>, Vec<f64>) {
+    let total = info
+        .ticks(Some((num, den)))
+        .iter()
+        .map(|s| s.end)
+        .max()
+        .unwrap_or(0);
+    let time = |k: u64| k as f64 * f64::from(den) / f64::from(num.max(1));
+    let first = first_where(total, |k| time(k) >= from - 1e-9);
+    let end = first_where(total, |k| time(k) >= to - 1e-9).max(first);
+    let times = [first, end.saturating_sub(1)].map(time).to_vec();
+    (first..end, times)
+}
+
+struct Written {
+    paths: Vec<(u64, PathBuf)>,
+    failed: Option<Fail>,
+}
+
+struct GifOut<'a> {
+    dir: &'a Path,
+    size: (u32, u32),
+    first: u64,
+    digits: usize,
+    format: Format,
+    quality: u8,
+}
+
+fn write_gif_batch(
+    batch: &mut Vec<(Rgba, std::ops::Range<u64>)>,
+    to: &GifOut,
+    written: &mut Written,
+) {
+    let wrote: Vec<Written> = batch
+        .par_drain(..)
+        .map(|(mut img, ticks)| {
+            let mut w = Written {
+                paths: Vec::new(),
+                failed: None,
+            };
+            media::flatten_alpha(&mut img);
+            if (img.width, img.height) != to.size {
+                img = media::scale(&img, to.size.0, to.size.1);
+            }
+            let data = match to.format.encode(&img, to.quality, false) {
+                Ok(data) => data,
+                Err(e) => {
+                    w.failed = Some(about(to.dir, e));
+                    return w;
+                }
+            };
+            for k in ticks {
+                let path = to.dir.join(format!(
+                    "{:0digits$}.{}",
+                    k - to.first,
+                    to.format.ext(),
+                    digits = to.digits
+                ));
+                if let Err(e) = std::fs::write(&path, &data) {
+                    w.failed = Some(about(&path, e));
+                    return w;
+                }
+                w.paths.push((k, path));
+            }
+            w
+        })
+        .collect();
+    for w in wrote {
+        written.paths.extend(w.paths);
+        if let Some(e) = w.failed {
+            written.failed.get_or_insert(e);
+        }
+    }
+}
+
+fn undo(written: Written, read: Result<(), Fail>) -> Result<Vec<(u64, PathBuf)>, Fail> {
+    match read.err().or(written.failed) {
+        Some(e) => {
+            for (_, path) in written.paths {
+                let _ = std::fs::remove_file(path);
+            }
+            Err(e)
+        }
+        None => Ok(written.paths),
+    }
+}
+
+fn every_rate(every: f64) -> (u32, u32) {
+    let ms = (every * 1000.0).round().clamp(1.0, f64::from(u32::MAX));
+    (1000, ms as u32)
+}
+
+fn run_gif_range(
+    out: &mut impl Write,
+    job: &Job,
+    range: &Range,
+    media: &Media,
+    dir: &Path,
+    started: Instant,
+) -> Result<(), Fail> {
+    let data = std::fs::read(&job.file).map_err(|e| about(&job.file, e))?;
+    let info = media::scan_gif(&data).map_err(|e| about(&job.file, e))?;
+    let rate = match range.every {
+        Some(every) => every_rate(every),
+        None => range.fps.unwrap_or(media.fps),
+    };
+    let to = range.to.unwrap_or(f64::INFINITY);
+    let (kept, times) = gif_spans(&info, rate, range.from, to);
+    let count = kept.end - kept.start;
+    if count == 0 {
+        return Err(about(
+            &job.file,
+            format!(
+                "no frame starts between {:.3} s and {:.3} s",
+                range.from,
+                to.min(info.duration())
+            ),
+        ));
+    }
+    if count > MAX_RANGE && !range.force {
+        return Err(format!(
+            "{count} frames from {:.3} s is more than {MAX_RANGE}; use --force to write them all",
+            range.from
+        )
+        .into());
+    }
+    let size = if range.sized {
+        range_size(media, range, job.height)?
+    } else {
+        (media.width, media.height)
+    };
+    ready(dir, range.force, job.format)?;
+    let quality = job.quality.unwrap_or(DEFAULT_QUALITY);
+    let target = GifOut {
+        dir,
+        size,
+        first: kept.start,
+        digits: count.to_string().len().max(NAME_DIGITS),
+        format: job.format,
+        quality,
+    };
+    let batch_size = gif_batch(rayon::current_num_threads(), (info.width, info.height));
+    let mut batch = Vec::with_capacity(batch_size);
+    let mut written = Written {
+        paths: Vec::new(),
+        failed: None,
+    };
+    let mut first_png = None;
+    let read = media::decode_scanned(&data, &info, Some(rate), |f| -> Result<(), Fail> {
+        let ticks = f.ticks.start.max(kept.start)..f.ticks.end.min(kept.end);
+        if !ticks.is_empty() {
+            batch.push((f.image.clone(), ticks));
+        }
+        if batch.len() >= batch_size {
+            write_gif_batch(&mut batch, &target, &mut written);
+            first_png.get_or_insert(started.elapsed().as_secs_f64());
+        }
+        match written.failed.take() {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    });
+    if read.is_ok() && !batch.is_empty() {
+        write_gif_batch(&mut batch, &target, &mut written);
+        first_png.get_or_insert(started.elapsed().as_secs_f64());
+    }
+    let mut paths = undo(written, read)?;
+    paths.sort_by_key(|(k, _)| *k);
+    let time = |k: u64| k as f64 * f64::from(rate.1) / f64::from(rate.0.max(1));
+    let text = summary(
+        &Summary {
+            file: &job.file,
+            from: range.from,
+            to: to.min(info.duration()),
+            first: times[0],
+            last: times[1],
+            expected: count,
+            per_second: range
+                .every
+                .map_or(f64::from(rate.0) / f64::from(rate.1.max(1)), |e| 1.0 / e),
+            rate,
+            every: range.every,
+            format: job.format,
+            quality,
+            size,
+            dir,
+            digits: target.digits,
+            first_png,
+            seconds: started.elapsed().as_secs_f64(),
+            files: paths
+                .into_iter()
+                .map(|(k, path)| (k - kept.start, time(k), time(k), path))
+                .collect(),
+        },
+        job.json,
+    );
+    out.write_all(text.as_bytes())?;
     Ok(())
 }
 
@@ -1024,6 +1295,7 @@ mod tests {
             from: 0.0,
             to: None,
             fps: None,
+            sized: false,
             every: None,
             size: None,
             force: false,
@@ -1064,6 +1336,7 @@ mod tests {
             from: 0.0,
             to: None,
             fps,
+            sized: false,
             every,
             size: None,
             force: false,
@@ -1228,5 +1501,294 @@ mod tests {
         assert!(quality_note(&job(Format::Jpeg, Some(50))).is_none());
         let note = quality_note(&job(Format::Png, Some(50))).unwrap();
         assert!(note.starts_with("pcod: ") && !note.contains('\n'));
+    }
+
+    fn gif(delays: &[u16]) -> media::GifInfo {
+        media::GifInfo {
+            width: 4,
+            height: 4,
+            loop_count: None,
+            delays_cs: delays.to_vec(),
+            transparent: false,
+        }
+    }
+
+    #[test]
+    fn first_where_finds_the_first_true_tick() {
+        assert_eq!(first_where(10, |k| k >= 4), 4);
+        assert_eq!(first_where(10, |_| true), 0);
+        assert_eq!(first_where(10, |_| false), 10);
+        assert_eq!(first_where(0, |_| true), 0);
+    }
+
+    #[test]
+    fn gif_spans_cover_every_tick_at_a_rate() {
+        let (kept, times) = gif_spans(&gif(&[7, 10, 13]), (30, 1), 0.0, f64::INFINITY);
+        assert_eq!(kept, 0..9);
+        assert!((times[0] - 0.0).abs() < 1e-12);
+        assert!((times[1] - 8.0 / 30.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn gif_spans_keep_the_ticks_from_from_up_to_to() {
+        let info = gif(&[7, 10, 13]);
+        assert_eq!(gif_spans(&info, (30, 1), 0.1, f64::INFINITY).0, 3..9);
+        assert_eq!(gif_spans(&info, (30, 1), 0.0, 0.2).0, 0..6);
+        assert_eq!(gif_spans(&info, (30, 1), 0.05, 0.2).0, 2..6);
+    }
+
+    #[test]
+    fn gif_spans_past_the_end_keep_nothing() {
+        let info = gif(&[7, 10, 13]);
+        let (kept, _) = gif_spans(&info, (10, 1), 0.5, f64::INFINITY);
+        assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn a_gif_batch_stays_under_its_byte_cap() {
+        assert_eq!(gif_batch(16, (16, 16)), 32);
+        assert_eq!(gif_batch(1, (16, 16)), 4);
+        assert_eq!(gif_batch(64, (16, 16)), 64);
+        assert_eq!(gif_batch(32, (1280, 800)), 16);
+        assert!(gif_batch(32, (1280, 800)) as u64 * 1280 * 800 * 4 <= GIF_BATCH_BYTES);
+        assert_eq!(gif_batch(32, (8192, 8192)), 2);
+    }
+
+    fn gif_dir(name: &str) -> PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tmp/unit-stills-gif")
+            .join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn target(dir: &Path, size: (u32, u32)) -> GifOut<'_> {
+        GifOut {
+            dir,
+            size,
+            first: 10,
+            digits: 6,
+            format: Format::Png,
+            quality: 85,
+        }
+    }
+
+    fn unwritten() -> Written {
+        Written {
+            paths: Vec::new(),
+            failed: None,
+        }
+    }
+
+    #[test]
+    fn a_gif_batch_writes_each_tick_once_named_from_the_first() {
+        let dir = gif_dir("batch");
+        let mut batch = vec![(checker(), 10..12), (checker(), 12..13)];
+        let mut written = unwritten();
+        write_gif_batch(&mut batch, &target(&dir, (32, 24)), &mut written);
+        assert!(batch.is_empty());
+        assert!(written.failed.is_none());
+        let mut names: Vec<_> = written
+            .paths
+            .iter()
+            .map(|(_, p)| p.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["000000.png", "000001.png", "000002.png"]);
+        let back = png::decode(&std::fs::read(&written.paths[0].1).unwrap()).unwrap();
+        assert_eq!((back.width, back.height), (32, 24));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_gif_batch_into_a_missing_folder_fails_and_keeps_no_path() {
+        let dir = gif_dir("missing").join("gone");
+        let mut batch = vec![(checker(), 10..14)];
+        let mut written = unwritten();
+        write_gif_batch(&mut batch, &target(&dir, (64, 48)), &mut written);
+        assert!(written.paths.is_empty());
+        let e = written.failed.unwrap().to_string();
+        assert!(
+            e.starts_with(&dir.join("000000.png").display().to_string()),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_gif_batch_stops_at_the_first_tick_it_cannot_write() {
+        let dir = gif_dir("blocked");
+        std::fs::create_dir(dir.join("000003.png")).unwrap();
+        let mut batch = vec![(checker(), 10..16)];
+        let mut written = unwritten();
+        write_gif_batch(&mut batch, &target(&dir, (64, 48)), &mut written);
+        let names: Vec<_> = written
+            .paths
+            .iter()
+            .map(|(_, p)| p.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, ["000000.png", "000001.png", "000002.png"]);
+        let e = written.failed.unwrap().to_string();
+        assert!(e.contains("000003.png"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_gif_frame_that_cannot_encode_fails_the_batch_naming_the_folder() {
+        let dir = gif_dir("empty-frame");
+        let mut batch = vec![(Rgba::new(0, 0), 10..11)];
+        let mut written = unwritten();
+        write_gif_batch(&mut batch, &target(&dir, (0, 0)), &mut written);
+        assert!(written.paths.is_empty());
+        let e = written.failed.unwrap().to_string();
+        assert!(e.starts_with(&dir.display().to_string()), "{e}");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_gif_batch_writes_jpeg_and_webp_when_asked() {
+        let dir = gif_dir("formats");
+        for (format, magic) in [
+            (Format::Jpeg, &b"\xff\xd8\xff"[..]),
+            (Format::Webp, b"RIFF"),
+        ] {
+            let mut batch = vec![(checker(), 10..11)];
+            let mut written = unwritten();
+            let to = GifOut {
+                format,
+                ..target(&dir, (64, 48))
+            };
+            write_gif_batch(&mut batch, &to, &mut written);
+            assert!(written.failed.is_none());
+            let path = dir.join(format!("000000.{}", format.ext()));
+            assert_eq!(written.paths, [(10, path.clone())]);
+            assert!(std::fs::read(&path).unwrap().starts_with(magic));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_gif_range_removes_every_frame_it_wrote() {
+        let dir = gif_dir("undo");
+        let paths: Vec<PathBuf> = (0..3).map(|k| dir.join(format!("{k:06}.png"))).collect();
+        for p in &paths {
+            std::fs::write(p, b"x").unwrap();
+        }
+        std::fs::write(dir.join("keep.txt"), b"x").unwrap();
+        let written = Written {
+            paths: paths
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(k, p)| (k as u64, p))
+                .collect(),
+            failed: Some("disk full".into()),
+        };
+        assert_eq!(undo(written, Ok(())).unwrap_err().to_string(), "disk full");
+        assert!(paths.iter().all(|p| !p.exists()));
+        for p in &paths {
+            std::fs::write(p, b"x").unwrap();
+        }
+        let written = Written {
+            paths: paths
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(k, p)| (k as u64, p))
+                .collect(),
+            failed: Some("later".into()),
+        };
+        let e = undo(written, Err("the GIF ends early".into())).unwrap_err();
+        assert_eq!(e.to_string(), "the GIF ends early");
+        assert!(paths.iter().all(|p| !p.exists()));
+        assert!(dir.join("keep.txt").exists());
+        let kept = Written {
+            paths: vec![(0, dir.join("keep.txt"))],
+            failed: None,
+        };
+        assert_eq!(undo(kept, Ok(())).unwrap(), [(0, dir.join("keep.txt"))]);
+        assert!(dir.join("keep.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_interval_becomes_a_tick_rate_in_milliseconds() {
+        assert_eq!(every_rate(2.0), (1000, 2000));
+        assert_eq!(every_rate(0.5), (1000, 500));
+        assert_eq!(every_rate(1.0 / 3.0), (1000, 333));
+        assert_eq!(every_rate(0.0001), (1000, 1));
+        assert_eq!(every_rate(1e12), (1000, u32::MAX));
+    }
+
+    fn summed(
+        every: Option<f64>,
+        files: Vec<(u64, f64, f64, PathBuf)>,
+        expected: u64,
+    ) -> Summary<'static> {
+        Summary {
+            file: Path::new("in.gif"),
+            from: 0.0,
+            to: 1.0,
+            first: 0.0,
+            last: 0.4,
+            expected,
+            per_second: 5.0,
+            rate: (5, 1),
+            every,
+            format: Format::Png,
+            quality: 85,
+            size: (64, 48),
+            dir: Path::new("out"),
+            digits: 6,
+            first_png: None,
+            seconds: 0.5,
+            files,
+        }
+    }
+
+    #[test]
+    fn a_summary_lists_each_file_and_nulls_what_was_not_asked_or_done() {
+        let files = vec![
+            (0, 0.0, 0.01, PathBuf::from("out/000000.png")),
+            (1, 0.2, 0.21, PathBuf::from("out/000001.png")),
+        ];
+        let v: serde_json::Value =
+            serde_json::from_str(&summary(&summed(None, files.clone(), 2), true)).unwrap();
+        assert_eq!(v["count"], 2);
+        assert_eq!(v["expected"], 2);
+        assert_eq!(v["rate"], "5/1");
+        assert_eq!(v["every"], serde_json::Value::Null);
+        assert_eq!(v["quality"], serde_json::Value::Null);
+        assert_eq!(v["first_png"], serde_json::Value::Null);
+        assert_eq!(v["frames_per_second"], 4.0);
+        let listed = v["files"].as_array().unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[1]["index"], 1);
+        assert_eq!(listed[1]["slot"], 0.2);
+        assert_eq!(listed[1]["time"], 0.21);
+        assert_eq!(listed[1]["path"], "out/000001.png");
+        let v: serde_json::Value =
+            serde_json::from_str(&summary(&summed(Some(0.2), files, 2), true)).unwrap();
+        assert_eq!(v["rate"], serde_json::Value::Null);
+        assert_eq!(v["every"], 0.2);
+    }
+
+    #[test]
+    fn a_summary_in_words_notes_a_short_stream() {
+        let files = vec![(0, 0.0, 0.0, PathBuf::from("out/000000.png"))];
+        let said = summary(&summed(Some(0.2), files.clone(), 1), false);
+        assert_eq!(
+            said,
+            "1 png frames, 64x48 one every 0.200 s, 0.000 s to 0.400 s, in out\n0.50 s, 2.0 frames/s, the first image after 0.500 s\n"
+        );
+        let said = summary(&summed(None, files, 3), false);
+        assert!(said.contains("64x48 at 5 fps"), "{said}");
+        assert!(
+            said.ends_with(
+                "note: the stream ends before its probed length: 1 of 3 frames written\n"
+            ),
+            "{said}"
+        );
     }
 }
