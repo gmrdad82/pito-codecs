@@ -575,6 +575,9 @@ fn webp_alpha_sizes() {
 #[test]
 #[ignore]
 fn webp_anim_bench() {
+    if !super::oracle::ffmpeg(&["-version"]) {
+        return;
+    }
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/coast/frames/reel");
     let out = std::process::Command::new("ffmpeg")
         .args([

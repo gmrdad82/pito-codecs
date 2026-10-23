@@ -237,6 +237,9 @@ fn odd_sizes_encode_without_failing() {
 #[test]
 #[ignore]
 fn bench_encoder() {
+    if !ffmpeg_present() {
+        return;
+    }
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let path = std::env::var("VP9_BENCH")
         .map(PathBuf::from)

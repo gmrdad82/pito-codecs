@@ -372,6 +372,9 @@ fn timed(f: impl FnOnce()) -> f64 {
 #[test]
 #[ignore]
 fn speed_against_ffmpeg() {
+    if !ffmpeg_present() {
+        return;
+    }
     for (w, h) in [(640u32, 360u32), (1280, 720)] {
         let name = format!("coast-{w}x{h}.rgba");
         let file = Path::new(env!("CARGO_MANIFEST_DIR"))

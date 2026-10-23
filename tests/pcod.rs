@@ -1208,7 +1208,7 @@ fn frames_that_fail_leave_neither_output_nor_partial() {
 #[test]
 fn frames_crf_0_is_near_lossless_against_the_source() {
     use pito_codecs::filter::{ColorSpec, Order, Packed, packed_to_yuv};
-    use pito_codecs::media::{Frame, PixelFormat, TimeBase};
+    use pito_codecs::media::{Choice, Frame, PixelFormat, TimeBase, decode_video};
     let folder = dir("frames-crf0");
     let input = frames("frames-crf0");
     let output = folder.join("crf0.mp4");
@@ -1223,29 +1223,32 @@ fn frames_crf_0_is_near_lossless_against_the_source() {
         "--route",
         "cpu",
     ]));
-    let decoded = Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
-        .arg(&output)
-        .args(["-f", "rawvideo", "-pix_fmt", "yuv420p", "-"])
-        .output()
+    let cpu = Prefs {
+        decode: Choice::Cpu,
+        ..Prefs::default()
+    };
+    let decoded: Vec<Frame> = decode_video(&output, 0.0, None, &cpu)
+        .unwrap()
+        .collect::<Result<_, _>>()
         .unwrap();
-    assert!(decoded.status.success(), "{}", text(&decoded.stderr));
     let (w, h) = (320usize, 240usize);
-    let picture = w * h * 3 / 2;
-    assert_eq!(decoded.stdout.len(), picture * 20);
+    assert_eq!(decoded.len(), 20);
     let mut squared = 0f64;
     let mut identical = true;
-    for n in 0..20 {
+    for (n, frame) in decoded.iter().enumerate() {
+        assert_eq!(frame.format, PixelFormat::Yuv420p8);
+        assert_eq!((frame.width, frame.height), (320, 240));
         let png = fs::read(input.join(format!("{n:04}.png"))).unwrap();
         let rgba = pito_codecs::png::decode(&png).unwrap();
         let mut want = Frame::new(PixelFormat::Yuv420p8, 320, 240, 0, TimeBase::new(1, 1));
         let source = Packed::new(rgba.width, rgba.height, Order::Rgbx, &rgba.data);
         packed_to_yuv(source, ColorSpec::BT709, PixelFormat::Yuv420p8, &mut want).unwrap();
         let luma = &want.planes[0];
-        let got = &decoded.stdout[n * picture..n * picture + w * h];
+        let got = &frame.planes[0];
         for y in 0..h {
             for x in 0..w {
-                let d = f64::from(luma.data[y * luma.stride + x]) - f64::from(got[y * w + x]);
+                let d = f64::from(luma.data[y * luma.stride + x])
+                    - f64::from(got.data[y * got.stride + x]);
                 identical &= d == 0.0;
                 squared += d * d;
             }

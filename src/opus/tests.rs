@@ -10,7 +10,7 @@ fn dir() -> PathBuf {
     d
 }
 
-fn libopus() -> bool {
+pub(crate) fn libopus() -> bool {
     Command::new("ffmpeg")
         .args(["-hide_banner", "-encoders"])
         .output()
@@ -152,6 +152,10 @@ fn ogg_rewrite_decodes_the_same() {
 #[test]
 #[ignore]
 fn decode_speed() {
+    if !libopus() {
+        eprintln!("ffmpeg with libopus not found; skipping");
+        return;
+    }
     let src = dir().join("speed.opus");
     for (name, args) in [
         ("celt 128k stereo", &["-b:a", "128k"][..]),

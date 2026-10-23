@@ -587,6 +587,9 @@ fn ffmpeg_bench(args: &[&str]) -> (f64, f64) {
 #[test]
 #[ignore]
 fn decode_speed() {
+    if !ffmpeg("decode_speed") {
+        return;
+    }
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)

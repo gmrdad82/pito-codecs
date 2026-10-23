@@ -23,4 +23,4 @@ pub use packet::{Bandwidth, Mode, Packet, Toc};
 #[cfg(test)]
 mod malformed;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

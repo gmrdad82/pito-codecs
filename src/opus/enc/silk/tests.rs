@@ -363,6 +363,10 @@ pub(crate) fn fw_snr_seg(reference: &[f32], decoded: &[f32], lag: usize, top_hz:
 #[test]
 #[ignore]
 fn eval_against_libopus() {
+    if !crate::opus::tests::libopus() {
+        eprintln!("ffmpeg with libopus not found; skipping");
+        return;
+    }
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/eval");
     std::fs::create_dir_all(&root).unwrap();
     let src =

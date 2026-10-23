@@ -168,6 +168,10 @@ fn seg_snr(a: &[f32], b: &[f32], c: usize) -> f32 {
 #[test]
 #[ignore]
 fn measure_against_libopus() {
+    if !crate::opus::tests::libopus() {
+        eprintln!("ffmpeg with libopus not found; skipping");
+        return;
+    }
     let dir = tmp_dir();
     let names = std::env::var("PITO_CLIPS").unwrap_or("resilience,solstice,music".into());
     for name in names.split(',') {
