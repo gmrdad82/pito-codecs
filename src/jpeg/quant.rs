@@ -15,11 +15,8 @@ pub(super) static CHROMA: [u16; 64] = [
 
 const SHIFT: u32 = 2 * 8 - 1;
 
-fn compute_reciprocal(divisor: u32) -> (i32, i32) {
-    if divisor <= 1 {
-        return (1, 0);
-    }
-
+pub(super) fn compute_reciprocal(divisor: u32) -> (i32, i32) {
+    let divisor = divisor.max(1);
     let mut reciprocals = (1 << SHIFT) / divisor;
     let fractional = (1 << SHIFT) % divisor;
 

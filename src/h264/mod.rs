@@ -10,6 +10,7 @@ mod tests_enc;
 
 use crate::media::{self, Error, Frame, Packet, PixelFormat, Plane, Result, TimeBase};
 
+pub use crate::media::color::Color;
 pub use dec::ColorInfo;
 pub use enc::{Preset, Profile};
 
@@ -132,6 +133,7 @@ pub struct EncoderConfig {
     pub b_frames: u8,
     pub threads: usize,
     pub bitstream: media::Bitstream,
+    pub color: Color,
 }
 
 impl Default for EncoderConfig {
@@ -147,6 +149,7 @@ impl Default for EncoderConfig {
             b_frames: 2,
             threads: 0,
             bitstream: media::Bitstream::LengthPrefixed,
+            color: Color::BT709,
         }
     }
 }
@@ -173,6 +176,7 @@ impl Encoder {
             media::Rate::Qp(q) => enc::RateControl::Qp(q),
         };
         cfg.keyint = config.gop;
+        cfg.color = config.color;
         cfg.bframes = config.b_frames;
         cfg.threads = config.threads;
         cfg.format = match config.bitstream {

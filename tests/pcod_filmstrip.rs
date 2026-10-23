@@ -282,7 +282,7 @@ fn bad_cadences_sizes_and_outputs_are_refused_in_one_line() {
     }
     refused(&run(&["filmstrip", c, s, "--count", "0"]), "--count");
     refused(
-        &run(&["filmstrip", c, s, "--count", "20", "--height", "4320"]),
+        &run(&["filmstrip", c, s, "--count", "4000", "--height", "240"]),
         "268 megapixels",
     );
     refused(
@@ -685,4 +685,337 @@ fn a_sheet_alone_lists_its_stills_with_no_paths_and_a_tall_height_is_refused() {
         ]),
         "height 5000 is outside 1 to 4320",
     );
+}
+
+fn wav(path: &Path, frames: u32) {
+    let data = frames * 4;
+    let mut b = Vec::new();
+    b.extend_from_slice(b"RIFF");
+    b.extend_from_slice(&(36 + data).to_le_bytes());
+    b.extend_from_slice(b"WAVEfmt ");
+    b.extend_from_slice(&16u32.to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&2u16.to_le_bytes());
+    b.extend_from_slice(&48_000u32.to_le_bytes());
+    b.extend_from_slice(&192_000u32.to_le_bytes());
+    b.extend_from_slice(&4u16.to_le_bytes());
+    b.extend_from_slice(&16u16.to_le_bytes());
+    b.extend_from_slice(b"data");
+    b.extend_from_slice(&data.to_le_bytes());
+    b.resize(b.len() + data as usize, 0);
+    fs::write(path, b).unwrap();
+}
+
+fn partials(folder: &Path) -> usize {
+    fs::read_dir(folder)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains(".partial"))
+        .count()
+}
+
+#[test]
+fn audio_alone_or_an_empty_file_is_refused_before_decoding() {
+    let folder = dir("no-video");
+    let strip = folder.join("strip.png");
+    let s = strip.to_str().unwrap();
+    let tone = folder.join("tone.wav");
+    wav(&tone, 48_000);
+    refused(
+        &run(&["filmstrip", tone.to_str().unwrap(), s]),
+        "tone.wav: has no video to take tiles from",
+    );
+    let empty = folder.join("empty.wav");
+    wav(&empty, 0);
+    refused(
+        &run(&["filmstrip", empty.to_str().unwrap(), s]),
+        "empty.wav: has no duration to take tiles over",
+    );
+    assert!(!strip.exists());
+}
+
+#[test]
+fn a_tile_that_fails_to_decode_is_refused_with_its_time() {
+    let folder = dir("broken-tile");
+    let clip = folder.join("bars.mp4");
+    ok(&run(&[
+        "synth",
+        clip.to_str().unwrap(),
+        "--size",
+        "352x240",
+        "--fps",
+        "10",
+        "--duration",
+        "6",
+    ]));
+    let bytes = fs::read(&clip).unwrap();
+    let cut = folder.join("cut.mp4");
+    fs::write(&cut, &bytes[..bytes.len() - 1]).unwrap();
+    let c = cut.to_str().unwrap();
+    let strip = folder.join("strip.png");
+    let s = strip.to_str().unwrap();
+    let out = run(&[
+        "filmstrip",
+        c,
+        s,
+        "--from",
+        "5.8",
+        "--count",
+        "1",
+        "--seek",
+        "exact",
+        "--route",
+        "cpu",
+    ]);
+    refused(&out, "cut.mp4: tile at 5.900 s: ");
+    assert!(!strip.exists());
+    assert_eq!(partials(&folder), 0);
+    refused(
+        &run(&[
+            "filmstrip",
+            c,
+            s,
+            "--from",
+            "5.8",
+            "--count",
+            "1",
+            "--seek",
+            "exact",
+            "--route",
+            "cpu",
+            "--height",
+            "1",
+            "--gap",
+            "0",
+            "--max-width",
+            "1",
+        ]),
+        "--max-width 1 is narrower than one tile (2 px with its gaps)",
+    );
+}
+
+#[test]
+fn a_taller_height_keeps_the_videos_own_size() {
+    let folder = dir("no-upscale");
+    let clip = video(&folder);
+    let strip = folder.join("strip.png");
+    let out = run(&[
+        "filmstrip",
+        clip.to_str().unwrap(),
+        strip.to_str().unwrap(),
+        "--count",
+        "2",
+        "--height",
+        "4320",
+        "--route",
+        "cpu",
+        "--json",
+    ]);
+    ok(&out);
+    let json = text(&out.stdout);
+    assert_eq!(field(&json, "tile_width"), Some("352"), "{json}");
+    assert_eq!(field(&json, "tile_height"), Some("240"), "{json}");
+    let img = png(&strip);
+    assert_eq!((img.width, img.height), (2 * 352 + 3 * 4, 240 + 2 * 4));
+}
+
+#[test]
+fn a_failed_landing_leaves_no_partial_file() {
+    let folder = dir("landing");
+    let clip = video(&folder);
+    let strip = folder.join("strip.png");
+    fs::create_dir_all(strip.join("inside")).unwrap();
+    let out = run(&[
+        "filmstrip",
+        clip.to_str().unwrap(),
+        strip.to_str().unwrap(),
+        "--count",
+        "2",
+        "--route",
+        "cpu",
+        "--force",
+    ]);
+    refused(&out, "strip.png");
+    assert!(strip.join("inside").is_dir());
+    assert_eq!(partials(&folder), 0);
+}
+
+#[test]
+fn a_stdout_nobody_reads_is_a_one_line_refusal_after_the_strip_lands() {
+    let folder = dir("closed-stdout");
+    let clip = video(&folder);
+    let strip = folder.join("strip.png");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pcod"))
+        .env("NO_COLOR", "1")
+        .args([
+            "filmstrip",
+            clip.to_str().unwrap(),
+            strip.to_str().unwrap(),
+            "--count",
+            "2",
+            "--route",
+            "cpu",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let out = child.wait_with_output().unwrap();
+    refused(&out, "Broken pipe");
+    assert_eq!(png(&strip).height, 90 + 2 * 4);
+}
+
+#[test]
+fn a_jpeg_strip_is_the_same_bytes_with_and_without_simd() {
+    let folder = dir("jpeg-simd");
+    let clip = video(&folder);
+    let strip = |name: &str, scalar: bool| -> Vec<u8> {
+        let path = folder.join(name);
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_pcod"));
+        cmd.env("NO_COLOR", "1").args([
+            "filmstrip",
+            clip.to_str().unwrap(),
+            path.to_str().unwrap(),
+            "--count",
+            "3",
+            "--timecodes",
+            "--route",
+            "cpu",
+        ]);
+        if scalar {
+            cmd.env("PITO_CODECS_NO_SIMD", "1");
+        }
+        let out = cmd.output().unwrap();
+        ok(&out);
+        fs::read(path).unwrap()
+    };
+    let fast = strip("fast.jpg", false);
+    let plain = strip("plain.jpg", true);
+    assert!(fast.starts_with(&[0xff, 0xd8]) && fast.ends_with(&[0xff, 0xd9]));
+    assert!(fast == plain, "{} vs {} bytes", fast.len(), plain.len());
+}
+
+fn bars_clip(folder: &Path) -> PathBuf {
+    let clip = folder.join("bars.mp4");
+    ok(&run(&[
+        "synth",
+        clip.to_str().unwrap(),
+        "--size",
+        "352x240",
+        "--fps",
+        "10",
+        "--duration",
+        "2",
+    ]));
+    clip
+}
+
+fn sized(clip: &Path, out: &Path, width: Option<u16>, height: Option<u16>) {
+    let mut b = fs::read(clip).unwrap();
+    let stsd = b.windows(4).position(|w| w == b"stsd").unwrap();
+    let at = stsd + b[stsd..].windows(4).position(|w| w == b"avc1").unwrap() + 28;
+    assert_eq!(b[at..at + 4], [1, 96, 0, 240]);
+    if let Some(w) = width {
+        b[at..at + 2].copy_from_slice(&w.to_be_bytes());
+    }
+    if let Some(h) = height {
+        b[at + 2..at + 4].copy_from_slice(&h.to_be_bytes());
+    }
+    fs::write(out, b).unwrap();
+}
+
+fn one_tile(clip: &Path, height: u32) -> (Rgba, String) {
+    let strip = clip.with_extension(format!("{height}.png"));
+    let out = run(&[
+        "filmstrip",
+        clip.to_str().unwrap(),
+        strip.to_str().unwrap(),
+        "--count",
+        "1",
+        "--gap",
+        "0",
+        "--height",
+        &height.to_string(),
+        "--route",
+        "cpu",
+        "--force",
+        "--json",
+    ]);
+    ok(&out);
+    (png(&strip), text(&out.stdout))
+}
+
+fn apart(ours: &Rgba, whole: &Rgba) -> f64 {
+    let mut sum = 0u64;
+    for y in 0..ours.height {
+        for x in 0..ours.width {
+            let a = pixel(ours, x, y);
+            let b = pixel(
+                whole,
+                x * whole.width / ours.width,
+                y * whole.height / ours.height,
+            );
+            sum += a
+                .iter()
+                .zip(b)
+                .map(|(p, q)| u64::from(p.abs_diff(q)))
+                .sum::<u64>();
+        }
+    }
+    sum as f64 / f64::from(ours.width * ours.height * 3)
+}
+
+#[test]
+fn a_sample_entry_narrower_than_the_stream_keeps_the_whole_picture() {
+    let folder = dir("narrow-entry");
+    let clip = bars_clip(&folder);
+    let narrow = folder.join("narrow.mp4");
+    sized(&clip, &narrow, Some(320), None);
+    let (strip, json) = one_tile(&narrow, 90);
+    assert_eq!(field(&json, "tile_width"), Some("120"), "{json}");
+    assert_eq!(field(&json, "tile_height"), Some("81"), "{json}");
+    assert_eq!((strip.width, strip.height), (120, 81));
+    let (whole, _) = one_tile(&clip, 81);
+    assert_eq!((whole.width, whole.height), (118, 81));
+    let tile = strip;
+    let off = apart(&tile, &whole);
+    assert!(
+        off < 6.0,
+        "the tile is {off:.2} apart from the whole picture"
+    );
+    for bar in 0..7 {
+        let (x, rx) = ((2 * bar + 1) * 120 / 14, (2 * bar + 1) * 118 / 14);
+        let (a, b) = (pixel(&tile, x, 4), pixel(&whole, rx, 4));
+        assert!(
+            a.iter().zip(b).all(|(p, q)| p.abs_diff(q) < 24),
+            "bar {bar}: {a:?} against {b:?}"
+        );
+    }
+}
+
+#[test]
+fn a_sample_entry_shorter_than_the_stream_keeps_the_whole_picture() {
+    let folder = dir("short-entry");
+    let clip = bars_clip(&folder);
+    let short = folder.join("short.mp4");
+    sized(&clip, &short, None, Some(60));
+    let (strip, json) = one_tile(&short, 90);
+    assert_eq!(field(&json, "tile_width"), Some("88"), "{json}");
+    assert_eq!(field(&json, "tile_height"), Some("60"), "{json}");
+    assert_eq!((strip.width, strip.height), (88, 60));
+    let (whole, _) = one_tile(&clip, 60);
+    assert_eq!((whole.width, whole.height), (88, 60));
+    let off = apart(&strip, &whole);
+    assert!(
+        off < 6.0,
+        "the tile is {off:.2} apart from the whole picture"
+    );
+    let bottom = (0..88).map(|x| pixel(&strip, x, 59)).collect::<Vec<_>>();
+    let truth = (0..88).map(|x| pixel(&whole, x, 59)).collect::<Vec<_>>();
+    let rows = bottom
+        .iter()
+        .zip(&truth)
+        .all(|(a, b)| a.iter().zip(b).all(|(p, q)| p.abs_diff(*q) < 24));
+    assert!(rows, "{bottom:?} against {truth:?}");
 }

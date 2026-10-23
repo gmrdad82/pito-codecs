@@ -232,14 +232,18 @@ impl Stills {
         }
     }
 
-    fn collect(&self, times: &[f64], seek: Seek) -> Result<Vec<Rgba>> {
-        let mut got: Vec<Option<Result<Rgba>>> = (0..times.len()).map(|_| None).collect();
+    pub fn each(&self, times: &[f64], seek: Seek) -> Result<Vec<Result<Rgba>>> {
+        let mut got: Vec<Result<Rgba>> = times.iter().map(|_| Err(failed())).collect();
         self.frames(times, seek, |i, r| {
             if let Some(slot) = got.get_mut(i) {
-                *slot = Some(r);
+                *slot = r;
             }
         })?;
-        got.into_iter().map(|r| r.ok_or_else(failed)?).collect()
+        Ok(got)
+    }
+
+    fn collect(&self, times: &[f64], seek: Seek) -> Result<Vec<Rgba>> {
+        self.each(times, seek)?.into_iter().collect()
     }
 
     fn take(&self, key: Key, make: impl FnOnce() -> Result<native::Decoder>) -> Worker {

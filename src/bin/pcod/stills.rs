@@ -387,24 +387,13 @@ fn run_stills(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
     };
     let stills =
         Stills::open(&job.file, job.height, &job.prefs).map_err(|e| about(&job.file, e))?;
-    let mut got: Vec<Option<media::Result<Rgba>>> = (0..n).map(|_| None).collect();
-    stills
-        .frames(&times, job.seek, |i, r| {
-            if let Some(slot) = got.get_mut(i) {
-                *slot = Some(r);
-            }
-        })
-        .map_err(|e| about(&job.file, e))?;
-    let mut images = Vec::with_capacity(n);
-    for (i, r) in got.into_iter().enumerate() {
-        match r {
-            Some(Ok(img)) => images.push(img),
-            Some(Err(e)) => {
-                return Err(about(&job.file, format!("still at {:.3} s: {e}", times[i])));
-            }
-            None => return Err(about(&job.file, format!("no still at {:.3} s", times[i]))),
-        }
-    }
+    let images: Vec<Rgba> = stills
+        .each(&times, job.seek)
+        .map_err(|e| about(&job.file, e))?
+        .into_iter()
+        .zip(&times)
+        .map(|(r, t)| r.map_err(|e| about(&job.file, format!("still at {t:.3} s: {e}"))))
+        .collect::<Result<_, _>>()?;
     let shown: Vec<f64> = match job.seek {
         Seek::Exact => times.clone(),
         Seek::Keyframe => {

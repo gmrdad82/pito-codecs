@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use pito_codecs::filter::spectrum::{TEXT_HEIGHT, draw_text, text_width};
-use pito_codecs::media::{self, Prefs, Rgba, Seek, Stills, probe};
+use pito_codecs::media::{Prefs, Rgba, Seek, Stills, probe, scale};
 use pito_codecs::{jpeg, png, webp};
 
 use super::convert::land;
@@ -132,6 +132,42 @@ pub fn times(cadence: Cadence, start: f64, end: f64) -> Result<Vec<f64>, Fail> {
         Cadence::Count(n) => Ok((0..n)
             .map(|i| start + span * (i as f64 + 0.5) / n as f64)
             .collect()),
+    }
+}
+
+pub fn tile_bound(shown: (u32, u32), height: u32) -> (u32, u32) {
+    let (sw, sh) = (u64::from(shown.0), u64::from(shown.1.max(1)));
+    let th = u64::from(height).min(sh);
+    let tw = (sw * th).div_ceil(sh).min(sw).max(2);
+    (tw as u32, th as u32)
+}
+
+pub fn fit(tile: Rgba, bound: (u32, u32)) -> Rgba {
+    let (w, h) = (u64::from(tile.width), u64::from(tile.height));
+    let (bw, bh) = (u64::from(bound.0.max(1)), u64::from(bound.1.max(1)));
+    if w <= bw && h <= bh {
+        return tile;
+    }
+    let (nw, nh) = if w * bh >= h * bw {
+        (bw, (h * bw / w).max(1))
+    } else {
+        ((w * bh / h).max(1), bh)
+    };
+    scale(&tile, nw as u32, nh as u32)
+}
+
+pub fn settle(plan: &Geometry, tiles: &[Rgba], label_w: u32) -> Geometry {
+    let widest = tiles.iter().map(|t| t.width).max().unwrap_or(0);
+    let tallest = tiles.iter().map(|t| t.height).max().unwrap_or(0);
+    let tile = (widest.min(plan.tile.0), tallest.min(plan.tile.1));
+    let cell = tile.0.max(label_w).min(plan.cell);
+    let (cols, rows) = (plan.cols as u32, plan.rows as u32);
+    Geometry {
+        tile,
+        cell,
+        width: plan.width - cols * (plan.cell - cell),
+        height: plan.height - rows * (plan.tile.1 - tile.1),
+        ..*plan
     }
 }
 
@@ -310,50 +346,31 @@ pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
     let asked = times(job.cadence, start, end)?;
     let (sw, sh) = p.shown_size();
     if sw == 0 || sh == 0 {
-        return Err(about(file, format!("the video's shape is {sw}x{sh}")));
+        return Err(about(file, "has no video to take tiles from"));
     }
-    let guess =
-        (u64::from(sw) * u64::from(job.height) / u64::from(sh)).clamp(1, u64::from(u32::MAX));
     let asked_labels: Vec<String> = asked.iter().map(|t| clock(*t)).collect();
-    geometry(
+    let plan = geometry(
         asked.len(),
-        (guess as u32, job.height),
+        tile_bound((sw, sh), job.height),
         label_width(&asked_labels, &job.look),
         &job.look,
     )?;
     encoded(format, &Rgba::new(1, 1), &job.output)?;
     let stills = Stills::open(file, job.height, &job.prefs).map_err(|e| about(file, e))?;
-    let mut got: Vec<Option<media::Result<Rgba>>> = (0..asked.len()).map(|_| None).collect();
-    stills
-        .frames(&asked, job.seek, |i, r| {
-            if let Some(slot) = got.get_mut(i) {
-                *slot = Some(r);
-            }
-        })
-        .map_err(|e| about(file, e))?;
-    let mut tiles = Vec::with_capacity(asked.len());
-    for (r, t) in got.into_iter().zip(&asked) {
-        match r {
-            Some(Ok(img)) => tiles.push(img),
-            Some(Err(e)) => return Err(about(file, format!("tile at {t:.3} s: {e}"))),
-            None => return Err(about(file, format!("no tile at {t:.3} s"))),
-        }
-    }
+    let tiles: Vec<Rgba> = stills
+        .each(&asked, job.seek)
+        .map_err(|e| about(file, e))?
+        .into_iter()
+        .zip(&asked)
+        .map(|(r, t)| r.map_err(|e| about(file, format!("tile at {t:.3} s: {e}"))))
+        .map(|r| r.map(|t| fit(t, plan.tile)))
+        .collect::<Result<_, _>>()?;
     let shown = stills
         .shown(&asked, job.seek)
         .map_err(|e| about(file, format!("the tiles' times: {e}")))?;
     drop(stills);
-    let tile = (
-        tiles.iter().map(|t| t.width).max().unwrap_or(0),
-        tiles.iter().map(|t| t.height).max().unwrap_or(0),
-    );
     let labels: Vec<String> = shown.iter().map(|t| clock(*t)).collect();
-    let g = geometry(
-        tiles.len(),
-        tile,
-        label_width(&labels, &job.look),
-        &job.look,
-    )?;
+    let g = settle(&plan, &tiles, label_width(&labels, &job.look));
     let count = tiles.len();
     let image = compose(&tiles, &labels, &g, &job.look);
     drop(tiles);
@@ -828,5 +845,137 @@ mod tests {
         let many: Vec<String> = (0..20).map(|s| clock(s as f64)).collect();
         assert_eq!(when(&many), "0:00 0:01 0:02 … 0:18 0:19 (20 times)");
         assert_eq!(when(&[]), "");
+    }
+
+    #[test]
+    fn the_tile_bound_covers_every_size_a_still_comes_out_at() {
+        assert_eq!(tile_bound((352, 240), 90), (132, 90));
+        assert_eq!(tile_bound((352, 240), 1), (2, 1));
+        assert_eq!(tile_bound((352, 240), 480), (352, 240));
+        assert_eq!(tile_bound((351, 240), 240), (351, 240));
+        assert_eq!(tile_bound((240, 352), 90), (62, 90));
+        assert_eq!(tile_bound((0, 0), 90), (2, 1));
+        for (sw, sh) in [
+            (352u32, 240u32),
+            (240, 352),
+            (1922, 1080),
+            (16, 1000),
+            (1000, 16),
+        ] {
+            for h in [1u32, 2, 89, 90, 240, 1080, 4320] {
+                let frame = pito_codecs::media::Frame::new(
+                    pito_codecs::media::PixelFormat::Yuv420p8,
+                    sw,
+                    sh,
+                    0,
+                    pito_codecs::media::TimeBase::new(1, 1),
+                );
+                let img = pito_codecs::media::to_rgba_height(&frame, h);
+                let (bw, bh) = tile_bound((sw, sh), h);
+                assert!(
+                    img.width <= bw && img.height <= bh,
+                    "{sw}x{sh} at {h}: {}x{} over {bw}x{bh}",
+                    img.width,
+                    img.height
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn settling_keeps_the_plans_grid_and_shrinks_to_the_tiles() {
+        let l = Look {
+            wrap: Some(2),
+            ..look()
+        };
+        let plan = geometry(3, (100, 60), 0, &l).unwrap();
+        let tiles = [
+            solid(90, 50, [1, 2, 3]),
+            solid(96, 56, [1, 2, 3]),
+            solid(80, 40, [1, 2, 3]),
+        ];
+        let g = settle(&plan, &tiles, 0);
+        assert_eq!(g, geometry(3, (96, 56), 0, &l).unwrap());
+        assert_eq!((g.cols, g.rows), (plan.cols, plan.rows));
+        let labelled = settle(&plan, &tiles, 98);
+        assert_eq!((labelled.cell, labelled.tile), (98, (96, 56)));
+        assert_eq!(labelled.width, geometry(3, (96, 56), 98, &l).unwrap().width);
+        let none = settle(&plan, &[], 0);
+        assert_eq!((none.tile, none.cell), ((0, 0), 0));
+        assert_eq!(none.width, 3 * l.gap);
+    }
+
+    fn striped(w: u32, h: u32, across: bool) -> Rgba {
+        let mut img = solid(w, h, [0, 200, 0]);
+        let (len, band) = (if across { w } else { h }, 6);
+        for (i, px) in img.data.chunks_exact_mut(4).enumerate() {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            let at = if across { x } else { y };
+            if at < band {
+                px[..3].copy_from_slice(&[200, 0, 0]);
+            } else if at >= len - band {
+                px[..3].copy_from_slice(&[0, 0, 200]);
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn a_tile_within_the_plan_is_kept_as_it_is() {
+        for (w, h) in [(80, 40), (100, 60), (100, 10), (5, 60), (0, 0)] {
+            let t = striped(w.max(1), h.max(1), true);
+            let t = Rgba {
+                width: w,
+                height: h,
+                ..t
+            };
+            let kept = fit(t.clone(), (100, 60));
+            assert_eq!((kept.width, kept.height), (w, h));
+            assert_eq!(kept.data, t.data);
+        }
+    }
+
+    #[test]
+    fn a_tile_larger_than_the_plan_shrinks_whole_into_its_cell() {
+        let l = look();
+        let plan = geometry(2, (100, 60), 0, &l).unwrap();
+        let tiles = vec![
+            fit(striped(120, 70, true), plan.tile),
+            fit(striped(60, 120, false), plan.tile),
+        ];
+        assert_eq!((tiles[0].width, tiles[0].height), (100, 58));
+        assert_eq!((tiles[1].width, tiles[1].height), (30, 60));
+        assert_eq!(
+            (
+                fit(solid(1000, 2, [0; 3]), (100, 60)).width,
+                fit(solid(1000, 2, [0; 3]), (100, 60)).height
+            ),
+            (100, 1)
+        );
+        assert_eq!(
+            (
+                fit(solid(2, 1000, [0; 3]), (100, 60)).width,
+                fit(solid(2, 1000, [0; 3]), (100, 60)).height
+            ),
+            (1, 60)
+        );
+        let g = settle(&plan, &tiles, 0);
+        assert_eq!(g, plan);
+        let img = compose(&tiles, &[], &g, &l);
+        let (red, green, blue) = ([200, 0, 0], [0, 200, 0], [0, 0, 200]);
+        assert_eq!(at(&img, 4, 30), red);
+        assert_eq!(at(&img, 54, 30), green);
+        assert_eq!(at(&img, 103, 30), blue);
+        assert_eq!(at(&img, 54, 4), [0, 0, 0]);
+        assert_eq!(at(&img, 54, 5), green);
+        assert_eq!(at(&img, 54, 62), green);
+        assert_eq!(at(&img, 54, 63), [0, 0, 0]);
+        assert_eq!(at(&img, 158, 4), red);
+        assert_eq!(at(&img, 158, 34), green);
+        assert_eq!(at(&img, 158, 63), blue);
+        assert_eq!(at(&img, 142, 34), [0, 0, 0]);
+        assert_eq!(at(&img, 143, 34), green);
+        assert_eq!(at(&img, 172, 34), green);
+        assert_eq!(at(&img, 173, 34), [0, 0, 0]);
     }
 }

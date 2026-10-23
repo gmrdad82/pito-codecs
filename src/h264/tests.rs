@@ -820,3 +820,200 @@ fn crop_offsets_past_the_picture_are_refused() {
         assert!(dec.flush().unwrap_or_default().is_empty());
     }
 }
+
+#[test]
+fn sps_vui_carries_the_given_colour_tags() {
+    use crate::syntax::bits::unescape_rbsp;
+    use crate::syntax::h264::params::Sps;
+    let vui = |color: Option<crate::media::color::Color>| {
+        let mut config = EncoderConfig {
+            width: 64,
+            height: 48,
+            ..EncoderConfig::default()
+        };
+        if let Some(c) = color {
+            config.color = c;
+        }
+        let sps = Encoder::new(config).unwrap().sps();
+        Sps::parse(&unescape_rbsp(&sps[1..])).unwrap().vui.unwrap()
+    };
+    let tags = |v: &crate::syntax::h264::params::Vui| {
+        (
+            v.colour_primaries,
+            v.transfer_characteristics,
+            v.matrix_coefficients,
+            v.full_range,
+        )
+    };
+    assert_eq!(tags(&vui(None)), (1, 1, 1, false));
+    for c in [
+        crate::media::color::Color {
+            primaries: 1,
+            transfer: 1,
+            matrix: 6,
+            full_range: false,
+        },
+        crate::media::color::Color {
+            primaries: 9,
+            transfer: 16,
+            matrix: 9,
+            full_range: true,
+        },
+    ] {
+        let v = vui(Some(c));
+        assert_eq!(tags(&v), (c.primaries, c.transfer, c.matrix, c.full_range));
+        assert_eq!(v.video_format, 5);
+        assert!(v.timing.is_some() && v.bitstream_restriction.is_some());
+    }
+}
+
+#[test]
+fn encoded_frames_carry_the_colour_tags_back_out() {
+    let cases = [
+        (Color::BT709, ["tv", "bt709", "bt709", "bt709"]),
+        (
+            Color {
+                primaries: 6,
+                transfer: 6,
+                matrix: 6,
+                full_range: false,
+            },
+            ["tv", "smpte170m", "smpte170m", "smpte170m"],
+        ),
+        (
+            Color {
+                primaries: 1,
+                transfer: 1,
+                matrix: 1,
+                full_range: true,
+            },
+            ["pc", "bt709", "bt709", "bt709"],
+        ),
+        (
+            Color {
+                primaries: 5,
+                transfer: 6,
+                matrix: 5,
+                full_range: true,
+            },
+            ["pc", "bt470bg", "smpte170m", "bt470bg"],
+        ),
+    ];
+    let probe = Command::new("ffprobe").arg("-version").output().is_ok();
+    if !probe {
+        eprintln!("ffprobe not found, skipping its half");
+    }
+    for (n, (color, names)) in cases.into_iter().enumerate() {
+        let mut enc = Encoder::new(EncoderConfig {
+            width: 64,
+            height: 48,
+            gop: 4,
+            color,
+            ..EncoderConfig::default()
+        })
+        .unwrap();
+        let mut packets = Vec::new();
+        for i in 0..6u8 {
+            let mut f = Frame::new(
+                PixelFormat::Yuv420p8,
+                64,
+                48,
+                i64::from(i),
+                TimeBase::new(1, 30),
+            );
+            f.planes[0].data.fill(16 + i * 30);
+            packets.extend(enc.encode(&f).unwrap());
+        }
+        packets.extend(enc.flush().unwrap());
+        assert_eq!(packets.len(), 6);
+        let stream = to_annexb(&enc.avcc(), &packets);
+        let starts: Vec<usize> = stream
+            .windows(3)
+            .enumerate()
+            .filter(|(_, w)| *w == [0, 0, 1])
+            .map(|(i, _)| i + 3)
+            .collect();
+        let sps = starts
+            .iter()
+            .copied()
+            .find(|&at| stream[at] & 0x1f == 7)
+            .unwrap();
+        let end = starts
+            .iter()
+            .copied()
+            .find(|&at| at > sps)
+            .map_or(stream.len(), |at| at - 3);
+        let vui = crate::syntax::h264::params::Sps::parse(&crate::syntax::bits::unescape_rbsp(
+            &stream[sps + 1..end],
+        ))
+        .unwrap()
+        .vui
+        .unwrap();
+        assert_eq!(
+            (
+                vui.colour_primaries,
+                vui.transfer_characteristics,
+                vui.matrix_coefficients,
+                vui.full_range
+            ),
+            (
+                color.primaries,
+                color.transfer,
+                color.matrix,
+                color.full_range
+            )
+        );
+        let mut dec = Decoder::with_extradata(&enc.avcc()).unwrap();
+        let mut shown = 0;
+        for p in &packets {
+            shown += dec.decode(p).unwrap().len();
+        }
+        shown += dec.flush().unwrap().len();
+        assert_eq!(shown, 6);
+        assert_eq!(
+            dec.color(),
+            Some(ColorInfo {
+                full_range: color.full_range,
+                primaries: color.primaries,
+                transfer: color.transfer,
+                matrix: color.matrix,
+            })
+        );
+        if !probe {
+            continue;
+        }
+        let path = dir().join(format!("colour-{n}.h264"));
+        std::fs::write(&path, &stream).unwrap();
+        let out = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=color_range,color_primaries,color_transfer,color_space",
+                "-of",
+                "default=nw=1",
+            ])
+            .arg(&path)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        let tag = |key: &str| {
+            text.lines()
+                .find_map(|l| l.strip_prefix(&format!("{key}=")))
+                .unwrap_or("")
+                .to_string()
+        };
+        assert_eq!(
+            [
+                tag("color_range"),
+                tag("color_primaries"),
+                tag("color_transfer"),
+                tag("color_space")
+            ],
+            names.map(String::from),
+            "{text}"
+        );
+    }
+}

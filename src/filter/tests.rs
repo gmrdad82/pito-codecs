@@ -2229,3 +2229,42 @@ fn spectrogram_leaves_rows_above_nyquist_blank() {
         assert_ne!(pixel(&s, x, row(hz)), spectrum::BACKGROUND, "{hz} Hz");
     }
 }
+
+#[test]
+fn text_at_the_edges_is_clipped_never_wrapped_onto_other_rows() {
+    let painted = |img: &Rgba| -> Vec<(u32, u32)> {
+        let mut at = Vec::new();
+        for y in 0..img.height {
+            for x in 0..img.width {
+                let i = (y as usize * img.width as usize + x as usize) * 4;
+                if img.data[i..i + 3] != [0, 0, 0] {
+                    at.push((x, y));
+                }
+            }
+        }
+        at
+    };
+    let ink = [255, 255, 255];
+    let mut left = Rgba::new(20, 30);
+    spectrum::draw_text(&mut left, -3, 4, "8", ink);
+    let px = painted(&left);
+    assert!(px.iter().any(|&(x, _)| x == 0), "{px:?}");
+    assert!(
+        px.iter().all(|&(x, y)| x < 8 && (4..18).contains(&y)),
+        "{px:?}"
+    );
+    let mut right = Rgba::new(20, 30);
+    spectrum::draw_text(&mut right, 14, 4, "8", ink);
+    let px = painted(&right);
+    assert!(px.iter().any(|&(x, _)| x == 19), "{px:?}");
+    assert!(
+        px.iter().all(|&(x, y)| x >= 14 && (4..18).contains(&y)),
+        "{px:?}"
+    );
+    let mut low = Rgba::new(20, 10);
+    spectrum::draw_text(&mut low, 2, 6, "8", ink);
+    assert!(painted(&low).iter().all(|&(_, y)| y >= 6));
+    let mut above = Rgba::new(20, 10);
+    spectrum::draw_text(&mut above, 2, -10, "8", ink);
+    assert!(painted(&above).iter().all(|&(_, y)| y < 4));
+}

@@ -726,6 +726,7 @@ fn cpu_h264(job: &Job, preset: h264::Preset, rate: Rate) -> Result<VEnc, Fail> {
         b_frames: 2,
         threads: 0,
         bitstream: Bitstream::LengthPrefixed,
+        color: gpu::Color::BT709,
     })?;
     Ok(VEnc::H264(Box::new(e)))
 }

@@ -1,3 +1,5 @@
+#[cfg(any(feature = "h264", feature = "gpu"))]
+pub(crate) mod color;
 #[cfg(any(feature = "aac", feature = "filter"))]
 pub(crate) mod fft;
 mod nal;

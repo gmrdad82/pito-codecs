@@ -427,7 +427,7 @@ enum Command {
     },
     #[command(
         about = "Write a filmstrip of a video: tiles on a cadence in one image",
-        long_about = "Write a filmstrip of a video: tiles on a cadence in one image\n\nA tile is taken every --every (2s, 500ms, 1.5 or 0:01) from the start of the window, or --count tiles are spaced evenly over it (10 by default); --from and --to narrow the window. Each tile is scaled to --height keeping its shape, all from one pass over the video, at the keyframe at or before each time by default, which can sit before --from and is the time its label shows (--seek exact for the exact frame). The tiles sit in one row, or wrap into a grid with --wrap tiles per row or at --max-width pixels, with --gap pixels of --background between and around them; --timecodes writes each tile's time under it. The output's extension picks PNG, JPEG or WebP. A filmstrip over 268 megapixels is refused, and an existing output unless --force is given. --json prints the size, the tile size and each tile's time.",
+        long_about = "Write a filmstrip of a video: tiles on a cadence in one image\n\nA tile is taken every --every (2s, 500ms, 1.5 or 0:01) from the start of the window, or --count tiles are spaced evenly over it (10 by default); --from and --to narrow the window. Each tile is scaled down to --height keeping its shape (never up: a shorter video keeps its own size), all from one pass over the video, at the keyframe at or before each time by default, which can sit before --from and is the time its label shows (--seek exact for the exact frame). The tiles sit in one row, or wrap into a grid with --wrap tiles per row or at --max-width pixels, with --gap pixels of --background between and around them; --timecodes writes each tile's time under it. The output's extension picks PNG, JPEG or WebP. A filmstrip over 268 megapixels is refused, and an existing output unless --force is given. --json prints the size, the tile size and each tile's time.",
         group(ArgGroup::new("cadence").args(["every", "count"]))
     )]
     Filmstrip {
@@ -439,7 +439,11 @@ enum Command {
         every: Option<f64>,
         #[arg(long, short = 'n', help = "How many evenly spaced tiles [default: 10]")]
         count: Option<usize>,
-        #[arg(long, default_value_t = 90, help = "Height of each tile in pixels")]
+        #[arg(
+            long,
+            default_value_t = 90,
+            help = "Height of each tile in pixels, at most the video's own"
+        )]
         height: u32,
         #[arg(long, value_parser = time_of, help = "Start the window here (seconds, m:ss or h:mm:ss)")]
         from: Option<f64>,
@@ -1230,6 +1234,7 @@ impl Encoder {
             b_frames: 2,
             threads,
             bitstream: media::Bitstream::LengthPrefixed,
+            color: gpu::Color::BT709,
         })?;
         Ok(Encoder::Cpu(Box::new(e)))
     }

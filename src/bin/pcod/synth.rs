@@ -524,6 +524,7 @@ fn h264_config(w: u32, h: u32, fps: (u32, u32), gop: u32) -> h264::EncoderConfig
         b_frames: 2,
         threads: THREADS,
         bitstream: Bitstream::LengthPrefixed,
+        color: h264::Color::BT709,
     }
 }
 

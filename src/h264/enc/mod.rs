@@ -102,6 +102,7 @@ pub struct EncoderConfig {
     pub bframes: u8,
     pub threads: usize,
     pub format: PacketFormat,
+    pub color: crate::media::color::Color,
 }
 
 const AQ_STRENGTH: f32 = 0.6;
@@ -120,6 +121,7 @@ impl EncoderConfig {
             bframes: 2,
             threads: 0,
             format: PacketFormat::AnnexB,
+            color: crate::media::color::Color::BT709,
         }
     }
 }
@@ -525,6 +527,7 @@ impl Encoder {
                 time_scale: cfg.fps_num.saturating_mul(2),
                 max_num_reorder_frames: reorder,
                 max_dec_frame_buffering: max_refs as u32,
+                color: cfg.color,
             },
         };
         let pps = Pps {

@@ -381,6 +381,7 @@ pub(super) fn encoder_for(
         b_frames: if edge { 0 } else { 2 },
         threads,
         bitstream: Bitstream::LengthPrefixed,
+        color: Color::BT709,
     })?)))
 }
 

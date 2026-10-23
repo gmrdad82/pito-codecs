@@ -20,6 +20,7 @@ pub struct Vui {
     pub time_scale: u32,
     pub max_num_reorder_frames: u32,
     pub max_dec_frame_buffering: u32,
+    pub color: crate::media::color::Color,
 }
 
 #[derive(Clone, Debug)]
@@ -78,11 +79,11 @@ impl Sps {
         w.write_bit(false);
         w.write_bit(true);
         w.write_bits(5, 3);
-        w.write_bit(false);
+        w.write_bit(v.color.full_range);
         w.write_bit(true);
-        w.write_bits(1, 8);
-        w.write_bits(1, 8);
-        w.write_bits(1, 8);
+        w.write_bits(v.color.primaries as u32, 8);
+        w.write_bits(v.color.transfer as u32, 8);
+        w.write_bits(v.color.matrix as u32, 8);
         w.write_bit(false);
         w.write_bit(true);
         w.write_bits(v.num_units_in_tick, 32);

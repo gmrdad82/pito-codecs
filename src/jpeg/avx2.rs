@@ -6,7 +6,9 @@ pub(super) struct Avx2(());
 
 impl Avx2 {
     pub(super) fn detect() -> Option<Self> {
-        std::arch::is_x86_feature_detected!("avx2").then_some(Avx2(()))
+        (std::env::var_os("PITO_CODECS_NO_SIMD").is_none()
+            && std::arch::is_x86_feature_detected!("avx2"))
+        .then_some(Avx2(()))
     }
 }
 

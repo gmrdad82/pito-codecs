@@ -196,6 +196,21 @@ fn quantizing_at_quality_100_divides_by_eight_exactly() {
 }
 
 #[test]
+fn every_divisor_is_at_least_eight_and_the_reciprocal_is_total() {
+    for q in 1..=100u8 {
+        for base in [&quant::LUMA, &quant::CHROMA] {
+            assert!(quant::scaled(base, q).iter().all(|&d| d >= 8), "q{q}");
+        }
+    }
+    let (r, c) = quant::compute_reciprocal(1);
+    for v in [0i32, 1, 2, 255, 1024, 32767] {
+        assert_eq!(((v + c) * r) >> 15, v);
+    }
+    assert_eq!(quant::compute_reciprocal(0), quant::compute_reciprocal(1));
+    assert_eq!(quant::compute_reciprocal(8), (4096, 4));
+}
+
+#[test]
 fn quantizing_rounds_half_away_from_zero() {
     let q = QuantTable::new(&quant::LUMA, 50);
     let d = 16 * 8;
