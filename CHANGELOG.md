@@ -1,5 +1,30 @@
 # Changelog
 
+## v2.1.0 — 2026-10-23
+
+### Added
+
+- `pcod filmstrip <video> <out.png|jpg|webp>` lays frames taken on a cadence (`--every 10s`) or a count (`--count 60`) into one strip, wrapped into a grid when long, with `--timecodes`, `--gap` and `--background`; 21 to 67 times faster than ffmpeg's thumbnail tiling on 10-minute 1080p and 4K files.
+- `pcod stills` takes frames on a cadence over a whole video or a window (`--every 2s`, `--every 500ms`, or `--fps`) as PNG, JPEG or WebP with `--quality`, with `--crop W:H:X:Y` and `--hold <seconds>`, from a video or a folder of PNG frames.
+- Still images: `pcod probe` reads PNG, JPEG, WebP and GIF; `pcod <in.png|jpg|webp> <out.webp>` writes a still WebP with `--quality`, `--lossless` and `--size`; `pcod <in.png> <out.png> --crop` crops one still.
+- A GIF is an input like a video: probe it, convert it to H.264 (`--fps` resamples it, each frame held for its delay) or take its frames with `pcod stills`.
+- JPEG encode (ported from the jpeg-encoder crate, with an AVX2 path) and JPEG decode (baseline and progressive, ported from zune-jpeg), applying the EXIF orientation.
+- Vorbis audio decodes (ported from lewton) in Ogg, Matroska, WebM and MP4, within 1e-6 of ffmpeg per sample.
+- `pcod synth` makes deterministic test media: a moving pattern with a frame counter and one audio track per `--audio` entry.
+- `pcod <video> <out.s16|-> --track N --from T [--mono] [--rate R]` writes one audio track as raw 16-bit PCM to a file or stdout, and the library has the same call.
+- `pcod <in.mp4> <out.mp4> --no-audio` copies the video without its audio; `--add-audio <bed.wav> --title Voice,Music` adds a titled second AAC track.
+- A-law and mu-law audio decode; `pcod loudness --json` reports the sample peak and the duration; `pcod frames` takes `--force`.
+
+### Changed
+
+- The CPU H.264 encoder writes the source's colour description in the stream.
+- A 5.1 source mixed to mono now matches ffmpeg's `-ac 1`, 7.7 dB lower than before.
+
+### Fixed
+
+- Vorbis, Opus, AC-3 and MP3 in Matroska and WebM start and end on ffmpeg's exact samples (Opus in MKV no longer decodes longer than ffmpeg's).
+- A filmstrip tile whose stream size disagrees with its container is scaled down whole, never cropped.
+
 ## v2.0.0 — 2026-10-23
 
 ### Added
