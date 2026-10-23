@@ -23,7 +23,12 @@ for target in x86_64-pc-windows-gnu aarch64-apple-darwin aarch64-unknown-linux-g
         echo "gate: skipping clippy for $target (its std is not installed)"
     fi
 done
-prlimit --core=1:1 -- cargo nextest run --cargo-profile ci --all-targets --no-fail-fast
+tests=(cargo nextest run --cargo-profile ci --all-targets --no-fail-fast)
+if command -v prlimit >/dev/null 2>&1; then
+    prlimit --core=1:1 -- "${tests[@]}"
+else
+    "${tests[@]}"
+fi
 if [ "$fast" -eq 0 ]; then
     cargo build --release
 fi
