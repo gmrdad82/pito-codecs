@@ -32,6 +32,8 @@ pub struct Wav {
     pub mono: bool,
     pub rate: Option<u32>,
     pub opus: Option<u32>,
+    pub track: Option<usize>,
+    pub raw: bool,
 }
 
 pub fn is_wav(output: &Path) -> bool {

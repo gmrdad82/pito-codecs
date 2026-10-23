@@ -240,6 +240,16 @@ impl Error {
         ))
     }
 
+    pub fn in_stream(self, stream: usize) -> Self {
+        let named = |s: String| format!("stream {stream}: {s}");
+        match self {
+            Error::Unsupported(s) => Error::Unsupported(named(s)),
+            Error::Invalid(s) => Error::Invalid(named(s)),
+            Error::Backend(s) => Error::Backend(named(s)),
+            e => e,
+        }
+    }
+
     pub fn in_file(self, path: &std::path::Path) -> Self {
         let shown = path.display().to_string();
         let named = |s: String| {
@@ -292,5 +302,22 @@ mod tests {
         assert_eq!(f.planes[0].stride, 1281 * 2);
         assert_eq!((f.planes[1].width, f.planes[1].height), (641, 361));
         assert_eq!(f.planes[2].data.len(), 641 * 2 * 361);
+    }
+
+    #[test]
+    fn a_stream_number_leads_every_message_and_leaves_io_and_cancel_alone() {
+        let said = |e: Error| e.in_stream(3).to_string();
+        assert_eq!(
+            said(Error::Unsupported("x".into())),
+            "unsupported: stream 3: x"
+        );
+        assert_eq!(
+            said(Error::Invalid("y".into())),
+            "invalid data: stream 3: y"
+        );
+        assert_eq!(said(Error::Backend("z".into())), "backend: stream 3: z");
+        let io = Error::Io(std::io::Error::other("gone")).in_stream(3);
+        assert!(matches!(&io, Error::Io(e) if e.to_string() == "gone"));
+        assert!(matches!(Error::Cancelled.in_stream(3), Error::Cancelled));
     }
 }

@@ -670,7 +670,7 @@ fn mkv_audio(r: &mkv::Reader, starts: &Starts) -> Vec<AudioTrack> {
                 language: (!a.language.is_empty() && a.language != "und")
                     .then(|| a.language.clone()),
                 codec,
-                channels: a.channels() as u16,
+                channels: super::probe::mkv_channels(a),
                 rate,
                 bitrate: None,
                 default: a.default,

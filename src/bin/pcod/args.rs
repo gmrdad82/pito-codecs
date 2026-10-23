@@ -11,13 +11,14 @@ use super::extract::{
 };
 use super::plan::{Loudness, Request};
 use super::profile::{ANIMATED_FPS, ANIMATED_WIDTH, LIGHT_WEB_CRF, Profile, VP9_LIGHT_WEB_CRF};
+use super::raw::is_raw;
 use super::size::Size;
 
 pub const USAGE: &str = "pcod [OPTIONS] <INPUT> <OUTPUT>\n       pcod <COMMAND>";
 
 pub fn help() -> String {
     format!(
-        "The output's extension picks the container: mp4, mov, mkv (H.264 and AAC), webm (VP9 and Opus), gif or webp (animated, looping, {ANIMATED_WIDTH} px wide at {ANIMATED_FPS} fps by default, or the source's width and rate where smaller). --from and --to cut a window of the input, video and audio in sync, starting at 0: the first frame at or after --from to the last before --to. With no video option the cut copies whole GOPs and re-encodes only the frames at its edges where the container carries the source's codec; a video option re-encodes it all. A .wav output is the audio alone: the first audio track as 16-bit PCM, stereo at the source's rate when it is 44100 or 48000 Hz (else 48000), with --from and --to for a range, --mono, --rate and --loudness. A .opus (or .ogg) output is the audio alone as Ogg Opus at 48000 Hz, 64k stereo or 32k with --mono by default, --audio-bitrate KBPS from 16 to 510, with --from, --to, --mono and --loudness. The input is a video file or a folder of PNG frames in name order (--fps gives their rate).
+        "The output's extension picks the container: mp4, mov, mkv (H.264 and AAC), webm (VP9 and Opus), gif or webp (animated, looping, {ANIMATED_WIDTH} px wide at {ANIMATED_FPS} fps by default, or the source's width and rate where smaller). --from and --to cut a window of the input, video and audio in sync, starting at 0: the first frame at or after --from to the last before --to. With no video option the cut copies whole GOPs and re-encodes only the frames at its edges where the container carries the source's codec; a video option re-encodes it all. A .wav output is the audio alone: the first audio track as 16-bit PCM, stereo at the source's rate when it is 44100 or 48000 Hz (else 48000), with --from and --to for a range, --mono, --rate and --loudness. A .s16 output, or - for stdout, is one audio stream as raw 16-bit little-endian PCM from --from to its end: --track N picks the stream as the container numbers it (the first audio stream by default), --mono mixes it to one channel and --rate resamples it (the stream's own channels and rate by default). A .opus (or .ogg) output is the audio alone as Ogg Opus at 48000 Hz, 64k stereo or 32k with --mono by default, --audio-bitrate KBPS from 16 to 510, with --from, --to, --mono and --loudness. The input is a video file or a folder of PNG frames in name order (--fps gives their rate).
 Profiles: balanced (the default) and best are H.264 on the CPU at CRF 20 and 18 on x264's scale; fast is H.264 on the GPU at QP 25, on the CPU where no GPU encoder is found. For .webm, balanced is VP9 at CRF 32 and best at 28 on libvpx's scale.
 Light web: --profile best --crf {LIGHT_WEB_CRF} (.webm: --crf {VP9_LIGHT_WEB_CRF})
 For screen recordings: --tune animation
@@ -41,10 +42,14 @@ pub fn size_of(text: &str) -> Result<Size, String> {
 }
 
 pub fn rate_hz(text: &str) -> Result<u32, String> {
+    let (lowest, highest) = (
+        pito_codecs::media::LOWEST_RATE,
+        pito_codecs::media::HIGHEST_RATE,
+    );
     text.parse()
         .ok()
-        .filter(|r| RATES.contains(r))
-        .ok_or_else(|| "use 44100 or 48000".to_string())
+        .filter(|r| (lowest..=highest).contains(r))
+        .ok_or_else(|| format!("use 44100 or 48000 for a .wav, {lowest} to {highest} for raw PCM"))
 }
 
 pub fn loudness_of(text: &str) -> Result<Loudness, String> {
@@ -111,10 +116,16 @@ pub struct ConvertArgs {
     pub from: Option<f64>,
     #[arg(long, value_parser = super::time_of, help = "Stop before this time [default: the end]")]
     pub to: Option<f64>,
-    #[arg(long, help = "For a .wav or .opus: one channel instead of two")]
+    #[arg(long, help = "For a .wav, .opus, .s16 or -: one channel")]
     pub mono: bool,
-    #[arg(long, value_parser = rate_hz, value_name = "HZ", help = "For a .wav: 44100 or 48000 [default: the source's when it is one of them, else 48000]")]
+    #[arg(long, value_parser = rate_hz, value_name = "HZ", help = "For a .wav: 44100 or 48000 [default: the source's when it is one of them, else 48000]; for .s16 or -: 8000 to 768000 [default: the stream's]")]
     pub rate: Option<u32>,
+    #[arg(
+        long,
+        value_name = "N",
+        help = "For .s16 or -: the audio stream, numbered as the container numbers its streams (ffmpeg's -map 0:N) [default: the first audio stream]"
+    )]
+    pub track: Option<usize>,
     #[arg(long, help = "Replace an existing output")]
     pub force: bool,
     #[arg(long, help = "Print a JSON manifest instead of the plain result")]
@@ -185,6 +196,16 @@ pub fn options(
             sub,
             ErrorKind::InvalidUtf8,
             "invalid UTF-8 was detected in one or more arguments",
+        );
+    }
+    if is_raw(&output) {
+        return raw(sub, input, joining, output, args);
+    }
+    if args.track.is_some() {
+        usage_error(
+            sub,
+            ErrorKind::ArgumentConflict,
+            "--track fits a .s16 or - output",
         );
     }
     if is_wav(&output) || is_opus(&output) {
@@ -305,6 +326,16 @@ fn wav(
             format!("{flag} doesn't apply to .wav, which is uncompressed audio")
         });
     }
+    if !opus
+        && let Some(rate) = args.rate
+        && !RATES.contains(&rate)
+    {
+        usage_error(
+            sub,
+            ErrorKind::ValueValidation,
+            format!("a .wav takes --rate 44100 or 48000, not {rate}"),
+        );
+    }
     if opus
         && let Some(kbps) = args.audio_bitrate
         && !(OPUS_KBPS_LOWEST..=OPUS_KBPS_HIGHEST).contains(&kbps)
@@ -336,6 +367,8 @@ fn wav(
             to: args.to,
             mono: args.mono,
             rate: args.rate,
+            track: None,
+            raw: false,
             opus: opus.then(|| {
                 args.audio_bitrate.unwrap_or(if args.mono {
                     OPUS_KBPS_MONO
@@ -384,6 +417,58 @@ pub fn rate_of(text: &str) -> Result<(u32, u32), String> {
 
 fn gcd(a: u32, b: u32) -> u32 {
     if b == 0 { a.max(1) } else { gcd(b, a % b) }
+}
+
+fn raw(
+    sub: Option<&str>,
+    input: PathBuf,
+    joining: bool,
+    output: PathBuf,
+    args: ConvertArgs,
+) -> Options {
+    let conflict = |message: &str| usage_error(sub, ErrorKind::ArgumentConflict, message);
+    if joining {
+        conflict(
+            "join writes mp4, mov, mkv or webm, not raw PCM: join first, then take the PCM from the joined file",
+        );
+    }
+    if input.is_dir() {
+        conflict("raw PCM takes its audio from a video or audio file, not a folder of frames");
+    }
+    let other = [
+        (args.profile.is_some(), "--profile"),
+        (args.size.is_some(), "--size"),
+        (args.fps.is_some(), "--fps"),
+        (args.crf.is_some(), "--crf"),
+        (args.qp.is_some(), "--qp"),
+        (args.tune.is_some(), "--tune"),
+        (args.audio_bitrate.is_some(), "--audio-bitrate"),
+        (args.loudness.is_some(), "--loudness"),
+        (args.to.is_some(), "--to"),
+        (args.json, "--json"),
+    ];
+    if let Some((_, flag)) = other.iter().find(|(set, _)| *set) {
+        conflict(&format!(
+            "{flag} doesn't apply to raw PCM, which is 16-bit little-endian samples from --from to the end"
+        ));
+    }
+    let mut request = Request::new(input, output);
+    request.overwrite = args.force;
+    Options {
+        request,
+        json: false,
+        progress: false,
+        wav: Some(Wav {
+            from: args.from.unwrap_or(0.0),
+            to: None,
+            mono: args.mono,
+            rate: args.rate,
+            opus: None,
+            track: args.track,
+            raw: true,
+        }),
+        range: None,
+    }
 }
 
 pub fn every_of(text: &str) -> Result<f64, String> {

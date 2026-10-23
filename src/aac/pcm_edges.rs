@@ -89,7 +89,27 @@ fn full_scale_surround_sums_past_one_and_is_left_unclipped() {
     assert!((out.samples[0] - peak).abs() < 1e-6);
     assert!((out.samples[1] - peak).abs() < 1e-6);
     let m = mono(&six);
-    assert!((m.samples[0] - peak).abs() < 1e-6);
+    assert!((m.samples[0] - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn surround_to_mono_weighs_channels_as_ffmpeg_ac_1_does() {
+    let sum = 2.0 + 2.0 * K;
+    let want = [K / sum, K / sum, 1.0 / sum, 0.0, 0.5 / sum, 0.5 / sum];
+    for (c, w) in want.iter().enumerate() {
+        let mut s = vec![0.0; 6];
+        s[c] = 1.0;
+        let m = mono(&buffer(48_000, 6, s));
+        assert!(
+            (m.samples[0] - w).abs() < 1e-6,
+            "channel {c}: {}",
+            m.samples[0]
+        );
+    }
+    let three = mono(&buffer(48_000, 3, vec![1.0, 0.0, 0.0]));
+    assert!((three.samples[0] - K / (1.0 + 2.0 * K) * 1.0).abs() < 1e-6);
+    let st = mono(&buffer(48_000, 2, vec![1.0, 0.0]));
+    assert_eq!(st.samples, [0.5]);
 }
 
 #[test]

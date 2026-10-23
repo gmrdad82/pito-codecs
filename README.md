@@ -99,11 +99,12 @@ pcod join intro.mp4 scene.mp4 outro.mp4 film.mp4   # copied when the clips match
 pcod talk.mp4 upload.mp4 --loudness youtube        # -14 LUFS in two EBU R128 passes, video copied
 pcod phone.mp4 engine.wav --from 0:12 --to 0:20     # a range of the audio as 16-bit PCM WAV
 pcod mix.wav master.wav --loudness -14 --linear     # -14 LUFS keeping the dynamics, peaks limited
-pcod loudness master.mp4 --json                     # EBU R128 integrated, range, true peak, maxima
+pcod loudness master.mp4 --json                     # EBU R128 integrated, range, true peak, maxima, max_volume, duration
 pcod stills talk.mp4 --every 2s --format jpeg --out frames  # a JPEG every 2 seconds of the whole video
 pcod filmstrip talk.mp4 strip.png --every 10s --timecodes  # a tile every 10 seconds, its time under it
 pcod memo.wav memo.opus --mono --audio-bitrate 24   # voice as Ogg Opus, 24 kbps mono
 pcod spectrum memo.opus memo.png                    # a 1200x360 spectrogram up to 12 kHz
+pcod synth test.mp4 --size 1280x720 --fps 30 --duration 10 --audio sine:440,silence   # a test video, no ffmpeg
 ```
 
 Against pconv 1.0.1, the converter pcod replaced (ffmpeg 9.0.1 with x264, libvpx and libwebp) on 30 s of 1080p30 H.264 talking head, run in turn three times each, medians, at load 22 to 46 on a 32-thread machine; quality against the source (the GIF and WebP against it scaled to 800x450 at 12 fps):
@@ -366,7 +367,7 @@ let mut blender = Blender::new();
 blender.draw(&mut frame, &watermark);
 ```
 
-`pcod` (`src/bin/pcod.rs`) is a small command line over the library. `pcod <input> <output>` converts a file or a folder of PNG frames to MP4, MOV, MKV, WebM, GIF or WebP and `pcod join` stitches clips (see Convert above); the GIF at the top shows `pcod decode clip.mp4 --route gpu`, or from a checkout `cargo run --release --bin pcod -- decode clip.mp4 --route gpu`. `pcod frames <dir> <out.mp4> --fps 60 --audio sound.wav` encodes a folder of PNG frames in name order and a WAV into an H.264 (or HEVC) and AAC MP4, BT.709 and faststart, decoding the PNGs on every core ahead of the encoder. `pcod stills clip.mp4 --sheet sheet.png` writes a contact sheet; see Filmstrips. It is behind the `cli` feature, on by default, so a library user with `default-features = false` never builds clap.
+`pcod` (`src/bin/pcod.rs`) is a small command line over the library. `pcod <input> <output>` converts a file or a folder of PNG frames to MP4, MOV, MKV, WebM, GIF or WebP and `pcod join` stitches clips (see Convert above); the GIF at the top shows `pcod decode clip.mp4 --route gpu`, or from a checkout `cargo run --release --bin pcod -- decode clip.mp4 --route gpu`. `pcod frames <dir> <out.mp4> --fps 60 --audio sound.wav` encodes a folder of PNG frames in name order and a WAV into an H.264 (or HEVC) and AAC MP4, BT.709 and faststart, decoding the PNGs on every core ahead of the encoder. `pcod stills clip.mp4 --sheet sheet.png` writes a contact sheet; see Filmstrips. `pcod synth <out> --size WxH --fps R --duration D --audio sine:440,sine:880,silence` writes a test video with no ffmpeg: seven colour bars with a moving box, the frame number in digits and as 24 white-or-black bits, and one stereo track per `--audio` entry (a -18 dBFS sine or silence) at `--rate` (48000 by default); mp4, mov and mkv carry H.264 and AAC, webm VP9 and Opus, and the same command on the same build and machine writes the same bytes. `pcod loudness <file> --json` also gives `max_volume`, the sample peak in dBFS to 0.1 dB, from -91.0 for silence up to 0.0, as ffmpeg's volumedetect reports it, and the `duration` in seconds (the whole file's). It is behind the `cli` feature, on by default, so a library user with `default-features = false` never builds clap.
 
 
 ## How it was measured

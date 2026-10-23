@@ -1179,7 +1179,10 @@ pub fn refuse(message: &str) -> ExitCode {
 pub fn run(options: Options) -> ExitCode {
     signals::catch();
     let mut partial_path = None;
-    let outcome = if let Some(wav) = &options.wav {
+    let raw = options.wav.as_ref().is_some_and(|w| w.raw);
+    let outcome = if let Some(wav) = options.wav.as_ref().filter(|w| w.raw) {
+        super::raw::run(&options, wav, &mut partial_path, &signals::STOP)
+    } else if let Some(wav) = &options.wav {
         super::extract::run(&options, wav, &mut partial_path)
     } else if options.request.joins.is_empty() {
         convert(&options, &mut partial_path)
@@ -1190,6 +1193,7 @@ pub fn run(options: Options) -> ExitCode {
         let _ = std::fs::remove_file(p);
     }
     match outcome {
+        Ok(text) if raw && text.is_empty() => ExitCode::SUCCESS,
         Ok(text) => print(&text),
         Err(e) => {
             if let Some((code, message)) = signals::caught() {

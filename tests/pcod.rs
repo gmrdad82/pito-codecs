@@ -1034,6 +1034,222 @@ fn an_id3_tagged_flac_is_labelled_flac() {
     assert!(text(&plain.stdout).starts_with("container  FLAC"));
 }
 
+fn ramp_wav(seconds: usize) -> (Vec<u8>, Vec<i16>) {
+    let frames = 48_000 * seconds;
+    let samples: Vec<i16> = (0..frames)
+        .flat_map(|i| {
+            let t = i as f64 / 48_000.0;
+            let l = ((t * 440.0 * std::f64::consts::TAU).sin() * 12_000.0) as i16;
+            let r = ((t * 150.0 * std::f64::consts::TAU).sin() * 9_000.0) as i16;
+            [l, r]
+        })
+        .collect();
+    let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    let mut file = Vec::with_capacity(44 + data.len());
+    file.extend_from_slice(b"RIFF");
+    file.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+    file.extend_from_slice(b"WAVEfmt ");
+    file.extend_from_slice(&16u32.to_le_bytes());
+    file.extend_from_slice(&1u16.to_le_bytes());
+    file.extend_from_slice(&2u16.to_le_bytes());
+    file.extend_from_slice(&48_000u32.to_le_bytes());
+    file.extend_from_slice(&(48_000u32 * 4).to_le_bytes());
+    file.extend_from_slice(&4u16.to_le_bytes());
+    file.extend_from_slice(&16u16.to_le_bytes());
+    file.extend_from_slice(b"data");
+    file.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    file.extend_from_slice(&data);
+    (file, samples)
+}
+
+fn le(bytes: &[u8]) -> Vec<i16> {
+    bytes
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .collect()
+}
+
+#[test]
+fn raw_s16_goes_to_a_file_or_stdout_from_any_start() {
+    let out = dir("raw-s16");
+    let input = out.join("ramp.wav");
+    let (file, samples) = ramp_wav(2);
+    fs::write(&input, file).unwrap();
+    let input_s = input.to_str().unwrap();
+
+    let piped = run(&[input_s, "-", "--from", "1"]);
+    ok(&piped);
+    assert!(piped.stderr.is_empty(), "{}", text(&piped.stderr));
+    assert_eq!(
+        le(&piped.stdout),
+        samples[48_000 * 2..],
+        "stereo at 48000 Hz is the source as it is"
+    );
+
+    let whole = run(&[input_s, "-", "--track", "0"]);
+    ok(&whole);
+    assert_eq!(le(&whole.stdout), samples);
+
+    let target = out.join("voice.s16");
+    let target_s = target.to_str().unwrap();
+    let written = run(&[input_s, target_s, "--mono", "--rate", "16000"]);
+    ok(&written);
+    assert_eq!(text(&written.stdout).trim(), target_s);
+    let mono = le(&fs::read(&target).unwrap());
+    assert!(mono.len().abs_diff(32_000) <= 160, "{} samples", mono.len());
+    let own = audio_pcm_range(&input, 0, 0.0, f64::INFINITY, 16_000, 1, &Prefs::default()).unwrap();
+    let own: Vec<i16> = own
+        .samples
+        .iter()
+        .map(|&s| pito_codecs::media::to_s16(s))
+        .collect();
+    let n = mono.len().min(own.len()) - 160;
+    let worst = mono[..n]
+        .iter()
+        .zip(&own[..n])
+        .map(|(a, b)| (*a as i32 - *b as i32).abs())
+        .max()
+        .unwrap();
+    assert!(
+        worst <= 8,
+        "the streamed mono differs from the in-memory one by {worst}"
+    );
+    assert!(partials(&out).is_empty());
+
+    let again = run(&[input_s, target_s, "--mono"]);
+    assert_eq!(again.status.code(), Some(1));
+    assert!(text(&again.stderr).contains("already exists"));
+    ok(&run(&[input_s, target_s, "--mono", "--force"]));
+    assert_eq!(le(&fs::read(&target).unwrap()).len(), 96_000);
+}
+
+#[test]
+fn raw_s16_refusals_are_one_line_and_bad_flags_exit_2() {
+    let out = dir("raw-s16-refused");
+    let input = out.join("ramp.wav");
+    fs::write(&input, ramp_wav(1).0).unwrap();
+    let input_s = input.to_str().unwrap();
+    for (args, said) in [
+        (&["--track", "3"][..], "no audio stream 3"),
+        (&["--from", "5"], "past the end"),
+    ] {
+        let mut all = vec![input_s, "-"];
+        all.extend_from_slice(args);
+        let got = run(&all);
+        let stderr = text(&got.stderr);
+        assert_eq!(got.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(got.stdout.is_empty(), "{args:?}");
+        assert!(
+            stderr.starts_with("pcod: ") && stderr.contains(said),
+            "{args:?}: {stderr}"
+        );
+        assert_eq!(stderr.lines().count(), 1, "{args:?}: {stderr}");
+    }
+    let same = out.join("ramp.s16");
+    fs::copy(&input, &same).unwrap();
+    let same_s = same.to_str().unwrap();
+    let got = run(&[same_s, same_s, "--force"]);
+    assert_eq!(got.status.code(), Some(1), "{}", text(&got.stderr));
+    assert!(text(&got.stderr).contains("the output is the input"));
+    assert_eq!(fs::read(&same).unwrap(), fs::read(&input).unwrap());
+    let missing = run(&["nothing-here.mkv", "-"]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(text(&missing.stderr).contains("nothing-here.mkv"));
+    let folder = run(&[out.to_str().unwrap(), "-"]);
+    let stderr = text(&folder.stderr);
+    assert_eq!(folder.status.code(), Some(2), "{stderr}");
+    assert!(stderr.starts_with("error: "), "{stderr}");
+    assert!(stderr.contains("not a folder of frames"), "{stderr}");
+    assert!(folder.stdout.is_empty());
+    let cases: &[&[&str]] = &[
+        &["in.mkv", "out.s16", "--to", "3"],
+        &["in.mkv", "out.s16", "--json"],
+        &["in.mkv", "-", "--loudness", "-16"],
+        &["in.mkv", "-", "--crf", "20"],
+        &["in.mkv", "-", "--rate", "0"],
+        &["in.mkv", "-", "--rate", "16"],
+        &["in.mkv", "-", "--rate", "7999"],
+        &["in.mkv", "-", "--track", "x"],
+        &["in.mkv", "out.mp4", "--track", "1"],
+        &["in.mkv", "out.wav", "--track", "1"],
+        &["in.mkv", "out.wav", "--rate", "16000"],
+        &["join", "a.mkv", "b.mkv", "out.s16"],
+    ];
+    for args in cases {
+        let got = run(args);
+        let stderr = text(&got.stderr);
+        assert_eq!(got.status.code(), Some(2), "{args:?}: {stderr}");
+        assert!(stderr.starts_with("error: "), "{args:?}: {stderr}");
+        assert!(got.stdout.is_empty(), "{args:?}");
+    }
+}
+
+#[test]
+fn raw_s16_track_picks_the_stream_the_container_numbers() {
+    if !has_encoder("mpeg4") {
+        eprintln!("no ffmpeg with mpeg4 on PATH: the raw --track test is skipped");
+        return;
+    }
+    let out = dir("raw-s16-track");
+    let input = out.join("two-tracks.mkv");
+    let made = Command::new("ffmpeg")
+        .args(["-nostdin", "-v", "error", "-y"])
+        .args(["-f", "lavfi", "-i", "testsrc2=s=352x240:r=30:d=2"])
+        .args(["-f", "lavfi", "-i", "sine=f=300:r=48000:d=2"])
+        .args(["-f", "lavfi", "-i", "sine=f=1200:r=44100:d=2"])
+        .args(["-map", "0:v", "-map", "1:a", "-map", "2:a"])
+        .args(["-c:v", "mpeg4", "-c:a", "aac", "-b:a", "128k"])
+        .arg(&input)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let input_s = input.to_str().unwrap();
+    let decode = |stream: usize| {
+        let span = pito_codecs::media::S16Span {
+            stream,
+            from: 0.5,
+            rate: 16_000,
+            mono: true,
+        };
+        let mut all = Vec::new();
+        pito_codecs::media::decode_s16(&input, &span, &Prefs::default(), |c| {
+            all.extend_from_slice(c);
+            Ok(())
+        })
+        .unwrap();
+        all
+    };
+    for stream in [1usize, 2] {
+        let n = stream.to_string();
+        let got = run(&[
+            input_s, "-", "--track", &n, "--from", "0.5", "--mono", "--rate", "16000",
+        ]);
+        ok(&got);
+        let got = le(&got.stdout);
+        assert!(
+            got.len().abs_diff(24_000) <= 800,
+            "stream {stream}: {} samples",
+            got.len()
+        );
+        assert_eq!(got, decode(stream), "stream {stream}");
+    }
+    assert_ne!(decode(1), decode(2));
+    let first = run(&[input_s, "-", "--from", "0.5", "--mono", "--rate", "16000"]);
+    ok(&first);
+    assert_eq!(
+        le(&first.stdout),
+        decode(1),
+        "no --track takes the first audio stream"
+    );
+    let video = run(&[input_s, "-", "--track", "0"]);
+    assert_eq!(video.status.code(), Some(1));
+    assert!(
+        text(&video.stderr).contains("no audio stream 0"),
+        "{}",
+        text(&video.stderr)
+    );
+}
+
 const MKV_RATES: [(&str, (u32, u32)); 6] = [
     ("23.976", (24000, 1001)),
     ("24", (24, 1)),
@@ -1384,4 +1600,83 @@ fn calibrated_levelling_that_reaches_the_target_reports_its_passes_without_a_sho
         m["true_peak"].as_f64().unwrap() <= -1.0,
         "the written file stays under the ceiling: {m}"
     );
+}
+
+#[cfg(unix)]
+fn long_wav(name: &str) -> (PathBuf, PathBuf) {
+    let out = dir(name);
+    let input = out.join("long.wav");
+    fs::write(&input, ramp_wav(20).0).unwrap();
+    (out, input)
+}
+
+#[cfg(unix)]
+fn raw_child(input: &Path) -> std::process::Child {
+    pcod()
+        .args([input.to_str().unwrap(), "-"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn raw_s16_ends_quietly_when_the_reader_hangs_up() {
+    use std::io::Read;
+    let (out, input) = long_wav("raw-s16-hang-up");
+    let mut child = raw_child(&input);
+    let mut some = vec![0u8; 16 << 10];
+    child.stdout.take().unwrap().read_exact(&mut some).unwrap();
+    assert_eq!(le(&some), ramp_wav(1).1[..8 << 10]);
+    let done = child.wait_with_output().unwrap();
+    assert_eq!(done.status.code(), Some(0), "{}", text(&done.stderr));
+    assert!(done.stderr.is_empty(), "{}", text(&done.stderr));
+    assert!(partials(&out).is_empty());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_s16_to_a_full_device_fails_in_one_line() {
+    let (_, input) = long_wav("raw-s16-full");
+    let full = fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .unwrap();
+    let done = pcod()
+        .args([input.to_str().unwrap(), "-"])
+        .stdout(full)
+        .output()
+        .unwrap();
+    let stderr = text(&done.stderr);
+    assert_eq!(done.status.code(), Some(1), "{stderr}");
+    assert!(stderr.starts_with("pcod: "), "{stderr}");
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn ctrl_c_stops_raw_s16_mid_stream() {
+    use std::io::Read;
+    let (out, input) = long_wav("raw-s16-ctrl-c");
+    let mut child = raw_child(&input);
+    let mut stdout = child.stdout.take().unwrap();
+    let mut some = vec![0u8; 4 << 10];
+    stdout.read_exact(&mut some).unwrap();
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    let pid = i32::try_from(child.id()).unwrap();
+    assert_eq!(unsafe { kill(pid, 2) }, 0);
+    let mut rest = Vec::new();
+    stdout.read_to_end(&mut rest).unwrap();
+    let done = child.wait_with_output().unwrap();
+    let stderr = text(&done.stderr);
+    assert_eq!(done.status.code(), Some(130), "{stderr}");
+    assert_eq!(stderr, "pcod: interrupted by SIGINT\n");
+    assert!(
+        some.len() + rest.len() < 20 * 48_000 * 4,
+        "the whole stream came out"
+    );
+    assert!(partials(&out).is_empty());
 }

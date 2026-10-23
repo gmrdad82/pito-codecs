@@ -49,6 +49,8 @@ mod pipeline;
 mod plan;
 #[path = "pcod/profile.rs"]
 mod profile;
+#[path = "pcod/raw.rs"]
+mod raw;
 #[path = "pcod/signals.rs"]
 mod signals;
 #[path = "pcod/size.rs"]
@@ -57,6 +59,8 @@ mod size;
 mod source;
 #[path = "pcod/spectrum.rs"]
 mod spectrum;
+#[path = "pcod/synth.rs"]
+mod synth;
 
 #[derive(Parser)]
 #[command(
@@ -74,7 +78,7 @@ struct Cli {
     input: Option<PathBuf>,
     #[arg(
         value_name = "OUTPUT",
-        help = "The file to write: mp4, mov, mkv, webm, gif, webp, or wav or opus for the audio alone"
+        help = "The file to write: mp4, mov, mkv, webm, gif, webp, wav or opus for the audio alone, or s16 (or - for stdout) for raw PCM"
     )]
     output: Option<PathBuf>,
     #[command(flatten)]
@@ -111,7 +115,7 @@ enum Command {
     },
     #[command(
         about = "Measure an audio track's loudness (EBU R128, ITU-R BS.1770-4)",
-        long_about = "Measure an audio track's loudness (EBU R128, ITU-R BS.1770-4)\n\nReads the track at its own rate and channels and reports the integrated loudness (gated), the loudness range, the true peak (4x oversampled below 88.2 kHz), the sample peak and the short-term (3 s) and momentary (400 ms) maxima. Five- and six-channel tracks weigh the surrounds by 1.41 and leave out the LFE (the fourth channel). The file is a video or an audio file: MP4, MOV, M4A, MKV, MKA, WebM, WAV or MP3."
+        long_about = "Measure an audio track's loudness (EBU R128, ITU-R BS.1770-4)\n\nReads the track at its own rate and channels and reports the integrated loudness (gated), the loudness range, the true peak (4x oversampled below 88.2 kHz), the sample peak and the short-term (3 s) and momentary (400 ms) maxima. --json also gives max_volume, the sample peak in dBFS rounded to 0.1 dB and held between -91.0 (silence) and 0.0 as ffmpeg's volumedetect reports it, and the duration in seconds, the whole file's length as ffprobe's format duration gives it. Five- and six-channel tracks weigh the surrounds by 1.41 and leave out the LFE (the fourth channel). The file is a video or an audio file: MP4, MOV, M4A, MKV, MKA, WebM, WAV or MP3."
     )]
     Loudness {
         #[arg(help = "A video or audio file")]
@@ -120,6 +124,34 @@ enum Command {
         track: usize,
         #[arg(long, help = "Print the measurements as JSON")]
         json: bool,
+    },
+    #[command(
+        about = "Write a test video: colour bars, a frame counter, a moving box and tones",
+        long_about = "Write a test video: colour bars, a frame counter, a moving box and tones\n\nThe top two thirds hold seven 75% colour bars with a box moving across them; the bottom third holds the frame number in white digits and, above them, as 24 bits (most significant first, white for 1), so every frame differs and is identified by its pixels. Each --audio entry is one stereo track: sine:<hz> plays a sine at -18 dBFS (an amplitude of 1/8), silence plays nothing. The extension picks the container and its codecs: mp4, mov and mkv carry H.264 and AAC, webm VP9 and Opus. The encode runs on the CPU at a fixed quality with fixed threads and a keyframe every 2 seconds (pcod's conversions use 10), so the same command on the same build and machine writes the same bytes and every part seeks fast. Each audio track ends with the video. --rate applies only when there is audio. An existing output is refused unless --force is given."
+    )]
+    Synth {
+        #[arg(help = "The video to write: mp4, mov, mkv or webm")]
+        output: PathBuf,
+        #[arg(long, value_parser = synth::size_of, help = "The picture size, WxH, both even, from 128x96 to 8192x8192; H.264 (mp4, mov, mkv) up to level 6.2, 139264 macroblocks a frame (8192x4352) and 16711680 a second")]
+        size: (u32, u32),
+        #[arg(long, value_parser = args::rate_of, help = "Frame rate: an integer, a ratio such as 30000/1001, or a decimal, up to 240")]
+        fps: (u32, u32),
+        #[arg(long, value_parser = time_of, help = "The length: seconds, m:ss or h:mm:ss")]
+        duration: f64,
+        #[arg(
+            long,
+            value_delimiter = ',',
+            help = "Audio tracks, comma separated: sine:<hz> or silence, one track each [default: none]"
+        )]
+        audio: Vec<String>,
+        #[arg(
+            long,
+            default_value_t = 48_000,
+            help = "The audio sample rate in Hz (AAC: one of its standard rates, 7350 to 96000; WebM: 48000 only)"
+        )]
+        rate: u32,
+        #[arg(long, help = "Replace an existing output")]
+        force: bool,
     },
     #[command(
         about = "Draw an audio track's spectrogram as a PNG",
@@ -527,6 +559,25 @@ fn main() -> ExitCode {
             return convert::run(args::options(Some("join"), first, inputs, output, convert));
         }
         Some(Command::Profiles) => return convert::print(&convert::profiles()),
+        Some(Command::Synth {
+            output,
+            size,
+            fps,
+            duration,
+            audio,
+            rate,
+            force,
+        }) => {
+            return synth::exit(&synth::Job {
+                output,
+                size,
+                fps,
+                seconds: duration,
+                audio,
+                rate,
+                force,
+            });
+        }
         Some(Command::Probe { file, json: true }) => {
             return match probe_json::probe_json(&file) {
                 Ok(text) => convert::print(&text),
@@ -594,7 +645,10 @@ fn run(command: Command) -> Result<(), Fail> {
                 json,
             },
         ),
-        Command::Convert { .. } | Command::Join { .. } | Command::Profiles => Ok(()),
+        Command::Convert { .. }
+        | Command::Synth { .. }
+        | Command::Join { .. }
+        | Command::Profiles => Ok(()),
         Command::Decode {
             file,
             route,
@@ -769,10 +823,12 @@ fn loudness(out: &mut impl Write, file: &Path, track: usize, json: bool) -> Resu
             ("channels", t.channels.into()),
             ("sample_rate", t.rate.into()),
             ("seconds", p.duration.into()),
+            ("duration", p.duration.into()),
             ("integrated", m.integrated.into()),
             ("range", m.range.into()),
             ("true_peak", m.true_peak.into()),
             ("sample_peak", m.sample_peak.into()),
+            ("max_volume", max_volume(m.sample_peak).into()),
             ("short_term_max", m.short_term_max.into()),
             ("momentary_max", m.momentary_max.into()),
         ]);
@@ -798,6 +854,13 @@ fn loudness(out: &mut impl Write, file: &Path, track: usize, json: bool) -> Resu
     writeln!(out, "short-term max  {} LUFS", n(m.short_term_max))?;
     writeln!(out, "momentary max   {} LUFS", n(m.momentary_max))?;
     Ok(())
+}
+
+fn max_volume(sample_peak: f64) -> f64 {
+    if sample_peak.is_nan() {
+        return -91.0;
+    }
+    ((sample_peak.min(0.0) * 10.0).round() / 10.0).max(-91.0) + 0.0
 }
 
 fn about(file: &Path, e: impl std::fmt::Display) -> Fail {
@@ -1348,4 +1411,38 @@ fn encode(
         std::fs::metadata(output)?.len() as f64 / 1e6
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Command, max_volume, run};
+
+    #[test]
+    fn max_volume_reads_as_volumedetect_does() {
+        assert_eq!(max_volume(-6.02), -6.0);
+        assert_eq!(max_volume(-18.06), -18.1);
+        assert_eq!(max_volume(f64::NEG_INFINITY), -91.0);
+        assert_eq!(max_volume(f64::NAN), -91.0);
+        assert_eq!(max_volume(-120.0), -91.0);
+        assert_eq!(max_volume(3.5), 0.0);
+        assert_eq!(max_volume(f64::INFINITY), 0.0);
+        assert!(max_volume(-0.01).is_sign_positive());
+    }
+
+    #[test]
+    fn the_commands_main_runs_itself_are_no_ops_here() {
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/never-written.mp4");
+        assert!(run(Command::Profiles).is_ok());
+        let synth = Command::Synth {
+            output: output.clone(),
+            size: (128, 96),
+            fps: (30, 1),
+            duration: 1.0,
+            audio: Vec::new(),
+            rate: 48_000,
+            force: true,
+        };
+        assert!(run(synth).is_ok());
+        assert!(!output.exists());
+    }
 }

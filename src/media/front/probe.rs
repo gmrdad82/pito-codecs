@@ -279,11 +279,7 @@ impl AudioTrack {
     }
 
     pub fn native(&self) -> bool {
-        let native: &[&str] = if cfg!(feature = "opus") {
-            &["aac", "opus", "pcm"]
-        } else {
-            &["aac", "pcm"]
-        };
+        let native: &[&str] = &["aac", "pcm", "alaw", "ulaw"];
         let ac3: &[&str] = if cfg!(feature = "ac3") {
             &["ac3", "eac3"]
         } else {
@@ -309,6 +305,7 @@ impl AudioTrack {
         !refused
             && native
                 .iter()
+                .chain(["opus"].iter().filter(|_| cfg!(feature = "opus")))
                 .chain(ac3)
                 .chain(mp3)
                 .chain(flac)
@@ -353,11 +350,28 @@ pub(super) fn mp4_audio_codec(t: &crate::mp4::Track) -> (String, u32, Option<Str
 
 pub(super) fn mkv_audio_codec(t: &crate::mkv::Track) -> (String, u32, Option<String>) {
     let name = t.codec_name();
+    if name == "A_MS/ACM" {
+        let rate = super::sound::acm_format(&t.codec_private).map_or(t.sample_rate(), |f| f.2);
+        return (
+            super::sound::acm_name(&t.codec_private).to_string(),
+            rate,
+            super::sound::acm_refused(&t.codec_private),
+        );
+    }
     #[cfg(feature = "alac")]
     if name == "alac" {
         return alac(Some(&t.codec_private), t.sample_rate());
     }
     (name.to_string(), t.sample_rate(), None)
+}
+
+pub(super) fn mkv_channels(t: &crate::mkv::Track) -> u16 {
+    let container = t.channels() as u16;
+    if t.codec_name() == "A_MS/ACM" {
+        super::sound::acm_channels(&t.codec_private, container)
+    } else {
+        container
+    }
 }
 
 #[derive(Default)]

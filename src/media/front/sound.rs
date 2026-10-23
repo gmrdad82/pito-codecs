@@ -12,7 +12,38 @@ enum Kind {
     S32,
     F32,
     F64,
+    ALaw,
+    MuLaw,
 }
+
+const fn g711(mu: bool, b: u8) -> i16 {
+    if mu {
+        let u = !b;
+        let t = ((((u & 0x0f) as i32) << 3) + 0x84) << ((u & 0x70) >> 4);
+        (if u & 0x80 != 0 { 0x84 - t } else { t - 0x84 }) as i16
+    } else {
+        let a = b ^ 0x55;
+        let seg = ((a & 0x70) >> 4) as i32;
+        let mut t = (((a & 0x0f) as i32) << 4) + if seg == 0 { 8 } else { 0x108 };
+        if seg > 1 {
+            t <<= seg - 1;
+        }
+        (if a & 0x80 != 0 { t } else { -t }) as i16
+    }
+}
+
+const fn g711_table(mu: bool) -> [i16; 256] {
+    let mut t = [0i16; 256];
+    let mut i = 0;
+    while i < 256 {
+        t[i] = g711(mu, i as u8);
+        i += 1;
+    }
+    t
+}
+
+const ALAW: [i16; 256] = g711_table(false);
+const MULAW: [i16; 256] = g711_table(true);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pcm {
@@ -48,6 +79,19 @@ impl Pcm {
                 return Err(Error::Unsupported(format!("{form} {bits}-bit PCM")));
             }
         };
+        Pcm::of(kind, big_endian, channels, rate)
+    }
+
+    pub fn g711(mu: bool, channels: u64, rate: f64) -> Result<Pcm> {
+        Pcm::of(
+            if mu { Kind::MuLaw } else { Kind::ALaw },
+            false,
+            channels,
+            rate,
+        )
+    }
+
+    fn of(kind: Kind, big_endian: bool, channels: u64, rate: f64) -> Result<Pcm> {
         if !(1..=64).contains(&channels) {
             return Err(Error::Invalid(format!("PCM with {channels} channels")));
         }
@@ -75,7 +119,7 @@ impl Pcm {
 
     fn width(&self) -> usize {
         match self.kind {
-            Kind::U8 | Kind::S8 => 1,
+            Kind::U8 | Kind::S8 | Kind::ALaw | Kind::MuLaw => 1,
             Kind::S16 => 2,
             Kind::S24 => 3,
             Kind::S32 | Kind::F32 => 4,
@@ -98,6 +142,8 @@ impl Pcm {
         match self.kind {
             Kind::U8 => out.extend(data.iter().map(|&b| (b as f32 - 128.0) / 128.0)),
             Kind::S8 => out.extend(data.iter().map(|&b| b as i8 as f32 / 128.0)),
+            Kind::ALaw => out.extend(data.iter().map(|&b| ALAW[b as usize] as f32 / 32768.0)),
+            Kind::MuLaw => out.extend(data.iter().map(|&b| MULAW[b as usize] as f32 / 32768.0)),
             Kind::S16 => out.extend(data.chunks_exact(2).map(|c| {
                 let v = [c[0], c[1]];
                 let s = if be {
@@ -190,6 +236,67 @@ fn mkv_pcm(t: &crate::mkv::Track) -> Result<Pcm> {
     )
 }
 
+pub(super) fn acm_format(private: &[u8]) -> Option<(u16, u16, u32, u16)> {
+    let at = |i: usize| -> Option<u16> {
+        Some(u16::from_le_bytes(private.get(i..i + 2)?.try_into().ok()?))
+    };
+    let tag = match at(0)? {
+        0xfffe => at(24)?,
+        tag => tag,
+    };
+    let rate = u32::from_le_bytes(private.get(4..8)?.try_into().ok()?);
+    Some((tag, at(2)?, rate, at(14)?))
+}
+
+pub(super) fn acm_name(private: &[u8]) -> &'static str {
+    match acm_format(private).map(|f| f.0) {
+        Some(1 | 3) => "pcm",
+        Some(6) => "alaw",
+        Some(7) => "ulaw",
+        _ => "A_MS/ACM",
+    }
+}
+
+pub(super) fn acm_refused(private: &[u8]) -> Option<String> {
+    let Some((tag, ..)) = acm_format(private) else {
+        return Some("A_MS/ACM without its WAVEFORMATEX".to_string());
+    };
+    let name = match tag {
+        1 | 3 | 6 | 7 => return None,
+        0x0160 => "WMA v1",
+        0x0161 => "WMA v2",
+        0x0162 => "WMA Pro",
+        0x0163 => "WMA Lossless",
+        0x0055 => "MP3",
+        0x2000 => "AC-3",
+        0x00ff | 0x1610 => "AAC",
+        _ => "Windows audio",
+    };
+    Some(format!("{name} (Windows audio format 0x{tag:04x})"))
+}
+
+pub(super) fn acm_channels(private: &[u8], container: u16) -> u16 {
+    acm_format(private).map_or(container, |f| f.1).max(1)
+}
+
+fn acm_pcm(private: &[u8]) -> Result<Pcm> {
+    let Some((tag, channels, rate, bits)) = acm_format(private) else {
+        return Err(Error::Invalid(
+            "an A_MS/ACM track without its WAVEFORMATEX".to_string(),
+        ));
+    };
+    let (channels, rate) = (channels as u64, rate as f64);
+    match tag {
+        1 => Pcm::new(bits, false, bits != 8, false, channels, rate),
+        3 => Pcm::new(bits, true, true, false, channels, rate),
+        6 => Pcm::g711(false, channels, rate),
+        7 => Pcm::g711(true, channels, rate),
+        tag => Err(Error::Unsupported(format!(
+            "Windows audio format 0x{tag:04x} in A_MS/ACM is not supported"
+        ))),
+    }
+}
+
 pub(super) fn child<'a>(e: &'a crate::mp4::SampleEntry, kind: &[u8; 4]) -> Option<&'a [u8]> {
     let extra = match e.audio.as_ref().map_or(0, |a| a.qt_version) {
         1 => 16,
@@ -242,6 +349,14 @@ impl Sound {
                         Ok(Sound::Aac(Box::new(crate::aac::Decoder::new(&asc)?)))
                     }
                     CodecConfig::Pcm(p) => Ok(Sound::Pcm(Pcm::from_mp4(p)?)),
+                    CodecConfig::Other(f) if &f.0 == b"alaw" || &f.0 == b"ulaw" => {
+                        let a = e.audio.clone().unwrap_or_default();
+                        Ok(Sound::Pcm(Pcm::g711(
+                            &f.0 == b"ulaw",
+                            a.channels as u64,
+                            a.sample_rate,
+                        )?))
+                    }
                     #[cfg(feature = "ac3")]
                     CodecConfig::Other(f) if &f.0 == b"ac-3" || &f.0 == b"ec-3" => {
                         Ok(Sound::Ac3(Box::new(crate::ac3::Decoder::new(
@@ -300,6 +415,7 @@ impl Sound {
                         &t.codec_private,
                     )?))),
                     "pcm" => Ok(Sound::Pcm(mkv_pcm(t)?)),
+                    "A_MS/ACM" => Ok(Sound::Pcm(acm_pcm(&t.codec_private)?)),
                     #[cfg(feature = "flac")]
                     "flac" => Ok(Sound::Flac(Box::new(crate::flac::Decoder::from_config(
                         &t.codec_private,
@@ -443,5 +559,156 @@ impl Sound {
                 Ok(p.channels)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn g711_expands_as_the_reference_does() {
+        let alaw = g711_table(false);
+        let mulaw = g711_table(true);
+        assert_eq!(alaw[0x55], -8);
+        assert_eq!(alaw[0xd5], 8);
+        assert_eq!(alaw[0xaa], 32256);
+        assert_eq!(alaw[0x2a], -32256);
+        assert_eq!(mulaw[0xff], 0);
+        assert_eq!(mulaw[0x7f], 0);
+        assert_eq!(mulaw[0x80], 32124);
+        assert_eq!(mulaw[0x00], -32124);
+        assert_eq!(g711(false, 0xd4), 24);
+        assert_eq!(g711(true, 0xfe), 8);
+        for b in 0..=255u8 {
+            assert_eq!(alaw[(b ^ 0x80) as usize], -alaw[b as usize], "{b:#x}");
+            assert_eq!(mulaw[(b ^ 0x80) as usize], -mulaw[b as usize], "{b:#x}");
+        }
+        let mut positive: Vec<i16> = (0x80..=0xffu8).map(|b| mulaw[b as usize]).collect();
+        positive.dedup();
+        assert!(positive.windows(2).all(|w| w[0] > w[1]));
+        let mut sorted: Vec<i16> = (0x80..=0xffu8).map(|b| alaw[(b ^ 0x55) as usize]).collect();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 128);
+    }
+
+    #[test]
+    fn g711_pcm_decodes_one_byte_per_sample_and_counts_frames() {
+        let pcm = Pcm::g711(false, 2, 8000.0).unwrap();
+        let mut out = Vec::new();
+        pcm.decode(&[0xd5, 0x55, 0xaa, 0x2a], &mut out).unwrap();
+        assert_eq!(
+            out,
+            [
+                8.0 / 32768.0,
+                -8.0 / 32768.0,
+                32256.0 / 32768.0,
+                -32256.0 / 32768.0
+            ]
+        );
+        assert!(pcm.decode(&[0xd5], &mut out).is_err());
+        assert_eq!(Sound::Pcm(pcm).pcm_frames(8000), Some(4000));
+        let mu = Pcm::g711(true, 1, 8000.0).unwrap();
+        mu.decode(&[0x80, 0xff], &mut out).unwrap();
+        assert_eq!(out, [32124.0 / 32768.0, 0.0]);
+        assert!(Pcm::g711(true, 0, 8000.0).is_err());
+        assert!(Pcm::g711(false, 1, 10.0).is_err());
+        assert!(Pcm::g711(false, 1, f64::NAN).is_err());
+    }
+
+    fn waveformatex(tag: u16, channels: u16, rate: u32, bits: u16) -> Vec<u8> {
+        let mut w = Vec::new();
+        w.extend_from_slice(&tag.to_le_bytes());
+        w.extend_from_slice(&channels.to_le_bytes());
+        w.extend_from_slice(&rate.to_le_bytes());
+        w.extend_from_slice(&(rate * u32::from(channels) * u32::from(bits) / 8).to_le_bytes());
+        w.extend_from_slice(&(channels * bits / 8).to_le_bytes());
+        w.extend_from_slice(&bits.to_le_bytes());
+        w.extend_from_slice(&0u16.to_le_bytes());
+        w
+    }
+
+    #[test]
+    fn acm_names_pcm_and_g711_and_leaves_the_rest_refused() {
+        assert_eq!(
+            acm_format(&waveformatex(6, 2, 8000, 8)),
+            Some((6, 2, 8000, 8))
+        );
+        assert_eq!(acm_name(&waveformatex(6, 1, 8000, 8)), "alaw");
+        assert_eq!(acm_name(&waveformatex(7, 1, 8000, 8)), "ulaw");
+        assert_eq!(acm_name(&waveformatex(1, 2, 48000, 16)), "pcm");
+        assert_eq!(acm_name(&waveformatex(3, 2, 48000, 32)), "pcm");
+        assert_eq!(acm_name(&waveformatex(0x0161, 2, 44100, 16)), "A_MS/ACM");
+        let mut extensible = waveformatex(0xfffe, 2, 48000, 24);
+        extensible[16..18].copy_from_slice(&22u16.to_le_bytes());
+        extensible.extend_from_slice(&24u16.to_le_bytes());
+        extensible.extend_from_slice(&3u32.to_le_bytes());
+        extensible.extend_from_slice(&1u16.to_le_bytes());
+        extensible.extend_from_slice(&[0; 14]);
+        assert_eq!(acm_format(&extensible), Some((1, 2, 48000, 24)));
+        assert_eq!(acm_format(&extensible[..20]), None);
+        assert_eq!(acm_format(&[6, 0, 1]), None);
+        assert_eq!(acm_name(&[]), "A_MS/ACM");
+    }
+
+    #[test]
+    fn an_acm_refusal_names_the_codec_and_its_channels_come_from_the_waveformatex() {
+        for tag in [1, 3, 6, 7] {
+            assert_eq!(acm_refused(&waveformatex(tag, 2, 48000, 16)), None, "{tag}");
+        }
+        assert_eq!(
+            acm_refused(&waveformatex(0x0161, 2, 44100, 16)).as_deref(),
+            Some("WMA v2 (Windows audio format 0x0161)")
+        );
+        assert_eq!(
+            acm_refused(&waveformatex(0x0163, 2, 44100, 16)).as_deref(),
+            Some("WMA Lossless (Windows audio format 0x0163)")
+        );
+        assert_eq!(
+            acm_refused(&waveformatex(0x1234, 1, 8000, 16)).as_deref(),
+            Some("Windows audio (Windows audio format 0x1234)")
+        );
+        assert!(acm_refused(&[1, 0]).unwrap().contains("WAVEFORMATEX"));
+        assert_eq!(acm_channels(&waveformatex(1, 2, 48000, 16), 1), 2);
+        assert_eq!(acm_channels(&waveformatex(6, 1, 8000, 8), 2), 1);
+        assert_eq!(acm_channels(&[], 6), 6);
+        assert_eq!(acm_channels(&waveformatex(1, 0, 48000, 16), 2), 1);
+    }
+
+    #[test]
+    fn every_refused_acm_tag_is_named() {
+        for (tag, name) in [
+            (0x0160, "WMA v1"),
+            (0x0162, "WMA Pro"),
+            (0x0055, "MP3"),
+            (0x2000, "AC-3"),
+            (0x00ff, "AAC"),
+            (0x1610, "AAC"),
+        ] {
+            let said = acm_refused(&waveformatex(tag, 2, 48000, 16)).unwrap();
+            assert!(said.starts_with(&format!("{name} (")), "{tag:#x}: {said}");
+        }
+    }
+
+    #[test]
+    fn an_acm_track_opens_pcm_float_and_g711_and_refuses_the_rest() {
+        let one = |tag: u16, rate: u32, bits: u16, data: &[u8]| {
+            let mut out = Vec::new();
+            acm_pcm(&waveformatex(tag, 1, rate, bits))
+                .unwrap()
+                .decode(data, &mut out)
+                .unwrap();
+            out
+        };
+        assert_eq!(one(1, 48000, 16, &16384i16.to_le_bytes()), [0.5]);
+        assert_eq!(one(3, 48000, 32, &0.25f32.to_le_bytes()), [0.25]);
+        assert_eq!(one(6, 8000, 8, &[0xd5]), [8.0 / 32768.0]);
+        assert_eq!(one(7, 8000, 8, &[0x80]), [32124.0 / 32768.0]);
+        let e = acm_pcm(&waveformatex(0x0161, 2, 44100, 16)).unwrap_err();
+        assert!(matches!(e, Error::Unsupported(_)), "{e}");
+        assert!(e.to_string().contains("0x0161"), "{e}");
+        let e = acm_pcm(&[1, 0]).unwrap_err();
+        assert!(e.to_string().contains("WAVEFORMATEX"), "{e}");
     }
 }

@@ -139,6 +139,7 @@ mod probe;
 ))]
 mod resident;
 mod route;
+mod s16;
 #[cfg(all(
     feature = "h264",
     feature = "hevc",
@@ -269,6 +270,7 @@ pub use picture::{
 };
 pub use probe::{AudioTrack, Probe, frame_count, keyframes, probe};
 pub use route::{Caps, Choice, Fallback, Picked, Prefs, pick_decode, pick_encode};
+pub use s16::{HIGHEST_RATE, LOWEST_RATE, S16Span, decode_s16, to_s16};
 pub use sound::Pcm;
 #[cfg(all(
     feature = "h264",

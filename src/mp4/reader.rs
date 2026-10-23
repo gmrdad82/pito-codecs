@@ -1,6 +1,6 @@
 use crate::media::{Codec, Error, Packet, Result};
 use crate::mp4::boxes::{Cur, FourCc, boxes, find, parse_box_header};
-use crate::mp4::entry::{CodecConfig, SampleEntry, parse_sample_entry};
+use crate::mp4::entry::{CodecConfig, PcmConfig, SampleEntry, parse_sample_entry};
 use crate::mp4::source::ByteSource;
 use crate::mp4::{too_large, truncated};
 use std::collections::HashMap;
@@ -872,9 +872,22 @@ fn parse_stbl(
             "stsc first_chunk values are not increasing from 1".into(),
         ));
     }
-    let pcm = match t.entries.first().map(|e| &e.codec) {
-        Some(CodecConfig::Pcm(p)) if const_size != 0 => Some(*p),
-        _ => None,
+    let pcm = match t.entries.first().filter(|_| const_size != 0) {
+        Some(e) => match &e.codec {
+            CodecConfig::Pcm(p) => Some(*p),
+            CodecConfig::Other(f) if &f.0 == b"alaw" || &f.0 == b"ulaw" => {
+                let a = e.audio.clone().unwrap_or_default();
+                Some(PcmConfig {
+                    bits: 8,
+                    signed: true,
+                    channels: a.channels,
+                    sample_rate: a.sample_rate,
+                    ..PcmConfig::default()
+                })
+            }
+            _ => None,
+        },
+        None => None,
     };
     let mut stts_c = SttsCursor {
         runs: &stts,

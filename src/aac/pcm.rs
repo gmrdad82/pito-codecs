@@ -78,12 +78,20 @@ pub fn mono(audio: &AudioBuffer) -> AudioBuffer {
     if audio.channels <= 1 {
         return audio.clone();
     }
-    let stereo = downmix_stereo(audio);
+    let channels = audio.channels as usize;
+    let mut m: Vec<f32> = stereo_matrix(channels)
+        .iter()
+        .map(|(a, b)| 0.5 * (a + b))
+        .collect();
+    let sum: f32 = m.iter().sum();
+    if channels > 2 && sum > 1.0 {
+        m.iter_mut().for_each(|c| *c /= sum);
+    }
     let mut out = AudioBuffer::new(audio.rate, 1);
-    out.samples = stereo
+    out.samples = audio
         .samples
-        .chunks_exact(2)
-        .map(|f| 0.5 * (f[0] + f[1]))
+        .chunks_exact(channels)
+        .map(|f| f.iter().zip(&m).map(|(x, c)| x * c).sum())
         .collect();
     out
 }
