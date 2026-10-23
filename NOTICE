@@ -820,6 +820,121 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+The Vorbis bit reader, Huffman codebook decode and header parsing in
+src/vorbis/ are adapted from lewton (https://github.com/RustAudio/lewton,
+commit bb2955b717094b40260902cf2f8dd9c5ea62a84a, 29 commits after 0.10.2),
+dual-licensed MIT OR Apache-2.0; the MIT terms are taken here. From lewton:
+the module layout (bitpacking, huffman_tree, header, header_cached), the
+codebook tree with its 8-bit lookup table, the identification, comment and
+setup header readers with their types and checks, the VQ lookup tables, the
+float32 unpacking, and the window, twiddle, bit-reverse and bark-map tables
+derived from the headers, with their unit test vectors; and the audio packet
+decode (floor 0 and floor 1 curves, residues 0, 1 and 2, inverse coupling, the
+fast inverse MDCT translated from stb_vorbis, windowing and overlap-add) with
+its neighbour and render-point test values. Changed in this package: the bit
+reader reads through a 128-bit window instead of per-width
+macros, residue books read all eight cascade stages (lewton reads seven), the
+floor 0 book list refuses an index equal to the codebook count, the lookup
+table fills every slot of a short code, empty codebooks and out-of-range
+indices return errors instead of panicking, the comment header checks lengths
+before allocating, a setup header may ask for at most 2^20 codebook entries
+and 2^22 VQ lookup values in all (more is refused before allocating), the
+header types drop the floor 0 rate and bark map size and the mapping submap
+count once checked (the decode never reads them), errors are the package's
+own, the identification header reads one framing bit as libvorbis does, the
+first audio packet returns the part of its block past the centre that no
+overlap needs (lewton drops it), the audio decode returns errors where lewton
+panics (missing neighbours, mismatched windows, codebooks
+without a value mapping), floor 1 values are clamped to their range as they
+are predicted, floor 0 curves always advance, and the output is interleaved
+in the channel order WAV uses. lewton carries this notice:
+
+MIT License
+
+Copyright (c) 2016 est31 and contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+lewton's inverse MDCT, ported in src/vorbis/imdct.rs, is a close translation
+of stb_vorbis (https://github.com/nothings/stb, stb_vorbis.c), dual-licensed
+public domain or MIT; the MIT terms are taken here:
+
+Copyright (c) 2017 Sean Barrett
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+The Ogg Vorbis granule rules in src/vorbis/ogg.rs (the first granule page
+sets how many leading samples are dropped, the last one where the stream ends)
+follow libvorbis's vorbisfile.c (same tag and commit as below).
+
+The codebook size checks in src/vorbis/header.rs (dimensions and entries
+together within 24 bits, and codeword lengths and lookup values that must fit
+in what is left of the packet, checked before allocating), the floor 0 checks
+(order, rate and bark map size of at least 1, books with a VQ lookup) and the
+residue classbook checks (at least one dimension, classifications to the power
+of its dimension within its entries) follow libvorbis's
+vorbis_staticbook_unpack, floor0_unpack and res0_unpack
+(https://github.com/xiph/vorbis, tag v1.3.7, commit 0657aee69dec8508a0011f47f3b69d7538e9d262), which carries this notice:
+
+Copyright (c) 2002-2020 Xiph.org Foundation
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+- Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+
+- Redistributions in binary form must reproduce the above copyright
+notice, this list of conditions and the following disclaimer in the
+documentation and/or other materials provided with the distribution.
+
+- Neither the name of the Xiph.org Foundation nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE FOUNDATION
+OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
 The FLAC decoder in src/flac/ is adapted from two sources.
 
 From libFLAC (https://github.com/xiph/flac, tag 1.5.0, commit

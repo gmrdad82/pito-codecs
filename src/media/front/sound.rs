@@ -203,6 +203,8 @@ pub enum Sound {
     Flac(Box<crate::flac::Decoder>),
     #[cfg(feature = "alac")]
     Alac(Box<crate::alac::Decoder>),
+    #[cfg(feature = "vorbis")]
+    Vorbis(Box<crate::vorbis::Decoder>),
     Pcm(Pcm),
 }
 
@@ -349,6 +351,13 @@ impl Sound {
                         Ok(Sound::Aac(Box::new(crate::aac::Decoder::new(&asc)?)))
                     }
                     CodecConfig::Pcm(p) => Ok(Sound::Pcm(Pcm::from_mp4(p)?)),
+                    #[cfg(feature = "vorbis")]
+                    CodecConfig::Vorbis(private) => {
+                        let [i, c, s] = crate::vorbis::xiph_headers(private)?;
+                        Ok(Sound::Vorbis(Box::new(
+                            crate::vorbis::Decoder::from_headers(i, c, s)?,
+                        )))
+                    }
                     CodecConfig::Other(f) if &f.0 == b"alaw" || &f.0 == b"ulaw" => {
                         let a = e.audio.clone().unwrap_or_default();
                         Ok(Sound::Pcm(Pcm::g711(
@@ -415,6 +424,13 @@ impl Sound {
                         &t.codec_private,
                     )?))),
                     "pcm" => Ok(Sound::Pcm(mkv_pcm(t)?)),
+                    #[cfg(feature = "vorbis")]
+                    "vorbis" => {
+                        let [i, c, s] = crate::vorbis::xiph_headers(&t.codec_private)?;
+                        Ok(Sound::Vorbis(Box::new(
+                            crate::vorbis::Decoder::from_headers(i, c, s)?,
+                        )))
+                    }
                     "A_MS/ACM" => Ok(Sound::Pcm(acm_pcm(&t.codec_private)?)),
                     #[cfg(feature = "flac")]
                     "flac" => Ok(Sound::Flac(Box::new(crate::flac::Decoder::from_config(
@@ -457,6 +473,8 @@ impl Sound {
             Sound::Flac(d) => d.rate(),
             #[cfg(feature = "alac")]
             Sound::Alac(d) => d.rate(),
+            #[cfg(feature = "vorbis")]
+            Sound::Vorbis(d) => d.rate(),
             Sound::Pcm(p) => p.rate,
         }
     }
@@ -474,6 +492,8 @@ impl Sound {
             Sound::Flac(d) => d.channels(),
             #[cfg(feature = "alac")]
             Sound::Alac(d) => d.channels(),
+            #[cfg(feature = "vorbis")]
+            Sound::Vorbis(d) => d.channels(),
             Sound::Pcm(p) => p.channels,
         }
     }
@@ -502,6 +522,25 @@ impl Sound {
             Sound::Flac(_) => None,
             #[cfg(feature = "alac")]
             Sound::Alac(_) => None,
+            #[cfg(feature = "vorbis")]
+            Sound::Vorbis(_) => None,
+        }
+    }
+
+    pub fn grid(&self) -> Option<usize> {
+        match self {
+            #[cfg(feature = "vorbis")]
+            Sound::Vorbis(d) => Some((1usize << d.ident.blocksize_0) / 4),
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(not(feature = "vorbis"), allow(unused_variables))]
+    pub fn block(&self, packet: &[u8]) -> Option<(usize, usize)> {
+        match self {
+            #[cfg(feature = "vorbis")]
+            Sound::Vorbis(d) => Some((d.blocksize(packet).ok()?, d.lead_in(packet).ok()?)),
+            _ => None,
         }
     }
 
@@ -517,6 +556,8 @@ impl Sound {
             Sound::Flac(_) => 0.0,
             #[cfg(feature = "alac")]
             Sound::Alac(_) => 0.0,
+            #[cfg(feature = "vorbis")]
+            Sound::Vorbis(d) => (1u32 << d.ident.blocksize_1) as f64 / d.rate().max(1) as f64,
             Sound::Aac(_) | Sound::Pcm(_) => 0.0,
         }
     }
@@ -552,6 +593,12 @@ impl Sound {
             #[cfg(feature = "alac")]
             Sound::Alac(d) => {
                 d.decode_into(data, out)?;
+                Ok(d.channels())
+            }
+            #[cfg(feature = "vorbis")]
+            Sound::Vorbis(d) => {
+                out.clear();
+                d.decode_aligned(data, out)?;
                 Ok(d.channels())
             }
             Sound::Pcm(p) => {

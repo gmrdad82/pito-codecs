@@ -1180,6 +1180,65 @@ fn aac_and_opus_in_matroska_line_up_with_ffmpeg_to_the_sample() {
     }
 }
 
+#[test]
+fn matroska_audio_off_the_millisecond_drops_the_last_blocks_discard_padding() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let prefs = Prefs::default();
+    for (name, codec, rate, limit) in [
+        ("opus.webm", "libopus", 48_000u32, 2e-3f32),
+        ("opus.mkv", "libopus", 48_000, 2e-3),
+        ("ac3.mkv", "ac3", 48_000, 1e-3),
+        ("mp3.mkv", "libmp3lame", 44_100, 1e-3),
+    ] {
+        let path = dir().join(format!("off-ms-{name}"));
+        let source = format!("sine=f=440:r={rate}:d=9.0123");
+        ffmpeg_make(
+            &path,
+            &["-f", "lavfi", "-i", &source, "-ac", "2", "-c:a", codec],
+        );
+        let theirs = ffmpeg_f32(&path);
+        let frames = theirs.len() / 2;
+        assert_eq!(frames, (9.0123 * rate as f64).round() as usize, "{name}");
+        let ours = audio_pcm(&path, 0, rate, false, &prefs).unwrap().samples;
+        assert_eq!(ours.len(), theirs.len(), "{name}");
+        let w = worst(&ours[4_000..], &theirs[4_000..]);
+        assert!(w < limit, "{name}: {w}");
+        let at = |t: f64| (t * rate as f64).round() as usize * 2;
+        for (from, to) in [(8.5, f64::INFINITY), (8.9, 9.5)] {
+            let part = audio_pcm_range(&path, 0, from, to, rate, 2, &prefs).unwrap();
+            assert_eq!(part.samples.len(), theirs.len() - at(from), "{name} {from}");
+            let w = worst(&part.samples[4_000..], &theirs[at(from) + 4_000..]);
+            assert!(w < limit, "{name} {from}: {w}");
+        }
+        let streamed: usize = audio_stream(&path, 0, 8.5, rate, 2, &prefs)
+            .unwrap()
+            .map(|b| b.unwrap().samples.len())
+            .sum();
+        assert_eq!(streamed, theirs.len() - at(8.5), "{name} stream");
+    }
+    let aac = dir().join("off-ms-aac.mkv");
+    ffmpeg_make(
+        &aac,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=f=440:r=48000:d=9.0123",
+            "-c:a",
+            "aac",
+        ],
+    );
+    let r = pito_codecs::mkv::Reader::open(&aac).unwrap();
+    let t = &r.tracks[0];
+    assert!(t.samples.iter().all(|s| s.discard == 0));
+    let stamped = (t.seconds(t.end()) * 48_000.0).round() as usize;
+    let ours = audio_pcm(&aac, 0, 48_000, true, &prefs).unwrap();
+    assert_eq!(ours.frames(), stamped);
+    assert!(ffmpeg_f32(&aac).len() > stamped);
+}
+
 fn recording() -> &'static Path {
     static FILE: OnceLock<PathBuf> = OnceLock::new();
     FILE.get_or_init(|| {
@@ -3147,7 +3206,7 @@ fn wav(name: &str) -> PathBuf {
 fn foreign_audio() -> &'static Path {
     static FILE: OnceLock<PathBuf> = OnceLock::new();
     FILE.get_or_init(|| {
-        let out = dir().join("aac-vorbis-truehd.mkv");
+        let out = dir().join("aac-dts-truehd.mkv");
         if out.exists() {
             return out;
         }
@@ -3176,7 +3235,7 @@ fn foreign_audio() -> &'static Path {
         let r = pito_codecs::mp4::Reader::open(&src).unwrap();
         let v = r.video().unwrap();
         let a = r.audio()[0];
-        let part = dir().join(format!("{id}.aac-vorbis-truehd.mkv"));
+        let part = dir().join(format!("{id}.aac-dts-truehd.mkv"));
         let mut w = pito_codecs::mkv::Writer::create(&part).unwrap();
         let tv = w
             .add_track(pito_codecs::mkv::TrackConfig::from_mp4(&r.tracks[v]).unwrap())
@@ -3194,7 +3253,7 @@ fn foreign_audio() -> &'static Path {
             )
         };
         let tf = [
-            w.add_track(foreign("A_VORBIS")).unwrap(),
+            w.add_track(foreign("A_DTS")).unwrap(),
             w.add_track(foreign("A_TRUEHD")).unwrap(),
         ];
         let mut blocks: Vec<(f64, usize, Vec<u8>, i64, bool)> = Vec::new();
@@ -3230,10 +3289,10 @@ fn an_audio_track_no_decoder_reads_is_named_on_every_path_and_a_muted_one_is_ski
     assert!(p.video_native());
     assert_eq!(p.audio.len(), 3);
     assert_eq!(p.audio[0].codec, "aac");
-    assert_eq!(p.unsupported(), ["Vorbis", "TrueHD"]);
+    assert_eq!(p.unsupported(), ["DTS", "TrueHD"]);
     let whole = audio_pcm(path, 0, 48_000, false, &prefs).unwrap();
     assert!(!whole.samples.is_empty());
-    for (track, name) in [(1, "Vorbis"), (2, "TrueHD")] {
+    for (track, name) in [(1, "DTS"), (2, "TrueHD")] {
         assert_eq!(
             said(audio_pcm(path, track, 48_000, false, &prefs)),
             format!("unsupported: {name} audio is not supported")
@@ -3247,7 +3306,7 @@ fn an_audio_track_no_decoder_reads_is_named_on_every_path_and_a_muted_one_is_ski
     }
     let either = |e: String| {
         assert_eq!(e.lines().count(), 1, "{e}");
-        assert!(e.contains("Vorbis") || e.contains("TrueHD"), "{e}");
+        assert!(e.contains("DTS") || e.contains("TrueHD"), "{e}");
         assert!(
             !e.replace(env!("CARGO_MANIFEST_DIR"), "")
                 .to_lowercase()
@@ -3318,13 +3377,13 @@ fn export_refuses_a_gained_track_no_decoder_reads_before_any_work() {
             told += 1;
             true
         })),
-        "unsupported: Vorbis audio is not supported"
+        "unsupported: DTS audio is not supported"
     );
     assert_eq!(told, 0);
     assert!(!out.exists());
     assert!(!parts.exists());
 
-    let twin = dir().join("aac-vorbis-truehd-twin.mkv");
+    let twin = dir().join("aac-dts-truehd-twin.mkv");
     std::fs::copy(path, &twin).unwrap();
     let both: Vec<Piece> = (0..10)
         .flat_map(|_| [path, twin.as_path()])

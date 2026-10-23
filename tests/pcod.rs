@@ -960,15 +960,15 @@ fn ogg_page(body: &[u8]) -> Vec<u8> {
 #[test]
 fn ogg_that_is_not_opus_is_refused_by_name() {
     let out = dir("ogg-other");
-    let mut vorbis = b"\x01vorbis".to_vec();
-    vorbis.resize(30, 0);
+    let mut speex = b"Speex   ".to_vec();
+    speex.resize(30, 0);
     let mut flac = b"\x7fFLAC".to_vec();
     flac.resize(30, 0);
     let cases = [
         (
             "talk.ogg",
-            ogg_page(&vorbis),
-            "Ogg Vorbis audio is not supported",
+            ogg_page(&speex),
+            "Ogg Speex audio is not supported",
         ),
         (
             "talk.oga",
@@ -1005,6 +1005,98 @@ fn ogg_that_is_not_opus_is_refused_by_name() {
             assert!(stderr.contains(want), "{args:?}: {stderr}");
             assert_eq!(stderr.lines().count(), 1, "{args:?}: {stderr}");
         }
+    }
+}
+
+fn wav_body(data: &[u8]) -> (u16, u32, Vec<i16>) {
+    assert_eq!(&data[..4], b"RIFF");
+    assert_eq!(&data[8..12], b"WAVE");
+    let mut pos = 12;
+    let (mut channels, mut rate) = (0, 0);
+    while pos + 8 <= data.len() {
+        let id = &data[pos..pos + 4];
+        let len = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        let body = &data[pos + 8..(pos + 8 + len).min(data.len())];
+        if id == b"fmt " {
+            channels = u16::from_le_bytes([body[2], body[3]]);
+            rate = u32::from_le_bytes(body[4..8].try_into().unwrap());
+        } else if id == b"data" {
+            let pcm = body
+                .chunks_exact(2)
+                .map(|b| i16::from_le_bytes([b[0], b[1]]))
+                .collect();
+            return (channels, rate, pcm);
+        }
+        pos += 8 + len + (len & 1);
+    }
+    panic!("no data chunk");
+}
+
+#[test]
+fn ogg_and_webm_vorbis_extract_to_wav_and_convert_to_opus() {
+    if !has_encoder("libvorbis") {
+        eprintln!("skipped Vorbis through pcod: ffmpeg has no libvorbis encoder");
+        return;
+    }
+    let out = dir("vorbis");
+    for ext in ["ogg", "webm"] {
+        let src = out.join(format!("tone.{ext}"));
+        let made = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+            ])
+            .arg("aevalsrc=0.3*sin(440*2*PI*t)|0.2*sin(660*2*PI*t):s=44100:d=0.7:c=stereo")
+            .args(["-c:a", "libvorbis", "-q:a", "3"])
+            .arg(&src)
+            .status()
+            .unwrap();
+        assert!(made.success(), "{ext}");
+        let wav = out.join(format!("{ext}.wav"));
+        ok(&run(&[src.to_str().unwrap(), wav.to_str().unwrap()]));
+        let (channels, rate, ours) = wav_body(&fs::read(&wav).unwrap());
+        assert_eq!((channels, rate), (2, 44_100), "{ext}");
+        assert_eq!(ours.len(), 30_870 * 2, "{ext}");
+        let theirs: Vec<i16> = Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&src)
+            .args(["-f", "s16le", "-"])
+            .output()
+            .unwrap()
+            .stdout
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        let n = ours.len().min(theirs.len());
+        assert!(
+            n + 256 * 2 >= ours.len(),
+            "{ext}: ffmpeg gave {}",
+            theirs.len()
+        );
+        let worst = ours[..n]
+            .iter()
+            .zip(&theirs[..n])
+            .map(|(a, b)| (i32::from(*a) - i32::from(*b)).abs())
+            .max()
+            .unwrap();
+        eprintln!("{ext}: worst 16-bit difference {worst} over {n} samples");
+        assert!(worst <= 1, "{ext}: worst 16-bit difference {worst}");
+        let opus = out.join(format!("{ext}.opus"));
+        ok(&run(&[src.to_str().unwrap(), opus.to_str().unwrap()]));
+        let ogg = pito_codecs::opus::ogg::OggOpus::parse(&fs::read(&opus).unwrap()).unwrap();
+        let decoded = ogg.decode().unwrap();
+        assert_eq!(decoded.channels, 2, "{ext}");
+        assert!(
+            decoded.frames().abs_diff(33_600) <= 1,
+            "{ext}: {} frames",
+            decoded.frames()
+        );
+        assert!(decoded.samples.iter().any(|&v| v.abs() > 0.05), "{ext}");
     }
 }
 

@@ -11,6 +11,8 @@ use crate::media::{Error, Result};
 const LEAD: f64 = 0.5;
 const TAIL: f64 = 10.0;
 const GAP: f64 = 0.001;
+const CAL: usize = 32;
+const ROUNDING: f64 = 0.0011;
 
 pub struct Feed {
     sound: Sound,
@@ -170,7 +172,10 @@ impl Feed {
             Some(s) => s,
             None => {
                 let start = match self.origin {
-                    Some(o) => on_grid(self.start, o, frames as f64 / self.rate as f64),
+                    Some(o) => {
+                        let step = self.sound.grid().unwrap_or(frames);
+                        on_grid(self.start, o, step as f64 / self.rate as f64)
+                    }
                     None => self.start,
                 };
                 let s = self.skip_from(start);
@@ -185,10 +190,17 @@ impl Feed {
             self.lead = 0;
         }
         self.decoded += frames as u64;
-        if let At::Mkv(l) = &mut self.at
-            && self.sound.counts_frames()
-        {
-            l.tail = Some(self.first_at + self.decoded as f64 / self.rate.max(1) as f64);
+        if let At::Mkv(l) = &mut self.at {
+            if self.sound.counts_frames() {
+                l.tail = Some(self.first_at + self.decoded as f64 / self.rate.max(1) as f64);
+            } else {
+                let frames = if l.size.is_some() {
+                    l.spans
+                } else {
+                    self.decoded
+                };
+                l.spanned = Some(l.spanned_to(self.first_at, frames, self.rate));
+            }
         }
         let drop = skip.saturating_sub(self.skipped).min(frames);
         self.skipped += drop;
@@ -217,6 +229,11 @@ struct Lazy {
     eof: bool,
     taken: i64,
     tail: Option<f64>,
+    spanned: Option<f64>,
+    cut: u64,
+    spans: u64,
+    size: Option<usize>,
+    fix: f64,
 }
 
 impl Lazy {
@@ -231,7 +248,8 @@ impl Lazy {
             .get(i)
             .ok_or_else(|| Error::Invalid(format!("no track {i}")))?;
         let delay = t.codec_delay as f64 / 1e9;
-        let fix = t.seconds(t.ticks(delay)) - delay;
+        let raw = t.seconds(t.ticks(delay));
+        let fix = raw - delay;
         let time_base = t.time_base;
         let cur = Cursor::new(&r);
         let mut l = Lazy {
@@ -247,6 +265,11 @@ impl Lazy {
             eof: false,
             taken: 0,
             tail: None,
+            spanned: None,
+            cut: 0,
+            spans: 0,
+            size: None,
+            fix,
         };
         let Some(first) = l.pull()? else {
             return Ok((l, 0.0, None));
@@ -300,13 +323,23 @@ impl Lazy {
                 Ok((l, origin + pos as f64 / rate, None))
             }
             None => {
+                let fix = match l.held.front().and_then(|(_, d)| sound.block(d)) {
+                    Some((_, lead)) => raw - lead as f64 / rate,
+                    None => fix,
+                };
                 let origin = first_s + fix;
                 let from_t = ticks(from);
-                if from - LEAD > first_s
-                    && let Some(landed) = l.landing(from - LEAD, ticks(from - LEAD))?
-                {
-                    l.held.push_back(landed);
+                let seeks = from - LEAD > first_s;
+                let cal = match l.held.front().and_then(|(_, d)| sound.block(d)) {
+                    Some(_) => l.calibrate(sound, seeks, from_t)?,
+                    None => None,
+                };
+                let mut landed = false;
+                if seeks && let Some(b) = l.landing(from - LEAD, ticks(from - LEAD))? {
+                    l.held.push_back(b);
+                    landed = true;
                 }
+                let mut popped = 0usize;
                 let mut before: Option<(Block, Vec<u8>)> = None;
                 loop {
                     while l.held.len() < 2 && !l.eof {
@@ -333,9 +366,17 @@ impl Lazy {
                         l.spare.push(old.1);
                     }
                     before = l.held.pop_front();
+                    popped += 1;
                 }
                 if let Some(b) = before {
                     l.held.push_front(b);
+                    popped -= 1;
+                }
+                if let Some(cal) = cal
+                    && let Some(at) =
+                        l.place(sound, &cal, (!landed).then_some(popped), time_base)?
+                {
+                    return Ok((l, origin + at as f64 / rate, None));
                 }
                 let start = l
                     .held
@@ -345,6 +386,74 @@ impl Lazy {
                 Ok((l, start, Some(origin)))
             }
         }
+    }
+
+    fn calibrate(
+        &mut self,
+        sound: &Sound,
+        seeks: bool,
+        until: i64,
+    ) -> Result<Option<Vec<(i64, u64)>>> {
+        while self.held.len() < CAL
+            || (!seeks && self.held.back().is_some_and(|(b, _)| b.pts <= until))
+        {
+            match self.pull()? {
+                Some(b) => self.held.push_back(b),
+                None => break,
+            }
+        }
+        let cal = walk(sound, self.held.iter(), true);
+        if seeks && self.held.len() > 1 {
+            while self.held.len() > 1 {
+                if let Some((_, d)) = self.held.pop_back() {
+                    self.spare.push(d);
+                }
+            }
+            if let Some((_, d)) = self.rewind()? {
+                self.spare.push(d);
+            }
+        }
+        Ok(cal)
+    }
+
+    fn place(
+        &mut self,
+        sound: &Sound,
+        cal: &[(i64, u64)],
+        index: Option<usize>,
+        tb: crate::media::TimeBase,
+    ) -> Result<Option<i64>> {
+        let Some((_, lead)) = self.held.front().and_then(|(_, d)| sound.block(d)) else {
+            return Ok(None);
+        };
+        if let Some(&(_, r)) = index.and_then(|b| cal.get(b + 1)) {
+            return Ok(Some(r as i64 - lead as i64));
+        }
+        while self.held.len() <= CAL {
+            match self.pull()? {
+                Some(b) => self.held.push_back(b),
+                None => break,
+            }
+        }
+        let rate = i128::from(sound.rate().max(1));
+        let tick = i128::from(tb.num) * rate;
+        let sample = i128::from(tb.den);
+        let found = walk(sound, self.held.iter(), false).and_then(|local| {
+            let grid = sound.grid()? as i128;
+            let exact = match (bounds(cal, tick, sample), bounds(&local, tick, sample)) {
+                (Some(u), Some(s)) => resolve(u, s, sample, grid),
+                _ => None,
+            };
+            exact.or_else(|| {
+                nearest(
+                    middle(cal, tick, sample)?,
+                    middle(&local, tick, sample)?,
+                    sample,
+                    grid,
+                )
+            })
+        });
+        Ok(found.map(|a| a - lead as i64))
     }
 
     fn landing(&mut self, seconds: f64, ticks: i64) -> Result<Option<(Block, Vec<u8>)>> {
@@ -436,10 +545,29 @@ impl Lazy {
             return Ok(None);
         };
         self.taken = b.pts;
+        self.cut = match b.discard {
+            d if d > 0 => {
+                let rate = sound.rate().max(1) as f64;
+                self.cut
+                    .saturating_add((d as f64 * rate / 1e9).round() as u64)
+            }
+            _ => 0,
+        };
         if let Some(c) = self.clock.as_mut() {
             c.pos += sound.pcm_frames(data.len() as u32).unwrap_or(0);
         }
+        if let Some((n, lead)) = sound.block(&data) {
+            self.spans += match self.size {
+                Some(p) => (p / 4 + n / 4) as u64,
+                None => lead as u64,
+            };
+            self.size = Some(n);
+        }
         Ok(Some(data))
+    }
+
+    fn spanned_to(&self, from: f64, frames: u64, rate: u32) -> f64 {
+        from + (frames as f64 - self.cut as f64) / rate.max(1) as f64
     }
 
     fn end(&self, sound: &Sound) -> f64 {
@@ -448,9 +576,20 @@ impl Lazy {
         }
         match &self.clock {
             Some(c) => (c.origin + c.pos as f64 / sound.rate().max(1) as f64).max(0.0),
-            None => self.r.tracks.get(self.i).map_or(0.0, |t| match self.tail {
-                Some(e) => e.max(0.0),
-                None => t.seconds(self.end_ticks).max(0.0),
+            None => self.r.tracks.get(self.i).map_or(0.0, |t| {
+                let stamped = t.seconds(self.end_ticks);
+                match (self.tail, self.spanned) {
+                    (Some(e), _) => e,
+                    (None, Some(e))
+                        if self.cut > 0
+                            || self.size.is_some()
+                            || (e - stamped).abs() <= ROUNDING =>
+                    {
+                        e
+                    }
+                    _ => stamped,
+                }
+                .max(0.0)
             }),
         }
     }
@@ -465,7 +604,7 @@ pub fn mkv_end(r: &Arc<mkv::Reader>, i: usize) -> Result<f64> {
         .and_then(|c| r.tracks.get(i).map(|t| t.seconds(c.time as i64)))
         .unwrap_or(0.0);
     let guess = r.duration_seconds().max(last_cue);
-    let (mut l, _, origin) = Lazy::open(r.clone(), i, (guess - TAIL).max(0.0), &sound)?;
+    let (mut l, start, origin) = Lazy::open(r.clone(), i, (guess - TAIL).max(0.0), &sound)?;
     let mut prev: Option<Vec<u8>> = None;
     let mut last: Option<Vec<u8>> = None;
     while let Some(data) = l.take(&sound)? {
@@ -473,26 +612,181 @@ pub fn mkv_end(r: &Arc<mkv::Reader>, i: usize) -> Result<f64> {
             l.spare.push(old);
         }
     }
-    if sound.counts_frames()
+    let rate = sound.rate().max(1);
+    if l.size.is_some() {
+        let start = match (origin, sound.grid()) {
+            (Some(o), Some(g)) => on_grid(start, o, g as f64 / rate as f64),
+            _ => start,
+        };
+        l.spanned = Some(l.spanned_to(start, l.spans, rate));
+    } else if l.clock.is_none()
         && let Some(data) = last
         && let Some(t) = r.tracks.get(i)
     {
-        let rate = sound.rate().max(1) as f64;
         let mut pcm = Vec::new();
         let full = prev.and_then(|p| frames_of(&mut sound, &p, &mut pcm));
         if let Some(n) = frames_of(&mut sound, &data, &mut pcm) {
-            let at = t.seconds(l.taken);
+            let at = t.seconds(l.taken) + l.fix;
             let at = match (origin, full) {
-                (Some(o), Some(f)) => on_grid(at, o, f as f64 / rate),
+                (Some(o), Some(f)) => on_grid(at, o, f as f64 / rate as f64),
                 _ => at,
             };
-            l.tail = Some(at + n as f64 / rate);
+            if sound.counts_frames() {
+                l.tail = Some(at + n as f64 / rate as f64);
+            } else {
+                l.spanned = Some(l.spanned_to(at, n, rate));
+            }
         }
     }
     Ok(l.end(&sound))
 }
 
+fn walk<'a>(
+    sound: &Sound,
+    mut blocks: impl Iterator<Item = &'a (Block, Vec<u8>)>,
+    origin: bool,
+) -> Option<Vec<(i64, u64)>> {
+    let (b0, d0) = blocks.next()?;
+    let (s0, lead) = sound.block(d0)?;
+    let mut at = 0u64;
+    let mut out = Vec::new();
+    if origin {
+        out.push((b0.pts, 0));
+        at = lead as u64;
+    }
+    let mut sizes = (s0, s0);
+    for (k, (b, d)) in blocks.enumerate() {
+        let (n, _) = sound.block(d)?;
+        if k > 0 {
+            at += (sizes.0 / 4 + sizes.1 / 4) as u64;
+        }
+        out.push((b.pts, at));
+        sizes = (sizes.1, n);
+    }
+    Some(out)
+}
+
+fn bounds(points: &[(i64, u64)], tick: i128, sample: i128) -> Option<(i128, i128)> {
+    let mut lo = i128::MIN;
+    let mut hi = i128::MAX;
+    for &(t, r) in points {
+        let base = i128::from(t) * tick - i128::from(r) * sample;
+        lo = lo.max(base);
+        hi = hi.min(base + tick);
+    }
+    (hi > lo && !points.is_empty()).then_some((lo, hi))
+}
+
+fn middle(points: &[(i64, u64)], tick: i128, sample: i128) -> Option<i128> {
+    let mut bases: Vec<i128> = points
+        .iter()
+        .map(|&(t, r)| i128::from(t) * tick - i128::from(r) * sample)
+        .collect();
+    bases.sort_unstable();
+    bases.get(bases.len() / 2).map(|b| b + tick / 2)
+}
+
+fn nearest(u: i128, s: i128, sample: i128, grid: i128) -> Option<i64> {
+    let step = sample * grid;
+    if step <= 0 {
+        return None;
+    }
+    let k = (s - u + step / 2).div_euclid(step);
+    (k >= 0).then(|| i64::try_from(k * grid).ok()).flatten()
+}
+
+fn resolve(u: (i128, i128), s: (i128, i128), sample: i128, grid: i128) -> Option<i64> {
+    let lo = s.0 - (u.1 - 1);
+    let hi = (s.1 - 1) - u.0;
+    let step = sample * grid;
+    if step <= 0 {
+        return None;
+    }
+    let k = lo.div_euclid(step) + i128::from(lo.rem_euclid(step) != 0);
+    let a = k * step;
+    (a <= hi && a + step > hi && k >= 0)
+        .then(|| i64::try_from(k * grid).ok())
+        .flatten()
+}
+
 fn frames_of(sound: &mut Sound, data: &[u8], pcm: &mut Vec<f32>) -> Option<u64> {
     let ch = sound.decode(data, pcm).ok()?;
     Some((pcm.len() / ch.max(1) as usize) as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TICK: i128 = 96_000;
+    const SAMPLE: i128 = 1_000;
+
+    fn stamps(u: i128, at: &[u64]) -> Vec<(i64, u64)> {
+        at.iter()
+            .map(|&r| {
+                let t = (u + i128::from(r) * SAMPLE).div_euclid(TICK);
+                (t as i64, r)
+            })
+            .collect()
+    }
+
+    fn longs(first: u64, n: u64) -> Vec<u64> {
+        (0..n).map(|k| first + k * 1024).collect()
+    }
+
+    #[test]
+    fn millisecond_stamps_pin_a_96k_block_to_its_sample() {
+        for (u, a) in [
+            (0, 64 * 1371),
+            (95_999, 64 * 1372),
+            (48_000, 64 * 7),
+            (12_345, 0),
+        ] {
+            let mut cal = vec![0];
+            cal.extend(longs(128, 31));
+            let cal = stamps(u, &cal);
+            let local: Vec<(i64, u64)> = stamps(u + i128::from(a) * SAMPLE, &longs(0, 32));
+            let got = resolve(
+                bounds(&cal, TICK, SAMPLE).unwrap(),
+                bounds(&local, TICK, SAMPLE).unwrap(),
+                SAMPLE,
+                64,
+            );
+            assert_eq!(got, Some(a as i64), "u {u}");
+        }
+    }
+
+    #[test]
+    fn stamps_off_by_more_than_rounding_still_place_a_block_from_their_middle() {
+        for (u, a) in [(0, 64 * 1371), (95_999, 64 * 1372), (48_000, 64 * 7)] {
+            let mut cal = vec![0];
+            cal.extend(longs(128, 31));
+            let mut cal = stamps(u, &cal);
+            let mut local: Vec<(i64, u64)> = stamps(u + i128::from(a) * SAMPLE, &longs(0, 32));
+            cal[5].0 += 3;
+            local[9].0 -= 2;
+            local[20].0 += 4;
+            assert_eq!(bounds(&local, TICK, SAMPLE), None);
+            let got = nearest(
+                middle(&cal, TICK, SAMPLE).unwrap(),
+                middle(&local, TICK, SAMPLE).unwrap(),
+                SAMPLE,
+                64,
+            );
+            assert_eq!(got, Some(a as i64), "u {u}");
+        }
+        assert_eq!(middle(&[], TICK, SAMPLE), None);
+        assert_eq!(nearest(0, 1, 0, 64), None);
+        assert_eq!(nearest(64 * SAMPLE * 10, 0, SAMPLE, 64), None);
+    }
+
+    #[test]
+    fn too_few_or_inconsistent_stamps_place_nothing() {
+        assert_eq!(bounds(&[], TICK, SAMPLE), None);
+        assert_eq!(bounds(&[(0, 0), (5, 0)], TICK, SAMPLE), None);
+        let one = bounds(&[(10, 0)], TICK, SAMPLE).unwrap();
+        assert_eq!(resolve(one, one, SAMPLE, 64), None);
+        assert_eq!(resolve((0, 1), (0, 1), 0, 64), None);
+        assert_eq!(resolve((1_000_000, 1_000_001), (0, 1), SAMPLE, 64), None);
+    }
 }

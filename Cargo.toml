@@ -8,16 +8,17 @@ license = "MIT"
 repository = "https://github.com/gmrdad82/pito-codecs"
 
 [features]
-default = ["media", "audio", "h264", "hevc", "aac", "ac3", "mp4", "gpu", "filter", "opus", "vp9", "webp", "mkv", "gif", "mp3", "flac", "png", "jpeg", "cli", "av1", "alac"]
+default = ["media", "audio", "h264", "hevc", "aac", "ac3", "mp4", "gpu", "filter", "opus", "vp9", "webp", "mkv", "gif", "mp3", "flac", "png", "jpeg", "cli", "av1", "alac", "vorbis"]
 media = []
 h264 = ["media", "dep:rayon"]
 hevc = ["media", "dep:rayon"]
 aac = ["media"]
-audio = ["media", "aac", "mkv", "mp4", "alac", "flac", "dep:rayon"]
+audio = ["media", "aac", "mkv", "mp4", "alac", "flac", "vorbis", "dep:rayon"]
 ac3 = ["media"]
 mp3 = ["media"]
 flac = ["media"]
 alac = ["media"]
+vorbis = ["media"]
 mp4 = ["media"]
 gpu = [
     "media",
@@ -38,7 +39,7 @@ webp = ["media", "filter", "dep:rayon"]
 gif = ["filter", "dep:rayon"]
 png = ["media"]
 jpeg = ["media"]
-cli = ["media", "h264", "hevc", "aac", "ac3", "mp4", "gpu", "filter", "mkv", "vp9", "png", "jpeg", "opus", "gif", "webp", "alac", "flac", "dep:clap"]
+cli = ["media", "h264", "hevc", "aac", "ac3", "mp4", "gpu", "filter", "mkv", "vp9", "png", "jpeg", "opus", "gif", "webp", "alac", "flac", "vorbis", "dep:clap"]
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 libloading = { version = "0.8", optional = true }

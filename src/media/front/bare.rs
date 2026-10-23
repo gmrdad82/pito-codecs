@@ -17,6 +17,8 @@ pub enum Bare {
     Flac,
     #[cfg(feature = "opus")]
     Opus,
+    #[cfg(feature = "vorbis")]
+    Vorbis,
     Ogg(&'static str),
 }
 
@@ -50,6 +52,10 @@ pub fn sniff(path: &Path) -> Option<Bare> {
             .is_some_and(|body| body.starts_with(b"OpusHead"))
     {
         return Some(Bare::Opus);
+    }
+    #[cfg(feature = "vorbis")]
+    if crate::vorbis::ogg::sniff(&head[..got]) {
+        return Some(Bare::Vorbis);
     }
     if got >= 27 && head.starts_with(b"OggS") {
         let body = head[..got]
@@ -93,6 +99,12 @@ fn refuse(name: &str) -> Error {
 fn mp3(path: &Path) -> Result<AudioBuffer> {
     let data = std::fs::read(path).map_err(|e| Error::at(path, e))?;
     crate::mp3::decode_file(&data)
+}
+
+#[cfg(feature = "vorbis")]
+fn vorbis(path: &Path) -> Result<AudioBuffer> {
+    let data = std::fs::read(path).map_err(|e| Error::at(path, e))?;
+    crate::vorbis::decode(&data)
 }
 
 #[cfg(feature = "opus")]
@@ -160,6 +172,16 @@ pub fn probe(path: &Path, kind: Bare) -> Result<Probe> {
                 seconds,
                 0,
             )
+        }
+        #[cfg(feature = "vorbis")]
+        Bare::Vorbis => {
+            let data = std::fs::read(path).map_err(|e| Error::at(path, e))?;
+            let ogg = crate::vorbis::OggVorbis::parse(&data)?;
+            let dec = ogg.decoder()?;
+            let rate = dec.rate();
+            let seconds = ogg.samples_with(&dec) as f64 / f64::from(rate.max(1));
+            let bitrate = (seconds > 0.0).then(|| (data.len() as f64 * 8.0 / seconds) as u32);
+            ("vorbis", dec.channels(), rate, bitrate, seconds, 0)
         }
         Bare::Ogg(name) => return Err(refuse(name)),
     };
@@ -250,6 +272,16 @@ impl BareFeed {
             #[cfg(feature = "opus")]
             Bare::Opus => {
                 let b = opus(path)?;
+                BareFeed {
+                    rate: b.rate,
+                    channels: b.channels,
+                    frames: b.frames() as u64,
+                    src: Src::Memory(b, 0),
+                }
+            }
+            #[cfg(feature = "vorbis")]
+            Bare::Vorbis => {
+                let b = vorbis(path)?;
                 BareFeed {
                     rate: b.rate,
                     channels: b.channels,

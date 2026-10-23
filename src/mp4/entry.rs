@@ -46,6 +46,7 @@ pub enum CodecConfig {
     Av1(Av1Config),
     Aac(AacConfig),
     Mp3,
+    Vorbis(Vec<u8>),
     Pcm(PcmConfig),
     Other(FourCc),
 }
@@ -59,6 +60,7 @@ impl CodecConfig {
             CodecConfig::Av1(_) => "av1".into(),
             CodecConfig::Aac(_) => "aac".into(),
             CodecConfig::Mp3 => "mp3".into(),
+            CodecConfig::Vorbis(_) => "vorbis".into(),
             CodecConfig::Pcm(_) => "pcm".into(),
             CodecConfig::Other(f) if &f.0 == b"ac-3" => "ac3".into(),
             CodecConfig::Other(f) if &f.0 == b"ec-3" => "eac3".into(),
@@ -74,6 +76,7 @@ impl CodecConfig {
             CodecConfig::Vp9(c) => Some(c.to_bytes()),
             CodecConfig::Av1(c) => Some(c.to_bytes()),
             CodecConfig::Aac(c) => Some(c.asc.clone()),
+            CodecConfig::Vorbis(p) => Some(p.clone()),
             _ => None,
         }
     }
@@ -840,6 +843,7 @@ fn parse_esds(p: &[u8]) -> Result<CodecConfig> {
     let d = decoder_config(p)?;
     Ok(match d.oti {
         0x69 | 0x6B => CodecConfig::Mp3,
+        0xDD => CodecConfig::Vorbis(d.asc),
         _ => {
             let mut a = AacConfig::from_asc(d.asc);
             a.max_bitrate = d.max_bitrate;

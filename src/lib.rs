@@ -53,6 +53,9 @@ pub mod mkv;
 #[cfg(feature = "opus")]
 pub mod opus;
 
+#[cfg(feature = "vorbis")]
+pub mod vorbis;
+
 #[cfg(feature = "vp9")]
 pub mod vp9;
 

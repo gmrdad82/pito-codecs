@@ -93,7 +93,20 @@ impl Track {
         }
     }
 
+    #[cfg(feature = "vorbis")]
+    fn vorbis_ident(&self) -> Option<crate::vorbis::IdentHeader> {
+        let Some(CodecConfig::Vorbis(private)) = self.config() else {
+            return None;
+        };
+        let [ident, _, _] = crate::vorbis::xiph_headers(private).ok()?;
+        crate::vorbis::read_header_ident(ident).ok()
+    }
+
     pub fn channels(&self) -> u32 {
+        #[cfg(feature = "vorbis")]
+        if let Some(h) = self.vorbis_ident() {
+            return u32::from(h.audio_channels);
+        }
         match self.config() {
             Some(CodecConfig::Aac(a)) if a.channels() > 0 => a.channels(),
             _ => self.entry().map_or(0, |e| {
@@ -105,6 +118,10 @@ impl Track {
     }
 
     pub fn sample_rate(&self) -> u32 {
+        #[cfg(feature = "vorbis")]
+        if let Some(h) = self.vorbis_ident() {
+            return h.audio_sample_rate;
+        }
         match self.config() {
             Some(CodecConfig::Aac(a)) if a.sample_rate > 0 => a.sample_rate,
             _ => self
@@ -695,6 +712,13 @@ fn parse_trak(
     }
     if let Some(stbl) = minf.and_then(|m| find(m, b"stbl")) {
         parse_stbl(stbl, &mut t, quicktime, file_len, room)?;
+    }
+    if matches!(t.config(), Some(CodecConfig::Vorbis(_)))
+        && t.edit_offset == 0
+        && let Some(first) = t.samples.first()
+        && first.pts == 0
+    {
+        t.edit_offset = -i64::from(first.duration);
     }
     if let Some(n) = name {
         t.name = n;

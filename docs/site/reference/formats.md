@@ -16,6 +16,7 @@ sidebar:
 | AAC | AAC-LC, mono to 7.1. | AAC-LC, CBR and VBR. |
 | AC-3 and E-AC-3 | Mono to 5.1 at 32, 44.1 and 48 kHz with coupling and rematrixing, within 2e-5 of ffmpeg's float decoder. Spectral extension, AHT and 7.1 through E-AC-3 dependent substreams are built but untested, since ffmpeg's encoder makes none of them; enhanced coupling and the reduced sample rates are refused. | — |
 | Opus | SILK, CELT, hybrid and multistream; the RFC 8251 conformance vectors decode to the reference's final range on every packet. | CELT, VBR and CBR, 6 to 510 kbps. **Experimental:** SILK and hybrid speech decode clean in libopus but sound worse than libopus at low rates. |
+| Vorbis | Floors 0 and 1, residues 0 to 2, mono to 8 channels in WAV channel order, from Ogg (`.ogg`, `.oga`), MKV, WebM and MP4, trimmed to the granule positions; within 4.8e-7 of ffmpeg's decoder per sample at worst (RMS 7.7e-8) from mono to 7.1. Chained Ogg files are refused. | — |
 | MP3, MP2, MP1 | MPEG-1, 2 and 2.5 audio, layers I, II and III, mono and stereo, CBR and VBR, within about 1e-6 of ffmpeg's mp3float. | — |
 | FLAC | 4 to 31-bit, mono to 8 channels, every subframe and stereo mode, bit-exact with libFLAC, in .flac, MKV and MP4; a bare `.flac` seeks to the exact sample. 32-bit streams are refused as "32-bit FLAC". | — |
 | ALAC | 16, 20, 24 and 32-bit, mono to 8 channels, in MP4, MOV, M4A and MKV, ported from Apple's reference decoder. | — |
@@ -24,7 +25,7 @@ sidebar:
 | GIF | GIF87a and 89a, interlace, disposal, transparency, loops. | Oklab palettes, ordered or Floyd-Steinberg dither, frame differencing. |
 | WebP | Lossless VP8L and lossy VP8, alpha, animation; bit-exact with libwebp. | Lossless VP8L and lossy VP8, alpha, animation. |
 
-Not covered: DTS, Vorbis, TrueHD, 32-bit FLAC, Ogg streams other than Opus, MPEG-4 Part 2, MPEG-2, ProRes, MJPEG, DNxHD and VP8 video, subtitle tracks, interlaced, 10-bit and 4:2:2 H.264 in the media front (`unsupported: 10-bit 4:2:2 H.264 video is not supported`), and the AVI, MPEG-TS, MPEG-PS, FLV and ASF containers. A file in one of those containers is refused at probe in one line naming the container (`unsupported: AVI files are not supported`). A track in a codec pito-codecs doesn't decode is refused when it is opened, in one line naming the codec plainly (`unsupported: MPEG-4 Part 2 video is not supported`), and `Probe::unsupported()` lists those names.
+Not covered: DTS, TrueHD, 32-bit FLAC, Ogg streams other than Opus and Vorbis, MPEG-4 Part 2, MPEG-2, ProRes, MJPEG, DNxHD and VP8 video, subtitle tracks, interlaced, 10-bit and 4:2:2 H.264 in the media front (`unsupported: 10-bit 4:2:2 H.264 video is not supported`), and the AVI, MPEG-TS, MPEG-PS, FLV and ASF containers. A file in one of those containers is refused at probe in one line naming the container (`unsupported: AVI files are not supported`). A track in a codec pito-codecs doesn't decode is refused when it is opened, in one line naming the codec plainly (`unsupported: MPEG-4 Part 2 video is not supported`), and `Probe::unsupported()` lists those names.
 
 ## What each job reads and writes
 

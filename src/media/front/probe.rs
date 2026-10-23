@@ -300,6 +300,10 @@ impl AudioTrack {
         } else {
             &[]
         };
+        #[cfg(feature = "vorbis")]
+        let vorbis: &[&str] = &["vorbis"];
+        #[cfg(not(feature = "vorbis"))]
+        let vorbis: &[&str] = &[];
         let refused =
             self.refused.is_some() || (self.codec.eq_ignore_ascii_case("flac") && self.bits > 31);
         !refused
@@ -310,6 +314,7 @@ impl AudioTrack {
                 .chain(mp3)
                 .chain(flac)
                 .chain(alac)
+                .chain(vorbis)
                 .any(|c| self.codec.eq_ignore_ascii_case(c))
     }
 }
@@ -691,8 +696,15 @@ mod tests {
             "invalid data: no video track"
         );
         assert!(p.unsupported().is_empty(), "{:?}", p.unsupported());
-        let p = audio_only(&["aac", "vorbis", "A_TRUEHD", "vorbis"]);
-        assert_eq!(p.unsupported(), ["Vorbis", "TrueHD"]);
+        let p = audio_only(&["aac", "A_DTS", "A_TRUEHD", "A_DTS"]);
+        assert_eq!(p.unsupported(), ["DTS", "TrueHD"]);
+        let p = audio_only(&["aac", "vorbis"]);
+        assert_eq!(
+            p.unsupported().is_empty(),
+            cfg!(feature = "vorbis"),
+            "{:?}",
+            p.unsupported()
+        );
         let mut p = audio_only(&[]);
         p.width = 352;
         assert_eq!(
