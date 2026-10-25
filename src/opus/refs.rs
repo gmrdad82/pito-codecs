@@ -1,0 +1,163 @@
+#![allow(dead_code)]
+
+#[allow(clippy::duplicate_mod)]
+#[path = "../aac/window.rs"]
+pub mod window;
+
+use pito_codecs::media::AudioBuffer;
+use pito_codecs::opus::enc::{Application, EncoderConfig, encode_ogg};
+
+pub const AREA: &str = "opus";
+pub const SECONDS: f32 = 0.5;
+pub const SPEECH_SECONDS: f32 = 1.0;
+
+pub const MUSIC: &str = "aevalsrc=0.3*sin(2*PI*220*t)+0.2*sin(2*PI*277.2*t+sin(2*PI*5*t))+0.15*sin(2*PI*329.6*t)*sin(2*PI*0.5*t)+0.05*sin(2*PI*3520*t)+0.08*(random(0)-0.5)*gt(mod(t\\,0.5)\\,0.45)|0.25*sin(2*PI*330*t)+0.2*sin(2*PI*440*t+0.3*sin(2*PI*3*t))+0.05*sin(2*PI*7040*t)+0.05*(random(1)-0.5):s=48000:d=0.5";
+pub const SPEECH: &str = "aevalsrc=(0.4*sin(2*PI*(120+20*sin(2*PI*3*t))*t)+0.2*sin(2*PI*(240+40*sin(2*PI*3*t))*t)+0.1*sin(2*PI*900*t)+0.05*(random(0)-0.5))*(0.6+0.4*sin(2*PI*4*t))*gt(sin(2*PI*1.3*t)\\,-0.6):s=48000:d=0.5";
+
+pub type Libopus = (&'static str, &'static str, &'static [&'static str], bool);
+
+pub const LIBOPUS: [Libopus; 4] = [
+    ("music_160k", MUSIC, &["-b:a", "160k", "-vbr", "off"], true),
+    (
+        "speech_16k_voip",
+        SPEECH,
+        &["-ac", "1", "-b:a", "16k", "-application", "voip"],
+        false,
+    ),
+    ("music_32k_hybrid", MUSIC, &["-b:a", "32k"], false),
+    (
+        "music_51_256k",
+        MUSIC,
+        &[
+            "-af",
+            "pan=5.1|c0=c0|c1=c1|c2=0.5*c0+0.5*c1|c3=0.1*c0|c4=0.8*c0|c5=0.8*c1",
+            "-b:a",
+            "256k",
+            "-mapping_family",
+            "1",
+        ],
+        true,
+    ),
+];
+
+pub const OURS: [(u16, u32); 3] = [(2, 128_000), (1, 64_000), (2, 64_000)];
+pub const SILK: [(u16, u32); 2] = [(1, 16_000), (2, 24_000)];
+
+pub fn stream(name: &str) -> String {
+    format!("{name}.opus")
+}
+
+pub fn decoded(file: &str) -> String {
+    format!("{file}.f32")
+}
+
+pub fn ours(channels: u16, bitrate: u32) -> String {
+    format!("enc_{channels}_{bitrate}.opus")
+}
+
+pub fn silk(channels: u16, bitrate: u32) -> String {
+    format!("silk_{channels}_{bitrate}.opus")
+}
+
+pub fn signal(seconds: f32, channels: usize) -> Vec<f32> {
+    let n = (48000.0 * seconds) as usize;
+    let mut seed = 0x1234_5678u32;
+    let mut out = Vec::with_capacity(n * channels);
+    for i in 0..n {
+        let t = i as f32 / 48000.0;
+        let env = if (i / 12000) % 4 == 3 { 0.2 } else { 1.0 };
+        for ch in 0..channels {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let noise = ((seed >> 9) as f32 / (1 << 23) as f32 - 0.5) * 0.05;
+            let f = if ch == 0 { 440.0 } else { 660.0 };
+            let v = 0.3 * (2.0 * std::f32::consts::PI * f * t).sin()
+                + 0.1 * (2.0 * std::f32::consts::PI * 3150.0 * t).sin()
+                + noise;
+            out.push(v * env);
+        }
+    }
+    out
+}
+
+pub fn speech(channels: usize) -> Vec<f32> {
+    speechlike(SPEECH_SECONDS, 48000)
+        .iter()
+        .flat_map(|&v| std::iter::repeat_n(v, channels))
+        .collect()
+}
+
+pub fn encode(cfg: EncoderConfig, pcm: &[f32]) -> Result<Vec<u8>, String> {
+    let mut buf = AudioBuffer::new(48000, cfg.channels);
+    buf.samples = pcm.to_vec();
+    encode_ogg(cfg, &buf).map_err(|e| e.to_string())
+}
+
+pub fn encode_ours(channels: u16, bitrate: u32) -> Result<Vec<u8>, String> {
+    let pcm = signal(SECONDS, channels as usize);
+    encode(EncoderConfig::new(channels, bitrate), &pcm)
+}
+
+pub fn encode_silk(channels: u16, bitrate: u32) -> Result<Vec<u8>, String> {
+    let mut cfg = EncoderConfig::new(channels, bitrate);
+    cfg.application = Application::Voip;
+    encode(cfg, &speech(channels as usize))
+}
+
+pub fn speechlike(seconds: f32, rate: u32) -> Vec<f32> {
+    let n = (seconds * rate as f32) as usize;
+    let fs = rate as f32;
+    let mut out = vec![0f32; n];
+    let mut phase = 0f32;
+    let mut noise = 12345u32;
+    let formants = [
+        (700f32, 130f32),
+        (1220.0, 70.0),
+        (2600.0, 160.0),
+        (3500.0, 250.0),
+    ];
+    let mut res = [[0f32; 2]; 4];
+    for (i, o) in out.iter_mut().enumerate() {
+        let t = i as f32 / fs;
+        let syl = (t * 3.1).fract();
+        let voiced = syl < 0.62;
+        let env = if syl < 0.7 {
+            (std::f32::consts::PI * syl / 0.7).sin().powf(0.6)
+        } else if syl < 0.82 {
+            0.25
+        } else {
+            0.0
+        };
+        let f0 = 110.0 + 45.0 * (t * 1.7).sin() + 20.0 * (t * 5.3).sin();
+        phase += f0 / fs;
+        let mut src = 0f32;
+        if phase >= 1.0 {
+            phase -= 1.0;
+            if voiced {
+                src = 1.0;
+            }
+        }
+        noise = noise.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let nz = (noise >> 8) as f32 / 16_777_216.0 - 0.5;
+        if !voiced {
+            src = nz * 0.6;
+        } else {
+            src += nz * 0.02;
+        }
+        let shift = 1.0 + 0.15 * (t * 2.3).sin();
+        let mut y = 0f32;
+        for (k, &(f, bw)) in formants.iter().enumerate() {
+            let r = (-std::f32::consts::PI * bw / fs).exp();
+            let c = 2.0 * r * (2.0 * std::f32::consts::PI * f * shift / fs).cos();
+            let v = src + c * res[k][0] - r * r * res[k][1];
+            res[k][1] = res[k][0];
+            res[k][0] = v;
+            y += v * (1.0 - r) * if k == 0 { 1.0 } else { 0.6 };
+        }
+        *o = y * env * 0.5;
+    }
+    let peak = out.iter().fold(0f32, |m, v| m.max(v.abs()));
+    for v in out.iter_mut() {
+        *v *= 0.5 / peak;
+    }
+    out
+}

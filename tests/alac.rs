@@ -1,14 +1,16 @@
 #![cfg(all(feature = "alac", feature = "audio", feature = "mp4", feature = "mkv"))]
 
-#[path = "fixtures/alac/pcm.rs"]
-mod pcm;
+#[path = "../src/alac/refs.rs"]
+mod refs;
+#[path = "../src/testref.rs"]
+mod testref;
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use pcm::{fnv, source};
 use pito_codecs::alac::{Config, Decoder, entry_cookie};
 use pito_codecs::media::{AudioBuffer, Prefs, audio_pcm_range, probe};
+use refs::pcm::{fnv, source};
+use testref::Refs;
 
 struct Fixture {
     name: &'static str,
@@ -530,100 +532,19 @@ fn a_damaged_alac_file_never_panics() {
         let _ = audio_pcm_range(&damaged, 0, 0.0, f64::INFINITY, f.rate, 2, &prefs);
     }
 }
-
-struct Case {
-    name: &'static str,
-    ext: &'static str,
-    depth: u32,
-    channels: usize,
-    rate: u32,
-    args: &'static [&'static str],
-}
-
-const CASES: &[Case] = &[
-    Case {
-        name: "s16-mono-m4a-level1",
-        ext: "m4a",
-        depth: 16,
-        channels: 1,
-        rate: 48_000,
-        args: &["-compression_level", "1"],
-    },
-    Case {
-        name: "s24-stereo-m4a-order1-30",
-        ext: "m4a",
-        depth: 24,
-        channels: 2,
-        rate: 96_000,
-        args: &["-min_prediction_order", "1", "-max_prediction_order", "30"],
-    },
-    Case {
-        name: "s16-stereo-mov-order12",
-        ext: "mov",
-        depth: 16,
-        channels: 2,
-        rate: 32_000,
-        args: &["-min_prediction_order", "12", "-max_prediction_order", "12"],
-    },
-    Case {
-        name: "s24-stereo-mkv",
-        ext: "mkv",
-        depth: 24,
-        channels: 2,
-        rate: 44_100,
-        args: &[],
-    },
-];
-
-fn raw(samples: &[i32], depth: u32) -> Vec<u8> {
-    let width = if depth == 16 { 2 } else { 3 };
-    samples
-        .iter()
-        .flat_map(|&s| s.to_le_bytes().into_iter().take(width))
-        .collect()
-}
-
-fn encode(case: &Case, samples: &[i32]) -> PathBuf {
-    let input = dir().join(format!("{}.raw", case.name));
-    std::fs::write(&input, raw(samples, case.depth)).unwrap();
-    let out = dir().join(format!("{}.{}", case.name, case.ext));
-    let part = dir().join(format!("{}.{}.{}", std::process::id(), case.name, case.ext));
-    let (fmt, sample_fmt) = if case.depth == 16 {
-        ("s16le", "s16p")
-    } else {
-        ("s24le", "s32p")
-    };
-    let rate = case.rate.to_string();
-    let channels = case.channels.to_string();
-    let st = Command::new("ffmpeg")
-        .args([
-            "-v", "error", "-y", "-f", fmt, "-ar", &rate, "-ac", &channels, "-i",
-        ])
-        .arg(&input)
-        .args(["-c:a", "alac", "-sample_fmt", sample_fmt])
-        .args(case.args)
-        .arg(&part)
-        .status()
-        .unwrap();
-    assert!(st.success(), "{}", case.name);
-    std::fs::rename(&part, &out).unwrap();
-    out
-}
-
 #[test]
 fn longer_streams_from_ffmpeg_decode_bit_exact() {
-    if Command::new("ffmpeg").arg("-version").output().is_err() {
-        eprintln!("alac: no ffmpeg here, so the longer encoder streams are skipped");
-        return;
-    }
-    for (k, case) in CASES.iter().enumerate() {
-        let frames = case.rate as usize * 2 + 4096 * k + 7;
-        let want = source(case.channels, case.depth, frames, 100 + k as u64);
-        let path = encode(case, &want);
+    let r = Refs::open(refs::AREA);
+    for (k, case) in refs::CASES.iter().enumerate() {
+        let want = refs::source(k);
+        assert_eq!(want.len(), refs::frames(k) * case.channels, "{}", case.name);
+        let path = r.path(&case.file());
         let (config, got) = decode_all(&path);
         assert_eq!(config.bit_depth as u32, case.depth, "{}", case.name);
         assert_eq!(config.channels as usize, case.channels, "{}", case.name);
         assert_eq!(config.sample_rate, case.rate, "{}", case.name);
+        let (_, pkts) = packets(&path);
+        assert!(pkts.len() >= 2, "{}: {} packets", case.name, pkts.len());
         assert!(got == want, "{} is not bit-exact", case.name);
         let whole = audio_pcm_range(
             &path,
@@ -640,6 +561,19 @@ fn longer_streams_from_ffmpeg_decode_bit_exact() {
             whole.samples == as_f32(&want, case.depth),
             "{}: the media front is not bit-exact",
             case.name
+        );
+    }
+}
+
+#[test]
+fn the_raw_input_packs_each_sample_in_its_width() {
+    assert_eq!(refs::raw(&[1, -2], 16), vec![1, 0, 0xfe, 0xff]);
+    assert_eq!(refs::raw(&[-1, 0x123456], 24), vec![0xff, 0xff, 0xff, 0x56, 0x34, 0x12]);
+    for (k, case) in refs::CASES.iter().enumerate() {
+        let width = if case.depth == 16 { 2 } else { 3 };
+        assert_eq!(
+            refs::raw_source(k).len(),
+            refs::frames(k) * case.channels * width
         );
     }
 }

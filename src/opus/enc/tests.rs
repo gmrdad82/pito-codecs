@@ -1,25 +1,9 @@
 use super::*;
 use crate::opus::StreamDecoder;
+use crate::opus::tests::refs;
+use crate::testref::{self, Refs};
 
-pub fn signal(seconds: f32, channels: usize) -> Vec<f32> {
-    let n = (48000.0 * seconds) as usize;
-    let mut seed = 0x1234_5678u32;
-    let mut out = Vec::with_capacity(n * channels);
-    for i in 0..n {
-        let t = i as f32 / 48000.0;
-        let env = if (i / 12000) % 4 == 3 { 0.2 } else { 1.0 };
-        for ch in 0..channels {
-            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            let noise = ((seed >> 9) as f32 / (1 << 23) as f32 - 0.5) * 0.05;
-            let f = if ch == 0 { 440.0 } else { 660.0 };
-            let v = 0.3 * (2.0 * std::f32::consts::PI * f * t).sin()
-                + 0.1 * (2.0 * std::f32::consts::PI * 3150.0 * t).sin()
-                + noise;
-            out.push(v * env);
-        }
-    }
-    out
-}
+pub use refs::signal;
 
 pub fn snr_db(reference: &[f32], decoded: &[f32]) -> f32 {
     let (mut s, mut e) = (0f64, 0f64);
@@ -80,59 +64,39 @@ pub fn ogg(cfg: EncoderConfig, pcm: &[f32]) -> Vec<u8> {
     encode_ogg(cfg, &buf).unwrap()
 }
 
-pub fn ffmpeg_decode(path: &std::path::Path, channels: usize) -> Option<Vec<f32>> {
-    let out = std::process::Command::new("ffmpeg")
-        .args(["-v", "error", "-c:a", "libopus", "-i"])
-        .arg(path)
-        .args([
-            "-f",
-            "f32le",
-            "-ac",
-            &channels.to_string(),
-            "-ar",
-            "48000",
-            "-",
-        ])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        panic!("ffmpeg: {}", String::from_utf8_lossy(&out.stderr));
-    }
-    Some(
-        out.stdout
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .collect(),
-    )
-}
-
 fn tmp_dir() -> std::path::PathBuf {
     let d = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/opusenc");
     std::fs::create_dir_all(&d).unwrap();
     d
 }
 
+fn rms(v: &[f32]) -> f32 {
+    (v.iter().map(|x| x * x).sum::<f32>() / v.len().max(1) as f32).sqrt()
+}
+
+fn libopus_heard(r: &Refs, file: &str, bytes: &[u8], pcm: &[f32], c: usize) -> (f32, f32) {
+    r.assert_digest(file, &testref::sha256(bytes));
+    let dec = r.f32s(&refs::decoded(file));
+    let pcm = refs::window::window(pcm, c);
+    assert_eq!(dec.len(), pcm.len(), "{file}: trimmed length");
+    let level = 20.0 * (rms(&dec) / rms(&pcm)).log10();
+    (snr_db(&pcm, &dec), level)
+}
+
 #[test]
 fn libopus_decodes_our_ogg_with_matching_level() {
-    for (channels, bitrate) in [(2u16, 128_000u32), (1, 64_000), (2, 64_000)] {
+    let r = Refs::open(refs::AREA);
+    for (channels, bitrate) in refs::OURS {
         let c = channels as usize;
-        let pcm = signal(2.0, c);
+        let pcm = signal(refs::SECONDS, c);
         let file = ogg(EncoderConfig::new(channels, bitrate), &pcm);
+        assert_eq!(file, refs::encode_ours(channels, bitrate).unwrap());
         let ours = crate::opus::ogg::decode(&file).unwrap();
         assert_eq!(ours.samples.len(), pcm.len(), "our trimmed length");
         assert!(snr_db(&pcm, &ours.samples) > 12.0);
-        let path = tmp_dir().join(format!("enc_{c}_{bitrate}.opus"));
-        std::fs::write(&path, file).unwrap();
-        let Some(dec) = ffmpeg_decode(&path, c) else {
-            return;
-        };
-        assert_eq!(dec.len(), pcm.len(), "trimmed length");
-        let snr = snr_db(&pcm, &dec);
-        let rms = |v: &[f32]| (v.iter().map(|x| x * x).sum::<f32>() / v.len() as f32).sqrt();
-        let level = 20.0 * (rms(&dec) / rms(&pcm)).log10();
-        eprintln!("libopus c{c} {bitrate}: snr {snr:.2} dB, level {level:+.2} dB");
-        assert!(snr > 12.0, "snr {snr}");
-        assert!(level.abs() < 0.5, "level {level}");
+        let (snr, level) = libopus_heard(&r, &refs::ours(channels, bitrate), &file, &pcm, c);
+        assert!(snr > 12.0, "c{c} {bitrate}: snr {snr}");
+        assert!(level.abs() < 0.5, "c{c} {bitrate}: level {level}");
     }
 }
 
@@ -143,94 +107,6 @@ fn read_f32(path: &std::path::Path) -> Option<Vec<f32>> {
             .map(|v| f32::from_le_bytes([v[0], v[1], v[2], v[3]]))
             .collect(),
     )
-}
-
-fn seg_snr(a: &[f32], b: &[f32], c: usize) -> f32 {
-    let w = 960 * c;
-    let mut acc = 0f64;
-    let mut n = 0;
-    for (x, y) in a.chunks(w).zip(b.chunks(w)) {
-        let s: f64 = x.iter().map(|v| (*v as f64).powi(2)).sum();
-        if s < 1e-6 * w as f64 {
-            continue;
-        }
-        let e: f64 = x
-            .iter()
-            .zip(y)
-            .map(|(p, q)| (*p as f64 - *q as f64).powi(2))
-            .sum();
-        acc += (10.0 * (s / e.max(1e-20)).log10()).clamp(-10.0, 60.0);
-        n += 1;
-    }
-    (acc / n.max(1) as f64) as f32
-}
-
-#[test]
-#[ignore]
-fn measure_against_libopus() {
-    if !crate::opus::tests::libopus() {
-        eprintln!("ffmpeg with libopus not found; skipping");
-        return;
-    }
-    let dir = tmp_dir();
-    let names = std::env::var("PITO_CLIPS").unwrap_or("resilience,solstice,music".into());
-    for name in names.split(',') {
-        let src = dir.join(format!("{name}.f32"));
-        let Some(pcm) = read_f32(&src) else {
-            continue;
-        };
-        let c = 2usize;
-        let secs = pcm.len() as f64 / (48000.0 * c as f64);
-        for bitrate in [64_000u32, 96_000, 128_000] {
-            let mut line = format!("{name} {} kbps:", bitrate / 1000);
-            for vbr in [false, true] {
-                let mut cfg = EncoderConfig::new(c as u16, bitrate);
-                cfg.vbr = vbr;
-                let t = std::time::Instant::now();
-                let file = ogg(cfg, &pcm);
-                let ours = t.elapsed().as_secs_f64();
-                let kbps = file.len() as f64 * 8.0 / secs / 1000.0;
-                let path = dir.join(format!("{name}_{bitrate}_{vbr}.opus"));
-                std::fs::write(&path, file).unwrap();
-                let dec = ffmpeg_decode(&path, c).unwrap();
-                line += &format!(
-                    " ours {} {:.0}x {:.1}k snr {:.2} seg {:.2} |",
-                    if vbr { "vbr" } else { "cbr" },
-                    secs / ours,
-                    kbps,
-                    snr_db(&pcm, &dec),
-                    seg_snr(&pcm, &dec, c)
-                );
-            }
-            for vbr in ["off", "on"] {
-                let lib = dir.join(format!("{name}_{bitrate}_libopus_{vbr}.opus"));
-                let t = std::time::Instant::now();
-                let st = std::process::Command::new("ffmpeg")
-                    .args([
-                        "-v", "error", "-y", "-threads", "1", "-f", "f32le", "-ar", "48000", "-ac",
-                        "2", "-i",
-                    ])
-                    .arg(&src)
-                    .args(["-c:a", "libopus", "-b:a", &bitrate.to_string(), "-vbr", vbr])
-                    .arg(&lib)
-                    .status()
-                    .unwrap();
-                let theirs = t.elapsed().as_secs_f64();
-                assert!(st.success());
-                let kbps = std::fs::metadata(&lib).unwrap().len() as f64 * 8.0 / secs / 1000.0;
-                let ldec = ffmpeg_decode(&lib, c).unwrap();
-                let n = pcm.len().min(ldec.len());
-                line += &format!(
-                    " libopus {vbr} {:.0}x {:.1}k snr {:.2} seg {:.2} |",
-                    secs / theirs,
-                    kbps,
-                    snr_db(&pcm[..n], &ldec[..n]),
-                    seg_snr(&pcm[..n], &ldec[..n], c)
-                );
-            }
-            eprintln!("{line}");
-        }
-    }
 }
 
 #[test]
@@ -355,26 +231,17 @@ fn speed() {
 
 #[test]
 fn voip_speech_goes_through_silk_and_lines_up_in_libopus() {
-    for (channels, bitrate) in [(1u16, 16_000u32), (2, 24_000)] {
+    let r = Refs::open(refs::AREA);
+    for (channels, bitrate) in refs::SILK {
         let c = channels as usize;
-        let mono = super::silk::tests::speechlike(2.0, 48000);
-        let pcm: Vec<f32> = mono
-            .iter()
-            .flat_map(|&v| std::iter::repeat_n(v, c))
-            .collect();
+        let pcm = refs::speech(c);
         let mut cfg = EncoderConfig::new(channels, bitrate);
         cfg.application = Application::Voip;
         let file = ogg(cfg, &pcm);
+        assert_eq!(file, refs::encode_silk(channels, bitrate).unwrap());
         let ours = crate::opus::ogg::decode(&file).unwrap();
         assert_eq!(ours.samples.len(), pcm.len());
-        let path = tmp_dir().join(format!("silk_{c}_{bitrate}.opus"));
-        std::fs::write(&path, file).unwrap();
-        let Some(dec) = ffmpeg_decode(&path, c) else {
-            return;
-        };
-        assert_eq!(dec.len(), pcm.len(), "trimmed length");
-        let snr = snr_db(&pcm, &dec);
-        eprintln!("silk c{c} {bitrate}: snr at lag 0 {snr:.2} dB");
-        assert!(snr > 4.0, "snr {snr}");
+        let (snr, _) = libopus_heard(&r, &refs::silk(channels, bitrate), &file, &pcm, c);
+        assert!(snr > 4.0, "c{c} {bitrate}: snr {snr}");
     }
 }

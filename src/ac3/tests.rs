@@ -1,75 +1,10 @@
 use super::*;
-use std::path::PathBuf;
-use std::process::Command;
+use crate::testref::{self, Diff, Refs, diff};
 
-pub(super) fn dir() -> PathBuf {
-    let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp/test-ac3");
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
+#[path = "refs.rs"]
+pub(super) mod refs;
 
-pub(super) fn ffmpeg() -> bool {
-    Command::new("ffmpeg")
-        .arg("-version")
-        .output()
-        .is_ok_and(|o| o.status.success())
-}
-
-pub(super) fn signal(rate: u32, channels: u16, seconds: f32) -> Vec<u8> {
-    let n = (rate as f32 * seconds) as usize;
-    let mut seed = 0x1234_5678u32;
-    let mut out = Vec::with_capacity(n * channels as usize * 4);
-    for i in 0..n {
-        let t = i as f32 / rate as f32;
-        for c in 0..channels {
-            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            let noise = (seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5;
-            let f = 180.0 * (c as f32 + 1.0);
-            let burst = if (t * 3.0).fract() < 0.1 { 0.3 } else { 0.0 };
-            let s = 0.3 * (std::f32::consts::TAU * f * t).sin()
-                + 0.1 * (std::f32::consts::TAU * 4100.0 * t).sin()
-                + (0.05 + burst) * noise;
-            out.extend_from_slice(&s.to_le_bytes());
-        }
-    }
-    out
-}
-
-fn encode(name: &str, codec: &str, rate: u32, layout: &str, channels: u16, kbps: u32) -> PathBuf {
-    let raw = dir().join(format!("{name}.f32"));
-    std::fs::write(&raw, signal(rate, channels, 2.0)).unwrap();
-    let out = dir().join(format!("{name}.{codec}"));
-    let st = Command::new("ffmpeg")
-        .args(["-v", "error", "-y", "-f", "f32le", "-ar"])
-        .arg(rate.to_string())
-        .args(["-ch_layout", layout, "-i"])
-        .arg(&raw)
-        .args(["-c:a", codec, "-b:a"])
-        .arg(format!("{kbps}k"))
-        .arg(&out)
-        .status()
-        .unwrap();
-    assert!(st.success());
-    out
-}
-
-fn ffmpeg_decode(path: &PathBuf) -> Vec<f32> {
-    let out = Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
-        .arg(path)
-        .args(["-f", "f32le", "-"])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    out.stdout
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .collect()
-}
+pub(super) const LIMIT: f64 = 5e-5;
 
 fn frames(data: &[u8]) -> Vec<&[u8]> {
     let mut out = Vec::new();
@@ -81,15 +16,14 @@ fn frames(data: &[u8]) -> Vec<&[u8]> {
     out
 }
 
-pub(super) fn without_dither_flags(path: &PathBuf) -> (PathBuf, usize) {
-    let data = std::fs::read(path).unwrap();
-    let i = info(&data).unwrap();
+pub(super) fn without_dither_flags(data: &[u8]) -> (Vec<u8>, usize) {
+    let i = info(data).unwrap();
     let mut d = Decoder::new(i.rate, i.channels);
-    let mut patched = data.clone();
+    let mut patched = data.to_vec();
     let mut off = 0;
     let mut cleared = 0;
     let mut buf = Vec::new();
-    for f in frames(&data) {
+    for f in frames(data) {
         d.decode_into(f, &mut buf).unwrap();
         for m in d.marks() {
             let bit = off * 8 + m;
@@ -98,36 +32,22 @@ pub(super) fn without_dither_flags(path: &PathBuf) -> (PathBuf, usize) {
         }
         off += f.len();
     }
-    let out = path.with_extension(format!(
-        "plain.{}",
-        path.extension().unwrap().to_string_lossy()
-    ));
-    std::fs::write(&out, patched).unwrap();
-    (out, cleared)
+    (patched, cleared)
 }
 
-pub(super) fn ours(path: &PathBuf, dither: bool) -> (Vec<f32>, u16) {
-    let data = std::fs::read(path).unwrap();
-    let i = info(&data).unwrap();
+pub(super) fn ours(data: &[u8], dither: bool) -> (Vec<f32>, u16) {
+    let i = info(data).unwrap();
     let mut d = Decoder::new(i.rate, i.channels);
     if !dither {
         d = d.without_dither();
     }
     let mut out = Vec::new();
     let mut buf = Vec::new();
-    for f in frames(&data) {
+    for f in frames(data) {
         d.decode_into(f, &mut buf).unwrap();
         out.extend_from_slice(&buf);
     }
     (out, d.channels())
-}
-
-pub(super) fn max_diff(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(a.len(), b.len());
-    a.iter()
-        .zip(b)
-        .map(|(x, y)| (x - y).abs())
-        .fold(0.0, f32::max)
 }
 
 fn crc16(data: &[u8]) -> u16 {
@@ -145,14 +65,13 @@ fn crc16(data: &[u8]) -> u16 {
     crc
 }
 
-pub(super) fn with_dither_flags(path: &PathBuf) -> PathBuf {
-    let data = std::fs::read(path).unwrap();
-    let i = info(&data).unwrap();
+pub(super) fn with_dither_flags(data: &[u8]) -> Vec<u8> {
+    let i = info(data).unwrap();
     let mut d = Decoder::new(i.rate, i.channels);
-    let nfchans = header::parse(&data).unwrap().nfchans;
+    let nfchans = header::parse(data).unwrap().nfchans;
     let mut out = Vec::new();
     let mut buf = Vec::new();
-    for f in frames(&data) {
+    for f in frames(data) {
         d.decode_into(f, &mut buf).unwrap();
         let holes = d.holes();
         let (flag, rest) = holes.split_first().unwrap();
@@ -182,52 +101,107 @@ pub(super) fn with_dither_flags(path: &PathBuf) -> PathBuf {
         frame[n - 2..].copy_from_slice(&crc.to_be_bytes());
         out.extend(frame);
     }
-    let p = path.with_extension(format!(
-        "flags.{}",
-        path.extension().unwrap().to_string_lossy()
-    ));
-    std::fs::write(&p, out).unwrap();
-    p
+    out
+}
+
+pub(super) fn plain(c: &refs::Case, data: &[u8]) -> (Vec<u8>, usize) {
+    if c.codec == "ac3" {
+        without_dither_flags(data)
+    } else {
+        (with_dither_flags(data), 0)
+    }
+}
+
+pub(super) fn pinned_plain(r: &Refs, c: &refs::Case) -> (Vec<u8>, usize) {
+    let (bytes, cleared) = plain(c, &r.bytes(&c.stream()));
+    r.assert_digest(&c.plain(), &testref::sha256(&bytes));
+    (bytes, cleared)
+}
+
+pub(super) fn against_ffmpeg(r: &Refs, c: &refs::Case, got: &[f32], channels: u16) -> Diff {
+    diff(&refs::window::window(got, channels as usize), &r.f32s(&c.decoded()))
+}
+
+#[test]
+#[ignore]
+fn write_plain_streams() {
+    let dir = refs::work_dir();
+    for c in refs::cases() {
+        let Ok(data) = std::fs::read(dir.join(c.stream())) else {
+            continue;
+        };
+        testref::write_atomic(&dir.join(c.plain()), &plain(c, &data).0).unwrap();
+    }
+}
+
+#[test]
+fn the_patch_cases_are_named_once() {
+    let mut names: Vec<&str> = refs::cases().map(|c| c.name).collect();
+    let all = names.len();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), all);
+    for name in refs::BOXED {
+        assert_eq!(refs::named(name).name, name);
+    }
+}
+
+#[test]
+fn the_patches_change_only_what_they_name() {
+    let r = Refs::open(refs::AREA);
+    let c = refs::named("ac3-51");
+    let data = r.bytes(&c.stream());
+    let (cleared, n) = without_dither_flags(&data);
+    assert!(n > 0);
+    assert_eq!(cleared.len(), data.len());
+    let flipped: u32 = data
+        .iter()
+        .zip(&cleared)
+        .map(|(a, b)| (a ^ b).count_ones())
+        .sum();
+    assert_eq!(flipped as usize, n);
+    assert_eq!(without_dither_flags(&cleared).1, 0);
+    let e = refs::named("eac3-stereo");
+    let data = r.bytes(&e.stream());
+    let flagged = with_dither_flags(&data);
+    assert_eq!(flagged.len(), data.len());
+    assert_eq!(frames(&flagged).len(), frames(&data).len());
 }
 
 #[test]
 fn ac3_matches_ffmpeg() {
-    if !ffmpeg() {
-        return;
-    }
-    for (name, rate, layout, channels, kbps) in [
-        ("ac3-51", 48_000, "5.1(side)", 6, 448),
-        ("ac3-stereo", 44_100, "stereo", 2, 96),
-        ("ac3-mono", 48_000, "mono", 1, 64),
-    ] {
-        let src = encode(name, "ac3", rate, layout, channels, kbps);
-        let (plain, cleared) = without_dither_flags(&src);
+    let r = Refs::open(refs::AREA);
+    for name in ["ac3-51", "ac3-stereo", "ac3-mono"] {
+        let c = refs::named(name);
+        let (plain, cleared) = pinned_plain(&r, c);
         assert!(cleared > 0, "{name}: no dither flags to clear");
-        let reference = ffmpeg_decode(&plain);
         let (got, ch) = ours(&plain, false);
-        assert_eq!(ch, channels);
-        let d = max_diff(&got, &reference);
-        assert!(d < 5e-5, "{name}: max difference {d}");
+        assert_eq!(ch, c.channels);
+        testref::assert_within(name, &against_ffmpeg(&r, c, &got, ch), LIMIT, LIMIT);
     }
 }
 
 #[test]
 fn eac3_matches_ffmpeg() {
-    if !ffmpeg() {
-        return;
-    }
-    for (name, layout, channels, kbps) in [
-        ("eac3-51", "5.1(side)", 6, 384),
-        ("eac3-stereo", "stereo", 2, 128),
-    ] {
-        let src = encode(name, "eac3", 48_000, layout, channels, kbps);
-        let plain = with_dither_flags(&src);
-        let reference = ffmpeg_decode(&plain);
+    let r = Refs::open(refs::AREA);
+    for name in ["eac3-51", "eac3-stereo"] {
+        let c = refs::named(name);
+        let (plain, _) = pinned_plain(&r, c);
         let (got, ch) = ours(&plain, false);
-        assert_eq!(ch, channels);
-        let d = max_diff(&got, &reference);
-        assert!(d < 5e-5, "{name}: max difference {d}");
+        assert_eq!(ch, c.channels);
+        testref::assert_within(name, &against_ffmpeg(&r, c, &got, ch), LIMIT, LIMIT);
     }
+}
+
+#[test]
+fn a_dithered_decode_differs_from_the_plain_one() {
+    let r = Refs::open(refs::AREA);
+    let c = refs::named("ac3-51");
+    let data = r.bytes(&c.stream());
+    let (dithered, _) = ours(&data, true);
+    let (plain, _) = ours(&without_dither_flags(&data).0, false);
+    assert_eq!(dithered.len(), plain.len());
+    assert!(dithered != plain);
 }
 
 struct Rng(u64);
@@ -247,16 +221,14 @@ impl Rng {
 
 #[test]
 fn malformed_frames_fail_cleanly() {
-    if !ffmpeg() {
-        return;
-    }
+    let r = Refs::open(refs::AREA);
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-    for (name, codec, layout, channels) in [
-        ("bad-ac3", "ac3", "5.1(side)", 6),
-        ("bad-eac3", "eac3", "stereo", 2),
-    ] {
-        let data = std::fs::read(encode(name, codec, 48_000, layout, channels, 256)).unwrap();
+    for name in ["ac3-51", "eac3-stereo"] {
+        let c = refs::named(name);
+        let channels = c.channels;
+        let data = r.bytes(&c.stream());
         let good: Vec<Vec<u8>> = frames(&data).into_iter().map(<[u8]>::to_vec).collect();
+        assert!(good.len() >= 2, "{name}: {} frames", good.len());
         let mut buf = Vec::new();
         for round in 0..400 {
             let mut d = Decoder::new(48_000, channels);
@@ -297,60 +269,19 @@ fn malformed_frames_fail_cleanly() {
 #[test]
 fn containers_decode_through_the_media_front() {
     use crate::media::{Prefs, audio_pcm_range, probe};
-    if !ffmpeg() {
-        return;
-    }
-    let aac = encode("side-aac", "aac", 48_000, "stereo", 2, 128);
-    let video = dir().join("video.mkv");
-    let st = Command::new("ffmpeg")
-        .args([
-            "-v",
-            "error",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=64x64:rate=10:duration=2",
-        ])
-        .args(["-c:v", "libx264", "-preset", "ultrafast"])
-        .arg(&video)
-        .status()
-        .unwrap();
-    assert!(st.success());
-    for (name, codec, rate, layout, channels, kbps) in [
-        ("box-ac3", "ac3", 48_000, "5.1(side)", 6u16, 448),
-        ("box-eac3", "eac3", 48_000, "5.1(side)", 6, 384),
-        ("box-ac3-44", "ac3", 44_100, "stereo", 2, 192),
-    ] {
-        let src = encode(name, codec, rate, layout, channels, kbps);
-        let plain = if codec == "ac3" {
-            without_dither_flags(&src).0
-        } else {
-            with_dither_flags(&src)
-        };
-        let reference = ffmpeg_decode(&plain);
-        for ext in ["mkv", "mp4"] {
-            let path = dir().join(format!("{name}.{ext}"));
-            let st = Command::new("ffmpeg")
-                .args(["-v", "error", "-y", "-i"])
-                .arg(&plain)
-                .arg("-i")
-                .arg(&aac)
-                .arg("-i")
-                .arg(&video)
-                .args(["-map", "2:v", "-map", "0:a", "-map", "1:a", "-c", "copy"])
-                .arg(&path)
-                .status()
-                .unwrap();
-            assert!(st.success());
+    let r = Refs::open(refs::AREA);
+    for name in refs::BOXED {
+        let c = refs::named(name);
+        let (rate, channels) = (c.rate, c.channels);
+        let n = channels as usize;
+        let reference = r.f32s(&c.decoded());
+        for ext in refs::BOX_EXTS {
+            let file = refs::boxed(name, ext);
+            let path = r.path(&file);
             let p = probe(&path, &Prefs::default()).unwrap();
-            assert_eq!(p.audio.len(), 2, "{name}.{ext}");
-            assert!(
-                p.audio.iter().all(|a| a.native()),
-                "{name}.{ext}: {:?}",
-                p.audio
-            );
-            assert_eq!(p.audio[0].channels, channels, "{name}.{ext}");
+            assert_eq!(p.audio.len(), 2, "{file}");
+            assert!(p.audio.iter().all(|a| a.native()), "{file}: {:?}", p.audio);
+            assert_eq!(p.audio[0].channels, channels, "{file}");
             let got = audio_pcm_range(
                 &path,
                 0,
@@ -362,16 +293,21 @@ fn containers_decode_through_the_media_front() {
             )
             .unwrap();
             assert_eq!(got.channels, channels);
-            let n = got.samples.len().min(reference.len());
+            let got = refs::window::window(&got.samples, n);
+            let k = got.len().min(reference.len());
+            let per_frame = (1536 / (refs::window::RUN * refs::window::EVERY) + 1)
+                * refs::window::RUN
+                * n;
             assert!(
-                n + 1536 * channels as usize >= reference.len(),
-                "{name}.{ext}: {n} of {}",
+                k + per_frame >= reference.len(),
+                "{file}: {k} of {}",
                 reference.len()
             );
-            let d = max_diff(&got.samples[..n], &reference[..n]);
-            assert!(d < 5e-5, "{name}.{ext}: max difference {d}");
-            let stereo = audio_pcm_range(&path, 0, 0.5, 1.0, 48_000, 2, &Prefs::default()).unwrap();
-            assert_eq!(stereo.samples.len(), 48_000);
+            let d = diff(&got[..k], &reference[..k]);
+            testref::assert_within(&file, &d, LIMIT, LIMIT);
+            let stereo =
+                audio_pcm_range(&path, 0, 0.01, 0.05, 48_000, 2, &Prefs::default()).unwrap();
+            assert_eq!(stereo.samples.len(), 3840, "{file}");
         }
     }
 }
