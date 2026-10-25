@@ -829,8 +829,13 @@ impl DecoderBackend for Av1Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testref::{Digest, Refs};
     use std::path::{Path, PathBuf};
-    use std::process::Command;
+
+    #[allow(dead_code)]
+    mod refs {
+        include!("../../av1/refs.rs");
+    }
 
     fn ivf_frames(data: &[u8]) -> Vec<&[u8]> {
         let mut out = Vec::new();
@@ -899,13 +904,11 @@ mod tests {
         pub worst: f64,
     }
 
-    pub fn compare(ivf: &Path, yuv: &Path, grain: bool) -> Outcome {
-        let data = std::fs::read(ivf).unwrap();
-        let reference = std::fs::read(yuv).unwrap();
+    fn decode_frames(data: &[u8], grain: bool, what: &str) -> Vec<Frame> {
         let mut dec = Av1Decoder::on(None, super::super::HELD, &[]).unwrap();
         dec.grain(grain);
         let mut frames = Vec::new();
-        for (i, c) in ivf_frames(&data).iter().enumerate() {
+        for (i, c) in ivf_frames(data).iter().enumerate() {
             let packet = Packet {
                 data: c.to_vec(),
                 pts: i as i64,
@@ -914,7 +917,7 @@ mod tests {
             };
             for p in dec
                 .decode(&packet, false)
-                .unwrap_or_else(|e| panic!("{}: unit {i}: {e}", ivf.display()))
+                .unwrap_or_else(|e| panic!("{what}: unit {i}: {e}"))
             {
                 frames.push(p.into_frame().unwrap());
             }
@@ -922,6 +925,13 @@ mod tests {
         for p in dec.flush(false).unwrap() {
             frames.push(p.into_frame().unwrap());
         }
+        frames
+    }
+
+    pub fn compare(ivf: &Path, yuv: &Path, grain: bool) -> Outcome {
+        let data = std::fs::read(ivf).unwrap();
+        let reference = std::fs::read(yuv).unwrap();
+        let frames = decode_frames(&data, grain, &ivf.display().to_string());
         let mut out = Outcome {
             frames: frames.len(),
             exact: 0,
@@ -950,14 +960,6 @@ mod tests {
         super::super::va::probe().is_ok_and(|d| {
             super::super::supports(&d, ffi::VAProfileAV1Profile0, crate::gpu::Direction::Decode)
         })
-    }
-
-    fn ffmpeg(args: &[&str]) -> bool {
-        Command::new("ffmpeg")
-            .args(["-hide_banner", "-loglevel", "error", "-y"])
-            .args(args)
-            .output()
-            .is_ok_and(|o| o.status.success())
     }
 
     #[test]
@@ -1034,41 +1036,22 @@ mod tests {
             eprintln!("SKIPPED: no VA-API AV1 decoder");
             return;
         }
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp/gpu");
-        std::fs::create_dir_all(&dir).unwrap();
-        let ivf = dir.join("av1_test.ivf");
-        let yuv = dir.join("av1_test.yuv");
-        let (i, y) = (ivf.to_str().unwrap(), yuv.to_str().unwrap());
-        if !ffmpeg(&[
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=352x288:rate=30,noise=alls=10:allf=t",
-            "-frames:v",
-            "24",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:v",
-            "libaom-av1",
-            "-cpu-used",
-            "8",
-            "-crf",
-            "40",
-            "-tile-columns",
-            "1",
-            "-f",
-            "ivf",
-            i,
-        ]) || !ffmpeg(&[
-            "-c:v", "libdav1d", "-i", i, "-f", "rawvideo", "-pix_fmt", "yuv420p", y,
-        ]) {
-            eprintln!("SKIPPED: no ffmpeg with libaom-av1 and libdav1d");
-            return;
+        let r = Refs::open(refs::AREA);
+        let name = "vaapi_noisy";
+        let s = refs::find(name);
+        let data = r.bytes(&refs::ivf(name));
+        let frames = decode_frames(&data, true, name);
+        assert_eq!(frames.len() as u64, s.frames);
+        assert!(frames.len() > super::super::HELD);
+        assert!(
+            frames.iter().all(|f| (f.width, f.height) == s.size),
+            "{name}: frame size"
+        );
+        let mut d = Digest::new();
+        for f in &frames {
+            d.bytes(&planes(f));
         }
-        let o = compare(&ivf, &yuv, true);
-        assert_eq!(o.exact, o.frames, "worst PSNR {:.2} dB", o.worst);
-        assert!(o.frames >= 24);
-        let data = std::fs::read(&ivf).unwrap();
+        r.assert_digest(&refs::decoded(name), &d.hex());
         let mut dec = Av1Decoder::on(None, super::super::HELD, &[]).unwrap();
         let mut held = std::collections::VecDeque::new();
         let mut n = 0;
@@ -1088,7 +1071,28 @@ mod tests {
             }
         }
         n += dec.flush(true).unwrap().len();
-        assert_eq!(n, o.frames);
+        assert_eq!(n, frames.len());
+    }
+
+    #[test]
+    fn planes_drop_the_stride_padding() {
+        let mut f = Frame::new(
+            crate::media::PixelFormat::Yuv420p8,
+            4,
+            2,
+            0,
+            crate::media::TimeBase::new(1, 1),
+        );
+        f.planes[0].stride = 6;
+        f.planes[0].data = vec![1, 2, 3, 4, 9, 9, 5, 6, 7, 8, 9, 9];
+        f.planes[1].data = vec![10, 11];
+        f.planes[2].data = vec![12, 13];
+        assert_eq!(planes(&f), [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13]);
+        let mut d = Digest::new();
+        d.frame(&f);
+        let mut p = Digest::new();
+        p.bytes(&planes(&f));
+        assert_eq!(d.hex(), p.hex());
     }
 
     #[test]
