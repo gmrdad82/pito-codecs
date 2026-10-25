@@ -338,13 +338,11 @@ fn every_recorded_stream_parses_to_its_frame_count_and_size() {
         );
         assert!(stats.keys >= 1, "{}: no key frame", s.name);
         let seq = parser.sequence().unwrap();
-        assert!(
-            u32::from(seq.max_frame_width_minus_1) < s.size.0
-                && u32::from(seq.max_frame_height_minus_1) < s.size.1,
-            "{}: sequence larger than {:?}",
-            s.name,
-            s.size
+        let max = (
+            u32::from(seq.max_frame_width_minus_1) + 1,
+            u32::from(seq.max_frame_height_minus_1) + 1,
         );
+        assert_eq!(max, s.size, "{}: sequence size", s.name);
     }
 }
 
@@ -352,7 +350,11 @@ fn every_recorded_stream_parses_to_its_frame_count_and_size() {
 fn refs_name_each_stream_once_and_size_sources_to_their_frames() {
     let all: Vec<&refs::Stream> = refs::BIT_EXACT.iter().chain(refs::PARSER.iter()).collect();
     for (i, s) in all.iter().enumerate() {
-        assert!(all[..i].iter().all(|o| o.name != s.name), "{} twice", s.name);
+        assert!(
+            all[..i].iter().all(|o| o.name != s.name),
+            "{} twice",
+            s.name
+        );
         assert!(std::ptr::eq(refs::find(s.name), *s));
         let (w, h) = (s.size.0 as usize, s.size.1 as usize);
         let frame = w * h + 2 * w.div_ceil(2) * h.div_ceil(2);
@@ -366,7 +368,9 @@ fn refs_name_each_stream_once_and_size_sources_to_their_frames() {
     let motion = refs::source_bytes(refs::find("compound_8"));
     let colors = |b: &[u8]| {
         let mut seen = [false; 256];
-        b[..128 * 96].iter().for_each(|&v| seen[usize::from(v)] = true);
+        b[..128 * 96]
+            .iter()
+            .for_each(|&v| seen[usize::from(v)] = true);
         seen.iter().filter(|&&s| s).count()
     };
     assert!(colors(&screen) < colors(&motion) / 2);

@@ -67,8 +67,15 @@ fn av1() -> Vec<Def> {
         let mut args = raw_input(s.size, RATE);
         let frames = s.frames.to_string();
         args.extend(
-            ["-frames:v", &frames, "-pix_fmt", s.pix_fmt, "-c:v", s.encoder]
-                .map(String::from),
+            [
+                "-frames:v",
+                &frames,
+                "-pix_fmt",
+                s.pix_fmt,
+                "-c:v",
+                s.encoder,
+            ]
+            .map(String::from),
         );
         args.extend(s.args.iter().map(|a| a.to_string()));
         args.extend(["-f".into(), "ivf".into(), "{out}".into()]);
@@ -86,9 +93,7 @@ fn av1() -> Vec<Def> {
             format!("{{ref:{}}}", av1_refs::ivf(s.name)),
             "-noautoscale".into(),
         ];
-        args.extend(
-            ["-fps_mode", "passthrough", "-f", "rawvideo", "{out}"].map(String::from),
-        );
+        args.extend(["-fps_mode", "passthrough", "-f", "rawvideo", "{out}"].map(String::from));
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         defs.push(Def::digest(
             AREA,

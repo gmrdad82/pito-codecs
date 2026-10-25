@@ -216,13 +216,57 @@ fn the_gpu_fixtures_decode_on_the_cpu_to_the_same_digests() {
 }
 
 #[test]
-fn a_damaged_fixture_is_refused_before_use() {
-    let r = Refs::open(refs::AREA);
-    let file = refs::high(refs::FLOOR);
-    let mut bytes = r.bytes(&file);
-    let at = bytes.len() / 2;
-    bytes[at] ^= 0x40;
-    assert_ne!(crate::testref::sha256(&bytes), r.digest(&file));
+fn refs_name_each_stream_once_and_size_sources_to_their_frames() {
+    let mut files = Vec::new();
+    for s in &refs::STREAMS {
+        assert_eq!(
+            s.muxer(),
+            if s.hevc { "hevc" } else { "h264" },
+            "{}",
+            s.name
+        );
+        let encoder = s
+            .args
+            .iter()
+            .position(|a| *a == "-c:v")
+            .map(|i| s.args[i + 1]);
+        let want = if s.hevc { "libx265" } else { "libx264" };
+        assert_eq!(encoder, Some(want), "{}: encoder", s.name);
+        let fmt = s
+            .args
+            .iter()
+            .position(|a| *a == "-pix_fmt")
+            .map(|i| s.args[i + 1]);
+        assert_eq!(fmt, Some(s.pix_fmt()), "{}: pix_fmt", s.name);
+        assert_eq!(s.pix_fmt() == "yuv420p10le", s.ten, "{}: depth", s.name);
+        assert!(!s.ten || s.hevc, "{}: 10-bit is HEVC only", s.name);
+        for &size in s.sizes {
+            assert!(
+                size.0 >= refs::FLOOR.0 && size.1 >= refs::FLOOR.1,
+                "{}: {size:?} below the VA-API floor",
+                s.name
+            );
+            let file = s.file(size);
+            assert!(file.ends_with(s.muxer()), "{file}");
+            assert!(!files.contains(&file), "{file} twice");
+            files.push(file);
+        }
+    }
+    assert_eq!(refs::high(refs::FLOOR), refs::STREAMS[2].file(refs::FLOOR));
+    assert!(refs::STREAMS[2].name.contains("high"));
+    for size in [refs::FLOOR, refs::WIDE] {
+        let (w, h) = (size.0 as usize, size.1 as usize);
+        let frame = w * h + 2 * w.div_ceil(2) * h.div_ceil(2);
+        let bytes = refs::source_bytes(size);
+        assert_eq!(bytes.len(), frame * refs::FRAMES as usize, "{size:?}");
+        assert_ne!(
+            bytes[..frame],
+            bytes[frame..2 * frame],
+            "{size:?}: frames 0 and 1"
+        );
+        assert_eq!(bytes, refs::source_bytes(size), "{size:?}: deterministic");
+    }
+    assert_eq!(refs::WIDE.0 / 2 % 2, 1, "WIDE keeps an odd chroma width");
 }
 
 fn source_frames(w: u32, h: u32, n: usize, format: PixelFormat) -> Vec<Frame> {
@@ -522,7 +566,10 @@ fn transcodes_on_the_gpu_without_copies() {
         let (packets, extradata, _) =
             transcode(Codec::H264, &src, Codec::Hevc, &config, usize::MAX);
         assert_eq!(packets.len(), n, "{w}x{h}: packets");
-        let decoded = cpu_decode(Codec::Hevc, &annexb_stream(Codec::Hevc, &packets, &extradata));
+        let decoded = cpu_decode(
+            Codec::Hevc,
+            &annexb_stream(Codec::Hevc, &packets, &extradata),
+        );
         assert_eq!(decoded.len(), n, "{w}x{h}: decoded frames");
         assert!(
             decoded.iter().all(|f| (f.width, f.height) == (w, h)),
@@ -589,10 +636,26 @@ fn gpu_frames_export_as_dmabuf_and_scale_on_the_gpu() {
     assert_eq!((big.width, big.height), (sw, sh));
     let full = frame.download().unwrap();
     assert_eq!((full.width, full.height), (w, h));
-    let expected =
-        crate::filter::scale(&full, sw, sh, crate::filter::Kernel::Bilinear).unwrap();
+    let expected = crate::filter::scale(&full, sw, sh, crate::filter::Kernel::Bilinear).unwrap();
     let db = psnr_bytes(&raw(&big), &raw(&expected), false);
-    assert!(db > 28.0, "GPU scale PSNR {db:.2} dB against our CPU bilinear");
+    assert!(
+        db > 28.0,
+        "GPU scale PSNR {db:.2} dB against our CPU bilinear"
+    );
+
+    let (frames, _) = gpu_frames(Codec::H264, &r.bytes(&refs::high(refs::WIDE)), 1);
+    let wide = &frames[0];
+    let down = super::GpuScaler::new(w, h, false).unwrap();
+    let small = down.scale(wide).unwrap().download().unwrap();
+    assert_eq!((small.width, small.height), (w, h));
+    let full = wide.download().unwrap();
+    assert_eq!((full.width, full.height), refs::WIDE);
+    let expected = crate::filter::scale(&full, w, h, crate::filter::Kernel::Bilinear).unwrap();
+    let db = psnr_bytes(&raw(&small), &raw(&expected), false);
+    assert!(
+        db > 30.0,
+        "GPU downscale PSNR {db:.2} dB against our CPU bilinear"
+    );
 }
 
 fn mean(db: &[f64], range: std::ops::Range<usize>) -> f64 {

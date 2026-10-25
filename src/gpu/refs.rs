@@ -27,7 +27,7 @@ pub static STREAMS: [Stream; 5] = [
             "-pix_fmt",
             "yuv420p",
         ],
-        sizes: &[FLOOR],
+        sizes: &[FLOOR, WIDE],
     },
     Stream {
         name: "h264-main-cabac",
@@ -43,7 +43,7 @@ pub static STREAMS: [Stream; 5] = [
             "-pix_fmt",
             "yuv420p",
         ],
-        sizes: &[FLOOR],
+        sizes: &[FLOOR, WIDE],
     },
     Stream {
         name: "h264-high-bframes",
@@ -75,7 +75,7 @@ pub static STREAMS: [Stream; 5] = [
             "-pix_fmt",
             "yuv420p",
         ],
-        sizes: &[FLOOR],
+        sizes: &[FLOOR, WIDE],
     },
     Stream {
         name: "hevc-main10",

@@ -154,7 +154,14 @@ pub static BIT_EXACT: [Stream; 16] = [
     stream("resize_8", Source::Motion, 6, P8, SVT, RESIZE),
     stream("svt_8", Source::Motion, 8, P8, SVT, SVT_SCREEN),
     stream("svt_10", Source::Motion, 8, P10, SVT, SVT_SCREEN),
-    stream("screen_inter_10", Source::Screen, 4, P10, AOM, PALETTE_INTER),
+    stream(
+        "screen_inter_10",
+        Source::Screen,
+        4,
+        P10,
+        AOM,
+        PALETTE_INTER,
+    ),
     Stream {
         name: "vaapi_noisy",
         source: Source::Noisy(6),
