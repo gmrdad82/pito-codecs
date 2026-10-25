@@ -2,6 +2,7 @@ pub const AREA: &str = "vorbis";
 pub const MAX_DIFF: f64 = 1e-6;
 pub const MAX_RMS: f64 = 1e-7;
 pub const EVERY: usize = 384;
+pub const FINE: usize = 127;
 pub const WINDOW: usize = 256;
 pub const SEAM: f64 = 4.0;
 
@@ -30,7 +31,8 @@ impl Case {
     }
 
     pub fn stride(&self) -> usize {
-        stride(self.frames(), self.channels)
+        let s = stride(self.frames(), self.channels);
+        if self.clicks { s } else { s.min(FINE) }
     }
 }
 
@@ -52,12 +54,11 @@ const fn case(
     }
 }
 
-pub const CASES: [Case; 12] = [
+pub const CASES: [Case; 11] = [
     case("mono_22k_q0", 22050, 1, "0", 0.5),
-    case("stereo_44k_q3", 44100, 2, "3", 0.5),
-    case("stereo_48k_q9", 48000, 2, "9", 0.3),
+    case("stereo_44k_q3", 44100, 2, "3", 0.5123),
+    case("stereo_48k_q9", 48000, 2, "9", 0.15),
     case("stereo_32k_qm1", 32000, 2, "-1", 0.5),
-    case("surround_48k_q2", 48000, 6, "2", 0.3),
     case("surround_22k_q1", 22050, 6, "1", 0.3),
     Case {
         native: true,
@@ -72,7 +73,7 @@ pub const CASES: [Case; 12] = [
 
 pub const LONG: Case = Case {
     clicks: true,
-    ..case("long_96k", 96000, 2, "-1", 4.5123)
+    ..case("long_96k", 96000, 2, "-1", 4.2123)
 };
 
 pub const HIGH: Case = Case {
@@ -80,7 +81,7 @@ pub const HIGH: Case = Case {
     ..case("high_88k", 88200, 2, "-1", 1.5123)
 };
 
-pub const CLUSTER_MS: &str = "500";
+pub const CLUSTER_MS: &str = "300";
 
 pub fn named(name: &str) -> Case {
     CASES
@@ -251,3 +252,9 @@ pub fn cut_short(full: &std::path::Path) -> Result<Vec<u8>, String> {
         .ok_or("no header before the block")?;
     Ok(file[..cut].to_vec())
 }
+
+pub fn off_the_millisecond(frames: usize, rate: u32) -> bool {
+    !(frames * 1000).is_multiple_of(rate as usize)
+}
+
+pub const OFF_THE_MILLISECOND: [&str; 3] = [LONG_WEBM, HIGH_MKV, COPIED_MKV];

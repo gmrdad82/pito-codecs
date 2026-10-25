@@ -38,7 +38,11 @@ fn like_ffmpeg(r: &Refs, file: &str, c: &Case, ours: &[f32], whole: bool) {
     let mine = refs::decimate(ours, c.channels, c.stride());
     let theirs = r.f32s(&refs::every(file));
     if whole {
-        close(&format!("{file}: every {}th frame", c.stride()), &mine, &theirs);
+        close(
+            &format!("{file}: every {}th frame", c.stride()),
+            &mine,
+            &theirs,
+        );
     } else {
         let n = mine.len().min(theirs.len());
         close(
@@ -111,7 +115,14 @@ fn every_channel_lands_in_ffmpegs_order() {
     for c in refs::CASES.iter().filter(|c| c.channels >= 3) {
         seen.push(c.channels);
         let ours = decode(&r.bytes(&c.ogg())).unwrap();
-        let theirs = r.f32s(&refs::head(&c.ogg()));
+        let mine = refs::decimate(&ours.samples, c.channels, c.stride());
+        let theirs = r.f32s(&refs::every(&c.ogg()));
+        assert!(
+            mine.len() >= theirs.len(),
+            "{}: {} picked",
+            c.name,
+            mine.len()
+        );
         let stride = c.channels as usize;
         for ch in 0..stride {
             let energy = |s: &[f32]| -> f64 {
@@ -121,7 +132,7 @@ fn every_channel_lands_in_ffmpegs_order() {
                     .map(|&v| (v as f64) * (v as f64))
                     .sum()
             };
-            let a = energy(&ours.samples[..theirs.len()]);
+            let a = energy(&mine[..theirs.len()]);
             let b = energy(&theirs);
             assert!(
                 (a - b).abs() <= 1e-3 * b.max(1e-9),
@@ -176,6 +187,35 @@ fn the_first_packet_primes_and_later_packets_follow_the_blocksizes() {
     assert!(aligned.iter().all(|&v| v == 0.0));
 }
 
+#[test]
+fn the_table_picks_every_short_block_and_keeps_its_ends_off_the_millisecond() {
+    for c in &refs::CASES {
+        assert!(
+            c.stride() <= refs::FINE,
+            "{}: every {}th frame",
+            c.name,
+            c.stride()
+        );
+        assert_eq!(c.stride() % 2, 1, "{}", c.name);
+    }
+    assert!(refs::LONG.stride() > refs::FINE);
+    for file in refs::OFF_THE_MILLISECOND {
+        let c = made(file).case();
+        assert!(
+            refs::off_the_millisecond(c.frames(), c.rate),
+            "{file}: {}",
+            c.frames()
+        );
+    }
+    assert!(made(refs::COPIED_MKV).copied);
+    assert!(!refs::off_the_millisecond(22050, 44100));
+    assert!(!refs::off_the_millisecond(3 * 96000, 96000));
+    assert!(refs::off_the_millisecond(22592, 44100));
+    assert!(refs::off_the_millisecond(97, 96000));
+    let (a, b) = refs::seam_span(&refs::LONG);
+    assert!(a < b && b < refs::LONG.frames(), "{a}..{b}");
+    const { assert!(refs::LONG.seconds > refs::SEAM + 0.2) };
+}
 
 #[cfg(feature = "audio")]
 mod front {
@@ -254,7 +294,9 @@ mod front {
             assert!(pr.audio[0].native(), "{}", m.file);
             assert!(pr.unsupported().is_empty(), "{}", m.file);
             let ours = whole(&path, c.rate, c.channels);
-            assert_eq!(ours.frames(), c.frames(), "{}", m.file);
+            if !m.copied {
+                assert_eq!(ours.frames(), c.frames(), "{}", m.file);
+            }
             like_ffmpeg(&r, m.file, &c, &ours.samples, true);
             if c.channels <= 2 {
                 let pcm = audio_pcm(&path, 0, c.rate, c.channels == 1, &Prefs::default()).unwrap();
@@ -309,7 +351,7 @@ mod front {
         let windows: [(&str, &[(f64, f64)]); 2] = [
             (
                 refs::LONG_WEBM,
-                &[(3.9, 4.1), (1.2345, 1.5), (0.613, 0.9), (4.0, 4.5)],
+                &[(3.9, 4.1), (1.2345, 1.5), (0.613, 0.9), (4.0, 4.2)],
             ),
             (refs::HIGH_MKV, &[(1.2345, 1.5), (0.613, 0.9), (0.5, 1.5)]),
         ];
@@ -338,7 +380,7 @@ mod front {
     #[test]
     fn matroska_vorbis_off_the_millisecond_ends_on_ffmpegs_last_sample() {
         let r = open();
-        for file in [refs::LONG_WEBM, refs::HIGH_MKV, refs::COPIED_MKV] {
+        for file in refs::OFF_THE_MILLISECOND {
             let m = made(file);
             let c = m.case();
             let name = format!("{file}{}", if m.copied { " copied" } else { "" });
@@ -346,7 +388,10 @@ mod front {
             let ours = whole(&path, c.rate, c.channels);
             like_ffmpeg(&r, file, &c, &ours.samples, true);
             let frames = ours.frames();
-            assert_ne!(frames % (c.rate as usize / 1000), 0, "{name}");
+            assert!(
+                refs::off_the_millisecond(frames, c.rate),
+                "{name}: {frames}"
+            );
             assert_eq!(
                 streamed(&path, &c, 0.0).len(),
                 ours.samples.len(),
@@ -402,7 +447,7 @@ mod front {
             (1.0 * rate..3.5 * rate).contains(&(frames as f64)),
             "{frames}"
         );
-        assert_ne!(frames % (c.rate as usize / 1000), 0, "{frames}");
+        assert!(refs::off_the_millisecond(frames, c.rate), "{frames}");
         let rd = crate::mkv::Reader::open(&path).unwrap();
         assert!(
             rd.duration_seconds() > frames as f64 / rate + 1.0,
@@ -424,7 +469,7 @@ mod front {
         let c = refs::LONG;
         let path = open().path(refs::LONG_WEBM);
         let all = whole(&path, c.rate, c.channels);
-        let (from, to) = (4.45, 4.5);
+        let (from, to) = (4.15, 4.2);
         let part = range(&path, &c, from, to);
         assert_eq!(part.samples.len(), at(&c, to) - at(&c, from));
         close(

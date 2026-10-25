@@ -45,10 +45,7 @@ fn clip() -> Clip {
 
 fn two_tracks(ext: &str) -> PathBuf {
     let mut c = clip();
-    c.sounds = vec![
-        Sound::Fn(refs::first_track),
-        Sound::Fn(refs::second_track),
-    ];
+    c.sounds = vec![Sound::Fn(refs::first_track), Sound::Fn(refs::second_track)];
     c.make(refs::AREA, &format!("two-tracks.{ext}"))
 }
 
@@ -119,7 +116,6 @@ fn best(a: &[i16], b: &[i16], ch: usize, reach: usize) -> Match {
         .max_by(|p, q| p.snr.total_cmp(&q.snr))
         .unwrap()
 }
-
 
 #[test]
 fn both_tracks_of_a_two_track_file_match_the_source_from_any_start_mono_or_not() {
@@ -304,7 +300,7 @@ fn a_delayed_short_track_starts_at_file_time_and_ends_on_its_own() {
                 m.lag
             );
         }
-        let from = refs::DELAYED_LONG - 0.2;
+        let from = refs::DELAYED_PAST;
         let span = S16Span {
             stream: 1,
             from,
@@ -314,8 +310,9 @@ fn a_delayed_short_track_starts_at_file_time_and_ends_on_its_own() {
         let e = ours(&path, &span).unwrap_err();
         one_line(e, &path, &["stream 1", "past the end", &format!("{from}")]);
         let longer = ours(&path, &S16Span { stream: 0, ..span }).unwrap();
+        let left = ((refs::DELAYED_LONG - from) * 16_000.0) as usize;
         assert!(
-            longer.len().abs_diff(3_200) <= 800,
+            longer.len().abs_diff(left) <= 800,
             "{ext}: {}",
             longer.len()
         );
@@ -442,8 +439,9 @@ fn every_recorder_codec_decodes_to_s16_like_ffmpeg_or_is_listed_as_refused() {
         let (rate, mono) = if kind.lossless {
             (kind.rate(), false)
         } else {
-            (refs::LOW_RATE, true)
+            (refs::LOW_RATE, kind.mono())
         };
+        let ch = kind.channels();
         let span = S16Span {
             stream,
             from: 0.0,
@@ -472,12 +470,12 @@ fn every_recorder_codec_decodes_to_s16_like_ffmpeg_or_is_listed_as_refused() {
         } else {
             let want = r.i16s(&kind.reference().name());
             assert!(
-                got.len().abs_diff(want.len()) <= rate as usize / 20,
+                got.len().abs_diff(want.len()) <= rate as usize / 20 * ch,
                 "{what}: {} against ffmpeg's {}",
                 got.len(),
                 want.len()
             );
-            let m = best(&got, &want, 1, rate as usize / 100);
+            let m = best(&got, &want, ch, rate as usize / 100);
             assert!(
                 m.snr >= LOSSY_SNR_DB,
                 "{what}: {:.1} dB at a lag of {}",
@@ -518,10 +516,7 @@ fn damaged(path: &Path, name: &str, cut: impl Fn(&mut Vec<u8>)) -> PathBuf {
 #[test]
 fn a_corrupt_frame_partway_fails_in_one_line_naming_the_file_and_stream() {
     let mut c = clip().audio_only();
-    c.sounds = vec![
-        Sound::Fn(refs::mono_track),
-        Sound::Fn(refs::first_track),
-    ];
+    c.sounds = vec![Sound::Fn(refs::mono_track), Sound::Fn(refs::first_track)];
     let path = c.make(refs::AREA, "two-aac.mka");
     let bad = damaged(&path, "corrupt.mka", |b| {
         for k in 4..16 {
@@ -591,7 +586,6 @@ fn a_track_with_no_samples_says_so_rather_than_past_the_end() {
     }
 }
 
-
 #[test]
 fn a_mov_a_law_entry_with_no_channels_or_a_bad_rate_is_refused_in_one_line() {
     let path = open().path(refs::LAW_MOV);
@@ -614,4 +608,129 @@ fn a_mov_a_law_entry_with_no_channels_or_a_bad_rate_is_refused_in_one_line() {
         one_line(e, &bad, &["stream 0: ", said]);
         let _ = std::fs::remove_file(bad);
     }
+}
+
+#[test]
+fn the_recorder_table_holds_every_file_and_reference_the_tests_read() {
+    use std::collections::HashSet;
+    let fixtures = refs::fixtures();
+    let files: HashSet<&str> = fixtures.iter().map(|f| f.file.as_str()).collect();
+    assert_eq!(files.len(), fixtures.len(), "a fixture file name twice");
+    let names: Vec<String> = refs::refs().iter().map(refs::Ref::name).collect();
+    let named: HashSet<&str> = names.iter().map(String::as_str).collect();
+    assert_eq!(named.len(), names.len(), "a reference name twice");
+    assert!(
+        names.iter().all(|n| !files.contains(n.as_str())),
+        "a reference named like a fixture"
+    );
+    for r in refs::refs() {
+        assert!(
+            files.contains(r.input.as_str()),
+            "{}: no fixture {}",
+            r.name(),
+            r.input
+        );
+        assert!(r.rate > 0, "{}", r.name());
+    }
+    let mut wanted = vec![refs::REFUSED.to_string(), refs::LAW_MOV.to_string()];
+    let mut read = Vec::new();
+    for ext in ["mkv", "mp4"] {
+        wanted.push(refs::delayed(ext));
+        for from in refs::DELAYED_FROM {
+            read.push(refs::window(refs::delayed(ext), 1, from, refs::LOW_RATE));
+        }
+    }
+    for (ext, _) in refs::MIXED_THIRD {
+        wanted.push(refs::mixed(ext));
+        for stream in 0..3 {
+            read.push(refs::window(
+                refs::mixed(ext),
+                stream,
+                refs::MIXED_FROM,
+                refs::LOW_RATE,
+            ));
+        }
+    }
+    for (ext, codec) in refs::FIVE_ONE_CODECS {
+        wanted.push(refs::five_one(ext, codec));
+        for rate in refs::FIVE_ONE_RATES {
+            read.push(refs::window(refs::five_one(ext, codec), 0, 0.0, rate));
+        }
+    }
+    for kind in refs::KINDS {
+        wanted.push(kind.file());
+        if kind.checked_by_ref() {
+            read.push(kind.reference());
+        }
+    }
+    for w in &wanted {
+        assert!(
+            files.contains(w.as_str()),
+            "the tests read {w}, the table makes no such file"
+        );
+    }
+    for r in &read {
+        assert!(
+            named.contains(r.name().as_str()),
+            "the tests read {}, the table records no such reference",
+            r.name()
+        );
+    }
+    assert_eq!(
+        read.len(),
+        names.len(),
+        "the table records references no test reads"
+    );
+    for f in &fixtures {
+        assert!(!f.sources.is_empty() && !f.codecs.is_empty(), "{}", f.file);
+        for s in &f.sources {
+            let l = s.lavfi();
+            assert!(l.starts_with("aevalsrc="), "{}: {l}", f.file);
+            for part in [
+                format!(":s={}", s.rate),
+                format!(":c={}", s.layout),
+                format!(":d={}", s.seconds),
+            ] {
+                assert!(l.contains(&part), "{}: {l} has no {part}", f.file);
+            }
+            assert!(s.rate > 0 && s.seconds > 0.0, "{}: {l}", f.file);
+        }
+    }
+    let law = refs::KINDS
+        .iter()
+        .find(|k| k.file() == refs::LAW_MOV)
+        .unwrap();
+    assert!(law.law() && law.checked_by_ref());
+    for kind in refs::KINDS {
+        assert_eq!(kind.reference().mono, kind.mono(), "{}", kind.label());
+        assert_eq!(
+            kind.channels(),
+            if kind.mono() { 1 } else { 2 },
+            "{}",
+            kind.label()
+        );
+        if kind.lossless {
+            assert!(!kind.mono(), "{}", kind.label());
+        }
+    }
+    for codec in refs::STEREO {
+        assert!(
+            refs::KINDS.iter().any(|k| k.codec == codec && !k.mono()),
+            "no stereo {codec} in the survey"
+        );
+    }
+    assert!(
+        refs::KINDS.iter().any(|k| !k.lossless && k.mono()),
+        "no mono lossy kind left"
+    );
+    let (start, end) = (refs::DELAYED, refs::DELAYED + refs::DELAYED_SHORT);
+    for from in refs::DELAYED_FROM {
+        assert!(
+            from > start && from + refs::WINDOW <= end,
+            "{from} outside {start}..{end}"
+        );
+    }
+    assert!(refs::DELAYED_PAST > end && refs::DELAYED_PAST < refs::DELAYED_LONG);
+    const { assert!(refs::MIXED_FROM + refs::WINDOW <= refs::MIXED) };
+    const { assert!(refs::WINDOW <= refs::FIVE_ONE_SECONDS) };
 }

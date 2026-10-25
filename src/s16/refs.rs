@@ -3,6 +3,7 @@ use crate::testref::Sound;
 pub const AREA: &str = "s16";
 pub const WINDOW: f64 = 0.1;
 pub const LOW_RATE: u32 = 8_000;
+pub const STEREO: [&str; 4] = ["aac", "libopus", "libmp3lame", "ac3"];
 
 pub const SURVEY: &str = "0.5*sin(2*PI*(200+100*t)*t)|0.4*sin(2*PI*(300+50*t)*t)";
 pub const TONE_A: &str = "0.5*sin(2*PI*(200+100*t)*t)";
@@ -179,7 +180,7 @@ impl Kind {
     }
 
     pub fn seconds(&self) -> f64 {
-        if self.lossless { 0.02 } else { 0.12 }
+        if self.lossless { 0.02 } else { 0.06 }
     }
 
     pub fn frames(&self) -> usize {
@@ -196,6 +197,14 @@ impl Kind {
         format!("survey-{}{profile}.{}", self.codec, self.ext)
     }
 
+    pub fn mono(&self) -> bool {
+        !self.lossless && !STEREO.contains(&self.codec)
+    }
+
+    pub fn channels(&self) -> usize {
+        if self.mono() { 1 } else { 2 }
+    }
+
     pub fn checked_by_ref(&self) -> bool {
         !self.lossless || self.law()
     }
@@ -206,7 +215,7 @@ impl Kind {
             stream: 0,
             from: 0.0,
             seconds: 0.0,
-            mono: !self.lossless,
+            mono: self.mono(),
             rate: if self.lossless { self.rate() } else { LOW_RATE },
         }
     }
@@ -235,16 +244,17 @@ impl Ref {
     }
 }
 
-pub const DELAYED: f64 = 0.3;
-pub const DELAYED_LONG: f64 = 1.2;
-pub const DELAYED_SHORT: f64 = 0.6;
-pub const DELAYED_FROM: [f64; 2] = [0.4, 0.6];
+pub const DELAYED: f64 = 0.2;
+pub const DELAYED_LONG: f64 = 0.8;
+pub const DELAYED_SHORT: f64 = 0.4;
+pub const DELAYED_FROM: [f64; 2] = [0.3, 0.45];
+pub const DELAYED_PAST: f64 = DELAYED + DELAYED_SHORT + 0.1;
 pub const MIXED: f64 = 0.3;
 pub const MIXED_FROM: f64 = 0.1;
 pub const MIXED_THIRD: [(&str, &str); 2] = [("mkv", "pcm_s24le"), ("mp4", "flac")];
 pub const FIVE_ONE_CODECS: [(&str, &str); 2] = [("mkv", "flac"), ("mp4", "aac")];
 pub const FIVE_ONE_RATES: [u32; 2] = [LOW_RATE, 16_000];
-pub const FIVE_ONE_SECONDS: f64 = 0.3;
+pub const FIVE_ONE_SECONDS: f64 = 0.15;
 pub const REFUSED: &str = "refused-wmav2.mkv";
 pub const LAW_MOV: &str = "survey-pcm_alaw.mov";
 

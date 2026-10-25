@@ -842,7 +842,6 @@ fn ogg_packets(data: &[u8], want: usize) -> Vec<Vec<u8>> {
     packets
 }
 
-
 fn probed(r: &Refs, c: &refs::Case) -> Vec<(String, String)> {
     String::from_utf8(r.bytes(&c.probe()))
         .unwrap()

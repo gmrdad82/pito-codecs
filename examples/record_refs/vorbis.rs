@@ -207,12 +207,7 @@ fn s16() -> Vec<Def> {
         defs.push(Def::fixture(s16::AREA, f.file.clone(), FFMPEG, ff(&args)));
     }
     for k in s16::refs() {
-        defs.push(Def::tolerance(
-            s16::AREA,
-            k.name(),
-            FFMPEG,
-            s16_args(&k),
-        ));
+        defs.push(Def::tolerance(s16::AREA, k.name(), FFMPEG, s16_args(&k)));
     }
     defs
 }
