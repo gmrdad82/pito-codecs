@@ -27,7 +27,12 @@ pub const SCANS: &str = "split-scans.txt";
 
 pub const CJPEG_SIZES: [(u32, u32); 3] = [(7, 5), (33, 17), (17, 33)];
 
-pub type Sampling = (&'static str, &'static [&'static str], &'static str, (usize, usize));
+pub type Sampling = (
+    &'static str,
+    &'static [&'static str],
+    &'static str,
+    (usize, usize),
+);
 
 pub const SAMPLINGS: [Sampling; 4] = [
     ("s1x2", &["-sample", "1x2"], "yuvj440p", (1, 2)),
@@ -49,6 +54,10 @@ pub const SAMPLINGS: [Sampling; 4] = [
 pub const RGB: &str = "cj-rgb-33x17";
 
 pub const OUR_Q80: u8 = 80;
+
+pub const OUR_Q95: u8 = 95;
+
+pub const EDGE_SIZES: [(u32, u32); 3] = [(1, 1), (2, 2), (16, 16)];
 
 pub const OUR_VARIANTS: [(&str, &[&str]); 4] = [
     ("base", &[]),
@@ -109,7 +118,7 @@ pub fn ppm_pixels(file: &[u8]) -> Vec<u8> {
             lines == 3
         })
         .unwrap_or(file.len().saturating_sub(1));
-    file[at + 1..].to_vec()
+    file.get(at + 1..).unwrap_or_default().to_vec()
 }
 
 pub fn ff(pix_fmt: &str, w: u32, h: u32) -> String {

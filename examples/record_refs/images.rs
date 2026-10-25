@@ -21,7 +21,15 @@ fn jpeg_planes(area: &'static str, jpg: &str, out: String, pix_fmt: &str) -> Def
         out,
         FFMPEG,
         ff(&[
-            "-f", "jpeg_pipe", "-i", &input, "-f", "rawvideo", "-pix_fmt", pix_fmt, "{out}",
+            "-f",
+            "jpeg_pipe",
+            "-i",
+            &input,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            pix_fmt,
+            "{out}",
         ]),
     )
 }
@@ -54,8 +62,23 @@ fn jpeg_defs() -> Vec<Def> {
                     format!("{base}.jpg"),
                     FFMPEG,
                     ff(&[
-                        "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", &size, "-i", "{src}",
-                        "-frames:v", "1", "-pix_fmt", pix_fmt, "-q:v", "2", "-f", "mjpeg", "{out}",
+                        "-f",
+                        "rawvideo",
+                        "-pix_fmt",
+                        "rgb24",
+                        "-s",
+                        &size,
+                        "-i",
+                        "{src}",
+                        "-frames:v",
+                        "1",
+                        "-pix_fmt",
+                        pix_fmt,
+                        "-q:v",
+                        "2",
+                        "-f",
+                        "mjpeg",
+                        "{out}",
                     ]),
                 )
                 .from(move || Ok(jpeg::rgb24(&jpeg::photo(w, h)))),
@@ -80,7 +103,12 @@ fn jpeg_defs() -> Vec<Def> {
         let from = format!("{}.jpg", jpeg::ff("yuvj420p", w, h));
         let g = jpeg::grey(w, h);
         defs.push(jpegtran(area, &from, format!("{g}.jpg"), &["-grayscale"]));
-        defs.push(jpeg_planes(area, &format!("{g}.jpg"), format!("{g}.gray"), "gray"));
+        defs.push(jpeg_planes(
+            area,
+            &format!("{g}.jpg"),
+            format!("{g}.gray"),
+            "gray",
+        ));
         for (v, args) in jpeg::GREY_VARIANTS {
             defs.push(jpegtran(
                 area,
@@ -90,13 +118,15 @@ fn jpeg_defs() -> Vec<Def> {
             ));
         }
     }
-    for (w, h) in jpeg::SIZES {
-        let name = jpeg::ours(jpeg::OUR_Q80, w, h);
+    let q80 = jpeg::SIZES.map(|s| (jpeg::OUR_Q80, s));
+    let q95 = jpeg::EDGE_SIZES.map(|s| (jpeg::OUR_Q95, s));
+    for (q, (w, h)) in q80.into_iter().chain(q95) {
+        let name = jpeg::ours(q, w, h);
         defs.push(Def::ours(
             area,
             format!("{name}.jpg"),
-            &format!("src/jpeg/refs.rs encode_ours({}, {w}, {h})", jpeg::OUR_Q80),
-            move || jpeg::encode_ours(jpeg::OUR_Q80, w, h),
+            &format!("src/jpeg/refs.rs encode_ours({q}, {w}, {h})"),
+            move || jpeg::encode_ours(q, w, h),
         ));
         defs.push(jpeg_planes(
             area,
@@ -230,7 +260,14 @@ fn webp_decoded(name: &str, pix_fmt: &str, f: fn(&[u8]) -> Result<String, String
         format!("{name}.{pix_fmt}"),
         FFMPEG,
         ff(&[
-            "-i", &input, "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", pix_fmt,
+            "-i",
+            &input,
+            "-fps_mode",
+            "passthrough",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            pix_fmt,
             "{out}",
         ]),
         f,
@@ -288,6 +325,11 @@ fn webp_defs() -> Vec<Def> {
         &["-quality", &q],
         || webp::alpha_image().data,
     ));
+    defs.push(webp_decoded(
+        &format!("lw-{}", webp::LOSSY_ALPHA),
+        "yuva420p",
+        sha,
+    ));
     defs.push(Def::ours(
         area,
         format!("{}.webp", webp::LOSSY_ALPHA),
@@ -303,6 +345,7 @@ fn webp_defs() -> Vec<Def> {
             &["-quality", &q],
             move || webp::lossy_anim_frames()[i as usize].data.clone(),
         ));
+        defs.push(webp_decoded(&webp::lossy_anim_still(i), "yuv420p", sha));
     }
     for (name, pic, profile, slices, sharpness, (w, h), qmin) in webp::LIBVPX {
         let size = format!("{w}x{h}");
@@ -312,10 +355,35 @@ fn webp_defs() -> Vec<Def> {
                 format!("{name}.ivf"),
                 FFMPEG,
                 ff(&[
-                    "-f", "rawvideo", "-pix_fmt", "rgba", "-s", &size, "-r", "1", "-i", "{src}",
-                    "-frames:v", "1", "-c:v", "libvpx", "-profile:v", profile, "-slices", slices,
-                    "-sharpness", sharpness, "-qmin", qmin, "-qmax", "63", "-b:v", "50k", "-f",
-                    "ivf", "{out}",
+                    "-f",
+                    "rawvideo",
+                    "-pix_fmt",
+                    "rgba",
+                    "-s",
+                    &size,
+                    "-r",
+                    "1",
+                    "-i",
+                    "{src}",
+                    "-frames:v",
+                    "1",
+                    "-c:v",
+                    "libvpx",
+                    "-profile:v",
+                    profile,
+                    "-slices",
+                    slices,
+                    "-sharpness",
+                    sharpness,
+                    "-qmin",
+                    qmin,
+                    "-qmax",
+                    "63",
+                    "-b:v",
+                    "50k",
+                    "-f",
+                    "ivf",
+                    "{out}",
                 ]),
             )
             .from(move || Ok(webp::picture(pic, w, h).data)),
@@ -326,7 +394,15 @@ fn webp_defs() -> Vec<Def> {
             format!("{name}.yuv"),
             FFMPEG,
             ff(&[
-                "-i", &input, "-frames:v", "1", "-pix_fmt", "yuv420p", "-f", "rawvideo", "{out}",
+                "-i",
+                &input,
+                "-frames:v",
+                "1",
+                "-pix_fmt",
+                "yuv420p",
+                "-f",
+                "rawvideo",
+                "{out}",
             ]),
             sha,
         ));

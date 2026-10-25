@@ -57,7 +57,12 @@ pub fn bytes(frames: &[Rgba]) -> Vec<u8> {
 pub type Still = (&'static str, Pic, (u32, u32), &'static [&'static str]);
 
 pub const LOSSLESS: [Still; 6] = [
-    ("ll_pattern", Pic::Pattern(0), (131, 87), &["-lossless", "1"]),
+    (
+        "ll_pattern",
+        Pic::Pattern(0),
+        (131, 87),
+        &["-lossless", "1"],
+    ),
     (
         "ll_fast",
         Pic::Noisy(1, 6),
@@ -68,7 +73,14 @@ pub const LOSSLESS: [Still; 6] = [
         "ll_best",
         Pic::Pattern(2),
         (120, 90),
-        &["-lossless", "1", "-compression_level", "6", "-quality", "100"],
+        &[
+            "-lossless",
+            "1",
+            "-compression_level",
+            "6",
+            "-quality",
+            "100",
+        ],
     ),
     ("ll_alpha", Pic::Ramp, (100, 60), &["-lossless", "1"]),
     ("ll_palette", Pic::Bars, (150, 50), &["-lossless", "1"]),
@@ -157,7 +169,7 @@ const fn lossy(
 pub const LOSSY: [Lossy; 7] = [
     lossy("pattern", Pic::Pattern(0), (320, 240), 75.0, 4, 26.0),
     lossy("noisy", Pic::Noisy(1, 4), (200, 120), 90.0, 6, 30.0),
-    lossy("bars", Pic::Pattern(5), (127, 61), 20.0, 0, 30.0),
+    lossy("pattern5", Pic::Pattern(5), (127, 61), 20.0, 0, 30.0),
     lossy("square", Pic::Pattern(4), (64, 64), 100.0, 4, 30.0),
     lossy("tiny", Pic::Pattern(0), (1, 1), 50.0, 4, 30.0),
     lossy("cell", Pic::Noisy(2, 40), (97, 33), 5.0, 2, 30.0),

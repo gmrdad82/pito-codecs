@@ -34,7 +34,6 @@ fn crop(f: &super::dec::Frame) -> [Vec<u8>; 3] {
     [y, u, v]
 }
 
-
 fn yuv_digest(f: &super::dec::Frame) -> String {
     let mut d = Digest::new();
     for p in crop(f) {
@@ -76,11 +75,8 @@ fn decodes_libvpx_partitions_and_simple_filter_like_ffmpeg() {
         let frame = &file[32 + 12..];
         let f = super::decode_yuv(frame).expect("decode");
         assert_eq!((f.width, f.height), (w as usize, h as usize), "{name}");
-        let label = format!(
-            "{name}: profile {profile}, {slices} partitions, sharpness {sharpness}: differs from ffmpeg"
-        );
-        let e = r.entry(&format!("{name}.yuv"));
-        assert!(yuv_digest(&f) == e.sha256, "{label}");
+        eprintln!("{name}: profile {profile}, {slices} partitions, sharpness {sharpness}");
+        r.assert_digest(&format!("{name}.yuv"), &yuv_digest(&f));
     }
 }
 

@@ -324,7 +324,10 @@ fn like_ffmpeg(r: &Refs, case: &refs::Case) {
 fn every_claimed_type_and_depth_decodes_like_ffmpeg() {
     let r = Refs::open(refs::AREA);
     let cases = refs::claimed();
-    assert_eq!(cases.len(), 2 * CLAIMED.iter().map(|(_, d)| d.len()).sum::<usize>());
+    assert_eq!(
+        cases.len(),
+        2 * CLAIMED.iter().map(|(_, d)| d.len()).sum::<usize>()
+    );
     for case in &cases {
         like_ffmpeg(&r, case);
     }

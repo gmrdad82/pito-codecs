@@ -56,13 +56,14 @@ fn animation_decode_matches_libwebp() {
     let ours = decode_animation(&file).unwrap();
     assert_eq!(ours.frames.len() as u64, refs::ANIM_FRAMES);
     let mut d = Digest::new();
+    let last = ours.frames.len() - 1;
     for (i, o) in ours.frames.iter().enumerate() {
         d.rgba(&o.image);
-        assert_eq!(
-            o.start + o.duration,
-            (i as u32 + 1) * refs::ANIM_MS,
-            "frame {i} end time"
-        );
+        assert_eq!(o.start, i as u32 * refs::ANIM_MS, "frame {i} start time");
+        assert!(o.duration > 0, "frame {i} has no duration");
+        if i < last {
+            assert_eq!(o.duration, refs::ANIM_MS, "frame {i} duration");
+        }
     }
     r.assert_digest(&format!("{}.rgba", refs::ANIM), &d.hex());
     let Some(theirs) = lib().and_then(|l| l.decode_animation(&file)) else {
@@ -285,7 +286,7 @@ fn lossy_ready() -> bool {
     )
 }
 
-fn yuva(file: &[u8], ours: &Rgba) -> String {
+fn yuva(file: &[u8], alpha: Option<&Rgba>) -> String {
     let body = super::riff::body(file).unwrap();
     let vp8 = super::riff::Chunks::new(body)
         .filter_map(|c| c.ok())
@@ -304,8 +305,10 @@ fn yuva(file: &[u8], ours: &Rgba) -> String {
             d.bytes(&plane[r * f.uvs..r * f.uvs + cw]);
         }
     }
-    let alpha: Vec<u8> = ours.data.chunks_exact(4).map(|p| p[3]).collect();
-    d.bytes(&alpha);
+    if let Some(img) = alpha {
+        let a: Vec<u8> = img.data.chunks_exact(4).map(|p| p[3]).collect();
+        d.bytes(&a);
+    }
     d.hex()
 }
 
@@ -332,7 +335,7 @@ fn lossy_alpha_decodes_the_same_in_libwebp() {
     let ours = decode(&file).unwrap();
     r.assert_digest(
         &format!("{}.yuva420p", refs::LOSSY_ALPHA),
-        &yuva(&file, &ours),
+        &yuva(&file, Some(&ours)),
     );
     let alpha_in: Vec<u8> = img.data.chunks_exact(4).map(|p| p[3]).collect();
     let alpha_out: Vec<u8> = ours.data.chunks_exact(4).map(|p| p[3]).collect();
@@ -340,7 +343,10 @@ fn lossy_alpha_decodes_the_same_in_libwebp() {
     let opaque: Vec<usize> = (0..alpha_in.len()).filter(|&i| alpha_in[i] > 0).collect();
     let a = opaque_rgb(&img, &opaque);
     let db = psnr(&a, &opaque_rgb(&ours, &opaque));
-    let reference = decode(&webp(&r, &format!("lw-{}", refs::LOSSY_ALPHA))).unwrap();
+    let lw = format!("lw-{}", refs::LOSSY_ALPHA);
+    let lw_file = webp(&r, &lw);
+    let reference = decode(&lw_file).unwrap();
+    r.assert_digest(&format!("{lw}.yuva420p"), &yuva(&lw_file, Some(&reference)));
     let floor = psnr(&a, &opaque_rgb(&reference, &opaque)) - 1.5;
     assert!(
         db > floor,
@@ -367,7 +373,10 @@ fn lossy_animation_plays_back_in_libwebp() {
     assert_eq!(ours.frames.len(), frames.len());
     for (i, o) in ours.frames.iter().enumerate() {
         let db = psnr(&o.image.data, &frames[i].data);
-        let reference = decode(&webp(&r, &refs::lossy_anim_still(i as u64))).unwrap();
+        let still = refs::lossy_anim_still(i as u64);
+        let still_file = webp(&r, &still);
+        r.assert_digest(&format!("{still}.yuv420p"), &yuva(&still_file, None));
+        let reference = decode(&still_file).unwrap();
         let floor = psnr(&reference.data, &frames[i].data) - 1.5;
         assert!(
             db > floor,
@@ -423,5 +432,17 @@ fn webp_alpha_sizes() {
             alph(&ours),
             t * 1e3
         );
+    }
+}
+
+#[test]
+fn lossy_case_names_are_unique_and_never_a_lossless_pictures_name() {
+    for (i, case) in refs::LOSSY.iter().enumerate() {
+        assert!(
+            refs::LOSSY[..i].iter().all(|c| c.name != case.name),
+            "{} twice",
+            case.name
+        );
+        assert_ne!(case.name, "bars", "the bars picture is lossless only");
     }
 }

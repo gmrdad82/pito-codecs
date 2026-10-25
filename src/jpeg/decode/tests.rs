@@ -357,6 +357,25 @@ fn our_encoder_decodes_back_at_every_size() {
             assert!(p > 30.0, "{w}x{h}: {p:.2} dB");
         }
     }
+    let r = Refs::open(refs::AREA);
+    for (w, h) in refs::EDGE_SIZES {
+        let name = refs::ours(refs::OUR_Q95, w, h);
+        let file = super::super::encode(&photo(w, h), refs::OUR_Q95).unwrap();
+        r.assert_digest(&format!("{name}.jpg"), &testref::sha256(&file));
+        let d = max_diff(&ours(&file), &r.bytes(&format!("{name}.yuv")));
+        assert!(d <= 1, "q95 {w}x{h}: off by {d}");
+    }
+}
+
+#[test]
+fn ppm_pixels_of_a_short_or_empty_file_are_empty() {
+    assert!(refs::ppm_pixels(&[]).is_empty());
+    assert!(refs::ppm_pixels(b"P6\n").is_empty());
+    assert!(refs::ppm_pixels(b"P6\n1 1\n255\n").is_empty());
+    assert_eq!(
+        refs::ppm_pixels(b"P6\n1 1\n255\n\x01\x02\x03"),
+        vec![1, 2, 3]
+    );
 }
 
 #[test]
@@ -424,7 +443,10 @@ fn progressive_and_restart_files_decode_like_their_baseline() {
                 let i = info(&file).unwrap();
                 assert_eq!(i.progressive, args.contains(&"-progressive"), "{v}");
                 let got = ours(&file);
-                assert_eq!(got, want, "{pix_fmt} {w}x{h} {v}: not the baseline's samples");
+                assert_eq!(
+                    got, want,
+                    "{pix_fmt} {w}x{h} {v}: not the baseline's samples"
+                );
                 let d = max_diff(&got, &theirs);
                 assert!(d <= 1, "{pix_fmt} {w}x{h} {v}: off by {d}");
                 worst = worst.max(d);
@@ -677,7 +699,11 @@ fn grey_files_decode_within_one_of_ffmpeg() {
         worst = worst.max(d);
         for (v, _) in refs::GREY_VARIANTS {
             let file = r.bytes(&format!("{}.jpg", refs::variant(&g, v)));
-            assert_eq!(ours(&file), want, "grey {w}x{h} {v}: not the baseline's samples");
+            assert_eq!(
+                ours(&file),
+                want,
+                "grey {w}x{h} {v}: not the baseline's samples"
+            );
         }
     }
     for (label, file) in grey_files(&r) {
