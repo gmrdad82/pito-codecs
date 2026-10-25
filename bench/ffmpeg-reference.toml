@@ -1,0 +1,298 @@
+# ffmpeg's side of the bench, recorded once with `bench --record-ffmpeg`.
+# The bench reads every ffmpeg column from this file and never runs ffmpeg;
+# re-recording is the owner's call, made only on his word.
+
+format = 1
+ffmpeg = "ffmpeg version n9.0.2 Copyright (c) 2000-2026 the FFmpeg developers"
+configuration = "configuration: --prefix=/usr --disable-debug --disable-static --disable-stripping --enable-amf --enable-avisynth --enable-cuda-llvm --enable-lto --enable-fontconfig --enable-frei0r --enable-gmp --enable-gnutls --enable-gpl --enable-ladspa --enable-lcms2 --enable-libaom --enable-libass --enable-libbluray --enable-libbs2b --enable-libdav1d --enable-libdrm --enable-libdvdnav --enable-libdvdread --enable-libfreetype --enable-libfribidi --enable-libgsm --enable-libharfbuzz --enable-libiec61883 --enable-libjack --enable-libjxl --enable-libmodplug --enable-libmp3lame --enable-libopencore_amrnb --enable-libopencore_amrwb --enable-libopenjpeg --enable-libopenmpt --enable-libopus --enable-libplacebo --enable-libpulse --enable-librav1e --enable-librsvg --enable-librubberband --enable-libsnappy --enable-libsoxr --enable-libspeex --enable-libsrt --enable-libssh --enable-libsvtav1 --enable-libtheora --enable-libv4l2 --enable-libvidstab --enable-libvmaf --enable-libvorbis --enable-libvpl --enable-libvpx --enable-libwebp --enable-libx264 --enable-libx265 --enable-libxcb --enable-libxml2 --enable-libxvid --enable-libzimg --enable-libzmq --enable-nvdec --enable-nvenc --enable-opencl --enable-opengl --enable-shared --enable-vapoursynth --enable-version3 --enable-vulkan --disable-decoder=magicyuv"
+date = "2026-10-23"
+runs = 3
+cpu = "AMD Ryzen 9 9950X 16-Core Processor"
+threads = 24
+gpu = "AMD Radeon RX 9060 XT"
+driver = "Mesa Gallium driver 26.2.5-arch1.1 for AMD Radeon RX 9060 XT (radeonsi, gfx1200, ACO, DRM 3.64, 7.2.8-9-omarchy)"
+os = "Linux 7.2.8-9-omarchy"
+
+[inputs]
+"audio.f32" = 46080000
+"h264-1080.mp4" = 10044607
+"h264-1440.mp4" = 14283755
+"hevc-1080.mp4" = 4443352
+"hevc-1440.mp4" = 6039761
+"raw-1080.yuv" = 746496000
+"raw-1440.yuv" = 1327104000
+
+[cases."audio.aac.decode"]
+unit = "x realtime"
+value = 1517.8388373142009
+runs = [1517.8388373142009, 1267.0286940715189, 1526.355853637025]
+
+[cases."audio.aac.encode"]
+unit = "x realtime"
+value = 125.74236023500632
+runs = [125.74236023500632, 127.14350250813975, 120.92873291061095]
+"ffmpeg_bytes" = 1434331.0
+
+[cases."audio.r128"]
+unit = "x realtime"
+value = 523.2434964365286
+runs = [478.19931942194665, 523.2434964365286, 528.9452995141519]
+"ffmpeg_lufs" = -31.5
+
+[cases."decode.h264.1080.cpu-1t"]
+unit = "fps"
+value = 487.51608989625436
+runs = [484.69688104271654, 490.63927295322765, 487.51608989625436]
+
+[cases."decode.h264.1080.cpu-all"]
+unit = "fps"
+value = 1960.3087763937856
+runs = [1960.3087763937856, 1912.7024145047585, 2052.557696510945]
+
+[cases."decode.h264.1080.gpu-readback"]
+unit = "fps"
+value = 478.4988111631188
+runs = [446.6005679202268, 478.4988111631188, 540.1699831771605]
+
+[cases."decode.h264.1080.gpu-surface"]
+unit = "fps"
+value = 1250.867729499939
+runs = [1250.867729499939, 1220.0746545262964, 1282.8737440106997]
+
+[cases."decode.h264.1440.cpu-1t"]
+unit = "fps"
+value = 247.2891255480699
+runs = [256.707167144467, 241.20667293452635, 247.2891255480699]
+
+[cases."decode.h264.1440.cpu-all"]
+unit = "fps"
+value = 1291.2615284709668
+runs = [1283.4298266507726, 1313.2857406248154, 1291.2615284709668]
+
+[cases."decode.h264.1440.gpu-readback"]
+unit = "fps"
+value = 396.2743598768494
+runs = [292.33406483890514, 397.4876023989767, 396.2743598768494]
+
+[cases."decode.h264.1440.gpu-surface"]
+unit = "fps"
+value = 1133.4029605742567
+runs = [1173.592599247156, 910.0580187565736, 1133.4029605742567]
+
+[cases."decode.hevc.1080.cpu-1t"]
+unit = "fps"
+value = 357.9782856080495
+runs = [311.09766177482135, 369.15039439746425, 357.9782856080495]
+
+[cases."decode.hevc.1080.cpu-all"]
+unit = "fps"
+value = 1210.3320900305455
+runs = [1210.3320900305455, 1230.05078199509, 1198.4003719850748]
+
+[cases."decode.hevc.1080.gpu-readback"]
+unit = "fps"
+value = 384.81320580944214
+runs = [528.948686648204, 384.81320580944214, 375.19686503624183]
+
+[cases."decode.hevc.1080.gpu-surface"]
+unit = "fps"
+value = 1072.3998142202825
+runs = [1072.3998142202825, 982.2179725197676, 1130.1890489279208]
+
+[cases."decode.hevc.1440.cpu-1t"]
+unit = "fps"
+value = 202.90707652529647
+runs = [179.46156230382505, 207.84823400264094, 202.90707652529647]
+
+[cases."decode.hevc.1440.cpu-all"]
+unit = "fps"
+value = 838.7524465504705
+runs = [807.1730798985793, 838.7524465504705, 866.2654130571646]
+
+[cases."decode.hevc.1440.gpu-readback"]
+unit = "fps"
+value = 311.51915747751883
+runs = [311.51915747751883, 314.48407592032834, 304.2225319649088]
+
+[cases."decode.hevc.1440.gpu-surface"]
+unit = "fps"
+value = 1121.8439368729491
+runs = [1100.273102925519, 1125.1635129329686, 1121.8439368729491]
+
+[cases."encode.1080.h264.cpu.medium"]
+unit = "fps"
+value = 81.0160943494423
+runs = [77.14327862893552, 81.0160943494423, 94.0910139147139]
+"ffmpeg_bytes" = 1366462.0
+"ffmpeg_psnr_db" = 45.112319
+
+[cases."encode.1080.h264.cpu.veryfast"]
+unit = "fps"
+value = 179.1315175145091
+runs = [138.47368276329414, 179.1315175145091, 230.47279400228356]
+"ffmpeg_bytes" = 885367.0
+"ffmpeg_psnr_db" = 42.725732
+
+[cases."encode.1080.h264.gpu"]
+unit = "fps"
+value = 536.7197835053089
+runs = [536.7197835053089, 492.3887036323123, 558.7540682010653]
+"ffmpeg_bytes" = 1876501.0
+"ffmpeg_psnr_db" = 45.929541
+
+[cases."encode.1080.hevc.gpu"]
+unit = "fps"
+value = 690.8269936571893
+runs = [690.8269936571893, 697.0756670815177, 680.3842565342572]
+"ffmpeg_bytes" = 1413765.0
+"ffmpeg_psnr_db" = 45.146843
+
+[cases."encode.1440.h264.cpu.medium"]
+unit = "fps"
+value = 66.06193832571064
+runs = [62.661700917987105, 66.06193832571064, 67.8741950143803]
+"ffmpeg_bytes" = 2129305.0
+"ffmpeg_psnr_db" = 46.366172
+
+[cases."encode.1440.h264.cpu.veryfast"]
+unit = "fps"
+value = 117.25169347011717
+runs = [92.39977415554802, 117.25169347011717, 135.74196914963082]
+"ffmpeg_bytes" = 1413365.0
+"ffmpeg_psnr_db" = 43.919795
+
+[cases."encode.1440.h264.gpu"]
+unit = "fps"
+value = 354.46161297482274
+runs = [338.20470043544026, 364.49885574013274, 354.46161297482274]
+"ffmpeg_bytes" = 2774547.0
+"ffmpeg_psnr_db" = 46.991939
+
+[cases."encode.1440.hevc.gpu"]
+unit = "fps"
+value = 467.9754083836636
+runs = [473.99123866299607, 459.51322856159845, 467.9754083836636]
+"ffmpeg_bytes" = 2032579.0
+"ffmpeg_psnr_db" = 46.451007
+
+[cases."filmstrip.h264.1080.auto"]
+unit = "stills/s"
+value = 37.16275070839403
+runs = [36.842574084913124, 37.16275070839403, 40.23476435123835]
+"ffmpeg_sequential" = 12.196816106329875
+
+[cases."filmstrip.h264.1080.cpu"]
+unit = "stills/s"
+value = 43.19336821118629
+runs = [44.20529885307253, 41.84034667209745, 43.19336821118629]
+"ffmpeg_sequential" = 11.333992499447113
+
+[cases."filmstrip.h264.1440.auto"]
+unit = "stills/s"
+value = 28.395127887290254
+runs = [30.062247264964927, 24.301805975345065, 28.395127887290254]
+"ffmpeg_sequential" = 8.829549015236683
+
+[cases."filmstrip.h264.1440.cpu"]
+unit = "stills/s"
+value = 30.182759475989265
+runs = [29.530646475487444, 30.246290172155355, 30.182759475989265]
+"ffmpeg_sequential" = 8.68541698273291
+
+[cases."filmstrip.hevc.1080.auto"]
+unit = "stills/s"
+value = 43.32831804441276
+runs = [44.59998242314693, 43.32831804441276, 38.842030007746914]
+"ffmpeg_sequential" = 10.521707521548013
+
+[cases."filmstrip.hevc.1080.cpu"]
+unit = "stills/s"
+value = 39.08956316025489
+runs = [38.695772280823334, 39.493238430116, 39.08956316025489]
+"ffmpeg_sequential" = 9.94900345612047
+
+[cases."filmstrip.hevc.1440.auto"]
+unit = "stills/s"
+value = 25.852788371663976
+runs = [24.34326688942095, 25.852788371663976, 26.000093375002006]
+"ffmpeg_sequential" = 7.350175375735728
+
+[cases."filmstrip.hevc.1440.cpu"]
+unit = "stills/s"
+value = 25.824257355045475
+runs = [24.310507611583468, 26.1574035842082, 25.824257355045475]
+"ffmpeg_sequential" = 7.915615449572903
+
+[cases."first-frame.h264.1440.cpu"]
+unit = "ms"
+value = 97.285407
+runs = [106.561747, 91.897411, 96.97615699999999, 113.92736500000001, 97.285407]
+
+[cases."first-frame.h264.1440.gpu"]
+unit = "ms"
+value = 112.404374
+runs = [116.783038, 112.404374, 107.668159, 103.56054400000001, 112.691294]
+
+[cases."first-frame.hevc.1440.cpu"]
+unit = "ms"
+value = 108.52548900000001
+runs = [117.855289, 115.101867, 104.207595, 108.52548900000001, 97.960718]
+
+[cases."first-frame.hevc.1440.gpu"]
+unit = "ms"
+value = 110.813703
+runs = [110.813703, 103.704754, 156.343392, 131.494125, 103.717365]
+
+[cases."scale.1080to1440"]
+unit = "fps"
+value = 1389.3645291519158
+runs = [1883.0212734249906, 1389.3645291519158, 1115.6981024136944]
+
+[cases."scale.1080to720"]
+unit = "fps"
+value = 1553.113471570355
+runs = [1524.1572832770278, 1553.113471570355, 1776.9496402698724]
+
+[cases."scale.1440to1080"]
+unit = "fps"
+value = 1030.5558698989514
+runs = [1030.5558698989514, 926.9857438630705, 1070.0575840342415]
+
+[cases."scale.1440to720"]
+unit = "fps"
+value = 1120.1124436077641
+runs = [1103.9738841730014, 1138.3295778971, 1120.1124436077641]
+
+[cases."smartcut.1080.copy"]
+unit = "x realtime"
+value = 64.6888179989013
+runs = [64.6888179989013, 64.67937495981485, 66.26173508708168]
+"ffmpeg_bytes" = 7447294.0
+
+[cases."smartcut.1080.reencode"]
+unit = "x realtime"
+value = 2.3194905136743666
+runs = [2.3194905136743666, 2.1537254912353245, 2.338702692663241]
+"ffmpeg_bytes" = 5317068.0
+
+[cases."smartcut.1440.copy"]
+unit = "x realtime"
+value = 59.262785175485426
+runs = [59.37624785750518, 57.84401457323885, 59.262785175485426]
+"ffmpeg_bytes" = 10573345.0
+
+[cases."smartcut.1440.reencode"]
+unit = "x realtime"
+value = 1.5839736034473808
+runs = [1.519596555932736, 1.5839736034473808, 1.6296733294638908]
+"ffmpeg_bytes" = 7856138.0
+
+[cases."transcode.h264.1440.gpu"]
+unit = "fps"
+value = 309.1255740985607
+runs = [310.55220464186823, 299.83809625561565, 309.1255740985607]
+
+[cases."transcode.hevc.1440.gpu"]
+unit = "fps"
+value = 376.9944077140061
+runs = [377.77172873904095, 376.5268419772482, 376.9944077140061]
