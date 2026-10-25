@@ -3,9 +3,9 @@ pub const SIZE: (u32, u32) = (160, 120);
 pub const FPS: u32 = 15;
 pub const SECONDS: u32 = 2;
 
-pub const H264: &str = "-c:v|libx264|-bf|2|-g|15|-crf|40|-pix_fmt|yuv420p|-c:a|aac|-b:a|48k";
+pub const H264: &str = "-c:v|libx264|-bf|2|-g|7|-crf|40|-pix_fmt|yuv420p|-c:a|aac|-b:a|48k";
 pub const VP9: &str =
-    "-c:v|libvpx-vp9|-g|15|-deadline|realtime|-cpu-used|8|-b:v|40k|-c:a|libopus|-b:a|24k";
+    "-c:v|libvpx-vp9|-g|7|-deadline|realtime|-cpu-used|8|-b:v|40k|-c:a|libopus|-b:a|24k";
 
 pub const FOREIGN: [(&str, &str, &str); 3] = [
     ("h264.mkv", H264, ""),

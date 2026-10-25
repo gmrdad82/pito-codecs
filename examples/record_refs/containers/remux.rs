@@ -9,8 +9,6 @@ mod mp4;
 
 const FFPROBE: &str = "ffprobe";
 
-pub const SMOKE_HEVC: &str = "smoke-hevc.mp4";
-
 fn listed(area: &'static str, file: &str, csv: String, entries: &str) -> Def {
     let args = [
         "-v",
@@ -48,30 +46,5 @@ pub fn defs() -> Vec<Def> {
         defs.push(fixture(mkv::AREA, file, args));
         defs.push(listed(mkv::AREA, file, mkv::packets_of(file), mkv::PACKETS));
     }
-    defs.push(fixture(
-        "pcod",
-        SMOKE_HEVC,
-        [
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=352x240:rate=30",
-            "-frames:v",
-            "10",
-            "-c:v",
-            "libx265",
-            "-x265-params",
-            "log-level=error",
-            "-crf",
-            "36",
-            "-pix_fmt",
-            "yuv420p",
-            "-tag:v",
-            "hvc1",
-            "{out}",
-        ]
-        .map(str::to_string)
-        .to_vec(),
-    ));
     defs
 }

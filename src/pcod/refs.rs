@@ -3,7 +3,7 @@ use pito_codecs::media::Rgba;
 
 pub const AREA: &str = "pcod";
 
-pub const TONE: &str = "aevalsrc=0.01*sin(2*PI*440*t)|0.01*sin(2*PI*440*t):s=48000:d=0.5";
+pub const TONE: &str = "aevalsrc=0.01*sin(2*PI*440*t)|0.01*sin(2*PI*440*t):s=48000:d=0.1";
 
 pub const TONES: [(&str, &[&str], &str, &str); 3] = [
     ("commands-tone.flac", &["-c:a", "flac"], "FLAC", "flac"),
@@ -15,6 +15,40 @@ pub const TONES: [(&str, &[&str], &str, &str); 3] = [
     ),
     ("commands-alac.m4a", &["-c:a", "alac"], "MP4", "alac"),
 ];
+
+pub const PROBED: &str = "testsrc2=s=128x96:r=30:d=0.5";
+
+pub const PROBE_SHAPES: [(&str, &[&str]); 3] = [
+    (
+        "cli-high422-10.mp4",
+        &["-pix_fmt", "yuv422p10le", "-profile:v", "high422"],
+    ),
+    (
+        "cli-high422-8.mp4",
+        &["-pix_fmt", "yuv422p", "-profile:v", "high422"],
+    ),
+    (
+        "cli-interlaced.mp4",
+        &[
+            "-pix_fmt",
+            "yuv420p",
+            "-flags",
+            "+ildct+ilme",
+            "-x264opts",
+            "tff=1",
+        ],
+    ),
+];
+
+pub const VORBIS: &str = "aevalsrc=0.3*sin(440*2*PI*t)|0.2*sin(660*2*PI*t):s=44100:d=0.7:c=stereo";
+pub const VORBIS_FILES: [&str; 2] = ["cli-tone.ogg", "cli-tone.webm"];
+pub const VORBIS_SLICE: (u64, u64) = (13_230, 19_845);
+
+pub fn vorbis_slice_name(file: &str) -> String {
+    format!("{file}.s16")
+}
+
+pub const SMOKE_HEVC: &str = "smoke-hevc.mp4";
 
 pub const GIF_SIZE: (u32, u32) = (384, 240);
 pub const GIF_DELAYS: [u16; 6] = [7, 1, 13, 4, 25, 3];
@@ -80,6 +114,10 @@ pub const WEBP_INPUTS: [&str; 3] = ["ui", "pattern", "mandelbrot"];
 
 pub fn webp_name(input: &str) -> String {
     format!("images-{input}.webp")
+}
+
+pub fn webp_size_name(input: &str) -> String {
+    format!("images-{input}.size")
 }
 
 pub fn ui_like(width: u32, height: u32) -> Rgba {

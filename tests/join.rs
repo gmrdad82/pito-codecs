@@ -118,7 +118,7 @@ fn a_join_copies_matching_clips_and_letterboxes_the_rest_with_silence() {
 #[test]
 fn a_10_bit_4_2_2_h264_joins_by_copy_and_is_refused_by_name_when_it_must_be_re_encoded() {
     let deep = fixture("h264-422-10.mp4");
-    let plain = clips().silent.clone();
+    let plain = clips().silent().clone();
     let prefs = Prefs::default();
     let copied = dir().join("join-h264-422-10-copied.mp4");
     let j = join(&[deep.clone(), deep.clone()], &copied, cpu(), |_| true).unwrap();
@@ -257,47 +257,86 @@ fn hdr_video(name: &str) -> PathBuf {
     })
 }
 
-struct Clips {
-    plain: PathBuf,
-    plain_mkv: PathBuf,
-    slower: PathBuf,
-    silent: PathBuf,
-    mono: PathBuf,
-    cd_rate: PathBuf,
-    swapped: PathBuf,
-    hdr: PathBuf,
-    sound: PathBuf,
+struct Clips;
+
+fn once(cell: &'static OnceLock<PathBuf>, make: impl FnOnce() -> PathBuf) -> &'static PathBuf {
+    cell.get_or_init(make)
 }
 
-fn clips() -> &'static Clips {
-    static CLIPS: OnceLock<Clips> = OnceLock::new();
-    CLIPS.get_or_init(|| {
-        let plain = made(clip(30), "js-plain.mp4");
-        let hdr = hdr_video("js-hdr-video.mp4");
-        Clips {
-            plain_mkv: made(clip(30), "js-plain.mkv"),
-            slower: made(Clip::new((352, 240), (25, 1), 25), "js-25.mp4"),
-            silent: made(clip(30).video_only(), "js-silent.mp4"),
-            mono: made(
+impl Clips {
+    fn plain(&self) -> &'static PathBuf {
+        static AT: OnceLock<PathBuf> = OnceLock::new();
+        once(&AT, || made(clip(30), "js-plain.mp4"))
+    }
+
+    fn plain_mkv(&self) -> &'static PathBuf {
+        static AT: OnceLock<PathBuf> = OnceLock::new();
+        once(&AT, || made(clip(30), "js-plain.mkv"))
+    }
+
+    fn slower(&self) -> &'static PathBuf {
+        static AT: OnceLock<PathBuf> = OnceLock::new();
+        once(&AT, || made(Clip::new((352, 240), (25, 1), 25), "js-25.mp4"))
+    }
+
+    fn silent(&self) -> &'static PathBuf {
+        static AT: OnceLock<PathBuf> = OnceLock::new();
+        once(&AT, || made(clip(30).video_only(), "js-silent.mp4"))
+    }
+
+    fn mono(&self) -> &'static PathBuf {
+        static AT: OnceLock<PathBuf> = OnceLock::new();
+        once(&AT, || {
+            made(
                 Clip {
                     channels: 1,
                     ..clip(30)
                 },
                 "js-mono.mp4",
-            ),
-            cd_rate: made(
+            )
+        })
+    }
+
+    fn cd_rate(&self) -> &'static PathBuf {
+        static AT: OnceLock<PathBuf> = OnceLock::new();
+        once(&AT, || {
+            made(
                 Clip {
                     rate: 44_100,
                     ..clip(30)
                 },
                 "js-44k.mp4",
-            ),
-            swapped: remuxed(&[(&plain, false), (&plain, true)], "js-swapped.mp4"),
-            hdr: remuxed(&[(&hdr, true), (&plain, false)], "js-hdr-tagged.mp4"),
-            sound: made(clip(30).audio_only(), "js-sound.m4a"),
-            plain,
-        }
-    })
+            )
+        })
+    }
+
+    fn swapped(&self) -> &'static PathBuf {
+        static AT: OnceLock<PathBuf> = OnceLock::new();
+        once(&AT, || {
+            let plain = self.plain().as_path();
+            remuxed(&[(plain, false), (plain, true)], "js-swapped.mp4")
+        })
+    }
+
+    fn hdr(&self) -> &'static PathBuf {
+        static AT: OnceLock<PathBuf> = OnceLock::new();
+        once(&AT, || {
+            let hdr = hdr_video("js-hdr-video.mp4");
+            remuxed(
+                &[(hdr.as_path(), true), (self.plain().as_path(), false)],
+                "js-hdr-tagged.mp4",
+            )
+        })
+    }
+
+    fn sound(&self) -> &'static PathBuf {
+        static AT: OnceLock<PathBuf> = OnceLock::new();
+        once(&AT, || made(clip(30).audio_only(), "js-sound.m4a"))
+    }
+}
+
+fn clips() -> &'static Clips {
+    &Clips
 }
 
 fn leftovers(folder: &Path) -> Vec<String> {
@@ -347,7 +386,7 @@ fn the_same_streams_in_mp4_and_mkv_join_by_copy_into_either_container() {
     let folder = story("mixed-containers");
     for out in ["copied.mp4", "copied.mkv", "copied.mov"] {
         let out = folder.join(out);
-        let j = joined(&[c.plain.clone(), c.plain_mkv.clone()], &out, cpu());
+        let j = joined(&[c.plain().clone(), c.plain_mkv().clone()], &out, cpu());
         assert_eq!(j.method, JoinMethod::Copy, "{}", j.reason);
         assert_eq!(
             j.reason,
@@ -372,57 +411,57 @@ fn each_mismatch_re_encodes_with_its_own_reason() {
     let name = |p: &Path| p.display().to_string();
     let cases = [
         (
-            &c.plain,
-            &c.slower,
+            c.plain(),
+            c.slower(),
             format!(
                 "{} runs at 25 fps, not 30 fps like {}",
-                name(&c.slower),
-                name(&c.plain)
+                name(c.slower()),
+                name(c.plain())
             ),
         ),
         (
-            &c.plain,
-            &c.silent,
+            c.plain(),
+            c.silent(),
             format!(
                 "{} has no audio and {} has",
-                name(&c.silent),
-                name(&c.plain)
+                name(c.silent()),
+                name(c.plain())
             ),
         ),
         (
-            &c.silent,
-            &c.plain,
+            c.silent(),
+            c.plain(),
             format!(
                 "{} has audio and {} has none",
-                name(&c.plain),
-                name(&c.silent)
+                name(c.plain()),
+                name(c.silent())
             ),
         ),
         (
-            &c.plain,
-            &c.mono,
+            c.plain(),
+            c.mono(),
             format!(
                 "{}'s audio is mono, not stereo like {}'s",
-                name(&c.mono),
-                name(&c.plain)
+                name(c.mono()),
+                name(c.plain())
             ),
         ),
         (
-            &c.plain,
-            &c.cd_rate,
+            c.plain(),
+            c.cd_rate(),
             format!(
                 "{}'s audio is 44100 Hz, not 48000 Hz like {}'s",
-                name(&c.cd_rate),
-                name(&c.plain)
+                name(c.cd_rate()),
+                name(c.plain())
             ),
         ),
         (
-            &c.plain,
-            &c.swapped,
+            c.plain(),
+            c.swapped(),
             format!(
                 "{}'s streams are in another order than {}'s",
-                name(&c.swapped),
-                name(&c.plain)
+                name(c.swapped()),
+                name(c.plain())
             ),
         ),
     ];
@@ -452,7 +491,7 @@ fn hdr_tags_differ_and_the_re_encode_refuses_to_tone_map() {
     let c = clips();
     let folder = story("hdr");
     let e = refused(
-        &[c.plain.clone(), c.hdr.clone()],
+        &[c.plain().clone(), c.hdr().clone()],
         &folder.join("out.mp4"),
         cpu(),
     );
@@ -460,11 +499,11 @@ fn hdr_tags_differ_and_the_re_encode_refuses_to_tone_map() {
         e,
         format!(
             "unsupported: {}: the source is HDR or wide gamut (bt2020, smpte2084): the join writes SDR BT.709 and does not tone-map",
-            c.hdr.display()
+            c.hdr().display()
         )
     );
     let j = joined(
-        &[c.hdr.clone(), c.hdr.clone()],
+        &[c.hdr().clone(), c.hdr().clone()],
         &folder.join("same.mkv"),
         cpu(),
     );
@@ -475,7 +514,7 @@ fn hdr_tags_differ_and_the_re_encode_refuses_to_tone_map() {
 fn silent_clips_stay_silent_whether_copied_or_re_encoded() {
     let c = clips();
     let folder = story("silent");
-    let two = [c.silent.clone(), c.silent.clone()];
+    let two = [c.silent().clone(), c.silent().clone()];
     let out = folder.join("copied.mp4");
     let j = joined(&two, &out, cpu());
     assert_eq!(j.method, JoinMethod::Copy);
@@ -518,7 +557,7 @@ fn silent_clips_stay_silent_whether_copied_or_re_encoded() {
 fn an_audio_bitrate_re_encodes_only_the_audio_at_a_rate_its_encoder_takes() {
     let c = clips();
     let folder = story("audio-bitrate");
-    let two = [c.plain.clone(), c.plain.clone()];
+    let two = [c.plain().clone(), c.plain().clone()];
     for (kbps, got) in [(6, 32), (192, 192), (512, 512)] {
         let out = folder.join(format!("{kbps}.mp4"));
         let j = joined(
@@ -561,7 +600,7 @@ fn h264_clips_into_webm_encode_vp9_and_opus_and_say_why() {
     let c = clips();
     let folder = story("into-webm");
     let out = folder.join("out.webm");
-    let j = joined(&[c.plain.clone(), c.plain.clone()], &out, cpu());
+    let j = joined(&[c.plain().clone(), c.plain().clone()], &out, cpu());
     assert_eq!(j.method, JoinMethod::Encode);
     assert_eq!(j.reason, ".webm doesn't carry h264");
     assert!(
@@ -672,14 +711,14 @@ fn hevc_and_h264_clips_re_encode_to_h264() {
     let c = clips();
     let hevc = fixture("hevc.mp4");
     let out = story("hevc").join("out.mp4");
-    let j = joined(&[c.plain.clone(), hevc.clone()], &out, cpu());
+    let j = joined(&[c.plain().clone(), hevc.clone()], &out, cpu());
     assert_eq!(j.method, JoinMethod::Encode);
     assert_eq!(
         j.reason,
         format!(
             "{} is hevc, not h264 like {}",
             hevc.display(),
-            c.plain.display()
+            c.plain().display()
         )
     );
     assert_eq!(j.video, Codec::H264);
@@ -693,7 +732,7 @@ fn hevc_and_h264_clips_re_encode_to_h264() {
 fn video_options_re_encode_to_the_asked_even_size_and_rate() {
     let c = clips();
     let folder = story("options");
-    let two = [c.plain.clone(), c.plain.clone()];
+    let two = [c.plain().clone(), c.plain().clone()];
     let out = folder.join("sized.mp4");
     let j = joined(
         &two,
@@ -744,20 +783,20 @@ fn a_join_refuses_bad_clips_and_outputs_by_name_and_leaves_nothing() {
     let opts = JoinOptions::default;
 
     assert_eq!(
-        refused(std::slice::from_ref(&c.plain), &out, opts()),
+        refused(std::slice::from_ref(c.plain()), &out, opts()),
         "invalid data: a join takes at least two clips"
     );
     assert_eq!(
         refused(
-            &[c.plain.clone(), c.plain.clone()],
+            &[c.plain().clone(), c.plain().clone()],
             &folder.join("out.avi"),
             opts()
         ),
         "invalid data: join writes mp4, mov, mkv or webm, not .avi"
     );
     let inside = folder.join("inside.mp4");
-    std::fs::copy(&c.plain, &inside).unwrap();
-    let e = join(&[c.plain.clone(), inside.clone()], &inside, opts(), |_| {
+    std::fs::copy(c.plain(), &inside).unwrap();
+    let e = join(&[c.plain().clone(), inside.clone()], &inside, opts(), |_| {
         true
     })
     .unwrap_err()
@@ -771,21 +810,21 @@ fn a_join_refuses_bad_clips_and_outputs_by_name_and_leaves_nothing() {
     );
     assert_eq!(
         std::fs::read(&inside).unwrap(),
-        std::fs::read(&c.plain).unwrap()
+        std::fs::read(c.plain()).unwrap()
     );
 
     for bad in [&missing, &empty, &junk] {
-        let e = refused(&[c.plain.clone(), bad.clone()], &out, opts());
+        let e = refused(&[c.plain().clone(), bad.clone()], &out, opts());
         assert!(e.contains(&bad.display().to_string()), "{e}");
         assert!(!e.to_lowercase().contains("panic"), "{e}");
     }
     for inputs in [
-        [c.plain.clone(), c.sound.clone()],
-        [c.sound.clone(), c.plain.clone()],
+        [c.plain().clone(), c.sound().clone()],
+        [c.sound().clone(), c.plain().clone()],
     ] {
         assert_eq!(
             refused(&inputs, &out, opts()),
-            format!("invalid data: {}: no video track", c.sound.display())
+            format!("invalid data: {}: no video track", c.sound().display())
         );
     }
 }
@@ -804,14 +843,14 @@ fn a_clip_with_no_frames_is_refused_by_name_on_both_paths() {
     let c = clips();
     let folder = story("zero-length");
     let empty = folder.join("empty.mp4");
-    emptied(&c.silent, &empty);
+    emptied(c.silent(), &empty);
     assert!(video_samples(&empty).is_empty());
     let name = empty.display();
     let encoded = format!("invalid data: {name} has no known length to join");
     for (inputs, opts, want) in [
-        ([c.plain.clone(), empty.clone()], cpu(), &encoded),
+        ([c.plain().clone(), empty.clone()], cpu(), &encoded),
         (
-            [c.silent.clone(), empty.clone()],
+            [c.silent().clone(), empty.clone()],
             JoinOptions {
                 encode: true,
                 ..cpu()
@@ -819,7 +858,7 @@ fn a_clip_with_no_frames_is_refused_by_name_on_both_paths() {
             &encoded,
         ),
         (
-            [c.silent.clone(), empty.clone()],
+            [c.silent().clone(), empty.clone()],
             cpu(),
             &format!("invalid data: {name} has no video frames"),
         ),
@@ -837,7 +876,7 @@ fn a_clip_shorter_than_one_output_frame_adds_no_time() {
     let folder = story("sub-frame");
     let out = folder.join("out.mp4");
     let j = joined(
-        &[c.silent.clone(), one.clone(), c.silent.clone()],
+        &[c.silent().clone(), one.clone(), c.silent().clone()],
         &out,
         JoinOptions {
             fps: Some((10, 1)),
@@ -875,14 +914,14 @@ fn clips_the_join_cannot_read_are_refused_by_name_and_4_4_4_only_when_re_encoded
         full.display()
     );
     for inputs in [
-        [full.clone(), c.silent.clone()],
-        [c.silent.clone(), full.clone()],
+        [full.clone(), c.silent().clone()],
+        [c.silent().clone(), full.clone()],
     ] {
         assert_eq!(refused(&inputs, &out, cpu()), want);
     }
     let hevc = fixture("hevc-422.mp4");
     assert_eq!(
-        refused(&[c.silent.clone(), hevc.clone()], &out, cpu()),
+        refused(&[c.silent().clone(), hevc.clone()], &out, cpu()),
         format!(
             "unsupported: {}: 8-bit 4:2:2 HEVC video is not supported",
             hevc.display()
@@ -890,7 +929,7 @@ fn clips_the_join_cannot_read_are_refused_by_name_and_4_4_4_only_when_re_encoded
     );
     let part2 = fixture("mpeg4.mp4");
     for inputs in [
-        [c.silent.clone(), part2.clone()],
+        [c.silent().clone(), part2.clone()],
         [part2.clone(), part2.clone()],
     ] {
         assert_eq!(
@@ -907,7 +946,7 @@ fn clips_the_join_cannot_read_are_refused_by_name_and_4_4_4_only_when_re_encoded
 fn a_cancelled_join_stops_and_leaves_nothing() {
     let c = clips();
     let folder = story("cancelled");
-    let two = [c.plain.clone(), c.plain.clone()];
+    let two = [c.plain().clone(), c.plain().clone()];
     for (name, encode) in [
         ("copy.mp4", false),
         ("encode.mp4", true),

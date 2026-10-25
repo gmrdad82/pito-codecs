@@ -479,7 +479,8 @@ fn lossless_size_is_near_libwebps_compression_level_six() {
         ok(&run(&[s(&input), s(&ours), "--lossless"]));
         assert_eq!(chunks(&fs::read(&ours).unwrap()), vec![*b"VP8L"], "{name}");
         let a = fs::metadata(&ours).unwrap().len() as f64;
-        let b = r.bytes(&refs::webp_name(name)).len() as f64;
+        let size = String::from_utf8(r.bytes(&refs::webp_size_name(name))).unwrap();
+        let b: f64 = size.trim().parse().unwrap();
         assert!(a <= b * 1.10, "{name}: ours {a} bytes, libwebp {b} bytes");
     }
 }

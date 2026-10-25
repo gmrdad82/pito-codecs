@@ -4,8 +4,8 @@
 mod testref;
 
 #[allow(dead_code)]
-#[path = "../src/join/refs.rs"]
-mod join_refs;
+#[path = "../src/pcod/refs.rs"]
+mod refs;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -540,11 +540,11 @@ type Shape = (PathBuf, &'static str, &'static str, &'static str, &'static str);
 
 #[test]
 fn probe_json_and_text_name_the_video_variant() {
-    let refs = Refs::open(join_refs::PCOD);
-    let [deep, wide, interlaced] = join_refs::PROBE_SHAPES.map(|(file, _)| refs.path(file));
+    let r = Refs::open(refs::AREA);
+    let [deep, wide, interlaced] = refs::PROBE_SHAPES.map(|(file, _)| r.path(file));
     let plain = Clip::new((352, 240), (30, 1), 15)
         .video_only()
-        .make(join_refs::PCOD, "cli-high.mp4");
+        .make(refs::AREA, "cli-high.mp4");
     let shapes: [Shape; 4] = [
         (deep, "4:2:2", "false", "10-bit 4:2:2 H.264", "yuv422p10le"),
         (wide, "4:2:2", "false", "8-bit 4:2:2 H.264", "yuv422p"),
@@ -967,18 +967,13 @@ fn wav_body(data: &[u8]) -> (u16, u32, Vec<i16>) {
     panic!("no data chunk");
 }
 
-fn vorbis_tone(i: u64, ch: u16, rate: u32) -> f32 {
-    let t = i as f64 / f64::from(rate);
-    let (amp, hz) = if ch == 0 { (0.3, 440.0) } else { (0.2, 660.0) };
-    (amp * (std::f64::consts::TAU * hz * t).sin()) as f32
-}
-
 #[test]
 fn ogg_and_webm_vorbis_extract_to_wav_and_convert_to_opus() {
-    let refs = Refs::open(join_refs::PCOD);
+    let r = Refs::open(refs::AREA);
     let out = dir("vorbis");
-    for file in join_refs::VORBIS_FILES {
-        let src = refs.path(file);
+    let (start, end) = refs::VORBIS_SLICE;
+    for file in refs::VORBIS_FILES {
+        let src = r.path(file);
         let ext = src.extension().unwrap().to_string_lossy().into_owned();
         let wav = out.join(format!("{ext}.wav"));
         ok(&run(&[src.to_str().unwrap(), wav.to_str().unwrap()]));
@@ -1002,10 +997,11 @@ fn ogg_and_webm_vorbis_extract_to_wav_and_convert_to_opus() {
             .max()
             .unwrap();
         assert!(worst <= 1, "{ext}: worst 16-bit difference {worst}");
-        let source = testref::pcm(testref::Sound::Fn(vorbis_tone), 44_100, 2, 0, n / 2);
-        let heard: Vec<f32> = ours[..n].iter().map(|v| f32::from(*v) / 32768.0).collect();
-        let snr = testref::snr_db(&heard, &source);
-        assert!(snr > 12.0, "{ext}: {snr:.1} dB against the tones");
+        let theirs = r.i16s(&refs::vorbis_slice_name(file));
+        assert_eq!(theirs.len() as u64, (end - start) * 2, "{ext}");
+        let slice = &ours[start as usize * 2..end as usize * 2];
+        let d = testref::diff(slice, &theirs);
+        testref::assert_within(&format!("{ext} against ffmpeg's decode"), &d, 1.0, 1.0);
         let opus = out.join(format!("{ext}.opus"));
         ok(&run(&[src.to_str().unwrap(), opus.to_str().unwrap()]));
         let ogg = pito_codecs::opus::ogg::OggOpus::parse(&fs::read(&opus).unwrap()).unwrap();
@@ -1357,22 +1353,63 @@ fn raw_s16_refusals_are_one_line_and_bad_flags_exit_2() {
     }
 }
 
-#[test]
-fn raw_s16_track_picks_the_stream_the_container_numbers() {
-    let input = Clip {
-        sounds: vec![
-            testref::Sound::Sine {
-                hz: 300.0,
-                amp: 0.25,
-            },
-            testref::Sound::Sine {
-                hz: 1200.0,
-                amp: 0.25,
-            },
-        ],
+fn two_rate_tracks() -> PathBuf {
+    use pito_codecs::mkv;
+    let first = Clip {
+        sounds: vec![testref::Sound::Sine {
+            hz: 300.0,
+            amp: 0.25,
+        }],
         ..Clip::new((352, 240), (30, 1), 60)
     }
-    .make(join_refs::PCOD, "cli-two-tracks.mkv");
+    .make(refs::AREA, "cli-two-tracks-48k.mkv");
+    let second = Clip {
+        sounds: vec![testref::Sound::Sine {
+            hz: 1200.0,
+            amp: 0.25,
+        }],
+        rate: 44_100,
+        ..Clip::new((352, 240), (30, 1), 60)
+    }
+    .audio_only()
+    .make(refs::AREA, "cli-two-tracks-44k.mka");
+    let readers = [
+        mkv::Reader::open(&first).unwrap(),
+        mkv::Reader::open(&second).unwrap(),
+    ];
+    let mut w = mkv::Writer::new(std::io::Cursor::new(Vec::new()), mkv::Options::default());
+    let mut blocks = Vec::new();
+    for (n, r) in readers.iter().enumerate() {
+        for (k, t) in r.tracks.iter().enumerate() {
+            let out = w.add_track(mkv::TrackConfig::from_track(t)).unwrap();
+            for (i, s) in t.samples.iter().enumerate() {
+                blocks.push((t.seconds(s.pts), n, k, i, out));
+            }
+        }
+    }
+    blocks.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (_, n, k, i, out) in blocks {
+        let r = &readers[n];
+        let packet = r.packet(k, i).unwrap();
+        w.push_timed(out, &packet, r.tracks[k].samples[i].duration)
+            .unwrap();
+    }
+    let bytes = w.finish().unwrap().into_inner();
+    let to = testref::scratch(refs::AREA).join("cli-two-tracks.mkv");
+    testref::write_atomic(&to, &bytes).unwrap();
+    let merged = mkv::Reader::open(&to).unwrap();
+    let rates: Vec<u32> = merged
+        .audio()
+        .iter()
+        .map(|&k| merged.tracks[k].sample_rate())
+        .collect();
+    assert_eq!(rates, [48_000, 44_100], "the second track keeps its own rate");
+    to
+}
+
+#[test]
+fn raw_s16_track_picks_the_stream_the_container_numbers() {
+    let input = two_rate_tracks();
     let input_s = input.to_str().unwrap();
     let decode = |stream: usize| {
         let span = pito_codecs::media::S16Span {

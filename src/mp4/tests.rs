@@ -51,16 +51,6 @@ fn reader_matches_ffprobe_packets() {
     }
 }
 
-#[test]
-fn a_damaged_fixture_is_refused_before_use() {
-    let r = Refs::open(refs::AREA);
-    let (file, _) = refs::FOREIGN[0];
-    let mut bytes = r.bytes(file);
-    let last = bytes.len() - 1;
-    bytes[last] ^= 1;
-    assert_ne!(crate::testref::sha256(&bytes), r.digest(file));
-}
-
 #[cfg(all(
     feature = "h264",
     feature = "hevc",

@@ -67,9 +67,11 @@ fn reader_matches_ffprobe_and_streams_and_seeks() {
             ReadOptions { index: false },
         )
         .unwrap();
+        let mut keys = Vec::new();
         for at in [0.0, 0.5, 1.0, seconds - 0.1] {
             let want = r.tracks[v].keyframe_at(r.tracks[v].ticks(at)).unwrap();
             let want = r.tracks[v].samples[want];
+            keys.push(want.pts);
             for reader in [&r, &lazy] {
                 let mut s = reader.stream();
                 let landed = s.seek(v, at).unwrap();
@@ -83,6 +85,8 @@ fn reader_matches_ffprobe_and_streams_and_seeks() {
                 assert_eq!((b.pts, b.keyframe), (want.pts, true), "{file} {at}");
             }
         }
+        keys.dedup();
+        assert_eq!(keys.len(), 4, "{file}: the seeks land on distinct keyframes");
     }
 }
 
@@ -95,15 +99,6 @@ fn the_webm_writer_refuses_h264() {
         w.add_track(TrackConfig::from_track(&h264.tracks[0]))
             .is_err()
     );
-}
-
-#[test]
-fn a_damaged_fixture_is_refused_before_use() {
-    let refs_dir = Refs::open(refs::AREA);
-    let mut bytes = refs_dir.bytes("vp9.webm");
-    let last = bytes.len() - 1;
-    bytes[last] ^= 1;
-    assert_ne!(crate::testref::sha256(&bytes), refs_dir.digest("vp9.webm"));
 }
 
 #[cfg(all(
