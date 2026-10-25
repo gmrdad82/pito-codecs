@@ -46,6 +46,12 @@ fn a_file_is_trimmed_by_its_lame_tag_like_ffmpeg() {
         let got = decode_file(&r.bytes(&file)).unwrap();
         assert_eq!(got.rate, rate, "{name}");
         assert_eq!(got.channels as usize, channels(name), "{name}");
+        let source = (refs::SECONDS * rate as f64).round() as usize;
+        assert_eq!(
+            got.samples.len(),
+            source * channels(name),
+            "{name}: trimmed length"
+        );
         let got = refs::window::window(&got.samples, channels(name));
         let want = r.f32s(&refs::decoded(&file));
         assert_within(name, &diff(&got, &want), LIMIT, LIMIT);
@@ -77,8 +83,24 @@ fn range_starts_on_the_right_sample_after_the_encoder_delay() {
         let rate = refs::DELAY_RATE;
         let got = crate::media::audio_pcm_range(&path, 0, from, to, rate, 2, &prefs).unwrap();
         assert_eq!(got.samples.len(), (end - start) * 2, "{ext}");
-        let got = refs::window::window(&got.samples, 2);
+        let got = refs::window::body(&got.samples, 2);
         let want = r.f32s(&refs::decoded(&file));
         assert_within(ext, &diff(&got, &want), LIMIT, LIMIT);
     }
+}
+
+#[test]
+fn the_window_tells_padding_left_after_the_trim() {
+    let full: Vec<f32> = (0..22_050 * 2)
+        .map(|i| ((i as f32 * 0.37).sin() + (i as f32 * 0.011).cos()) * 0.25)
+        .collect();
+    let want = refs::window::window(&full, 2);
+    let mut padded = full.clone();
+    padded.extend(std::iter::repeat_n(0.0, 350 * 2));
+    let lost = refs::window::window(&full[..full.len() - 1152 * 2], 2);
+    for (what, got) in [("padded", refs::window::window(&padded, 2)), ("lost", lost)] {
+        assert!(!diff(&got, &want).within(LIMIT, LIMIT), "{what}");
+    }
+    let range = refs::window::window_range(&full, 2, 100, 200);
+    assert_eq!(range, refs::window::body(&full[200..400], 2));
 }

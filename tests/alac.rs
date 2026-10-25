@@ -568,7 +568,10 @@ fn longer_streams_from_ffmpeg_decode_bit_exact() {
 #[test]
 fn the_raw_input_packs_each_sample_in_its_width() {
     assert_eq!(refs::raw(&[1, -2], 16), vec![1, 0, 0xfe, 0xff]);
-    assert_eq!(refs::raw(&[-1, 0x123456], 24), vec![0xff, 0xff, 0xff, 0x56, 0x34, 0x12]);
+    assert_eq!(
+        refs::raw(&[-1, 0x123456], 24),
+        vec![0xff, 0xff, 0xff, 0x56, 0x34, 0x12]
+    );
     for (k, case) in refs::CASES.iter().enumerate() {
         let width = if case.depth == 16 { 2 } else { 3 };
         assert_eq!(

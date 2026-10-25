@@ -16,6 +16,17 @@ fn snr_db(reference: &[f32], ours: &[f32]) -> f64 {
     10.0 * (s / n.max(1e-20)).log10()
 }
 
+fn level_db(whole: &[f32], reference: &[f32], ours: &[f32]) -> f64 {
+    let s: f64 = whole.iter().map(|a| (*a as f64).powi(2)).sum::<f64>() / whole.len().max(1) as f64;
+    let e: f64 = reference
+        .iter()
+        .zip(ours)
+        .map(|(a, b)| (*a as f64 - *b as f64).powi(2))
+        .sum::<f64>()
+        / reference.len().max(1) as f64;
+    10.0 * (s / e.max(1e-20)).log10()
+}
+
 #[test]
 fn decode_matches_libopus() {
     let r = Refs::open(refs::AREA);
@@ -38,8 +49,12 @@ fn decode_matches_libopus() {
         let ours = refs::window::window(&ours, channels);
         let reference = r.f32s(&refs::decoded(&refs::stream(name)));
         assert_eq!(ours.len(), reference.len(), "{name}: length");
+        let floor = if celt { 50.0 } else { 10.0 };
         let snr = snr_db(&reference, &ours);
-        assert!(snr >= if celt { 50.0 } else { 10.0 }, "{name}: {snr:.1} dB");
+        assert!(snr >= floor, "{name}: {snr:.1} dB");
+        let at = |v: &[f32]| v.len() - refs::window::tail(v, channels).len();
+        let tail = level_db(&reference, &reference[at(&reference)..], &ours[at(&ours)..]);
+        assert!(tail >= floor, "{name}: last run {tail:.1} dB");
     }
 }
 
@@ -65,7 +80,6 @@ fn ogg_rewrite_decodes_the_same() {
     assert!(!a.samples.is_empty());
     assert!(a.samples == b.samples);
 }
-
 
 fn vectors() -> Option<PathBuf> {
     let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp/vectors/opus_newvectors");
@@ -212,4 +226,26 @@ fn rfc8251_vectors() {
         }
     }
     assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
+fn the_window_tells_a_late_end_granule() {
+    let pcm = refs::signal(refs::SECONDS, 2);
+    let late = refs::signal(refs::SECONDS + 0.02, 2);
+    assert_eq!(&late[..pcm.len()], &pcm[..]);
+    let (want, got) = (
+        refs::window::window(&pcm, 2),
+        refs::window::window(&late, 2),
+    );
+    let at = |v: &[f32]| v.len() - refs::window::tail(v, 2).len();
+    assert!(level_db(&want, &want[at(&want)..], &got[at(&got)..]) < 10.0);
+    assert!(level_db(&want, &want[at(&want)..], &want[at(&want)..]) > 150.0);
+}
+
+#[test]
+fn the_signal_steps_down_inside_the_clip() {
+    let pcm = refs::signal(refs::SECONDS, 1);
+    let rms = |v: &[f32]| (v.iter().map(|x| x * x).sum::<f32>() / v.len() as f32).sqrt();
+    assert!(pcm.len() >= 12_000);
+    assert!(rms(&pcm[9_000..12_000]) < 0.4 * rms(&pcm[..9_000]));
 }

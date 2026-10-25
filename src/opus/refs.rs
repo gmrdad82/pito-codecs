@@ -1,8 +1,39 @@
 #![allow(dead_code)]
 
-#[allow(clippy::duplicate_mod)]
-#[path = "../aac/window.rs"]
-pub mod window;
+pub mod window {
+    pub const RUN: usize = 32;
+    pub const EVERY: usize = 50;
+
+    pub fn body(samples: &[f32], channels: usize) -> Vec<f32> {
+        samples
+            .chunks(RUN * channels.max(1))
+            .step_by(EVERY)
+            .flatten()
+            .copied()
+            .collect()
+    }
+
+    pub fn tail(samples: &[f32], channels: usize) -> &[f32] {
+        &samples[samples.len().saturating_sub(RUN * channels.max(1))..]
+    }
+
+    pub fn window(samples: &[f32], channels: usize) -> Vec<f32> {
+        let mut out = body(samples, channels);
+        out.extend_from_slice(tail(samples, channels));
+        out
+    }
+
+    pub fn body_filter() -> String {
+        format!("asetnsamples=n={RUN}:p=0,aselect=not(mod(n\\,{EVERY}))")
+    }
+
+    pub fn window_filter() -> String {
+        format!(
+            "asplit[body][tail];[body]{}[b];[tail]areverse,asetpts=N/SR/TB,atrim=end_sample={RUN},areverse[t];[b][t]concat=n=2:v=0:a=1",
+            body_filter()
+        )
+    }
+}
 
 use pito_codecs::media::AudioBuffer;
 use pito_codecs::opus::enc::{Application, EncoderConfig, encode_ogg};
@@ -65,7 +96,7 @@ pub fn signal(seconds: f32, channels: usize) -> Vec<f32> {
     let mut out = Vec::with_capacity(n * channels);
     for i in 0..n {
         let t = i as f32 / 48000.0;
-        let env = if (i / 12000) % 4 == 3 { 0.2 } else { 1.0 };
+        let env = if (i / 3000) % 4 == 3 { 0.2 } else { 1.0 };
         for ch in 0..channels {
             seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             let noise = ((seed >> 9) as f32 / (1 << 23) as f32 - 0.5) * 0.05;

@@ -119,7 +119,14 @@ pub(super) fn pinned_plain(r: &Refs, c: &refs::Case) -> (Vec<u8>, usize) {
 }
 
 pub(super) fn against_ffmpeg(r: &Refs, c: &refs::Case, got: &[f32], channels: u16) -> Diff {
-    diff(&refs::window::window(got, channels as usize), &r.f32s(&c.decoded()))
+    diff(
+        &refs::window::window(got, channels as usize),
+        &r.f32s(&c.decoded()),
+    )
+}
+
+pub(super) fn every_frame(plain: &[u8], channels: u16) -> usize {
+    frames(plain).len() * 1536 * channels as usize
 }
 
 #[test]
@@ -177,6 +184,7 @@ fn ac3_matches_ffmpeg() {
         assert!(cleared > 0, "{name}: no dither flags to clear");
         let (got, ch) = ours(&plain, false);
         assert_eq!(ch, c.channels);
+        assert_eq!(got.len(), every_frame(&plain, ch), "{name}: length");
         testref::assert_within(name, &against_ffmpeg(&r, c, &got, ch), LIMIT, LIMIT);
     }
 }
@@ -189,6 +197,7 @@ fn eac3_matches_ffmpeg() {
         let (plain, _) = pinned_plain(&r, c);
         let (got, ch) = ours(&plain, false);
         assert_eq!(ch, c.channels);
+        assert_eq!(got.len(), every_frame(&plain, ch), "{name}: length");
         testref::assert_within(name, &against_ffmpeg(&r, c, &got, ch), LIMIT, LIMIT);
     }
 }
@@ -223,7 +232,7 @@ impl Rng {
 fn malformed_frames_fail_cleanly() {
     let r = Refs::open(refs::AREA);
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-    for name in ["ac3-51", "eac3-stereo"] {
+    for name in ["ac3-51", "eac3-stereo", "edge-ac3-51-cpl", "edge-eac3-quad"] {
         let c = refs::named(name);
         let channels = c.channels;
         let data = r.bytes(&c.stream());
@@ -232,7 +241,7 @@ fn malformed_frames_fail_cleanly() {
         let mut buf = Vec::new();
         for round in 0..400 {
             let mut d = Decoder::new(48_000, channels);
-            for f in good.iter().take(3) {
+            for f in good.iter().cycle().take(3) {
                 let mut p = f.clone();
                 match rng.below(4) {
                     0 => p.truncate(rng.below(p.len() + 1)),
@@ -274,6 +283,7 @@ fn containers_decode_through_the_media_front() {
         let c = refs::named(name);
         let (rate, channels) = (c.rate, c.channels);
         let n = channels as usize;
+        let (plain, _) = pinned_plain(&r, c);
         let reference = r.f32s(&c.decoded());
         for ext in refs::BOX_EXTS {
             let file = refs::boxed(name, ext);
@@ -293,21 +303,45 @@ fn containers_decode_through_the_media_front() {
             )
             .unwrap();
             assert_eq!(got.channels, channels);
-            let got = refs::window::window(&got.samples, n);
-            let k = got.len().min(reference.len());
-            let per_frame = (1536 / (refs::window::RUN * refs::window::EVERY) + 1)
-                * refs::window::RUN
-                * n;
-            assert!(
-                k + per_frame >= reference.len(),
-                "{file}: {k} of {}",
-                reference.len()
-            );
-            let d = diff(&got[..k], &reference[..k]);
+            assert_eq!(got.samples.len(), every_frame(&plain, channels), "{file}");
+            let d = diff(&refs::window::window(&got.samples, n), &reference);
             testref::assert_within(&file, &d, LIMIT, LIMIT);
             let stereo =
                 audio_pcm_range(&path, 0, 0.01, 0.05, 48_000, 2, &Prefs::default()).unwrap();
             assert_eq!(stereo.samples.len(), 3840, "{file}");
         }
     }
+}
+
+#[test]
+fn the_window_samples_every_block_of_every_frame() {
+    let total = refs::SAMPLES + 256;
+    assert_eq!(total % 1536, 0);
+    let index: Vec<f32> = (0..total).map(|i| i as f32).collect();
+    let seen = refs::window::window(&index, 1);
+    for block in 0..total / 256 {
+        let span = (block * 256) as f32..((block + 1) * 256) as f32;
+        assert!(
+            seen.iter().any(|i| span.contains(i)),
+            "block {block} unseen"
+        );
+    }
+    assert_eq!(seen.last(), index.last());
+}
+
+#[test]
+fn the_window_tells_a_lost_or_extra_frame() {
+    let c = refs::named("ac3-stereo");
+    let n = c.channels as usize;
+    let full = testref::le_f32(&refs::signal(c.rate, c.channels, refs::SAMPLES + 256));
+    let want = refs::window::window(&full, n);
+    let lost = refs::window::window(&full[..full.len() - 1536 * n], n);
+    let mut padded = full.clone();
+    padded.extend(std::iter::repeat_n(0.0, 1536 * n));
+    let extra = refs::window::window(&padded, n);
+    let short = refs::window::window(&full[..full.len() - 32 * n], n);
+    for (what, got) in [("lost", lost), ("extra", extra), ("short", short)] {
+        assert!(!diff(&got, &want).within(LIMIT, LIMIT), "{what}");
+    }
+    assert!(diff(&refs::window::window(&full, n), &want).within(0.0, 0.0));
 }

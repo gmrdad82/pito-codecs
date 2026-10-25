@@ -24,8 +24,15 @@ fn decode_adts(data: &[u8]) -> AudioBuffer {
 fn decode_matches_ffmpeg_in_wave_channel_order() {
     let r = Refs::open(refs::AREA);
     for (channels, layout, _) in refs::STREAMS {
-        let ours = decode_adts(&r.bytes(&refs::stream(channels)));
+        let bytes = r.bytes(&refs::stream(channels));
+        let ours = decode_adts(&bytes);
         assert_eq!(ours.channels, channels, "{layout}");
+        let frames = split_adts(&bytes).unwrap().len();
+        assert_eq!(
+            ours.samples.len(),
+            frames * 1024 * channels as usize,
+            "{layout}"
+        );
         let reference = r.f32s(&refs::decoded(channels));
         let got = refs::window::window(&ours.samples, channels as usize);
         assert_within(layout, &diff(&got, &reference), 1e-3, 1e-3);
@@ -128,4 +135,19 @@ fn speech_resample_keeps_the_band_and_drops_aliases() {
     }
     streamed.samples.extend(r.flush().samples);
     assert_eq!(streamed.samples, resample(&input, 44_100).samples);
+}
+
+#[test]
+fn the_window_tells_a_lost_or_extra_frame() {
+    let full = refs::signal(refs::RATE, 2, refs::SECONDS);
+    let want = refs::window::window(&full, 2);
+    let lost = refs::window::window(&full[..full.len() - 1024 * 2], 2);
+    let mut padded = full.clone();
+    padded.extend(std::iter::repeat_n(0.0, 1024 * 2));
+    let extra = refs::window::window(&padded, 2);
+    let short = refs::window::window(&full[..full.len() - 2], 2);
+    for (what, got) in [("lost", lost), ("extra", extra), ("short", short)] {
+        assert!(!diff(&got, &want).within(1e-3, 1e-3), "{what}");
+    }
+    assert_eq!(refs::window::tail(&full, 2), &full[full.len() - 64..]);
 }

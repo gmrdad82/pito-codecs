@@ -74,13 +74,20 @@ fn rms(v: &[f32]) -> f32 {
     (v.iter().map(|x| x * x).sum::<f32>() / v.len().max(1) as f32).sqrt()
 }
 
+fn rms_error(a: &[f32], b: &[f32]) -> f32 {
+    let e: Vec<f32> = a.iter().zip(b).map(|(x, y)| x - y).collect();
+    rms(&e).max(1e-10)
+}
+
 fn libopus_heard(r: &Refs, file: &str, bytes: &[u8], pcm: &[f32], c: usize) -> (f32, f32) {
     r.assert_digest(file, &testref::sha256(bytes));
     let dec = r.f32s(&refs::decoded(file));
     let pcm = refs::window::window(pcm, c);
     assert_eq!(dec.len(), pcm.len(), "{file}: trimmed length");
     let level = 20.0 * (rms(&dec) / rms(&pcm)).log10();
-    (snr_db(&pcm, &dec), level)
+    let n = refs::window::tail(&pcm, c).len();
+    let tail = 20.0 * (rms(&pcm) / rms_error(&pcm[pcm.len() - n..], &dec[dec.len() - n..])).log10();
+    (snr_db(&pcm, &dec).min(tail), level)
 }
 
 #[test]

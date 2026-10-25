@@ -1,4 +1,4 @@
-use super::tests::{LIMIT, against_ffmpeg, ours, pinned_plain, refs};
+use super::tests::{LIMIT, against_ffmpeg, every_frame, ours, pinned_plain, refs};
 use super::{info, layout};
 use crate::testref::Refs;
 
@@ -18,6 +18,7 @@ fn every_layout_and_rate_matches_ffmpeg() {
         let (plain, _) = pinned_plain(&r, c);
         let (got, ch) = ours(&plain, false);
         assert_eq!(ch, layout(c.channels), "{}", c.name);
+        assert_eq!(got.len(), every_frame(&plain, ch), "{}: length", c.name);
         let n = ch as usize;
         let silent = (0..n)
             .filter(|&k| got.iter().skip(k).step_by(n).all(|&v| v == 0.0))
@@ -37,16 +38,4 @@ fn every_layout_and_rate_matches_ffmpeg() {
         }
     }
     assert!(failed.is_empty(), "{failed:#?}");
-}
-
-#[test]
-fn every_edge_target_has_the_slots_our_decoder_fills() {
-    for c in &refs::EDGES {
-        let want = match c.target() {
-            "mono" => 1,
-            "stereo" => 2,
-            _ => 6,
-        };
-        assert_eq!(layout(c.channels), want, "{}", c.name);
-    }
 }

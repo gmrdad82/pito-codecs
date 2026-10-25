@@ -4,14 +4,14 @@ use crate::{Def, FFMPEG, ff, sha};
 mod aac;
 #[path = "../../src/ac3/refs.rs"]
 mod ac3;
-#[path = "../../src/mp3/refs.rs"]
-mod mp3;
-#[path = "../../src/flac/refs.rs"]
-mod flac;
-#[path = "../../src/opus/refs.rs"]
-mod opus;
 #[path = "../../src/alac/refs.rs"]
 mod alac;
+#[path = "../../src/flac/refs.rs"]
+mod flac;
+#[path = "../../src/mp3/refs.rs"]
+mod mp3;
+#[path = "../../src/opus/refs.rs"]
+mod opus;
 
 pub fn defs() -> Vec<Def> {
     [
@@ -51,16 +51,12 @@ fn strs(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| s.to_string()).collect()
 }
 
-fn windowed(
-    area: &'static str,
-    file: String,
-    input: &str,
-    before: &[&str],
-    filter: String,
-) -> Def {
+fn windowed(area: &'static str, file: String, input: &str, before: &[&str], filter: String) -> Def {
     let mut a = strs(before);
     let input = format!("{{ref:{input}}}");
-    a.extend(strs(&["-i", &input, "-af", &filter, "-f", "f32le", "{out}"]));
+    a.extend(strs(&[
+        "-i", &input, "-af", &filter, "-f", "f32le", "{out}",
+    ]));
     Def::tolerance(area, file, FFMPEG, args(&[a]))
 }
 
@@ -138,9 +134,9 @@ fn ac3_defs() -> Vec<Def> {
             &c.plain(),
             &["-f", c.codec],
             format!(
-                "{},aformat=channel_layouts={}",
-                ac3::window::window_filter(),
-                c.target()
+                "aformat=channel_layouts={},{}",
+                c.target(),
+                ac3::window::window_filter()
             ),
         ));
     }
@@ -180,7 +176,12 @@ fn ac3_defs() -> Vec<Def> {
                 "64k",
                 "{out}",
             ]);
-            defs.push(Def::fixture(area, ac3::boxed(name, ext), FFMPEG, args(&[a])));
+            defs.push(Def::fixture(
+                area,
+                ac3::boxed(name, ext),
+                FFMPEG,
+                args(&[a]),
+            ));
         }
     }
     defs
