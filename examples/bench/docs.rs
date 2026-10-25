@@ -53,6 +53,7 @@ struct Rows {
     order: Vec<String>,
     date: String,
     commit: String,
+    ffmpeg: String,
 }
 
 impl Rows {
@@ -76,6 +77,10 @@ impl Rows {
             order,
             date: text("date"),
             commit: text("commit"),
+            ffmpeg: doc["machine"]["ffmpeg"]
+                .as_str()
+                .unwrap_or("none")
+                .to_string(),
         })
     }
 
@@ -132,10 +137,20 @@ struct Docs<'a> {
     ff: String,
 }
 
+fn short_cpu(cpu: &str) -> &str {
+    let cpu = cpu.trim().trim_end_matches(" Processor");
+    match cpu.rsplit_once(' ') {
+        Some((head, last)) if last.ends_with("-Core") => head,
+        _ => cpu,
+    }
+}
+
 pub fn ffmpeg_names(r: &Reference) -> (String, String) {
     let ff = format!("FFMPEG {}", r.version());
     let sub = format!(
-        "RYZEN 9 9950X, RADEON RX 9060 XT (VA-API), {ff} RECORDED {}",
+        "{}, {} (VA-API), {ff} RECORDED {}",
+        short_cpu(&r.cpu).to_uppercase(),
+        r.gpu.trim().to_uppercase(),
         r.date
     );
     (sub, ff)
@@ -499,6 +514,15 @@ impl Docs<'_> {
 
 pub fn charts(results: &Path, out: &Path, reference: &Reference) -> Res<()> {
     let rows = Rows::read(results)?;
+    if rows.ffmpeg != reference.ffmpeg {
+        return Err(format!(
+            "{}: its ffmpeg column is from `{}`, not the reference's `{}`; run the bench again so it reads the reference",
+            results.display(),
+            rows.ffmpeg,
+            reference.ffmpeg
+        )
+        .into());
+    }
     fs::create_dir_all(out)?;
     let (sub, ff) = ffmpeg_names(reference);
     Docs {

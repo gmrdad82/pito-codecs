@@ -7,6 +7,8 @@ mod fail;
 mod docs;
 #[path = "bench/reference.rs"]
 mod reference;
+#[path = "../src/bin/pcod/sha256.rs"]
+mod sha256;
 
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
@@ -39,12 +41,17 @@ const ALL_SIZES: [(u32, u32); 2] = [(1920, 1080), (2560, 1440)];
 const USAGE: &str = "usage: bench [--runs N] [--quick] [--only ID]... [--out DIR] [--images DIR] [--fixtures DIR] [--reference FILE] [--charts-only] [--no-charts]
        bench --check <new results.json> [baseline.json]
        bench --chart-docs <results.json> <dir> [reference.toml]
+       bench --hash-inputs [--out DIR] [--reference FILE]
        bench --record-ffmpeg [--runs N] [--only ID]... [--out DIR] [--fixtures DIR] [--reference FILE]
 
 The bench times pito-codecs and reads every ffmpeg column from the reference file
-(bench/ffmpeg-reference.toml): it never runs ffmpeg. --record-ffmpeg is the one path
-that runs ffmpeg: it times the ffmpeg on PATH on the bench's cases, makes the inputs,
-and rewrites the reference file. Re-recording is the owner's call, made only on his word.";
+(bench/ffmpeg-reference.toml): it never runs ffmpeg. It runs only where --out holds
+the inputs the reference was measured on, checked by size and sha256.
+--hash-inputs records the sha256 of the inputs in --out into the reference, without ffmpeg.
+--record-ffmpeg is the one path that runs ffmpeg: it times the ffmpeg on PATH on the
+bench's cases, makes the inputs, and rewrites the reference file; with --only it adds
+to a file recorded with the same ffmpeg build. Re-recording is the owner's call, made
+only on his word.";
 
 static QUICK: AtomicBool = AtomicBool::new(false);
 static FFMPEG: OnceLock<PathBuf> = OnceLock::new();
@@ -461,7 +468,7 @@ fn load_raw(path: &Path, w: u32, h: u32) -> Res<Vec<Frame>> {
         .collect()
 }
 
-fn encode_cpu(frames: &[Frame], w: u32, h: u32) -> Res<(f64, Vec<u8>)> {
+fn encode_cpu(frames: &[Frame], w: u32, h: u32) -> Res<(f64, Vec<Vec<u8>>)> {
     let t = Instant::now();
     let mut enc = h264::Encoder::new(h264::EncoderConfig {
         width: w,
@@ -476,16 +483,21 @@ fn encode_cpu(frames: &[Frame], w: u32, h: u32) -> Res<(f64, Vec<u8>)> {
     let mut out = Vec::new();
     for f in frames {
         for p in enc.encode(f)? {
-            out.extend_from_slice(&p.data);
+            out.push(p.data);
         }
     }
     for p in enc.flush()? {
-        out.extend_from_slice(&p.data);
+        out.push(p.data);
     }
     Ok((t.elapsed().as_secs_f64(), out))
 }
 
-fn encode_gpu(frames: &[Frame], w: u32, h: u32, codec: Codec) -> Res<(f64, Vec<u8>, String)> {
+fn encode_gpu(
+    frames: &[Frame],
+    w: u32,
+    h: u32,
+    codec: Codec,
+) -> Res<(f64, Vec<Vec<u8>>, String)> {
     let t = Instant::now();
     let mut enc = HwEncoder::new(
         codec,
@@ -505,14 +517,88 @@ fn encode_gpu(frames: &[Frame], w: u32, h: u32, codec: Codec) -> Res<(f64, Vec<u
     let mut out = Vec::new();
     for f in frames {
         for p in enc.encode(f)? {
-            out.extend_from_slice(&p.data);
+            out.push(p.data);
         }
     }
     for p in enc.flush()? {
-        out.extend_from_slice(&p.data);
+        out.push(p.data);
     }
     Ok((t.elapsed().as_secs_f64(), out, name))
 }
+
+fn plane_row(p: &pito_codecs::media::Plane, y: usize) -> Option<&[u8]> {
+    p.data.get(y * p.stride..y * p.stride + p.width)
+}
+
+fn psnr_of(codec: Codec, packets: &[Vec<u8>], raw: &[Frame]) -> Res<f64> {
+    let threads = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .min(16);
+    let packet = |i: usize, data: &[u8]| Packet {
+        data: data.to_vec(),
+        pts: i as i64,
+        dts: i as i64,
+        keyframe: false,
+    };
+    let mut decoded = Vec::with_capacity(raw.len());
+    match codec {
+        Codec::H264 => {
+            let mut dec = h264::Decoder::with_threads(threads);
+            for (i, p) in packets.iter().enumerate() {
+                decoded.extend(dec.decode(&packet(i, p))?);
+            }
+            decoded.extend(dec.flush()?);
+        }
+        Codec::Hevc => {
+            let mut dec = hevc::Decoder::with_threads(threads);
+            for (i, p) in packets.iter().enumerate() {
+                decoded.extend(dec.decode(&packet(i, p))?);
+            }
+            decoded.extend(dec.flush()?);
+        }
+        _ => return Err(format!("no decoder of ours measures {codec} quality").into()),
+    }
+    if decoded.len() != raw.len() {
+        return Err(format!(
+            "our {codec} decoder gave {} frames of {}",
+            decoded.len(),
+            raw.len()
+        )
+        .into());
+    }
+    let (mut sse, mut samples) = (0u64, 0u64);
+    for (d, r) in decoded.iter().zip(raw) {
+        for (a, b) in d.planes.iter().zip(&r.planes) {
+            if (a.width, a.height) != (b.width, b.height) {
+                return Err(format!(
+                    "a decoded {}x{} plane against a raw {}x{} one",
+                    a.width, a.height, b.width, b.height
+                )
+                .into());
+            }
+            for y in 0..a.height {
+                let (Some(ra), Some(rb)) = (plane_row(a, y), plane_row(b, y)) else {
+                    return Err("a plane shorter than its size".into());
+                };
+                sse += ra
+                    .iter()
+                    .zip(rb)
+                    .map(|(&p, &q)| u64::from(p.abs_diff(q)).pow(2))
+                    .sum::<u64>();
+            }
+            samples += (a.width * a.height) as u64;
+        }
+    }
+    if samples == 0 {
+        return Err("no samples to compare".into());
+    }
+    if sse == 0 {
+        return Ok(PSNR_CAP);
+    }
+    Ok((10.0 * (255.0f64.powi(2) * samples as f64 / sse as f64).log10()).min(PSNR_CAP))
+}
+
+const PSNR_CAP: f64 = 100.0;
 
 const BT709: &str = "setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709";
 
@@ -560,14 +646,61 @@ struct Bench {
     missing: Vec<String>,
 }
 
-fn compare(reference: &Reference, row: &mut Row) -> bool {
-    let Some(c) = reference.cases.get(&row.id).filter(|c| c.unit == row.unit) else {
-        return false;
+fn unit_of(id: &str) -> &'static str {
+    match id.split('.').next().unwrap_or("") {
+        "first-frame" => "ms",
+        "filmstrip" => "stills/s",
+        "audio" | "smartcut" => "x realtime",
+        _ => "fps",
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Compared {
+    Read,
+    Missing,
+    Unit(String),
+}
+
+fn compare(reference: &Reference, row: &mut Row) -> Compared {
+    let Some(c) = reference.cases.get(&row.id) else {
+        return Compared::Missing;
     };
+    if c.unit != row.unit {
+        return Compared::Unit(c.unit.clone());
+    }
     row.ffmpeg = Some(c.value);
     row.ffmpeg_runs = c.runs.clone();
     row.details.extend(c.details.clone());
-    true
+    Compared::Read
+}
+
+fn speedup(row: &mut Row) {
+    let higher = row.higher_is_better;
+    row.speedup = row
+        .ours
+        .zip(row.ffmpeg)
+        .map(|(o, f)| if higher { o / f } else { f / o });
+}
+
+fn refresh(reference: &Reference, row: &mut Row) -> Option<String> {
+    row.ffmpeg = None;
+    row.ffmpeg_runs.clear();
+    row.speedup = None;
+    row.details.retain(|k, _| !k.starts_with("ffmpeg_"));
+    if row.skipped.is_some() || row.ours.is_none() {
+        return None;
+    }
+    let missing = match compare(reference, row) {
+        Compared::Read => None,
+        Compared::Missing => Some(row.id.clone()),
+        Compared::Unit(u) => Some(format!(
+            "{} (recorded in {u}, the bench gives {})",
+            row.id, row.unit
+        )),
+    };
+    speedup(row);
+    missing
 }
 
 fn record(reference: &mut Reference, row: &Row) {
@@ -601,15 +734,7 @@ impl Bench {
             })
     }
 
-    fn add(
-        &mut self,
-        id: &str,
-        group: &str,
-        label: &str,
-        unit: &str,
-        higher: bool,
-        measured: Res<Measured>,
-    ) {
+    fn add(&mut self, id: &str, group: &str, label: &str, higher: bool, measured: Res<Measured>) {
         if !self.want(&[id]) {
             return;
         }
@@ -617,7 +742,7 @@ impl Bench {
             id: id.into(),
             group: group.into(),
             label: label.into(),
-            unit: unit.into(),
+            unit: unit_of(id).into(),
             higher_is_better: higher,
             ..Row::default()
         };
@@ -632,13 +757,10 @@ impl Bench {
                 row.details = m.details;
                 if recording() {
                     record(&mut self.reference, &row);
-                } else if !compare(&self.reference, &mut row) {
-                    self.missing.push(row.id.clone());
+                    speedup(&mut row);
+                } else if let Some(missing) = refresh(&self.reference, &mut row) {
+                    self.missing.push(missing);
                 }
-                row.speedup = row
-                    .ours
-                    .zip(row.ffmpeg)
-                    .map(|(o, f)| if higher { o / f } else { f / o });
             }
             Err(e) => row.skipped = Some(e.to_string()),
         }
@@ -728,7 +850,7 @@ impl Bench {
                         m.details.insert("frames".into(), n as f64);
                         Ok(m)
                     })();
-                    self.add(&id, "decode", &label, "fps", true, m);
+                    self.add(&id, "decode", &label, true, m);
                 }
             }
         }
@@ -787,10 +909,20 @@ impl Bench {
                 let refs: Vec<&str> = args.iter().map(String::as_str).collect();
                 ffmpeg_time(&refs)
             };
-            let with_quality = |m: &mut Measured, ours: &[u8], theirs: &Path, fmt: &str| {
+            let with_quality = |m: &mut Measured,
+                                codec: Codec,
+                                ours: &[Vec<u8>],
+                                theirs: &Path,
+                                fmt: &str|
+             -> Res<()> {
                 if !recording() {
-                    m.details.insert("ours_bytes".into(), ours.len() as f64);
-                    return;
+                    m.details.insert(
+                        "ours_bytes".into(),
+                        ours.iter().map(Vec::len).sum::<usize>() as f64,
+                    );
+                    m.details
+                        .insert("ours_psnr_db".into(), psnr_of(codec, ours, &frames)?);
+                    return Ok(());
                 }
                 if let Some(p) = psnr(theirs, fmt, &raw, w, h) {
                     m.details.insert("ffmpeg_psnr_db".into(), p);
@@ -799,6 +931,7 @@ impl Bench {
                     "ffmpeg_bytes".into(),
                     fs::metadata(theirs).map_or(0.0, |x| x.len() as f64),
                 );
+                Ok(())
             };
 
             for (key, preset) in [("medium", "medium"), ("veryfast", "veryfast")] {
@@ -833,7 +966,7 @@ impl Bench {
                     for _ in 0..ffmpeg_runs(runs) {
                         m.ffmpeg.push(n / run_ff(&args)?);
                     }
-                    with_quality(&mut m, &last, &out, "h264");
+                    with_quality(&mut m, Codec::H264, &last, &out, "h264")?;
                     Ok(m)
                 })();
                 self.add(
@@ -843,7 +976,6 @@ impl Bench {
                         "H.264 {h}P ENCODE, CPU vs LIBX264 {}",
                         preset.to_uppercase()
                     ),
-                    "fps",
                     true,
                     m,
                 );
@@ -885,14 +1017,13 @@ impl Bench {
                     for _ in 0..ffmpeg_runs(runs) {
                         m.ffmpeg.push(n / run_ff(&args)?);
                     }
-                    with_quality(&mut m, &last, &out, fmt);
+                    with_quality(&mut m, codec, &last, &out, fmt)?;
                     Ok(m)
                 })();
                 self.add(
                     &id,
                     "encode",
                     &format!("{} {h}P ENCODE, VA-API", codec.to_string().to_uppercase()),
-                    "fps",
                     true,
                     m,
                 );
@@ -1005,7 +1136,6 @@ impl Bench {
                 &id,
                 "encode",
                 &format!("{codec} {h}P GPU TRANSCODE, SURFACES"),
-                "fps",
                 true,
                 m,
             );
@@ -1055,7 +1185,6 @@ impl Bench {
                 id,
                 "audio",
                 "AAC DECODE, 48 KHZ STEREO",
-                "x realtime",
                 true,
                 m,
             );
@@ -1122,7 +1251,6 @@ impl Bench {
                 id,
                 "audio",
                 "AAC ENCODE, 128 KBPS STEREO",
-                "x realtime",
                 true,
                 m,
             );
@@ -1193,7 +1321,6 @@ impl Bench {
                 id,
                 "audio",
                 "EBU R128 LOUDNESS, 48 KHZ STEREO",
-                "x realtime",
                 true,
                 m,
             );
@@ -1262,7 +1389,6 @@ impl Bench {
                     &id,
                     "pipeline",
                     &format!("{codec} {h}P TIME TO FIRST FRAME, {text}"),
-                    "ms",
                     false,
                     m,
                 );
@@ -1365,7 +1491,6 @@ impl Bench {
                         &id,
                         "pipeline",
                         &format!("{codec} {h}P FILMSTRIP STILLS, {text}"),
-                        "stills/s",
                         true,
                         m,
                     );
@@ -1498,7 +1623,6 @@ impl Bench {
                         "SMART-CUT EXPORT {h}P VS FFMPEG {}",
                         if reencode { "RE-ENCODE" } else { "STREAM COPY" }
                     ),
-                    "x realtime",
                     true,
                     m,
                 );
@@ -1580,7 +1704,6 @@ impl Bench {
                 &id,
                 "pipeline",
                 &format!("SCALE {from}P TO {to}P, BICUBIC"),
-                "fps",
                 true,
                 m,
             );
@@ -1594,6 +1717,20 @@ fn shell(cmd: &str, args: &[&str]) -> String {
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default()
+}
+
+fn driver_and_gpu(vainfo: &str) -> (String, String) {
+    let driver = vainfo
+        .lines()
+        .find_map(|l| l.split("Driver version:").nth(1))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let gpu = driver
+        .split(" for ")
+        .nth(1)
+        .map(|s| s.split(" (").next().unwrap_or(s).to_string())
+        .unwrap_or_default();
+    (driver, gpu)
 }
 
 fn machine(ffmpeg: &str) -> Machine {
@@ -1616,16 +1753,7 @@ fn machine(ffmpeg: &str) -> Machine {
             )
         })
         .unwrap_or_default();
-    let driver = vainfo
-        .lines()
-        .find_map(|l| l.split("Driver version:").nth(1))
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-    let gpu = driver
-        .split(" for ")
-        .nth(1)
-        .map(|s| s.split(" (").next().unwrap_or(s).to_string())
-        .unwrap_or_default();
+    let (driver, gpu) = driver_and_gpu(&vainfo);
     Machine {
         cpu,
         threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
@@ -1853,97 +1981,188 @@ fn main() -> ExitCode {
     fail::run("bench", run)
 }
 
-fn run() -> Res<()> {
-    let given: Vec<String> = std::env::args().skip(1).collect();
+#[derive(Debug, PartialEq)]
+struct Opts {
+    runs: usize,
+    quick: bool,
+    only: Vec<String>,
+    out: PathBuf,
+    images: PathBuf,
+    fixtures: PathBuf,
+    charts_only: bool,
+    no_charts: bool,
+    record_ffmpeg: bool,
+    hash_inputs: bool,
+    reference: PathBuf,
+}
+
+impl Default for Opts {
+    fn default() -> Self {
+        Opts {
+            runs: 3,
+            quick: false,
+            only: Vec::new(),
+            out: PathBuf::from("tmp/bench"),
+            images: PathBuf::from("docs/images"),
+            fixtures: PathBuf::from("tmp/bench/fixtures"),
+            charts_only: false,
+            no_charts: false,
+            record_ffmpeg: false,
+            hash_inputs: false,
+            reference: PathBuf::from(reference::PATH),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Mode {
+    Check(PathBuf, PathBuf),
+    ChartDocs(PathBuf, PathBuf, PathBuf),
+    Help,
+    Run(Opts),
+}
+
+const SHORT_USAGE: &str = "usage: bench --check <new results.json> [baseline.json] | bench --chart-docs <results.json> <dir> [reference.toml]";
+
+fn parse_args(given: &[String]) -> Res<Mode> {
+    let arg = |i: usize| PathBuf::from(&given[i]);
     match given.first().map(String::as_str) {
         Some("--check") if (2..=3).contains(&given.len()) => {
             let baseline = given
                 .get(2)
                 .map_or(".dev/bench/baseline.json", String::as_str);
-            return docs::check(Path::new(&given[1]), Path::new(baseline));
+            return Ok(Mode::Check(arg(1), PathBuf::from(baseline)));
         }
         Some("--chart-docs") if (3..=4).contains(&given.len()) => {
-            let reference = Reference::read(Path::new(
-                given.get(3).map_or(reference::PATH, String::as_str),
-            ))?;
-            return docs::charts(Path::new(&given[1]), Path::new(&given[2]), &reference);
+            let reference = given.get(3).map_or(reference::PATH, String::as_str);
+            return Ok(Mode::ChartDocs(arg(1), arg(2), PathBuf::from(reference)));
         }
-        Some("--check" | "--chart-docs") => {
-            return Err("usage: bench --check <new results.json> [baseline.json] | bench --chart-docs <results.json> <dir> [reference.toml]".into());
-        }
-        Some("--help" | "-h") => {
-            say!("{USAGE}")?;
-            return Ok(());
-        }
+        Some("--check" | "--chart-docs") => return Err(SHORT_USAGE.into()),
+        Some("--help" | "-h") => return Ok(Mode::Help),
         _ => {}
     }
-    let mut args = given.into_iter();
-    let mut runs = 3usize;
-    let mut quick = false;
-    let mut only = Vec::new();
-    let mut out = PathBuf::from("tmp/bench");
-    let mut images = PathBuf::from("docs/images");
-    let mut fixtures = PathBuf::from("tmp/bench/fixtures");
-    let mut charts_only = false;
-    let mut no_charts = false;
-    let mut record_ffmpeg = false;
-    let mut reference_path = PathBuf::from(reference::PATH);
+    let mut o = Opts::default();
+    let mut args = given.iter();
     while let Some(a) = args.next() {
+        let mut next = |what: &str| {
+            args.next()
+                .cloned()
+                .ok_or_else(|| format!("{what} needs a value"))
+        };
         match a.as_str() {
-            "--runs" => runs = args.next().ok_or("--runs N")?.parse()?,
-            "--quick" => {
-                quick = true;
-                runs = 1;
+            "--runs" => {
+                let v = next("--runs")?;
+                o.runs = v
+                    .parse()
+                    .map_err(|_| format!("--runs takes a whole number, not {v}"))?;
             }
-            "--only" => only.push(args.next().ok_or("--only ID")?),
-            "--out" => out = args.next().ok_or("--out DIR")?.into(),
-            "--images" => images = args.next().ok_or("--images DIR")?.into(),
-            "--fixtures" => fixtures = args.next().ok_or("--fixtures DIR")?.into(),
-            "--charts-only" => charts_only = true,
-            "--no-charts" => no_charts = true,
-            "--record-ffmpeg" => record_ffmpeg = true,
-            "--reference" => reference_path = args.next().ok_or("--reference FILE")?.into(),
+            "--quick" => {
+                o.quick = true;
+                o.runs = 1;
+            }
+            "--only" => o.only.push(next("--only")?),
+            "--out" => o.out = next("--out")?.into(),
+            "--images" => o.images = next("--images")?.into(),
+            "--fixtures" => o.fixtures = next("--fixtures")?.into(),
+            "--charts-only" => o.charts_only = true,
+            "--no-charts" => o.no_charts = true,
+            "--record-ffmpeg" => o.record_ffmpeg = true,
+            "--hash-inputs" => o.hash_inputs = true,
+            "--reference" => o.reference = next("--reference")?.into(),
             _ => return Err(format!("unknown {a}; bench --help gives the usage").into()),
         }
     }
-    QUICK.store(quick, Ordering::Relaxed);
-    let results_path = out.join(if quick {
+    if o.record_ffmpeg && o.hash_inputs {
+        return Err("--record-ffmpeg and --hash-inputs don't go together".into());
+    }
+    Ok(Mode::Run(o))
+}
+
+fn version_lines(version: &str) -> Res<(String, String)> {
+    let line = |p: &str| {
+        version
+            .lines()
+            .map(str::trim)
+            .find(|l| l.starts_with(p))
+            .map(str::to_string)
+    };
+    let v = line("ffmpeg version ").ok_or("ffmpeg -version gave no version line")?;
+    let c = line("configuration:").ok_or("ffmpeg -version gave no configuration line")?;
+    Ok((v, c))
+}
+
+fn record_base(partial: bool, path: &Path, version: &str) -> Res<Reference> {
+    let (line, configuration) = version_lines(version)?;
+    let mut r = if partial {
+        let r = Reference::read(path)?;
+        r.same_ffmpeg(&line, &configuration)?;
+        r
+    } else {
+        Reference::default()
+    };
+    r.ffmpeg = line;
+    r.configuration = configuration;
+    Ok(r)
+}
+
+fn load_reference(path: &Path, inputs: &Path) -> Res<Reference> {
+    let r = Reference::read(path)?;
+    r.check_inputs(inputs)?;
+    Ok(r)
+}
+
+fn hash_inputs(path: &Path, inputs: &Path) -> Res<String> {
+    let mut r = Reference::read(path)?;
+    r.hash_inputs(inputs)?;
+    fs::write(path, r.render()).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(format!(
+        "recorded the sha256 of {} inputs from {} in {}",
+        r.inputs.len(),
+        inputs.display(),
+        path.display()
+    ))
+}
+
+fn run() -> Res<()> {
+    let given: Vec<String> = std::env::args().skip(1).collect();
+    let o = match parse_args(&given)? {
+        Mode::Check(new, baseline) => return docs::check(&new, &baseline),
+        Mode::ChartDocs(results, dir, reference) => {
+            return docs::charts(&results, &dir, &Reference::read(&reference)?);
+        }
+        Mode::Help => {
+            say!("{USAGE}")?;
+            return Ok(());
+        }
+        Mode::Run(o) => o,
+    };
+    if o.hash_inputs {
+        say!("{}", hash_inputs(&o.reference, &o.out)?)?;
+        return Ok(());
+    }
+    QUICK.store(o.quick, Ordering::Relaxed);
+    let results_path = o.out.join(if o.quick {
         "results-quick.json"
     } else {
         "results.json"
     });
-    if charts_only {
+    if o.charts_only {
         let r: Results = serde_json::from_slice(&fs::read(&results_path)?)?;
-        charts(&r.rows, &images, &r.machine, &r.date)?;
+        charts(&r.rows, &o.images, &r.machine, &r.date)?;
         return Ok(());
     }
-    let reference = if record_ffmpeg {
+    let reference = if o.record_ffmpeg {
         let _ = FFMPEG.set(ffmpeg_on(std::env::var_os("PATH").as_deref())?);
-        let mut r = if only.is_empty() {
-            Reference::default()
-        } else {
-            Reference::read(&reference_path).unwrap_or_default()
-        };
         let (_, version) = ffmpeg_run(&["-version"], false)?;
-        let line = |p: &str| {
-            version
-                .lines()
-                .find(|l| l.starts_with(p))
-                .map(str::to_string)
-        };
-        r.ffmpeg = line("ffmpeg version ").ok_or("ffmpeg -version gave no version line")?;
-        r.configuration = line("configuration:").unwrap_or_default();
-        r
+        record_base(!o.only.is_empty(), &o.reference, &version)?
     } else {
-        let r = Reference::read(&reference_path)?;
-        r.check_inputs(&out)?;
-        r
+        load_reference(&o.reference, &o.out)?
     };
     let load_start = fs::read_to_string("/proc/loadavg").unwrap_or_default();
-    let assets = prepare(&out, &fixtures)?;
+    let assets = prepare(&o.out, &o.fixtures)?;
     let mut b = Bench {
-        runs: runs.max(1),
-        only,
+        runs: o.runs.max(1),
+        only: o.only,
         rows: Vec::new(),
         node: render_node(),
         reference,
@@ -1959,10 +2178,26 @@ fn run() -> Res<()> {
     b.scale(&assets);
     let date = shell("date", &["-u", "+%Y-%m-%d"]);
     let machine = machine(&b.reference.ffmpeg);
-    if record_ffmpeg {
-        return write_reference(b.reference, machine, date, b.runs, &assets, &reference_path);
+    if o.record_ffmpeg {
+        let skipped: Vec<String> = b
+            .rows
+            .iter()
+            .filter(|r| r.ffmpeg.is_none())
+            .map(|r| r.id.clone())
+            .collect();
+        let line = write_reference(
+            b.reference,
+            machine,
+            date,
+            b.runs,
+            &assets,
+            &o.reference,
+            &skipped,
+        )?;
+        say!("{line}")?;
+        return Ok(());
     }
-    if let Some(line) = missing_line(&b.missing, &reference_path) {
+    if let Some(line) = missing_line(&b.missing, &o.reference) {
         note!("bench: {line}");
     }
     let results = Results {
@@ -1986,17 +2221,20 @@ fn run() -> Res<()> {
             .to_string(),
         rows: b.rows,
     };
-    fs::create_dir_all(&out)?;
-    let merged = if results.rows.is_empty() || (!b.only.is_empty() && results_path.exists()) {
+    fs::create_dir_all(&o.out)?;
+    let mut merged = if results.rows.is_empty() || (!b.only.is_empty() && results_path.exists()) {
         merge(&results_path, results)?
     } else {
         results
     };
+    for row in &mut merged.rows {
+        refresh(&b.reference, row);
+    }
     fs::write(&results_path, serde_json::to_vec_pretty(&merged)?)?;
     say!("wrote {}", results_path.display())?;
-    if !no_charts && !quick && b.only.is_empty() {
-        charts(&merged.rows, &images, &merged.machine, &merged.date)?;
-        say!("wrote charts to {}", images.display())?;
+    if !o.no_charts && !o.quick && b.only.is_empty() {
+        charts(&merged.rows, &o.images, &merged.machine, &merged.date)?;
+        say!("wrote charts to {}", o.images.display())?;
     }
     Ok(())
 }
@@ -2008,7 +2246,7 @@ fn ffmpeg_on(path: Option<&std::ffi::OsStr>) -> Res<PathBuf> {
 fn missing_line(missing: &[String], path: &Path) -> Option<String> {
     (!missing.is_empty()).then(|| {
         format!(
-            "no ffmpeg reference for {} cases in {}, not measured: {}",
+            "no usable ffmpeg reference for {} cases in {}, not measured: {}",
             missing.len(),
             path.display(),
             missing.join(", ")
@@ -2023,7 +2261,8 @@ fn write_reference(
     runs: usize,
     a: &Assets,
     path: &Path,
-) -> Res<()> {
+    skipped: &[String],
+) -> Res<String> {
     r.date = date;
     r.runs = runs;
     r.cpu = m.cpu;
@@ -2034,19 +2273,31 @@ fn write_reference(
     let files = a.video.values().chain(a.raw.values()).chain([&a.pcm]);
     for f in files {
         let name = f.file_name().and_then(|n| n.to_str()).ok_or("input name")?;
-        r.inputs.insert(name.to_string(), fs::metadata(f)?.len());
+        let bytes = fs::metadata(f)
+            .map_err(|e| format!("{}: {e}", f.display()))?
+            .len();
+        let sha256 = sha256::sha256_file(f).map_err(|e| format!("{}: {e}", f.display()))?;
+        r.inputs
+            .insert(name.to_string(), reference::Input { bytes, sha256 });
     }
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         fs::create_dir_all(dir)?;
     }
-    fs::write(path, r.render())?;
-    say!(
+    fs::write(path, r.render()).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut line = format!(
         "wrote {} cases to {} with {}",
         r.cases.len(),
         path.display(),
         r.ffmpeg
-    )?;
-    Ok(())
+    );
+    if !skipped.is_empty() {
+        line.push_str(&format!(
+            "; not recorded, {} cases: {}",
+            skipped.len(),
+            skipped.join(", ")
+        ));
+    }
+    Ok(line)
 }
 
 fn merge(path: &Path, mut fresh: Results) -> Res<Results> {
@@ -2152,6 +2403,124 @@ mod tests {
         })
     }
 
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    fn tracked() -> Reference {
+        Reference::read(&Path::new(env!("CARGO_MANIFEST_DIR")).join(reference::PATH)).unwrap()
+    }
+
+    fn bench_ids() -> Vec<String> {
+        let mut ids = Vec::new();
+        for c in ["h264", "hevc"] {
+            for h in [1080, 1440] {
+                for k in ["cpu-1t", "cpu-all", "gpu-readback", "gpu-surface"] {
+                    ids.push(format!("decode.{c}.{h}.{k}"));
+                }
+                for k in ["cpu", "auto"] {
+                    ids.push(format!("filmstrip.{c}.{h}.{k}"));
+                }
+            }
+            ids.push(format!("transcode.{c}.1440.gpu"));
+            for k in ["cpu", "gpu"] {
+                ids.push(format!("first-frame.{c}.1440.{k}"));
+            }
+        }
+        for h in [1080, 1440] {
+            for k in ["h264.cpu.medium", "h264.cpu.veryfast", "h264.gpu", "hevc.gpu"] {
+                ids.push(format!("encode.{h}.{k}"));
+            }
+            for k in ["copy", "reencode"] {
+                ids.push(format!("smartcut.{h}.{k}"));
+            }
+        }
+        for k in ["1440to1080", "1440to720", "1080to720", "1080to1440"] {
+            ids.push(format!("scale.{k}"));
+        }
+        for k in ["aac.decode", "aac.encode", "r128"] {
+            ids.push(format!("audio.{k}"));
+        }
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn units_follow_the_case_id() {
+        assert_eq!(unit_of("first-frame.h264.1440.cpu"), "ms");
+        assert_eq!(unit_of("filmstrip.hevc.1080.auto"), "stills/s");
+        assert_eq!(unit_of("audio.r128"), "x realtime");
+        assert_eq!(unit_of("smartcut.1080.copy"), "x realtime");
+        for id in [
+            "decode.h264.1080.cpu-1t",
+            "encode.1440.hevc.gpu",
+            "transcode.h264.1440.gpu",
+            "scale.1080to720",
+        ] {
+            assert_eq!(unit_of(id), "fps", "{id}");
+        }
+    }
+
+    #[test]
+    fn the_tracked_reference_holds_every_bench_case_in_the_bench_units() {
+        let r = tracked();
+        assert_eq!(r.version(), "9.0.2");
+        assert_eq!(r.runs, 3);
+        assert!(r.configuration.starts_with("configuration: "));
+        let ids: Vec<String> = r.cases.keys().cloned().collect();
+        assert_eq!(ids.len(), 49);
+        assert_eq!(ids, bench_ids());
+        for (id, c) in &r.cases {
+            assert_eq!(c.unit, unit_of(id), "{id}");
+            assert!(c.runs.len() >= r.runs, "{id}");
+            assert_eq!(median(&c.runs), Some(c.value), "{id}");
+        }
+        let inputs: Vec<&str> = r.inputs.keys().map(String::as_str).collect();
+        assert_eq!(
+            inputs,
+            [
+                "audio.f32",
+                "h264-1080.mp4",
+                "h264-1440.mp4",
+                "hevc-1080.mp4",
+                "hevc-1440.mp4",
+                "raw-1080.yuv",
+                "raw-1440.yuv"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_tracked_reference_records_each_inputs_sha256() {
+        for (name, i) in &tracked().inputs {
+            assert_eq!(i.sha256.len(), 64, "{name}: run bench --hash-inputs");
+        }
+    }
+
+    #[test]
+    fn the_tracked_reference_gives_every_comparison_row_without_ffmpeg() {
+        let r = tracked();
+        let mut b = bench_with(r.clone());
+        for id in bench_ids() {
+            let higher = unit_of(&id) != "ms";
+            b.add(&id, "group", "LABEL", higher, ours(&[100.0, 120.0, 110.0]));
+        }
+        assert!(b.missing.is_empty(), "{:?}", b.missing);
+        assert_eq!(b.rows.len(), 49);
+        for row in &b.rows {
+            let c = &r.cases[&row.id];
+            assert_eq!(row.ffmpeg, Some(c.value), "{}", row.id);
+            assert_eq!(row.ffmpeg_runs, c.runs);
+            let want = if row.higher_is_better {
+                110.0 / c.value
+            } else {
+                c.value / 110.0
+            };
+            assert!((row.speedup.unwrap() - want).abs() < 1e-9, "{}", row.id);
+        }
+        assert!(FFMPEG.get().is_none());
+    }
+
     #[test]
     fn every_reference_case_gives_a_comparison_row_without_running_ffmpeg() {
         let r = reference::tests::sample();
@@ -2160,7 +2529,6 @@ mod tests {
             "decode.h264.1080.cpu-1t",
             "decode",
             "H.264 1080P DECODE",
-            "fps",
             true,
             ours(&[800.0, 825.0, 850.0]),
         );
@@ -2168,18 +2536,19 @@ mod tests {
             "first-frame.h264.1440.cpu",
             "pipeline",
             "FIRST FRAME",
-            "ms",
             false,
             ours(&[4.0, 4.26, 5.0]),
         );
         assert!(b.missing.is_empty());
         assert_eq!(b.rows.len(), r.cases.len());
         let decode = &b.rows[0];
+        assert_eq!(decode.unit, "fps");
         assert_eq!(decode.ffmpeg, Some(412.5));
         assert_eq!(decode.ffmpeg_runs, vec![410.0, 412.5, 415.25]);
         assert_eq!(decode.speedup, Some(2.0));
         assert_eq!(decode.details.get("ffmpeg_psnr_db"), Some(&41.2));
         let first = &b.rows[1];
+        assert_eq!(first.unit, "ms");
         assert_eq!(first.ffmpeg, Some(85.2));
         assert!((first.speedup.unwrap() - 20.0).abs() < 1e-9);
         assert!(FFMPEG.get().is_none());
@@ -2187,24 +2556,27 @@ mod tests {
 
     #[test]
     fn a_case_with_no_reference_is_reported_missing_not_measured() {
-        let mut b = bench_with(reference::tests::sample());
-        b.add(
-            "scale.1440to1080",
-            "pipeline",
-            "SCALE",
-            "fps",
-            true,
-            ours(&[900.0]),
-        );
+        let mut r = reference::tests::sample();
+        r.cases
+            .get_mut("decode.h264.1080.cpu-1t")
+            .unwrap()
+            .unit = "ms".into();
+        let mut b = bench_with(r);
+        b.add("scale.1440to1080", "pipeline", "SCALE", true, ours(&[900.0]));
         b.add(
             "decode.h264.1080.cpu-1t",
             "decode",
             "H.264 1080P DECODE",
-            "ms",
             true,
             ours(&[1.0]),
         );
-        assert_eq!(b.missing, ["scale.1440to1080", "decode.h264.1080.cpu-1t"]);
+        assert_eq!(
+            b.missing,
+            [
+                "scale.1440to1080",
+                "decode.h264.1080.cpu-1t (recorded in ms, the bench gives fps)"
+            ]
+        );
         for row in &b.rows {
             assert_eq!(row.ffmpeg, None);
             assert!(row.ffmpeg_runs.is_empty());
@@ -2214,9 +2586,11 @@ mod tests {
         let line = missing_line(&b.missing, Path::new("bench/ffmpeg-reference.toml")).unwrap();
         assert_eq!(
             line,
-            "no ffmpeg reference for 2 cases in bench/ffmpeg-reference.toml, not measured: scale.1440to1080, decode.h264.1080.cpu-1t"
+            "no usable ffmpeg reference for 2 cases in bench/ffmpeg-reference.toml, not measured: scale.1440to1080, decode.h264.1080.cpu-1t (recorded in ms, the bench gives fps)"
         );
+        assert!(!line.contains('\n'));
         assert_eq!(missing_line(&[], Path::new("x")), None);
+        assert!(FFMPEG.get().is_none());
     }
 
     #[test]
@@ -2226,13 +2600,79 @@ mod tests {
             "decode.h264.1080.cpu-1t",
             "decode",
             "H.264 1080P DECODE",
-            "fps",
             true,
             Err("no VA-API device".into()),
         );
         assert!(b.missing.is_empty());
         assert_eq!(b.rows[0].skipped.as_deref(), Some("no VA-API device"));
         assert_eq!(b.rows[0].ffmpeg, None);
+    }
+
+    #[test]
+    fn merged_rows_take_their_ffmpeg_numbers_from_the_reference() {
+        let s = scratch("merge-refresh");
+        let path = s.0.join("results.json");
+        let row = |id: &str, ours: Option<f64>, ffmpeg: f64| Row {
+            id: id.into(),
+            unit: unit_of(id).into(),
+            higher_is_better: true,
+            ours,
+            ffmpeg: Some(ffmpeg),
+            ffmpeg_runs: vec![ffmpeg],
+            speedup: Some(9.0),
+            details: BTreeMap::from([("ffmpeg_psnr_db".into(), 30.0), ("frames".into(), 1.0)]),
+            ..Row::default()
+        };
+        let results = |rows: Vec<Row>, ffmpeg: &str| Results {
+            date: "2026-10-15".into(),
+            command: String::new(),
+            commit: String::new(),
+            runs: 1,
+            input: String::new(),
+            machine: Machine {
+                cpu: String::new(),
+                threads: 1,
+                gpu: String::new(),
+                driver: String::new(),
+                ffmpeg: ffmpeg.into(),
+                os: String::new(),
+            },
+            load_average_start: String::new(),
+            load_average_end: String::new(),
+            rows,
+        };
+        let r = reference::tests::sample();
+        let old = results(
+            vec![
+                row("decode.h264.1080.cpu-1t", Some(825.0), 999.0),
+                row("scale.1440to1080", Some(900.0), 450.0),
+                Row {
+                    skipped: Some("no device".into()),
+                    ..row("encode.1080.h264.gpu", None, 300.0)
+                },
+            ],
+            "ffmpeg version 9.0.1 live",
+        );
+        fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        let mut merged = merge(&path, results(Vec::new(), &r.ffmpeg)).unwrap();
+        let missing: Vec<String> = merged
+            .rows
+            .iter_mut()
+            .filter_map(|row| refresh(&r, row))
+            .collect();
+        assert_eq!(merged.machine.ffmpeg, r.ffmpeg);
+        assert_eq!(missing, ["scale.1440to1080"]);
+        let decode = &merged.rows[0];
+        assert_eq!(decode.ffmpeg, Some(412.5));
+        assert_eq!(decode.ffmpeg_runs, vec![410.0, 412.5, 415.25]);
+        assert_eq!(decode.speedup, Some(2.0));
+        assert_eq!(decode.details.get("ffmpeg_psnr_db"), Some(&41.2));
+        assert_eq!(decode.details.get("frames"), Some(&1.0));
+        let scale = &merged.rows[1];
+        assert_eq!((scale.ffmpeg, scale.speedup), (None, None));
+        assert!(!scale.details.contains_key("ffmpeg_psnr_db"));
+        let skipped = &merged.rows[2];
+        assert_eq!((skipped.ffmpeg, skipped.speedup), (None, None));
     }
 
     #[test]
@@ -2276,28 +2716,41 @@ mod tests {
 
     #[test]
     fn only_the_gated_ffmpeg_run_spawns_a_process() {
-        let src = include_str!("bench.rs");
+        let squash = |s: &str| s.split_whitespace().collect::<String>();
         let spawn = concat!("Command::", "new(");
+        let process = concat!("process::", "Command");
+        for (name, other) in [
+            ("charts.rs", include_str!("bench/charts.rs")),
+            ("docs.rs", include_str!("bench/docs.rs")),
+            ("reference.rs", include_str!("bench/reference.rs")),
+            ("sha256.rs", include_str!("../src/bin/pcod/sha256.rs")),
+            ("fail.rs", include_str!("support/fail.rs")),
+        ] {
+            let other = squash(other);
+            assert!(!other.contains(spawn), "{name}");
+            assert!(!other.contains(process), "{name}");
+            assert!(!other.contains(concat!("FFMPEG", ".set(")), "{name}");
+        }
+        let src = squash(include_str!("bench.rs"));
         let targets: Vec<&str> = src
             .match_indices(spawn)
             .filter_map(|(i, _)| src[i + spawn.len()..].split(')').next())
             .collect();
         assert_eq!(targets, ["exe", "cmd", "\"vainfo\""]);
-        let gate = &src[src.find("fn ffmpeg_run(").unwrap()..];
+        let gate = &src[src.find(concat!("fn", "ffmpeg_run(")).unwrap()..];
         let gate = &gate[..gate.find(&format!("{spawn}exe)")).unwrap()];
-        assert!(gate.contains("let exe = FFMPEG\n        .get()"));
+        assert!(gate.starts_with(concat!("fn", "ffmpeg_run(")));
+        assert!(gate.contains(concat!("letexe=", "FFMPEG.get()")));
         let shells: Vec<&str> = src
-            .match_indices("shell(\"")
+            .match_indices(concat!("shell(", "\""))
             .filter_map(|(i, _)| src[i + 7..].split('"').next())
             .collect();
         assert_eq!(shells, ["uname", "date", "git"]);
-        let sets = src.matches(concat!("FFMPEG", ".set(")).count();
-        assert_eq!(sets, 1);
-        let set_at = src.find(concat!("FFMPEG", ".set(")).unwrap();
-        let before = &src[..set_at];
-        assert!(
-            before[before.rfind("let reference = if ").unwrap()..].contains("if record_ffmpeg {")
-        );
+        let set = concat!("FFMPEG", ".set(");
+        assert_eq!(src.matches(set).count(), 1);
+        let before = &src[..src.find(set).unwrap()];
+        let branch = &before[before.rfind(concat!("letreference=", "if")).unwrap()..];
+        assert!(branch.starts_with(concat!("letreference=", "ifo.record_ffmpeg{")));
     }
 
     #[test]
@@ -2317,9 +2770,452 @@ mod tests {
     }
 
     #[test]
-    fn chart_docs_name_the_reference_version_and_date() {
+    fn chart_docs_name_the_reference_version_date_and_machine() {
         let (sub, ff) = docs::ffmpeg_names(&reference::tests::sample());
         assert_eq!(ff, "FFMPEG 9.0.1");
-        assert!(sub.ends_with("FFMPEG 9.0.1 RECORDED 2026-10-23"), "{sub}");
+        assert_eq!(
+            sub,
+            "AMD RYZEN 9 9950X, AMD RADEON RX 9060 XT (VA-API), FFMPEG 9.0.1 RECORDED 2026-10-23"
+        );
+        let mut r = reference::tests::sample();
+        r.cpu = "Apple M4".into();
+        r.gpu = "Apple M4".into();
+        assert!(docs::ffmpeg_names(&r).0.starts_with("APPLE M4, APPLE M4 (VA-API)"));
+    }
+
+    #[test]
+    fn chart_docs_refuse_results_timed_on_another_ffmpeg() {
+        let s = scratch("chart-docs-version");
+        let r = reference::tests::sample();
+        let results = s.0.join("results.json");
+        let old = "ffmpeg version 9.0.0 Copyright (c) 2000-2026 the FFmpeg developers";
+        let doc = |ffmpeg: &str| {
+            serde_json::json!({"date": "2026-10-15", "commit": "abc", "machine": {"ffmpeg": ffmpeg}, "rows": []})
+        };
+        fs::write(&results, doc(old).to_string()).unwrap();
+        let err = docs::charts(&results, &s.0.join("charts"), &r)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            format!(
+                "{}: its ffmpeg column is from `{old}`, not the reference's `{}`; run the bench again so it reads the reference",
+                results.display(),
+                r.ffmpeg
+            )
+        );
+        assert!(!s.0.join("charts").exists());
+        fs::write(&results, doc(&r.ffmpeg).to_string()).unwrap();
+        let same = docs::charts(&results, &s.0.join("charts"), &r)
+            .unwrap_err()
+            .to_string();
+        assert!(!same.contains("its ffmpeg column"), "{same}");
+    }
+
+    #[test]
+    fn arguments_default_to_a_full_run() {
+        assert_eq!(parse_args(&[]).unwrap(), Mode::Run(Opts::default()));
+        let Mode::Run(o) = parse_args(&[]).unwrap() else {
+            panic!("not a run");
+        };
+        assert_eq!(o.reference, PathBuf::from("bench/ffmpeg-reference.toml"));
+        assert_eq!(o.out, PathBuf::from("tmp/bench"));
+        assert_eq!(o.runs, 3);
+    }
+
+    #[test]
+    fn every_run_argument_is_read() {
+        let given = strings(&[
+            "--runs", "5", "--only", "decode", "--only", "audio", "--out", "o", "--images", "i",
+            "--fixtures", "f", "--reference", "r.toml", "--charts-only", "--no-charts",
+            "--record-ffmpeg",
+        ]);
+        let want = Opts {
+            runs: 5,
+            only: strings(&["decode", "audio"]),
+            out: "o".into(),
+            images: "i".into(),
+            fixtures: "f".into(),
+            reference: "r.toml".into(),
+            charts_only: true,
+            no_charts: true,
+            record_ffmpeg: true,
+            ..Opts::default()
+        };
+        assert_eq!(parse_args(&given).unwrap(), Mode::Run(want));
+        let quick = parse_args(&strings(&["--runs", "7", "--quick", "--hash-inputs"])).unwrap();
+        assert_eq!(
+            quick,
+            Mode::Run(Opts {
+                runs: 1,
+                quick: true,
+                hash_inputs: true,
+                ..Opts::default()
+            })
+        );
+    }
+
+    #[test]
+    fn bad_run_arguments_are_refused_in_one_line() {
+        for (given, want) in [
+            (vec!["--runs"], "--runs needs a value"),
+            (vec!["--runs", "many"], "--runs takes a whole number, not many"),
+            (vec!["--reference"], "--reference needs a value"),
+            (vec!["--only"], "--only needs a value"),
+            (vec!["--out"], "--out needs a value"),
+            (vec!["--fast"], "unknown --fast; bench --help gives the usage"),
+            (vec!["decode"], "unknown decode; bench --help gives the usage"),
+            (
+                vec!["--record-ffmpeg", "--hash-inputs"],
+                "--record-ffmpeg and --hash-inputs don't go together",
+            ),
+        ] {
+            let err = parse_args(&strings(&given)).unwrap_err().to_string();
+            assert_eq!(err, want, "{given:?}");
+        }
+    }
+
+    #[test]
+    fn check_chart_docs_and_help_take_their_own_arguments() {
+        assert_eq!(
+            parse_args(&strings(&["--check", "new.json"])).unwrap(),
+            Mode::Check("new.json".into(), ".dev/bench/baseline.json".into())
+        );
+        assert_eq!(
+            parse_args(&strings(&["--check", "new.json", "base.json"])).unwrap(),
+            Mode::Check("new.json".into(), "base.json".into())
+        );
+        assert_eq!(
+            parse_args(&strings(&["--chart-docs", "r.json", "docs/charts"])).unwrap(),
+            Mode::ChartDocs(
+                "r.json".into(),
+                "docs/charts".into(),
+                "bench/ffmpeg-reference.toml".into()
+            )
+        );
+        assert_eq!(
+            parse_args(&strings(&["--chart-docs", "r.json", "d", "ref.toml"])).unwrap(),
+            Mode::ChartDocs("r.json".into(), "d".into(), "ref.toml".into())
+        );
+        for bad in [
+            vec!["--chart-docs", "r.json"],
+            vec!["--chart-docs", "r.json", "d", "ref.toml", "x"],
+            vec!["--check"],
+            vec!["--check", "a", "b", "c"],
+        ] {
+            let err = parse_args(&strings(&bad)).unwrap_err().to_string();
+            assert_eq!(err, SHORT_USAGE, "{bad:?}");
+        }
+        assert_eq!(parse_args(&strings(&["--help"])).unwrap(), Mode::Help);
+        assert_eq!(parse_args(&strings(&["-h", "x"])).unwrap(), Mode::Help);
+        for flag in ["--record-ffmpeg", "--hash-inputs", "owner's call", "never runs ffmpeg"] {
+            assert!(USAGE.contains(flag), "{flag}");
+        }
+    }
+
+    const VERSION: &str = "ffmpeg version n9.0.2 Copyright (c) 2000-2026 the FFmpeg developers\nbuilt with gcc 15.2.1\nconfiguration: --prefix=/usr --enable-gpl\nlibavutil      60.  8.100 / 60.  8.100\n";
+
+    #[test]
+    fn the_version_and_configuration_lines_come_from_ffmpeg_version() {
+        let (v, c) = version_lines(VERSION).unwrap();
+        assert_eq!(
+            v,
+            "ffmpeg version n9.0.2 Copyright (c) 2000-2026 the FFmpeg developers"
+        );
+        assert_eq!(c, "configuration: --prefix=/usr --enable-gpl");
+        let none = version_lines("built with gcc\n").unwrap_err().to_string();
+        assert_eq!(none, "ffmpeg -version gave no version line");
+        let bare = version_lines("ffmpeg version 9\n").unwrap_err().to_string();
+        assert_eq!(bare, "ffmpeg -version gave no configuration line");
+    }
+
+    #[test]
+    fn a_full_recording_starts_from_an_empty_reference() {
+        let s = scratch("record-full");
+        let r = record_base(false, &s.0.join("absent.toml"), VERSION).unwrap();
+        assert!(r.cases.is_empty());
+        assert!(r.ffmpeg.ends_with("the FFmpeg developers"));
+        assert_eq!(r.configuration, "configuration: --prefix=/usr --enable-gpl");
+    }
+
+    #[test]
+    fn a_partial_recording_needs_a_readable_file_of_the_same_ffmpeg() {
+        let s = scratch("record-partial");
+        let path = s.0.join("ref.toml");
+        let absent = record_base(true, &path, VERSION).unwrap_err().to_string();
+        assert!(absent.starts_with(&path.display().to_string()), "{absent}");
+        fs::write(&path, "format = 1\nbroken\n").unwrap();
+        let broken = record_base(true, &path, VERSION).unwrap_err().to_string();
+        assert_eq!(broken, format!("{}: line 2: not key = value", path.display()));
+        let mut r = reference::tests::sample();
+        fs::write(&path, r.render()).unwrap();
+        let other = record_base(true, &path, VERSION).unwrap_err().to_string();
+        assert!(other.contains("one file holds one ffmpeg build"), "{other}");
+        let (v, c) = version_lines(VERSION).unwrap();
+        r.ffmpeg = v;
+        r.configuration = c;
+        fs::write(&path, r.render()).unwrap();
+        let same = record_base(true, &path, VERSION).unwrap();
+        assert_eq!(same, r);
+        assert_eq!(fs::read_to_string(&path).unwrap(), r.render());
+    }
+
+    fn one_input_reference(dir: &Path, sha256: &str) -> PathBuf {
+        let mut r = reference::tests::sample();
+        r.inputs = BTreeMap::from([(
+            "audio.f32".into(),
+            reference::Input {
+                bytes: 3,
+                sha256: sha256.into(),
+            },
+        )]);
+        let path = dir.join("ref.toml");
+        fs::write(&path, r.render()).unwrap();
+        path
+    }
+
+    #[test]
+    fn the_bench_runs_only_on_the_recorded_inputs() {
+        let s = scratch("load-reference");
+        let path = one_input_reference(&s.0, reference::tests::ABC);
+        let missing = load_reference(&path, &s.0).unwrap_err().to_string();
+        assert!(missing.contains("audio.f32 is missing"), "{missing}");
+        assert!(missing.contains("--record-ffmpeg"), "{missing}");
+        fs::write(s.0.join("audio.f32"), b"abd").unwrap();
+        let changed = load_reference(&path, &s.0).unwrap_err().to_string();
+        assert!(changed.contains("has sha256"), "{changed}");
+        fs::write(s.0.join("audio.f32"), b"abc").unwrap();
+        assert_eq!(load_reference(&path, &s.0).unwrap().inputs.len(), 1);
+        let absent = load_reference(&s.0.join("absent.toml"), &s.0)
+            .unwrap_err()
+            .to_string();
+        assert!(absent.contains("absent.toml"), "{absent}");
+        assert!(FFMPEG.get().is_none());
+    }
+
+    #[test]
+    fn hash_inputs_writes_the_inputs_sha256_into_the_reference() {
+        let s = scratch("hash-inputs");
+        let path = one_input_reference(&s.0, "");
+        let missing = hash_inputs(&path, &s.0).unwrap_err().to_string();
+        assert!(missing.contains("audio.f32 is missing"), "{missing}");
+        let unhashed = load_reference(&path, &s.0.join("absent"))
+            .unwrap_err()
+            .to_string();
+        assert!(unhashed.contains("is missing"), "{unhashed}");
+        fs::write(s.0.join("audio.f32"), b"abc").unwrap();
+        let before = load_reference(&path, &s.0).unwrap_err().to_string();
+        assert!(before.contains("`bench --hash-inputs`"), "{before}");
+        let line = hash_inputs(&path, &s.0).unwrap();
+        assert_eq!(
+            line,
+            format!(
+                "recorded the sha256 of 1 inputs from {} in {}",
+                s.0.display(),
+                path.display()
+            )
+        );
+        let r = load_reference(&path, &s.0).unwrap();
+        assert_eq!(r.inputs["audio.f32"].sha256, reference::tests::ABC);
+        assert_eq!(r.cases, reference::tests::sample().cases);
+        assert!(FFMPEG.get().is_none());
+    }
+
+    #[test]
+    fn write_reference_records_the_machine_inputs_and_skipped_cases() {
+        let s = scratch("write-reference");
+        let file = |name: &str, bytes: &[u8]| {
+            let p = s.0.join(name);
+            fs::write(&p, bytes).unwrap();
+            p
+        };
+        let a = Assets {
+            dir: s.0.clone(),
+            speech: s.0.join("clips/solstice.mp4"),
+            video: HashMap::from([
+                ((Codec::H264, 1080), file("h264-1080.mp4", b"abc")),
+                ((Codec::Hevc, 1080), file("hevc-1080.mp4", b"abcd")),
+            ]),
+            raw: BTreeMap::from([(1080, file("raw-1080.yuv", b"abcde"))]),
+            pcm: file("audio.f32", b""),
+        };
+        let m = Machine {
+            cpu: "AMD Ryzen 9 9950X 16-Core Processor".into(),
+            threads: 24,
+            gpu: "AMD Radeon RX 9060 XT".into(),
+            driver: "Mesa".into(),
+            ffmpeg: "ignored".into(),
+            os: "Linux 7.2".into(),
+        };
+        let mut r = reference::tests::sample();
+        r.inputs.clear();
+        let path = s.0.join("out/ffmpeg-reference.toml");
+        let skipped = strings(&["scale.1440to720", "audio.r128"]);
+        let line = write_reference(r.clone(), m, "2026-10-25".into(), 3, &a, &path, &skipped)
+            .unwrap();
+        assert_eq!(
+            line,
+            format!(
+                "wrote 2 cases to {} with {}; not recorded, 2 cases: scale.1440to720, audio.r128",
+                path.display(),
+                r.ffmpeg
+            )
+        );
+        let back = Reference::read(&path).unwrap();
+        assert_eq!(back.date, "2026-10-25");
+        assert_eq!(back.runs, 3);
+        assert_eq!(back.threads, 24);
+        assert_eq!(back.cpu, "AMD Ryzen 9 9950X 16-Core Processor");
+        assert_eq!(back.gpu, "AMD Radeon RX 9060 XT");
+        assert_eq!(back.driver, "Mesa");
+        assert_eq!(back.os, "Linux 7.2");
+        assert_eq!(back.ffmpeg, r.ffmpeg);
+        assert_eq!(back.cases, r.cases);
+        let sizes: Vec<(&str, u64)> = back
+            .inputs
+            .iter()
+            .map(|(k, i)| (k.as_str(), i.bytes))
+            .collect();
+        assert_eq!(
+            sizes,
+            [
+                ("audio.f32", 0),
+                ("h264-1080.mp4", 3),
+                ("hevc-1080.mp4", 4),
+                ("raw-1080.yuv", 5)
+            ]
+        );
+        assert_eq!(back.inputs["h264-1080.mp4"].sha256, reference::tests::ABC);
+        assert_eq!(
+            back.inputs["audio.f32"].sha256,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert!(back.check_inputs(&s.0).is_ok());
+        let clean = write_reference(
+            r,
+            Machine {
+                cpu: String::new(),
+                threads: 1,
+                gpu: String::new(),
+                driver: String::new(),
+                ffmpeg: String::new(),
+                os: String::new(),
+            },
+            "2026-10-25".into(),
+            3,
+            &a,
+            &path,
+            &[],
+        )
+        .unwrap();
+        assert!(!clean.contains("not recorded"), "{clean}");
+        fs::remove_file(s.0.join("raw-1080.yuv")).unwrap();
+        let gone = write_reference(
+            reference::tests::sample(),
+            Machine {
+                cpu: String::new(),
+                threads: 1,
+                gpu: String::new(),
+                driver: String::new(),
+                ffmpeg: String::new(),
+                os: String::new(),
+            },
+            "2026-10-25".into(),
+            3,
+            &a,
+            &path,
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(gone.contains("raw-1080.yuv"), "{gone}");
+    }
+
+    #[test]
+    fn the_driver_and_gpu_come_from_vainfo() {
+        let vainfo = "vainfo: VA-API version: 1.22 (libva 2.22.0)\nvainfo: Driver version: Mesa Gallium driver 26.2.5-arch1.1 for AMD Radeon RX 9060 XT (radeonsi, gfx1200, ACO, DRM 3.64, 7.2.8-9-omarchy)\nvainfo: Supported profile and entrypoints\n";
+        let (driver, gpu) = driver_and_gpu(vainfo);
+        assert!(driver.starts_with("Mesa Gallium driver 26.2.5-arch1.1 for AMD"));
+        assert!(driver.ends_with("7.2.8-9-omarchy)"));
+        assert_eq!(gpu, "AMD Radeon RX 9060 XT");
+        assert_eq!(driver_and_gpu(""), (String::new(), String::new()));
+        let bare = driver_and_gpu("vainfo: Driver version: Intel iHD driver 25.1\n");
+        assert_eq!(bare, ("Intel iHD driver 25.1".into(), String::new()));
+    }
+
+    #[test]
+    fn the_machine_carries_the_reference_ffmpeg_line() {
+        let m = machine("ffmpeg version n9.0.2");
+        assert_eq!(m.ffmpeg, "ffmpeg version n9.0.2");
+        assert!(m.threads >= 1);
+        assert!(FFMPEG.get().is_none());
+    }
+
+    fn pattern(w: u32, h: u32, n: usize) -> Vec<Frame> {
+        (0..n)
+            .map(|i| {
+                let mut f = Frame::new(PixelFormat::Yuv420p8, w, h, i as i64, TimeBase::new(1, 60));
+                for (k, plane) in f.planes.iter_mut().enumerate() {
+                    for y in 0..plane.height {
+                        for x in 0..plane.width {
+                            plane.data[y * plane.stride + x] =
+                                ((x * 3 + y * 2 + i * 5 + k * 40) % 200 + 20) as u8;
+                        }
+                    }
+                }
+                f
+            })
+            .collect()
+    }
+
+    #[test]
+    fn our_encodes_quality_is_measured_with_our_own_decoder() {
+        let frames = pattern(128, 96, 4);
+        let (_, packets) = encode_cpu(&frames, 128, 96).unwrap();
+        assert!(!packets.is_empty());
+        let db = psnr_of(Codec::H264, &packets, &frames).unwrap();
+        assert!(db.is_finite());
+        assert!(db > 30.0 && db <= PSNR_CAP, "{db}");
+        assert!(FFMPEG.get().is_none());
+    }
+
+    #[test]
+    fn identical_frames_give_the_capped_psnr() {
+        let frames = pattern(128, 96, 2);
+        let (_, packets) = encode_cpu(&frames, 128, 96).unwrap();
+        let decoded = {
+            let mut dec = h264::Decoder::with_threads(1);
+            let mut out = Vec::new();
+            for (i, p) in packets.iter().enumerate() {
+                out.extend(
+                    dec.decode(&Packet {
+                        data: p.clone(),
+                        pts: i as i64,
+                        dts: i as i64,
+                        keyframe: false,
+                    })
+                    .unwrap(),
+                );
+            }
+            out.extend(dec.flush().unwrap());
+            out
+        };
+        assert_eq!(psnr_of(Codec::H264, &packets, &decoded).unwrap(), PSNR_CAP);
+    }
+
+    #[test]
+    fn quality_is_refused_when_frames_or_codecs_do_not_match() {
+        let frames = pattern(128, 96, 3);
+        let (_, packets) = encode_cpu(&frames, 128, 96).unwrap();
+        let short = psnr_of(Codec::H264, &packets, &frames[..2])
+            .unwrap_err()
+            .to_string();
+        assert_eq!(short, "our H.264 decoder gave 3 frames of 2");
+        let small = pattern(64, 48, 3);
+        let sized = psnr_of(Codec::H264, &packets, &small).unwrap_err().to_string();
+        assert_eq!(sized, "a decoded 128x96 plane against a raw 64x48 one");
+        let vp9 = psnr_of(Codec::Vp9, &packets, &frames).unwrap_err().to_string();
+        assert!(vp9.ends_with("quality"), "{vp9}");
+        assert!(psnr_of(Codec::Hevc, &[vec![0, 0, 0, 1, 0x40]], &frames).is_err());
     }
 }
