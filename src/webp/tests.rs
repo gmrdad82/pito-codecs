@@ -1,24 +1,13 @@
-use super::oracle::{dir, ffmpeg, lib, source};
+use super::oracle::{lib, psnr};
 use super::{decode, decode_animation, info};
 use crate::media::Rgba;
+use crate::testref::{self, Digest, Refs};
 
-fn ffmpeg_webp(
-    name: &str,
-    lavfi: &str,
-    size: (u32, u32),
-    frames: usize,
-    args: &[&str],
-) -> Option<Vec<u8>> {
-    let path = dir().join(name);
-    let sep = if lavfi.contains('=') { ':' } else { '=' };
-    let input = format!("{lavfi}{sep}size={}x{}", size.0, size.1);
-    let frames = frames.to_string();
-    let mut a = vec!["-f", "lavfi", "-i", &input, "-frames:v", &frames];
-    a.extend_from_slice(args);
-    let p = path.to_str()?;
-    a.push(p);
-    ffmpeg(&a).then(|| std::fs::read(&path).ok()).flatten()
-}
+#[allow(dead_code)]
+#[path = "refs.rs"]
+pub(super) mod refs;
+
+use refs::{photo, picture, with_alpha};
 
 fn same(name: &str, ours: &Rgba, theirs: &Rgba) {
     assert_eq!(
@@ -29,7 +18,7 @@ fn same(name: &str, ours: &Rgba, theirs: &Rgba) {
     if let Some(i) = ours.data.iter().zip(&theirs.data).position(|(a, b)| a != b) {
         let px = i / 4;
         panic!(
-            "{name}: first difference at pixel ({}, {}) channel {}: ours {} libwebp {}",
+            "{name}: first difference at pixel ({}, {}) channel {}: ours {} theirs {}",
             px % ours.width as usize,
             px / ours.width as usize,
             i % 4,
@@ -39,200 +28,77 @@ fn same(name: &str, ours: &Rgba, theirs: &Rgba) {
     }
 }
 
-type Case = (
-    &'static str,
-    &'static str,
-    (u32, u32),
-    &'static [&'static str],
-);
-
-const LOSSLESS: &[Case] = &[
-    (
-        "ll_testsrc2.webp",
-        "testsrc2",
-        (331, 207),
-        &["-c:v", "libwebp", "-lossless", "1"],
-    ),
-    (
-        "ll_fast.webp",
-        "mandelbrot",
-        (256, 160),
-        &[
-            "-c:v",
-            "libwebp",
-            "-lossless",
-            "1",
-            "-compression_level",
-            "0",
-        ],
-    ),
-    (
-        "ll_best.webp",
-        "testsrc",
-        (320, 240),
-        &[
-            "-c:v",
-            "libwebp",
-            "-lossless",
-            "1",
-            "-compression_level",
-            "6",
-            "-quality",
-            "100",
-        ],
-    ),
-    (
-        "ll_alpha.webp",
-        "testsrc2",
-        (200, 120),
-        &[
-            "-vf",
-            "format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='X*2'",
-            "-c:v",
-            "libwebp",
-            "-lossless",
-            "1",
-        ],
-    ),
-    (
-        "ll_palette.webp",
-        "smptebars",
-        (300, 100),
-        &["-c:v", "libwebp", "-lossless", "1"],
-    ),
-    (
-        "ll_rgbtest.webp",
-        "rgbtestsrc",
-        (97, 61),
-        &[
-            "-c:v",
-            "libwebp",
-            "-lossless",
-            "1",
-            "-compression_level",
-            "6",
-        ],
-    ),
-];
+fn webp(r: &Refs, name: &str) -> Vec<u8> {
+    r.bytes(&format!("{name}.webp"))
+}
 
 #[test]
 fn lossless_decode_matches_libwebp() {
-    let Some(lib) = lib() else { return };
-    for &(name, src, size, args) in LOSSLESS {
-        let Some(file) = ffmpeg_webp(name, src, size, 1, args) else {
-            return;
-        };
+    let r = Refs::open(refs::AREA);
+    let lib = lib();
+    for (name, _, size, _) in refs::LOSSLESS {
+        let file = webp(&r, name);
         let i = info(&file).unwrap();
         assert!(i.lossless, "{name}");
         let ours = decode(&file).unwrap();
-        same(name, &ours, &lib.decode_rgba(&file).unwrap());
+        assert_eq!((ours.width, ours.height), size, "{name}");
+        r.assert_digest(&format!("{name}.rgba"), &testref::sha256(&ours.data));
+        if let Some(lib) = lib {
+            same(name, &ours, &lib.decode_rgba(&file).unwrap());
+        }
     }
 }
 
 #[test]
 fn animation_decode_matches_libwebp() {
-    let Some(lib) = lib() else { return };
-    let Some(file) = ffmpeg_webp(
-        "anim_ll.webp",
-        "testsrc2",
-        (160, 96),
-        8,
-        &["-c:v", "libwebp_anim", "-lossless", "1", "-loop", "0"],
-    ) else {
-        return;
-    };
-    let Some(theirs) = lib.decode_animation(&file) else {
-        return;
-    };
+    let r = Refs::open(refs::AREA);
+    let file = webp(&r, refs::ANIM);
     let ours = decode_animation(&file).unwrap();
+    assert_eq!(ours.frames.len() as u64, refs::ANIM_FRAMES);
+    let mut d = Digest::new();
+    for (i, o) in ours.frames.iter().enumerate() {
+        d.rgba(&o.image);
+        assert_eq!(
+            o.start + o.duration,
+            (i as u32 + 1) * refs::ANIM_MS,
+            "frame {i} end time"
+        );
+    }
+    r.assert_digest(&format!("{}.rgba", refs::ANIM), &d.hex());
+    let Some(theirs) = lib().and_then(|l| l.decode_animation(&file)) else {
+        return;
+    };
     assert_eq!(ours.frames.len(), theirs.len());
     for (i, (o, (t, ts))) in ours.frames.iter().zip(&theirs).enumerate() {
         same(&format!("frame {i}"), &o.image, t);
         assert_eq!((o.start + o.duration) as i32, *ts, "frame {i} timestamp");
     }
-    let _ = source;
-}
-
-fn photo(w: u32, h: u32) -> Option<Rgba> {
-    source("mandelbrot", w, h, 1)?.pop().map(|mut img| {
-        let noise = source("cellauto=rule=110", w, h, 1).and_then(|mut v| v.pop());
-        if let Some(n) = noise {
-            for (p, q) in img.data.chunks_exact_mut(4).zip(n.data.chunks_exact(4)) {
-                p[0] = p[0].wrapping_add(q[0] >> 5);
-            }
-        }
-        img
-    })
 }
 
 #[test]
 fn lossless_encode_decodes_exactly_in_libwebp_and_ffmpeg() {
-    let Some(lib) = lib() else { return };
-    let mut cases = Vec::new();
-    for (src, w, h) in [
-        ("testsrc", 333, 211),
-        ("smptebars", 160, 90),
-        ("rgbtestsrc", 7, 5),
-        ("mandelbrot", 1, 1),
-    ] {
-        match source(src, w, h, 1).and_then(|mut v| v.pop()) {
-            Some(img) => cases.push((format!("{src} {w}x{h}"), img)),
-            None => eprintln!("no {src} {w}x{h}"),
-        }
-    }
-    if let Some(p) = photo(256, 192) {
-        cases.push(("photo".into(), p));
-    }
-    if let Some(mut v) = source("testsrc2", 120, 80, 1) {
-        let mut img = v.pop().unwrap();
-        for (i, p) in img.data.chunks_exact_mut(4).enumerate() {
-            p[3] = (i * 7 % 256) as u8;
-        }
-        cases.push(("alpha".into(), img));
-    }
-    for (name, img) in &cases {
+    let r = Refs::open(refs::AREA);
+    let lib = lib();
+    for (name, img) in &refs::lossless_cases() {
         for effort in [0, 4, 6] {
-            let opts = super::Options {
-                effort,
-                exact: true,
-                ..super::Options::lossless()
-            };
-            let file = super::encode(img, &opts).unwrap();
-            let theirs = lib
-                .decode_rgba(&file)
-                .unwrap_or_else(|| panic!("{name} effort {effort}: libwebp refused"));
-            same(&format!("{name} effort {effort}"), &theirs, img);
+            let file = super::encode(img, &refs::lossless_options(effort)).unwrap();
             same(
                 &format!("{name} effort {effort} ours"),
                 &decode(&file).unwrap(),
                 img,
             );
+            if effort == refs::PINNED_EFFORT && refs::PINNED_LOSSLESS.contains(&name.as_str()) {
+                r.assert_digest(&format!("our-ll-{name}.webp"), &testref::sha256(&file));
+                r.assert_digest(&format!("our-ll-{name}.rgba"), &testref::sha256(&img.data));
+            }
+            if let Some(lib) = lib {
+                let theirs = lib
+                    .decode_rgba(&file)
+                    .unwrap_or_else(|| panic!("{name} effort {effort}: libwebp refused"));
+                same(&format!("{name} effort {effort}"), &theirs, img);
+            }
         }
     }
-}
-
-fn reel(w: u32, h: u32) -> Option<Rgba> {
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/coast/frames/reel/00001.png");
-    let out = std::process::Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-i"])
-        .arg(&path)
-        .args([
-            "-vf",
-            &format!("scale={w}:{h}:flags=lanczos"),
-            "-pix_fmt",
-            "rgba",
-            "-f",
-            "rawvideo",
-            "-",
-        ])
-        .output()
-        .ok()?;
-    (out.status.success() && out.stdout.len() == (w * h * 4) as usize).then_some(Rgba {
-        width: w,
-        height: h,
-        data: out.stdout,
-    })
 }
 
 fn timed<T>(runs: usize, mut f: impl FnMut() -> T) -> (T, f64) {
@@ -251,9 +117,7 @@ fn timed<T>(runs: usize, mut f: impl FnMut() -> T) -> (T, f64) {
 fn webp_bench() {
     let Some(lib) = lib() else { return };
     for (w, h) in [(1280, 720), (1920, 1080)] {
-        let Some(img) = reel(w, h).or_else(|| photo(w, h)) else {
-            return;
-        };
+        let img = photo(w, h);
         let mp = (w * h) as f64 / 1e6;
         let (theirs, t) = timed(3, || lib.encode_lossless(&img));
         println!(
@@ -310,16 +174,19 @@ fn alpha_plane_round_trips() {
 
 #[test]
 fn lossless_animation_plays_back_exactly_in_libwebp() {
-    let Some(lib) = lib() else { return };
-    let Some(frames) = source("testsrc2", 160, 96, 6) else {
-        return;
-    };
+    let frames = testref::rgba_frames(160, 96, 6, 0);
     let mut enc = super::AnimEncoder::new(160, 96, super::Options::lossless(), 0).unwrap();
     for (i, f) in frames.iter().enumerate() {
         enc.add(f, 40 + i as u32).unwrap();
     }
     enc.add(&frames[5], 10).unwrap();
     let file = enc.finish().unwrap();
+    let ours = decode_animation(&file).unwrap();
+    assert_eq!(ours.frames.len(), 6);
+    for (i, f) in ours.frames.iter().enumerate() {
+        same(&format!("ours frame {i}"), &f.image, &frames[i]);
+    }
+    let Some(lib) = lib() else { return };
     let theirs = lib
         .decode_animation(&file)
         .expect("libwebp decodes our animation");
@@ -330,41 +197,27 @@ fn lossless_animation_plays_back_exactly_in_libwebp() {
         end += 40 + i as i32 + if i == 5 { 10 } else { 0 };
         assert_eq!(*ts, end, "frame {i} end time");
     }
-    let ours = decode_animation(&file).unwrap();
-    for (i, f) in ours.frames.iter().enumerate() {
-        same(&format!("ours frame {i}"), &f.image, &frames[i]);
-    }
 }
 
 #[test]
 fn damaged_files_fail_without_panics() {
-    let mut files = Vec::new();
-    for &(name, src, size, args) in &LOSSLESS[..3] {
-        if let Some(f) = ffmpeg_webp(&format!("damaged_{name}"), src, size, 1, args) {
-            files.push(f);
-        }
+    let r = Refs::open(refs::AREA);
+    let mut files: Vec<Vec<u8>> = refs::LOSSLESS[..3]
+        .iter()
+        .map(|(name, ..)| webp(&r, name))
+        .collect();
+    files.push(webp(&r, refs::ANIM));
+    let frames = testref::rgba_frames(384, 352, 3, 0);
+    let mut a = frames[0].clone();
+    for (i, px) in a.data.chunks_exact_mut(4).enumerate() {
+        px[3] = (i % 251) as u8;
     }
-    if let Some(f) = ffmpeg_webp(
-        "damaged_anim.webp",
-        "testsrc2",
-        (160, 96),
-        8,
-        &["-c:v", "libwebp_anim", "-lossless", "1", "-loop", "0"],
-    ) {
-        files.push(f);
+    files.push(super::encode(&a, &super::Options::lossy(60.0)).unwrap());
+    let mut enc = super::AnimEncoder::new(384, 352, super::Options::lossy(60.0), 0).unwrap();
+    for f in &frames {
+        enc.add(f, 40).unwrap();
     }
-    if let Some(frames) = source("testsrc2", 384, 352, 3) {
-        let mut a = frames[0].clone();
-        for (i, px) in a.data.chunks_exact_mut(4).enumerate() {
-            px[3] = (i % 251) as u8;
-        }
-        files.push(super::encode(&a, &super::Options::lossy(60.0)).unwrap());
-        let mut enc = super::AnimEncoder::new(384, 352, super::Options::lossy(60.0), 0).unwrap();
-        for f in &frames {
-            enc.add(f, 40).unwrap();
-        }
-        files.push(enc.finish().unwrap());
-    }
+    files.push(enc.finish().unwrap());
     let mut seed = 0x2545f4914f6cdd1du64;
     let mut next = || {
         seed ^= seed << 13;
@@ -401,19 +254,14 @@ fn damaged_files_fail_without_panics() {
 #[ignore]
 fn webp_sizes() {
     let Some(lib) = lib() else { return };
-    for src in [
-        "testsrc2",
-        "smptehdbars",
-        "mandelbrot",
-        "cellauto",
-        "life",
-        "rgbtestsrc",
-        "yuvtestsrc",
-        "gradients=seed=7",
+    for (src, pic) in [
+        ("pattern", refs::Pic::Pattern(0)),
+        ("bars", refs::Pic::Bars),
+        ("ramp", refs::Pic::Ramp),
+        ("noisy 3", refs::Pic::Noisy(1, 3)),
+        ("noisy 20", refs::Pic::Noisy(2, 20)),
     ] {
-        let Some(img) = source(src, 1280, 720, 1).and_then(|mut v| v.pop()) else {
-            continue;
-        };
+        let img = picture(pic, 1280, 720);
         let (theirs, t1) = timed(1, || lib.encode_lossless(&img));
         let (ours, t2) = timed(1, || {
             super::encode(&img, &super::Options::lossless()).unwrap()
@@ -437,91 +285,104 @@ fn lossy_ready() -> bool {
     )
 }
 
-fn with_alpha(mut img: Rgba) -> Rgba {
-    let w = img.width as usize;
-    for (i, p) in img.data.chunks_exact_mut(4).enumerate() {
-        let (x, y) = (i % w, i / w);
-        p[3] = if (x / 24 + y / 24) % 3 == 0 {
-            0
-        } else {
-            ((x * 255) / w) as u8 | 0x20
-        };
+fn yuva(file: &[u8], ours: &Rgba) -> String {
+    let body = super::riff::body(file).unwrap();
+    let vp8 = super::riff::Chunks::new(body)
+        .filter_map(|c| c.ok())
+        .find(|c| &c.id == b"VP8 ")
+        .expect("a VP8 chunk")
+        .data;
+    let f = super::vp8::decode_yuv(vp8).unwrap();
+    let (w, h) = (f.width, f.height);
+    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+    let mut d = Digest::new();
+    for r in 0..h {
+        d.bytes(&f.y[r * f.ys..r * f.ys + w]);
     }
-    img
+    for plane in [&f.u, &f.v] {
+        for r in 0..ch {
+            d.bytes(&plane[r * f.uvs..r * f.uvs + cw]);
+        }
+    }
+    let alpha: Vec<u8> = ours.data.chunks_exact(4).map(|p| p[3]).collect();
+    d.bytes(&alpha);
+    d.hex()
+}
+
+fn opaque_rgb(img: &Rgba, keep: &[usize]) -> Vec<u8> {
+    keep.iter()
+        .flat_map(|&i| img.data[i * 4..i * 4 + 3].to_vec())
+        .collect()
 }
 
 #[test]
 fn lossy_alpha_decodes_the_same_in_libwebp() {
-    let (Some(lib), true) = (lib(), lossy_ready()) else {
+    if !lossy_ready() {
         return;
-    };
-    let Some(img) = source("testsrc2", 320, 180, 1)
-        .and_then(|mut v| v.pop())
-        .map(with_alpha)
-    else {
-        return;
-    };
-    let file = super::encode(&img, &super::Options::lossy(85.0)).unwrap();
+    }
+    let r = Refs::open(refs::AREA);
+    let img = refs::alpha_image();
+    let file = super::encode(&img, &super::Options::lossy(refs::ALPHA_QUALITY)).unwrap();
+    r.assert_digest(
+        &format!("{}.webp", refs::LOSSY_ALPHA),
+        &testref::sha256(&file),
+    );
     let i = info(&file).unwrap();
     assert!(i.alpha && !i.lossless);
-    let theirs = lib
-        .decode_rgba(&file)
-        .expect("libwebp decodes lossy + alpha");
     let ours = decode(&file).unwrap();
-    same("lossy alpha", &ours, &theirs);
+    r.assert_digest(
+        &format!("{}.yuva420p", refs::LOSSY_ALPHA),
+        &yuva(&file, &ours),
+    );
     let alpha_in: Vec<u8> = img.data.chunks_exact(4).map(|p| p[3]).collect();
     let alpha_out: Vec<u8> = ours.data.chunks_exact(4).map(|p| p[3]).collect();
     assert_eq!(alpha_in, alpha_out, "alpha is lossless");
     let opaque: Vec<usize> = (0..alpha_in.len()).filter(|&i| alpha_in[i] > 0).collect();
-    let a: Vec<u8> = opaque
-        .iter()
-        .flat_map(|&i| img.data[i * 4..i * 4 + 3].to_vec())
-        .collect();
-    let b: Vec<u8> = opaque
-        .iter()
-        .flat_map(|&i| ours.data[i * 4..i * 4 + 3].to_vec())
-        .collect();
-    let db = super::oracle::psnr(&a, &b);
-    let reference = lib.decode_rgba(&lib.encode(&img, 85.0)).unwrap();
-    let c: Vec<u8> = opaque
-        .iter()
-        .flat_map(|&i| reference.data[i * 4..i * 4 + 3].to_vec())
-        .collect();
-    let floor = super::oracle::psnr(&a, &c) - 1.5;
+    let a = opaque_rgb(&img, &opaque);
+    let db = psnr(&a, &opaque_rgb(&ours, &opaque));
+    let reference = decode(&webp(&r, &format!("lw-{}", refs::LOSSY_ALPHA))).unwrap();
+    let floor = psnr(&a, &opaque_rgb(&reference, &opaque)) - 1.5;
     assert!(
         db > floor,
         "lossy RGB PSNR {db:.1} dB, libwebp's at the same quality less 1.5 dB is {floor:.1}"
     );
+    if let Some(lib) = lib() {
+        let theirs = lib
+            .decode_rgba(&file)
+            .expect("libwebp decodes lossy + alpha");
+        same("lossy alpha", &ours, &theirs);
+    }
 }
 
 #[test]
 fn lossy_animation_plays_back_in_libwebp() {
-    let (Some(lib), true) = (lib(), lossy_ready()) else {
+    if !lossy_ready() {
         return;
-    };
-    let Some(frames) = source("testsrc2", 160, 96, 5) else {
-        return;
-    };
-    let mut enc = super::AnimEncoder::new(160, 96, super::Options::lossy(80.0), 1).unwrap();
-    for f in &frames {
-        enc.add(f, 50).unwrap();
     }
-    let file = enc.finish().unwrap();
-    let theirs = lib
-        .decode_animation(&file)
-        .expect("libwebp decodes our lossy animation");
+    let r = Refs::open(refs::AREA);
+    let frames = refs::lossy_anim_frames();
+    let file = refs::encode_lossy_anim().unwrap();
     let ours = decode_animation(&file).unwrap();
     assert_eq!(ours.info.loop_count, 1);
-    assert_eq!(theirs.len(), frames.len());
-    for (i, ((t, _), o)) in theirs.iter().zip(&ours.frames).enumerate() {
-        same(&format!("lossy frame {i}"), &o.image, t);
-        let db = super::oracle::psnr(&o.image.data, &frames[i].data);
-        let reference = lib.decode_rgba(&lib.encode(&frames[i], 80.0)).unwrap();
-        let floor = super::oracle::psnr(&reference.data, &frames[i].data) - 1.5;
+    assert_eq!(ours.frames.len(), frames.len());
+    for (i, o) in ours.frames.iter().enumerate() {
+        let db = psnr(&o.image.data, &frames[i].data);
+        let reference = decode(&webp(&r, &refs::lossy_anim_still(i as u64))).unwrap();
+        let floor = psnr(&reference.data, &frames[i].data) - 1.5;
         assert!(
             db > floor,
             "frame {i} PSNR {db:.1} dB, libwebp's still less 1.5 dB is {floor:.1}"
         );
+    }
+    let Some(theirs) = lib().map(|l| {
+        l.decode_animation(&file)
+            .expect("libwebp decodes our lossy animation")
+    }) else {
+        return;
+    };
+    assert_eq!(theirs.len(), frames.len());
+    for (i, ((t, _), o)) in theirs.iter().zip(&ours.frames).enumerate() {
+        same(&format!("lossy frame {i}"), &o.image, t);
     }
 }
 
@@ -537,28 +398,21 @@ fn webp_alpha_sizes() {
             .find(|c| &c.id == b"ALPH")
             .map_or(0, |c| c.data.len())
     };
+    let mut soft = photo(1280, 720);
+    let w = soft.width as usize;
+    for (k, p) in soft.data.chunks_exact_mut(4).enumerate() {
+        let (x, y) = ((k % w) as f32, (k / w) as f32);
+        p[3] = (255.0
+            * (1.0 - ((x - 640.0).powi(2) + (y - 360.0).powi(2)).sqrt() / 700.0).clamp(0.0, 1.0))
+            as u8;
+    }
     for (name, img) in [
         (
             "blocks",
-            source("testsrc2", 1280, 720, 1)
-                .and_then(|mut v| v.pop())
-                .map(with_alpha),
+            with_alpha(picture(refs::Pic::Pattern(0), 1280, 720)),
         ),
-        (
-            "soft",
-            reel(1280, 720).map(|mut i| {
-                let w = i.width as usize;
-                for (k, p) in i.data.chunks_exact_mut(4).enumerate() {
-                    let (x, y) = ((k % w) as f32, (k / w) as f32);
-                    p[3] = (255.0
-                        * (1.0 - ((x - 640.0).powi(2) + (y - 360.0).powi(2)).sqrt() / 700.0)
-                            .clamp(0.0, 1.0)) as u8;
-                }
-                i
-            }),
-        ),
+        ("soft", soft),
     ] {
-        let Some(img) = img else { continue };
         let theirs = lib.encode(&img, 80.0);
         let (ours, t) = timed(1, || {
             super::encode(&img, &super::Options::lossy(80.0)).unwrap()
@@ -568,99 +422,6 @@ fn webp_alpha_sizes() {
             alph(&theirs),
             alph(&ours),
             t * 1e3
-        );
-    }
-}
-
-#[test]
-#[ignore]
-fn webp_anim_bench() {
-    if !super::oracle::ffmpeg(&["-version"]) {
-        return;
-    }
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/coast/frames/reel");
-    let out = std::process::Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-framerate",
-            "25",
-            "-start_number",
-            "1",
-            "-i",
-        ])
-        .arg(dir.join("%05d.png"))
-        .args([
-            "-frames:v",
-            "60",
-            "-vf",
-            "scale=640:360",
-            "-pix_fmt",
-            "rgba",
-            "-f",
-            "rawvideo",
-            "-",
-        ])
-        .output()
-        .unwrap();
-    let frames: Vec<Rgba> = out
-        .stdout
-        .chunks_exact(640 * 360 * 4)
-        .map(|c| Rgba {
-            width: 640,
-            height: 360,
-            data: c.to_vec(),
-        })
-        .collect();
-    let raw = super::oracle::dir().join("anim_src.rgba");
-    std::fs::write(&raw, &out.stdout).unwrap();
-    for (label, opts, args) in [
-        (
-            "lossless",
-            super::Options::lossless(),
-            vec!["-lossless", "1"],
-        ),
-        (
-            "lossy q75",
-            super::Options::lossy(75.0),
-            vec!["-quality", "75"],
-        ),
-    ] {
-        if !opts.lossless && !lossy_ready() {
-            continue;
-        }
-        let t = std::time::Instant::now();
-        let mut enc = super::AnimEncoder::new(640, 360, opts, 0).unwrap();
-        for f in &frames {
-            enc.add(f, 40).unwrap();
-        }
-        let ours = enc.finish().unwrap();
-        let ours_t = t.elapsed().as_secs_f64();
-        let path = super::oracle::dir().join("anim_ffmpeg.webp");
-        let t = std::time::Instant::now();
-        let mut a: Vec<String> = [
-            "-f", "rawvideo", "-pix_fmt", "rgba", "-s", "640x360", "-r", "25", "-i",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        a.push(raw.to_str().unwrap().into());
-        a.extend(["-c:v", "libwebp_anim"].iter().map(|s| s.to_string()));
-        a.extend(args.iter().map(|s| s.to_string()));
-        a.push(path.to_str().unwrap().into());
-        let refs: Vec<&str> = a.iter().map(|s| s.as_str()).collect();
-        ffmpeg(&refs);
-        let theirs_t = t.elapsed().as_secs_f64();
-        let theirs = std::fs::metadata(&path).map_or(0, |m| m.len());
-        println!(
-            "60 frames 640x360 {label}: ours {} bytes {:.0} ms {:.0} fps; ffmpeg libwebp_anim {} bytes {:.0} ms {:.0} fps",
-            ours.len(),
-            ours_t * 1e3,
-            60.0 / ours_t,
-            theirs,
-            theirs_t * 1e3,
-            60.0 / theirs_t
         );
     }
 }

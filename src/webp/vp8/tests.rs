@@ -1,6 +1,9 @@
 use super::super::Options;
 use super::super::oracle::{self, lib};
 use crate::media::Rgba;
+use crate::testref::{self, Digest, Refs};
+
+use super::super::tests::refs;
 
 fn vp8_chunk(file: &[u8]) -> &[u8] {
     let mut at = 12;
@@ -31,101 +34,69 @@ fn crop(f: &super::dec::Frame) -> [Vec<u8>; 3] {
     [y, u, v]
 }
 
+
+fn yuv_digest(f: &super::dec::Frame) -> String {
+    let mut d = Digest::new();
+    for p in crop(f) {
+        d.bytes(&p);
+    }
+    d.hex()
+}
+
 #[test]
 fn decodes_libwebp_bit_exact() {
-    let Some(lib) = lib() else { return };
-    let cases = [
-        ("testsrc2", 320, 240, 75.0),
-        ("mandelbrot", 333, 187, 90.0),
-        ("smptehdbars", 127, 61, 20.0),
-        ("testsrc", 64, 64, 100.0),
-        ("cellauto", 97, 33, 5.0),
-    ];
-    for (src, w, h, q) in cases {
-        let Some(frames) = oracle::source(src, w, h, 1) else {
-            return;
-        };
-        let file = lib.encode(&frames[0], q);
+    let r = Refs::open(refs::AREA);
+    let lib = lib();
+    for case in &refs::LOSSY {
+        let name = case.libwebp();
+        let file = r.bytes(&format!("{name}.webp"));
         let data = vp8_chunk(&file);
         let f = super::decode_yuv(data).expect("decode");
-        eprintln!("{src} {} bytes", data.len());
+        let (w, h) = case.size;
+        assert_eq!((f.width, f.height), (w as usize, h as usize), "{name}");
+        r.assert_digest(&format!("{name}.yuv420p"), &yuv_digest(&f));
+        let Some(lib) = lib else { continue };
         let ours = crop(&f);
         let theirs = lib.decode_yuv(&file).expect("libwebp decode");
         for (p, (a, b)) in ours.iter().zip(&theirs).enumerate() {
-            assert!(a == b, "{src} q{q}: plane {p} differs");
+            assert!(a == b, "{name}: plane {p} differs");
         }
         let mut rgba = vec![0u8; w as usize * h as usize * 4];
         super::decode_into(data, &mut rgba).expect("rgba");
         let theirs = lib.decode_rgba(&file).expect("libwebp rgba");
-        assert!(rgba == theirs.data, "{src} q{q}: rgba differs");
+        assert!(rgba == theirs.data, "{name}: rgba differs");
     }
-    let _ = (Options::default(), Rgba::new(1, 1));
 }
 
 #[test]
 fn decodes_libvpx_partitions_and_simple_filter_like_ffmpeg() {
-    let cases = [
-        ("testsrc2", "0", "1", "0", 352, 288, "30"),
-        ("mandelbrot", "0", "8", "0", 352, 288, "50"),
-        ("testsrc2", "0", "4", "3", 352, 288, "50"),
-        ("mandelbrot", "1", "1", "0", 352, 288, "50"),
-        ("testsrc2", "1", "8", "6", 640, 360, "40"),
-        ("mandelbrot", "3", "2", "2", 98, 62, "60"),
-    ];
-    for (src, profile, slices, sharpness, w, h, q) in cases {
-        let ivf = crate::fixture::unique(&oracle::dir().join(format!("libvpx-{profile}.ivf")));
-        let lavfi = format!("{src}=s={w}x{h}:r=1");
-        let made = oracle::ffmpeg(&[
-            "-f",
-            "lavfi",
-            "-i",
-            &lavfi,
-            "-frames:v",
-            "1",
-            "-c:v",
-            "libvpx",
-            "-profile:v",
-            profile,
-            "-slices",
-            slices,
-            "-sharpness",
-            sharpness,
-            "-qmin",
-            q,
-            "-qmax",
-            "63",
-            "-b:v",
-            "50k",
-            "-f",
-            "ivf",
-            ivf.to_str().unwrap(),
-        ]);
-        if !made {
-            return;
-        }
-        let file = std::fs::read(&ivf).unwrap();
-        let theirs = std::process::Command::new("ffmpeg")
-            .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
-            .arg(&ivf)
-            .args([
-                "-frames:v",
-                "1",
-                "-pix_fmt",
-                "yuv420p",
-                "-f",
-                "rawvideo",
-                "-",
-            ])
-            .output()
-            .unwrap();
-        std::fs::remove_file(&ivf).ok();
-        assert!(theirs.status.success());
+    let r = Refs::open(refs::AREA);
+    for (name, _, profile, slices, sharpness, (w, h), _) in refs::LIBVPX {
+        let file = r.bytes(&format!("{name}.ivf"));
         let frame = &file[32 + 12..];
         let f = super::decode_yuv(frame).expect("decode");
-        assert!(
-            crop(&f).concat() == theirs.stdout,
-            "{src} profile {profile}, {slices} partitions, sharpness {sharpness}: differs from ffmpeg"
+        assert_eq!((f.width, f.height), (w as usize, h as usize), "{name}");
+        let label = format!(
+            "{name}: profile {profile}, {slices} partitions, sharpness {sharpness}: differs from ffmpeg"
         );
+        let e = r.entry(&format!("{name}.yuv"));
+        assert!(yuv_digest(&f) == e.sha256, "{label}");
+    }
+}
+
+fn coast(name: &str) -> Option<Rgba> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tmp/bench")
+        .join(name);
+    let bytes = std::fs::read(path).ok()?;
+    #[cfg(feature = "png")]
+    {
+        crate::png::decode(&bytes).ok()
+    }
+    #[cfg(not(feature = "png"))]
+    {
+        let _ = bytes;
+        None
     }
 }
 
@@ -144,12 +115,11 @@ fn timed<T>(n: usize, mut f: impl FnMut() -> T) -> (f64, T) {
 #[ignore]
 fn bench() {
     let Some(lib) = lib() else { return };
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/bench");
     for name in ["coast-1920x1080.png", "coast-2560x1440.png"] {
-        let Some(img) = oracle::ffmpeg_decode(&root.join(name)) else {
+        let Some(img) = coast(name) else {
             continue;
         };
-        let img = &img[0];
+        let img = &img;
         let mp = (img.width * img.height) as f64 / 1e6;
         let file = lib.encode(img, 75.0);
         let data = vp8_chunk(&file);
@@ -195,11 +165,10 @@ fn bench() {
 #[ignore]
 fn bench_one_thread() {
     let Some(lib) = lib() else { return };
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/bench");
-    let Some(img) = oracle::ffmpeg_decode(&root.join("coast-1920x1080.png")) else {
+    let Some(img) = coast("coast-1920x1080.png") else {
         return;
     };
-    let img = &img[0];
+    let img = &img;
     let one = rayon::ThreadPoolBuilder::new()
         .num_threads(1)
         .build()
@@ -228,11 +197,10 @@ fn bench_one_thread() {
 #[ignore]
 fn phases() {
     let Some(lib) = lib() else { return };
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/bench");
-    let Some(img) = oracle::ffmpeg_decode(&root.join("coast-1920x1080.png")) else {
+    let Some(img) = coast("coast-1920x1080.png") else {
         return;
     };
-    let file = lib.encode(&img[0], 75.0);
+    let file = lib.encode(&img, 75.0);
     let data = vp8_chunk(&file);
     use super::dec::*;
     let (t_parse, _) = timed(10, || {
@@ -260,7 +228,7 @@ fn phases() {
     });
     eprintln!("parse {:.2} ms", t_parse * 1e3);
     let (t_dec, f) = timed(10, || decode(data).unwrap());
-    let mut out = vec![0u8; img[0].data.len()];
+    let mut out = vec![0u8; img.data.len()];
     let (t_rgb, _) = timed(10, || {
         let p = super::yuv::Yuv {
             y: &f.y,
@@ -381,46 +349,39 @@ fn rgb_psnr(a: &[u8], b: &[u8]) -> f64 {
 
 #[test]
 fn encode_decodes_in_libwebp() {
-    let Some(lib) = lib() else { return };
-    let cases = [
-        ("testsrc2", 320, 240, 75.0, 4u8, 26.0f64),
-        ("mandelbrot", 333, 187, 90.0, 6, 30.0),
-        ("smptehdbars", 127, 61, 20.0, 0, 30.0),
-        ("testsrc", 1, 1, 50.0, 4, 30.0),
-        ("cellauto", 97, 33, 100.0, 2, 30.0),
-        ("testsrc2", 640, 512, 50.0, 4, 25.0),
-    ];
-    for (src, w, h, q, effort, min_psnr) in cases {
-        let Some(frames) = oracle::source(src, w, h, 1) else {
-            return;
-        };
-        let img = &frames[0];
-        let options = Options {
-            quality: q,
-            effort,
-            ..Options::lossy(q)
-        };
-        let ours = super::encode(&img.data, w, h, &options).expect("encode");
-        let file = riff(&ours);
-        let theirs = lib.decode_rgba(&file).expect("libwebp decodes ours");
+    let r = Refs::open(refs::AREA);
+    let lib = lib();
+    for case in &refs::LOSSY {
+        let (name, (w, h), q) = (case.ours(), case.size, case.quality);
+        let img = case.image();
+        let file = crate::webp::encode(&img, &case.options()).expect("encode");
+        r.assert_digest(&format!("{name}.webp"), &testref::sha256(&file));
+        let ours = vp8_chunk(&file);
+        let f = super::decode_yuv(ours).expect("we decode ours");
+        r.assert_digest(&format!("{name}.yuv420p"), &yuv_digest(&f));
         let mut back = vec![0u8; img.data.len()];
-        super::decode_into(&ours, &mut back).expect("we decode ours");
-        assert!(
-            back == theirs.data,
-            "{src} {w}x{h} q{q}: libwebp and we disagree"
-        );
+        super::decode_into(ours, &mut back).expect("we decode ours");
+        if let Some(lib) = lib {
+            let theirs = lib.decode_rgba(&file).expect("libwebp decodes ours");
+            assert!(
+                back == theirs.data,
+                "{name} {w}x{h} q{q}: libwebp and we disagree"
+            );
+        }
         let p = rgb_psnr(&img.data, &back);
-        let ref_file = lib.encode(img, q);
-        let ref_back = lib.decode_rgba(&ref_file).unwrap();
-        let rp = rgb_psnr(&img.data, &ref_back.data);
+        let ref_file = r.bytes(&format!("{}.webp", case.libwebp()));
+        let mut ref_back = vec![0u8; img.data.len()];
+        super::decode_into(vp8_chunk(&ref_file), &mut ref_back).expect("we decode libwebp's");
+        let rp = rgb_psnr(&img.data, &ref_back);
         eprintln!(
-            "{src} {w}x{h} q{q} e{effort}: ours {} bytes {p:.2} dB, libwebp {} bytes {rp:.2} dB",
+            "{name} {w}x{h} q{q} e{}: ours {} bytes {p:.2} dB, libwebp {} bytes {rp:.2} dB",
+            case.effort,
             file.len(),
             ref_file.len()
         );
         assert!(
-            p >= min_psnr.min(rp - 1.0),
-            "{src} q{q}: PSNR {p:.2} against libwebp's {rp:.2}"
+            p >= case.min_psnr.min(rp - 1.0),
+            "{name} q{q}: PSNR {p:.2} against libwebp's {rp:.2}"
         );
     }
 }

@@ -1,36 +1,12 @@
 use super::super::huffman::HuffmanTable;
 use super::*;
-use std::io::Write;
-use std::process::{Command, Stdio};
+use crate::testref::{self, Refs};
 
-fn photo(width: u32, height: u32) -> Rgba {
-    let mut img = Rgba::new(width, height);
-    let mut s = 0x9e37_79b9u32 ^ width.wrapping_mul(131) ^ height;
-    for y in 0..height {
-        for x in 0..width {
-            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            let n = (s >> 28) as i32 - 8;
-            let at = ((y * width + x) * 4) as usize;
-            let r = (x * 255 / width.max(1)) as i32 + n;
-            let g = (y * 255 / height.max(1)) as i32 - n;
-            let b = ((x + 2 * y) * 255 / (width + 2 * height)) as i32;
-            img.data[at..at + 4].copy_from_slice(&[
-                r.clamp(0, 255) as u8,
-                g.clamp(0, 255) as u8,
-                b as u8,
-                255,
-            ]);
-        }
-    }
-    img
-}
+#[allow(dead_code)]
+#[path = "../refs.rs"]
+mod refs;
 
-fn rgb24(img: &Rgba) -> Vec<u8> {
-    img.data
-        .chunks_exact(4)
-        .flat_map(|p| [p[0], p[1], p[2]])
-        .collect()
-}
+use refs::{FORMATS, SIZES, photo, rgb24};
 
 fn psnr(a: &[u8], b: &[u8]) -> f64 {
     assert_eq!(a.len(), b.len());
@@ -45,85 +21,6 @@ fn psnr(a: &[u8], b: &[u8]) -> f64 {
     } else {
         10.0 * (255.0 * 255.0 / mse).log10()
     }
-}
-
-fn have(tool: &str, flag: &str) -> bool {
-    Command::new(tool)
-        .arg(flag)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok()
-}
-
-fn run(tool: &str, args: &[&str], input: Vec<u8>) -> Option<Vec<u8>> {
-    let mut child = Command::new(tool)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let mut stdin = child.stdin.take()?;
-    let feeder = std::thread::spawn(move || stdin.write_all(&input).is_ok());
-    let out = child.wait_with_output().ok()?;
-    let fed = feeder.join().ok()?;
-    (fed && out.status.success()).then_some(out.stdout)
-}
-
-fn ffmpeg_encode(img: &Rgba, pix_fmt: &str) -> Vec<u8> {
-    let size = format!("{}x{}", img.width, img.height);
-    run(
-        "ffmpeg",
-        &[
-            "-v",
-            "error",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgb24",
-            "-s",
-            &size,
-            "-i",
-            "-",
-            "-frames:v",
-            "1",
-            "-pix_fmt",
-            pix_fmt,
-            "-q:v",
-            "2",
-            "-f",
-            "mjpeg",
-            "-",
-        ],
-        rgb24(img),
-    )
-    .unwrap_or_else(|| panic!("ffmpeg refused to encode {size} {pix_fmt}"))
-}
-
-fn ffmpeg_planes(file: &[u8], pix_fmt: &str) -> Vec<u8> {
-    run(
-        "ffmpeg",
-        &[
-            "-v",
-            "error",
-            "-f",
-            "jpeg_pipe",
-            "-i",
-            "-",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            pix_fmt,
-            "-",
-        ],
-        file.to_vec(),
-    )
-    .expect("ffmpeg decode")
-}
-
-fn jpegtran(file: &[u8], args: &[&str]) -> Vec<u8> {
-    run("jpegtran", args, file.to_vec()).unwrap_or_else(|| panic!("jpegtran {args:?} refused"))
 }
 
 fn ours(file: &[u8]) -> Vec<u8> {
@@ -142,23 +39,6 @@ fn max_diff(a: &[u8], b: &[u8]) -> u8 {
         .map(|(&x, &y)| x.abs_diff(y))
         .max()
         .unwrap_or(0)
-}
-
-const FORMATS: [(&str, (usize, usize)); 3] = [
-    ("yuvj444p", (1, 1)),
-    ("yuvj422p", (2, 1)),
-    ("yuvj420p", (2, 2)),
-];
-const SIZES: [(u32, u32); 5] = [(7, 5), (33, 17), (17, 33), (64, 48), (161, 91)];
-
-fn tools(names: &[(&str, &str)]) -> bool {
-    for (tool, flag) in names {
-        if !have(tool, flag) {
-            eprintln!("skipped: no {tool}");
-            return false;
-        }
-    }
-    true
 }
 
 #[test]
@@ -457,7 +337,6 @@ fn sof_end(file: &[u8]) -> usize {
 
 #[test]
 fn our_encoder_decodes_back_at_every_size() {
-    let ffmpeg = have("ffmpeg", "-version");
     for (w, h) in [
         (1, 1),
         (2, 2),
@@ -473,10 +352,6 @@ fn our_encoder_decodes_back_at_every_size() {
         let got = decode(&file).unwrap();
         assert_eq!((got.width, got.height), (w, h));
         assert!(got.data.chunks_exact(4).all(|p| p[3] == 255));
-        if ffmpeg {
-            let d = max_diff(&ours(&file), &ffmpeg_planes(&file, "yuvj420p"));
-            assert!(d <= 1, "{w}x{h}: planes off by {d}");
-        }
         if w >= 7 {
             let p = psnr(&rgb24(&img), &rgb24(&got));
             assert!(p > 30.0, "{w}x{h}: {p:.2} dB");
@@ -500,18 +375,17 @@ fn a_flat_colour_comes_back_flat() {
 
 #[test]
 fn ffmpeg_files_decode_within_one_of_ffmpeg() {
-    if !tools(&[("ffmpeg", "-version")]) {
-        return;
-    }
+    let r = Refs::open(refs::AREA);
     let mut worst = 0;
     for (pix_fmt, sampling) in FORMATS {
         for (w, h) in SIZES {
-            let file = ffmpeg_encode(&photo(w, h), pix_fmt);
+            let name = refs::ff(pix_fmt, w, h);
+            let file = r.bytes(&format!("{name}.jpg"));
             let i = info(&file).unwrap();
             assert_eq!((i.width, i.height), (w, h));
             let chroma = &decode_planes(&file).unwrap().planes[1];
             assert_eq!((chroma.fx, chroma.fy), sampling, "{pix_fmt}");
-            let d = max_diff(&ours(&file), &ffmpeg_planes(&file, pix_fmt));
+            let d = max_diff(&ours(&file), &r.bytes(&format!("{name}.yuv")));
             assert!(d <= 1, "{pix_fmt} {w}x{h}: off by {d}");
             worst = worst.max(d);
             let rgba = decode(&file).unwrap();
@@ -523,13 +397,13 @@ fn ffmpeg_files_decode_within_one_of_ffmpeg() {
 
 #[test]
 fn our_encoder_decodes_within_one_of_ffmpeg() {
-    if !tools(&[("ffmpeg", "-version")]) {
-        return;
-    }
+    let r = Refs::open(refs::AREA);
     let mut worst = 0;
     for (w, h) in SIZES {
-        let file = super::super::encode(&photo(w, h), 80).unwrap();
-        let d = max_diff(&ours(&file), &ffmpeg_planes(&file, "yuvj420p"));
+        let name = refs::ours(refs::OUR_Q80, w, h);
+        let file = super::super::encode(&photo(w, h), refs::OUR_Q80).unwrap();
+        r.assert_digest(&format!("{name}.jpg"), &testref::sha256(&file));
+        let d = max_diff(&ours(&file), &r.bytes(&format!("{name}.yuv")));
         assert!(d <= 1, "{w}x{h}: off by {d}");
         worst = worst.max(d);
     }
@@ -538,30 +412,21 @@ fn our_encoder_decodes_within_one_of_ffmpeg() {
 
 #[test]
 fn progressive_and_restart_files_decode_like_their_baseline() {
-    if !tools(&[("ffmpeg", "-version"), ("jpegtran", "-version")]) {
-        return;
-    }
+    let r = Refs::open(refs::AREA);
     let mut worst = 0;
     for (pix_fmt, _) in FORMATS {
         for (w, h) in SIZES {
-            let base = ffmpeg_encode(&photo(w, h), pix_fmt);
-            let want = ours(&base);
-            for args in [
-                &["-progressive"][..],
-                &["-restart", "1"],
-                &["-restart", "3B"],
-                &["-progressive", "-restart", "2B"],
-            ] {
-                let file = jpegtran(&base, args);
+            let name = refs::ff(pix_fmt, w, h);
+            let want = ours(&r.bytes(&format!("{name}.jpg")));
+            let theirs = r.bytes(&format!("{name}.yuv"));
+            for (v, args) in refs::VARIANTS {
+                let file = r.bytes(&format!("{}.jpg", refs::variant(&name, v)));
                 let i = info(&file).unwrap();
-                assert_eq!(i.progressive, args.contains(&"-progressive"), "{args:?}");
+                assert_eq!(i.progressive, args.contains(&"-progressive"), "{v}");
                 let got = ours(&file);
-                assert_eq!(
-                    got, want,
-                    "{pix_fmt} {w}x{h} {args:?}: not the baseline's samples"
-                );
-                let d = max_diff(&got, &ffmpeg_planes(&file, pix_fmt));
-                assert!(d <= 1, "{pix_fmt} {w}x{h} {args:?}: off by {d}");
+                assert_eq!(got, want, "{pix_fmt} {w}x{h} {v}: not the baseline's samples");
+                let d = max_diff(&got, &theirs);
+                assert!(d <= 1, "{pix_fmt} {w}x{h} {v}: off by {d}");
                 worst = worst.max(d);
             }
         }
@@ -569,14 +434,18 @@ fn progressive_and_restart_files_decode_like_their_baseline() {
     eprintln!("progressive and restarts: max difference {worst}");
 }
 
+fn transcoded(r: &Refs, q: u8, w: u32, h: u32, v: &str) -> Vec<u8> {
+    r.bytes(&format!("{}.jpg", refs::variant(&refs::ours(q, w, h), v)))
+}
+
 #[test]
 fn our_encoder_made_progressive_decodes_the_same() {
-    if !tools(&[("jpegtran", "-version")]) {
-        return;
-    }
-    for (w, h) in [(7, 5), (33, 17), (64, 48)] {
-        let base = super::super::encode(&photo(w, h), 75).unwrap();
-        let prog = jpegtran(&base, &["-progressive"]);
+    let r = Refs::open(refs::AREA);
+    for (q, w, h, _) in &refs::OURS_TRANSCODED[..3] {
+        let base = transcoded(&r, *q, *w, *h, "base");
+        let prog = transcoded(&r, *q, *w, *h, "prog");
+        assert!(info(&prog).unwrap().progressive, "{w}x{h}");
+        assert!(!info(&base).unwrap().progressive, "{w}x{h}");
         assert_eq!(decode(&prog).unwrap(), decode(&base).unwrap(), "{w}x{h}");
     }
 }
@@ -603,11 +472,8 @@ fn a_truncated_file_is_refused_at_every_cut() {
 
 #[test]
 fn a_progressive_truncated_file_is_refused_at_every_cut() {
-    if !tools(&[("jpegtran", "-version")]) {
-        return;
-    }
-    let base = super::super::encode(&photo(33, 17), 90).unwrap();
-    let file = jpegtran(&base, &["-progressive", "-restart", "1B"]);
+    let r = Refs::open(refs::AREA);
+    let file = transcoded(&r, 90, 33, 17, "prog-rst1b");
     for cut in 0..file.len() - 2 {
         let _ = refused(&file[..cut]);
     }
@@ -734,11 +600,12 @@ fn bad_tables_and_scan_headers_are_refused() {
 #[test]
 fn corrupt_scan_data_never_panics() {
     let base = super::super::encode(&photo(48, 32), 85).unwrap();
-    let mut files = vec![base.clone()];
-    if have("jpegtran", "-version") {
-        files.push(jpegtran(&base, &["-progressive"]));
-        files.push(jpegtran(&base, &["-restart", "1B"]));
-    }
+    let r = Refs::open(refs::AREA);
+    let files = [
+        base,
+        transcoded(&r, 85, 48, 32, "prog"),
+        transcoded(&r, 85, 48, 32, "rst1b"),
+    ];
     for file in files {
         let start = sof_end(&file);
         let mut s = 99u32;
@@ -785,42 +652,37 @@ fn sof_at(file: &[u8]) -> usize {
         .unwrap()
 }
 
-fn grey_files() -> Option<Vec<(String, Vec<u8>)>> {
-    if !tools(&[("ffmpeg", "-version"), ("jpegtran", "-version")]) {
-        return None;
-    }
+fn grey_files(r: &Refs) -> Vec<(String, Vec<u8>)> {
     let mut out = Vec::new();
     for (w, h) in SIZES {
-        let base = jpegtran(&ffmpeg_encode(&photo(w, h), "yuvj420p"), &["-grayscale"]);
-        for args in [
-            &[][..],
-            &["-progressive"],
-            &["-restart", "1"],
-            &["-progressive", "-restart", "2B"],
-        ] {
-            let file = if args.is_empty() {
-                base.clone()
-            } else {
-                jpegtran(&base, args)
-            };
-            out.push((format!("{w}x{h} {args:?}"), file));
+        let g = refs::grey(w, h);
+        out.push((format!("{w}x{h}"), r.bytes(&format!("{g}.jpg"))));
+        for (v, _) in refs::GREY_VARIANTS {
+            let file = r.bytes(&format!("{}.jpg", refs::variant(&g, v)));
+            out.push((format!("{w}x{h} {v}"), file));
         }
     }
-    Some(out)
+    out
 }
 
 #[test]
 fn grey_files_decode_within_one_of_ffmpeg() {
-    let Some(files) = grey_files() else {
-        return;
-    };
+    let r = Refs::open(refs::AREA);
     let mut worst = 0;
-    for (label, file) in files {
+    for (w, h) in SIZES {
+        let g = refs::grey(w, h);
+        let want = ours(&r.bytes(&format!("{g}.jpg")));
+        let d = max_diff(&want, &r.bytes(&format!("{g}.gray")));
+        assert!(d <= 1, "grey {w}x{h}: off by {d}");
+        worst = worst.max(d);
+        for (v, _) in refs::GREY_VARIANTS {
+            let file = r.bytes(&format!("{}.jpg", refs::variant(&g, v)));
+            assert_eq!(ours(&file), want, "grey {w}x{h} {v}: not the baseline's samples");
+        }
+    }
+    for (label, file) in grey_files(&r) {
         let i = info(&file).unwrap();
         assert_eq!(i.sampling.len(), 1, "{label}");
-        let d = max_diff(&ours(&file), &ffmpeg_planes(&file, "gray"));
-        assert!(d <= 1, "grey {label}: off by {d}");
-        worst = worst.max(d);
         let rgba = decode(&file).unwrap();
         assert_eq!(
             (rgba.width, rgba.height),
@@ -839,10 +701,8 @@ fn grey_files_decode_within_one_of_ffmpeg() {
 
 #[test]
 fn a_grey_frame_ignores_its_sampling_factors() {
-    let Some(files) = grey_files() else {
-        return;
-    };
-    for (label, file) in files {
+    let r = Refs::open(refs::AREA);
+    for (label, file) in grey_files(&r) {
         let at = sof_at(&file);
         assert_eq!(file[at + 9], 1, "{label}");
         let mut patched = file.clone();
@@ -853,35 +713,9 @@ fn a_grey_frame_ignores_its_sampling_factors() {
     }
 }
 
-fn ppm(img: &Rgba) -> Vec<u8> {
-    let mut out = format!("P6\n{} {}\n255\n", img.width, img.height).into_bytes();
-    out.extend_from_slice(&rgb24(img));
-    out
-}
-
-fn ppm_pixels(file: &[u8]) -> Vec<u8> {
-    let mut lines = 0;
-    let at = file
-        .iter()
-        .position(|&b| {
-            lines += usize::from(b == b'\n');
-            lines == 3
-        })
-        .expect("a PPM header");
-    file[at + 1..].to_vec()
-}
-
-fn cjpeg(img: &Rgba, args: &[&str]) -> Vec<u8> {
-    run("cjpeg", args, ppm(img)).unwrap_or_else(|| panic!("cjpeg {args:?} refused"))
-}
-
-fn djpeg_rgb(file: &[u8]) -> Vec<u8> {
-    ppm_pixels(&run("djpeg", &["-ppm"], file.to_vec()).expect("djpeg"))
-}
-
-fn rgb_diff(file: &[u8], label: &str) -> u8 {
+fn rgb_diff(file: &[u8], djpeg: &[u8], label: &str) -> u8 {
     let got = rgb24(&decode(file).unwrap());
-    let want = djpeg_rgb(file);
+    let want = refs::ppm_pixels(djpeg);
     let d = max_diff(&got, &want);
     let p = psnr(&got, &want);
     assert!(d <= 3 && p > 45.0, "{label}: off by {d}, {p:.1} dB");
@@ -890,47 +724,19 @@ fn rgb_diff(file: &[u8], label: &str) -> u8 {
 
 #[test]
 fn other_samplings_and_split_scans_decode_like_libjpeg() {
-    if !tools(&[
-        ("cjpeg", "-version"),
-        ("djpeg", "-version"),
-        ("ffmpeg", "-version"),
-    ]) {
-        return;
-    }
-    let script =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/jpegdec-split-scans.txt");
-    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
-    let script = crate::fixture::once(&script, |part| {
-        std::fs::write(part, "0;\n1;\n2;\n").unwrap()
-    });
-    let script = script.to_str().unwrap().to_string();
+    let r = Refs::open(refs::AREA);
     let mut worst = (0, 0);
-    for (w, h) in SIZES {
-        let img = photo(w, h);
-        for (args, pix_fmt, ratio) in [
-            (vec!["-sample", "1x2"], "yuvj440p", (1, 2)),
-            (vec!["-sample", "4x1"], "yuvj411p", (4, 1)),
-            (
-                vec!["-sample", "2x2", "-scans", script.as_str()],
-                "yuvj420p",
-                (2, 2),
-            ),
-            (
-                vec!["-sample", "1x1", "-scans", script.as_str()],
-                "yuvj444p",
-                (1, 1),
-            ),
-        ] {
-            let mut args = args;
-            args.extend(["-quality", "90"]);
-            let file = cjpeg(&img, &args);
-            let label = format!("{w}x{h} {args:?}");
+    for (w, h) in refs::CJPEG_SIZES {
+        for (v, _, _, ratio) in refs::SAMPLINGS {
+            let name = refs::cj(v, w, h);
+            let file = r.bytes(&format!("{name}.jpg"));
             let planes = decode_planes(&file).unwrap();
-            assert_eq!((planes.planes[1].fx, planes.planes[1].fy), ratio, "{label}");
-            let d = max_diff(&ours(&file), &ffmpeg_planes(&file, pix_fmt));
-            assert!(d <= 1, "{label}: planes off by {d}");
+            assert_eq!((planes.planes[1].fx, planes.planes[1].fy), ratio, "{name}");
+            let d = max_diff(&ours(&file), &r.bytes(&format!("{name}.yuv")));
+            assert!(d <= 1, "{name}: planes off by {d}");
             worst.0 = worst.0.max(d);
-            worst.1 = worst.1.max(rgb_diff(&file, &label));
+            let ppm = r.bytes(&format!("{name}.ppm"));
+            worst.1 = worst.1.max(rgb_diff(&file, &ppm, &name));
         }
     }
     eprintln!(
@@ -941,11 +747,10 @@ fn other_samplings_and_split_scans_decode_like_libjpeg() {
 
 #[test]
 fn rgb_files_are_found_by_their_ids_or_adobe_marker() {
-    if !tools(&[("cjpeg", "-version"), ("djpeg", "-version")]) {
-        return;
-    }
+    let r = Refs::open(refs::AREA);
     let img = photo(33, 17);
-    let file = cjpeg(&img, &["-rgb", "-quality", "95"]);
+    let file = r.bytes(&format!("{}.jpg", refs::RGB));
+    let djpeg = r.bytes(&format!("{}.ppm", refs::RGB));
     let at = sof_at(&file);
     assert_eq!([file[at + 10], file[at + 13], file[at + 16]], *b"RGB");
     assert!(decode_planes(&file).unwrap().rgb);
@@ -975,7 +780,7 @@ fn rgb_files_are_found_by_their_ids_or_adobe_marker() {
     neither[adobe] = b'a';
     for (label, f) in [("both", &file), ("ids", &ids_only), ("adobe", &adobe_only)] {
         assert!(decode_planes(f).unwrap().rgb, "{label}");
-        rgb_diff(f, label);
+        rgb_diff(f, &djpeg, label);
         let p = psnr(&rgb24(&img), &rgb24(&decode(f).unwrap()));
         assert!(p > 30.0, "{label}: {p:.1} dB from the source");
     }
@@ -1001,10 +806,9 @@ fn a_file_missing_only_its_end_marker_decodes() {
     let want = decode(&file).unwrap();
     assert_eq!(decode(&file[..file.len() - 2]).unwrap(), want);
     assert_eq!(decode(&file[..file.len() - 1]).unwrap(), want);
-    if !tools(&[("jpegtran", "-version")]) {
-        return;
-    }
-    let prog = jpegtran(&file, &["-progressive"]);
+    let r = Refs::open(refs::AREA);
+    let want = decode(&transcoded(&r, 90, 33, 17, "base")).unwrap();
+    let prog = transcoded(&r, 90, 33, 17, "prog");
     assert_eq!(decode(&prog[..prog.len() - 2]).unwrap(), want);
     let last = prog.windows(2).rposition(|w| w == [0xff, 0xda]).unwrap();
     let e = refused(&prog[..last]);
@@ -1024,11 +828,9 @@ fn a_scan_cut_short_by_a_marker_is_refused() {
         let e = refused(&f);
         assert!(e.contains("stops at marker 0xFFD9"), "cut at {cut}: {e}");
     }
-    if !tools(&[("jpegtran", "-version")]) {
-        return;
-    }
-    for args in [&["-progressive"][..], &["-restart", "1B"]] {
-        let file = jpegtran(&file, args);
+    let r = Refs::open(refs::AREA);
+    for v in ["prog", "rst1b"] {
+        let file = transcoded(&r, 90, 33, 17, v);
         for (start, end) in entropy_ranges(&file) {
             for cut in start..end {
                 let mut f = file[..cut].to_vec();
@@ -1058,10 +860,8 @@ fn too_many_scans_are_refused() {
 #[test]
 fn corrupt_headers_never_panic() {
     let base = super::super::encode(&photo(48, 32), 85).unwrap();
-    let mut files = vec![base.clone()];
-    if have("jpegtran", "-version") {
-        files.push(jpegtran(&base, &["-progressive"]));
-    }
+    let r = Refs::open(refs::AREA);
+    let files = [base, transcoded(&r, 85, 48, 32, "prog")];
     for file in files {
         let end = scan_data_start(&file);
         let mut s = 7u32;
@@ -1146,11 +946,8 @@ fn upsampling_two_by_two_row_by_row_gives_the_fancy_filter() {
 
 #[test]
 fn a_table_redefined_between_progressive_scans_keeps_the_first() {
-    if !tools(&[("jpegtran", "-version")]) {
-        return;
-    }
-    let base = super::super::encode(&photo(33, 17), 90).unwrap();
-    let file = jpegtran(&base, &["-progressive"]);
+    let r = Refs::open(refs::AREA);
+    let file = transcoded(&r, 90, 33, 17, "prog");
     let want = decode(&file).unwrap();
     let last = file.windows(2).rposition(|w| w == [0xff, 0xda]).unwrap();
     let mut redefined = file[..last].to_vec();
