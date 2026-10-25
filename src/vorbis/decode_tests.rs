@@ -1,305 +1,84 @@
 use super::ogg::{page_crc, span};
 use super::*;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use crate::testref::{self, Refs};
+use std::path::PathBuf;
 
-const MAX_DIFF: f32 = 1e-6;
-const MAX_RMS: f64 = 1e-7;
+#[allow(dead_code)]
+#[path = "refs.rs"]
+pub(super) mod refs;
 
-fn dir() -> PathBuf {
-    let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp/test-vorbis-decode");
-    std::fs::create_dir_all(&d).unwrap();
-    d
+use refs::{Case, End, Made};
+
+fn open() -> Refs {
+    Refs::open(refs::AREA)
 }
 
-fn has_ffmpeg() -> bool {
-    Command::new("ffmpeg")
-        .arg("-version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+fn scratch(name: &str) -> PathBuf {
+    testref::scratch(refs::AREA).join(name)
 }
 
-fn encoders() -> String {
-    let out = Command::new("ffmpeg")
-        .args(["-hide_banner", "-encoders"])
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout).into_owned()
+fn made(file: &str) -> Made {
+    *refs::MADE
+        .iter()
+        .find(|m| m.file == file)
+        .unwrap_or_else(|| panic!("no Vorbis file named {file}"))
 }
 
-struct Case {
-    name: &'static str,
-    encoder: &'static str,
-    rate: u32,
-    channels: u16,
-    quality: &'static str,
-    clicks: bool,
+fn stereo() -> Case {
+    refs::named("stereo_44k_q3")
 }
 
-const SECONDS: f64 = 0.7;
-
-const HIGH: [Case; 2] = [
-    Case {
-        name: "stereo_96k_q3",
-        encoder: "libvorbis",
-        rate: 96000,
-        channels: 2,
-        quality: "3",
-        clicks: true,
-    },
-    Case {
-        name: "stereo_88k_q3",
-        encoder: "libvorbis",
-        rate: 88200,
-        channels: 2,
-        quality: "3",
-        clicks: true,
-    },
-];
-
-const CASES: [Case; 12] = [
-    Case {
-        name: "mono_22k_q0",
-        encoder: "libvorbis",
-        rate: 22050,
-        channels: 1,
-        quality: "0",
-        clicks: false,
-    },
-    Case {
-        name: "stereo_44k_q3",
-        encoder: "libvorbis",
-        rate: 44100,
-        channels: 2,
-        quality: "3",
-        clicks: false,
-    },
-    Case {
-        name: "stereo_48k_q9",
-        encoder: "libvorbis",
-        rate: 48000,
-        channels: 2,
-        quality: "9",
-        clicks: false,
-    },
-    Case {
-        name: "stereo_32k_qm1",
-        encoder: "libvorbis",
-        rate: 32000,
-        channels: 2,
-        quality: "-1",
-        clicks: false,
-    },
-    Case {
-        name: "surround_48k_q5",
-        encoder: "libvorbis",
-        rate: 48000,
-        channels: 6,
-        quality: "5",
-        clicks: false,
-    },
-    Case {
-        name: "surround_22k_q1",
-        encoder: "libvorbis",
-        rate: 22050,
-        channels: 6,
-        quality: "1",
-        clicks: false,
-    },
-    Case {
-        name: "native_stereo_44k",
-        encoder: "vorbis",
-        rate: 44100,
-        channels: 2,
-        quality: "5",
-        clicks: false,
-    },
-    Case {
-        name: "c3_44k_q4",
-        encoder: "libvorbis",
-        rate: 44100,
-        channels: 3,
-        quality: "4",
-        clicks: false,
-    },
-    Case {
-        name: "quad_44k_q4",
-        encoder: "libvorbis",
-        rate: 44100,
-        channels: 4,
-        quality: "4",
-        clicks: false,
-    },
-    Case {
-        name: "c5_48k_q4",
-        encoder: "libvorbis",
-        rate: 48000,
-        channels: 5,
-        quality: "4",
-        clicks: false,
-    },
-    Case {
-        name: "c61_48k_q4",
-        encoder: "libvorbis",
-        rate: 48000,
-        channels: 7,
-        quality: "4",
-        clicks: false,
-    },
-    Case {
-        name: "c71_48k_q4",
-        encoder: "libvorbis",
-        rate: 48000,
-        channels: 8,
-        quality: "4",
-        clicks: false,
-    },
-];
-
-fn source(c: &Case, seconds: f64) -> String {
-    let tones: Vec<String> = (0..c.channels)
-        .map(|i| {
-            let f = 220.0 * (i + 1) as f64 + 37.0;
-            let a = 0.1 + 0.08 * i as f64;
-            let click = if c.clicks {
-                "+0.6*lt(mod(t+0.043\\,0.31)\\,0.0015)*sin(9000*2*PI*t)"
-            } else {
-                ""
-            };
-            format!(
-                "{a}*sin({f}*2*PI*t)+0.1*sin({}*2*PI*t)*exp(-3*t){click}",
-                f * 7.3
-            )
-        })
-        .collect();
-    let layout = match c.channels {
-        1 => "mono",
-        2 => "stereo",
-        3 => "3.0",
-        4 => "quad",
-        5 => "5.0",
-        6 => "5.1",
-        7 => "6.1",
-        _ => "7.1",
-    };
-    format!(
-        "aevalsrc={}:s={}:d={seconds}:c={layout}",
-        tones.join("|"),
-        c.rate
-    )
+fn close(name: &str, ours: &[f32], theirs: &[f32]) {
+    assert!(!theirs.is_empty(), "{name}: nothing to compare");
+    let d = testref::diff(ours, theirs);
+    testref::assert_within(name, &d, refs::MAX_DIFF, refs::MAX_RMS);
 }
 
-fn encode(c: &Case, ext: &str) -> Option<PathBuf> {
-    encode_for(c, ext, SECONDS)
-}
-
-fn encode_for(c: &Case, ext: &str, seconds: f64) -> Option<PathBuf> {
-    let name = if seconds == SECONDS {
-        c.name.to_string()
+fn like_ffmpeg(r: &Refs, file: &str, c: &Case, ours: &[f32], whole: bool) {
+    let mine = refs::decimate(ours, c.channels, c.stride());
+    let theirs = r.f32s(&refs::every(file));
+    if whole {
+        close(&format!("{file}: every {}th frame", c.stride()), &mine, &theirs);
     } else {
-        format!("{}_{seconds}s", c.name)
-    };
-    let ogg = if ext == "mp4" {
-        Some(encode_for(c, "ogg", seconds)?)
-    } else {
-        None
-    };
-    let path = crate::fixture::once(&dir().join(format!("{name}.{ext}")), |part| {
-        let mut cmd = Command::new("ffmpeg");
-        cmd.args(["-hide_banner", "-loglevel", "error", "-y"]);
-        match &ogg {
-            Some(ogg) => {
-                cmd.arg("-i").arg(ogg).args(["-c", "copy", "-strict", "-2"]);
-            }
-            None => {
-                cmd.args(["-f", "lavfi", "-i"])
-                    .arg(source(c, seconds))
-                    .args(["-c:a", c.encoder, "-strict", "-2"]);
-                if c.encoder == "libvorbis" {
-                    cmd.args(["-q:a", c.quality]);
-                }
-            }
-        }
-        if !cmd.arg(part).status().unwrap().success() {
-            let _ = std::fs::remove_file(part);
-            assert_eq!(ext, "mp4", "ffmpeg encode {} {ext}", c.name);
-        }
-    });
-    path.exists().then_some(path)
-}
-
-fn ffmpeg_pcm(path: &Path) -> Vec<f32> {
-    let out = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-i"])
-        .arg(path)
-        .args(["-f", "f32le", "-"])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "ffmpeg decode {}", path.display());
-    out.stdout
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .collect()
-}
-
-fn cases() -> Vec<&'static Case> {
-    cases_of(&CASES)
-}
-
-fn cases_of(all: &'static [Case]) -> Vec<&'static Case> {
-    if !has_ffmpeg() {
-        eprintln!("skipped vorbis decode fixtures: ffmpeg not on PATH");
-        return Vec::new();
+        let n = mine.len().min(theirs.len());
+        close(
+            &format!("{file}: every {}th frame", c.stride()),
+            &mine[..n],
+            &theirs[..n],
+        );
     }
-    let list = encoders();
-    all.iter()
-        .filter(|c| {
-            let ok = list
-                .lines()
-                .any(|l| l.split_whitespace().nth(1) == Some(c.encoder));
-            if !ok {
-                eprintln!("skipped {}: ffmpeg has no {} encoder", c.name, c.encoder);
-            }
-            ok
-        })
-        .collect()
-}
-
-fn compare(name: &str, ours: &[f32], theirs: &[f32]) -> (f32, f64) {
-    let n = ours.len().min(theirs.len());
-    assert!(n > 0, "{name}: nothing to compare");
-    let mut max = 0f32;
-    let mut sum = 0f64;
-    for (a, b) in ours[..n].iter().zip(&theirs[..n]) {
-        let d = (a - b).abs();
-        max = max.max(d);
-        sum += (d as f64) * (d as f64);
+    match refs::end(file) {
+        End::Head => {
+            let head = r.f32s(&refs::head(file));
+            assert!(ours.len() >= head.len(), "{file}: {} samples", ours.len());
+            close(&format!("{file}: head"), &ours[..head.len()], &head);
+        }
+        End::Tail => {
+            let tail = r.f32s(&refs::tail(file));
+            assert!(ours.len() >= tail.len(), "{file}: {} samples", ours.len());
+            close(
+                &format!("{file}: tail"),
+                &ours[ours.len() - tail.len()..],
+                &tail,
+            );
+        }
     }
-    let rms = (sum / n as f64).sqrt();
-    eprintln!("{name}: max {max:e} rms {rms:e} over {n} samples");
-    assert!(max <= MAX_DIFF, "{name}: max diff {max} over {MAX_DIFF}");
-    assert!(rms <= MAX_RMS, "{name}: rms {rms} over {MAX_RMS}");
-    (max, rms)
 }
 
-fn expected_frames(c: &Case, ogg: &Path) -> usize {
-    if c.encoder == "libvorbis" {
-        (SECONDS * c.rate as f64).round() as usize
+fn expected_frames(c: &Case, ogg: &[u8]) -> usize {
+    if c.native {
+        OggVorbis::parse(ogg).unwrap().samples().unwrap() as usize
     } else {
-        let parsed = OggVorbis::parse(&std::fs::read(ogg).unwrap()).unwrap();
-        parsed.samples().unwrap() as usize
+        c.frames()
     }
 }
 
 #[test]
 fn ogg_vorbis_decodes_to_ffmpegs_samples_with_exact_lengths() {
-    for c in cases() {
-        let Some(path) = encode(c, "ogg") else {
-            continue;
-        };
-        let data = std::fs::read(&path).unwrap();
+    let r = open();
+    for c in &refs::CASES {
+        let file = c.ogg();
+        let data = r.bytes(&file);
         let ogg = OggVorbis::parse(&data).unwrap();
         assert!(ogg.warnings.is_empty(), "{}: {:?}", c.name, ogg.warnings);
         let ours = ogg.decode().unwrap();
@@ -307,54 +86,43 @@ fn ogg_vorbis_decodes_to_ffmpegs_samples_with_exact_lengths() {
         assert_eq!(ours.channels, c.channels, "{}", c.name);
         assert_eq!(
             ours.frames(),
-            expected_frames(c, &path),
+            expected_frames(c, &data),
             "{}: frames",
             c.name
         );
         assert_eq!(ogg.samples().unwrap() as usize, ours.frames(), "{}", c.name);
-        let theirs = ffmpeg_pcm(&path);
-        let ch = c.channels as usize;
+        let picked = r.f32s(&refs::every(&file)).len() / c.channels as usize;
+        let theirs = picked * c.stride();
         let long = 1usize << ogg.decoder().unwrap().ident.blocksize_1;
-        eprintln!(
-            "{}: ffmpeg's Ogg demuxer gives {} frames, the granules {}",
-            c.name,
-            theirs.len() / ch,
-            ours.frames()
-        );
         assert!(
-            (theirs.len() / ch).abs_diff(ours.frames()) <= long / 2,
-            "{}: ffmpeg's Ogg demuxer gives {} frames, ours {}",
+            theirs.abs_diff(ours.frames()) <= long / 2 + c.stride(),
+            "{}: ffmpeg's Ogg demuxer gives about {theirs} frames, ours {}",
             c.name,
-            theirs.len() / ch,
             ours.frames()
         );
-        compare(c.name, &ours.samples, &theirs);
+        like_ffmpeg(&r, &file, c, &ours.samples, false);
     }
 }
 
 #[test]
 fn every_channel_lands_in_ffmpegs_order() {
+    let r = open();
     let mut seen = Vec::new();
-    for c in cases().into_iter().filter(|c| c.channels >= 3) {
-        let Some(path) = encode(c, "ogg") else {
-            continue;
-        };
+    for c in refs::CASES.iter().filter(|c| c.channels >= 3) {
         seen.push(c.channels);
-        let ours = decode(&std::fs::read(&path).unwrap()).unwrap();
-        let theirs = ffmpeg_pcm(&path);
+        let ours = decode(&r.bytes(&c.ogg())).unwrap();
+        let theirs = r.f32s(&refs::head(&c.ogg()));
         let stride = c.channels as usize;
         for ch in 0..stride {
-            let energy = |s: &[f32], skip: usize| -> f64 {
+            let energy = |s: &[f32]| -> f64 {
                 s.iter()
                     .skip(ch)
                     .step_by(stride)
-                    .skip(skip)
-                    .take(4000)
                     .map(|&v| (v as f64) * (v as f64))
                     .sum()
             };
-            let a = energy(&ours.samples, 0);
-            let b = energy(&theirs, 0);
+            let a = energy(&ours.samples[..theirs.len()]);
+            let b = energy(&theirs);
             assert!(
                 (a - b).abs() <= 1e-3 * b.max(1e-9),
                 "{} channel {ch}: {a} vs {b}",
@@ -362,20 +130,14 @@ fn every_channel_lands_in_ffmpegs_order() {
             );
         }
     }
-    if !seen.is_empty() {
-        seen.sort_unstable();
-        seen.dedup();
-        assert_eq!(seen, [3, 4, 5, 6, 7, 8]);
-    }
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(seen, [3, 4, 5, 6, 7, 8]);
 }
 
 #[test]
 fn the_first_packet_primes_and_later_packets_follow_the_blocksizes() {
-    let Some(c) = cases().into_iter().find(|c| c.name == "stereo_44k_q3") else {
-        return;
-    };
-    let path = encode(c, "ogg").unwrap();
-    let ogg = OggVorbis::parse(&std::fs::read(&path).unwrap()).unwrap();
+    let ogg = OggVorbis::parse(&open().bytes(&stereo().ogg())).unwrap();
     let mut dec = ogg.decoder().unwrap();
     assert!(!dec.primed());
     let first = ogg.packet(0);
@@ -414,22 +176,41 @@ fn the_first_packet_primes_and_later_packets_follow_the_blocksizes() {
     assert!(aligned.iter().all(|&v| v == 0.0));
 }
 
+
 #[cfg(feature = "audio")]
 mod front {
     use super::*;
     use crate::media::{Prefs, audio_pcm, audio_pcm_range, probe};
+    use std::path::Path;
 
     fn whole(path: &Path, rate: u32, ch: u16) -> crate::media::AudioBuffer {
         audio_pcm_range(path, 0, 0.0, f64::INFINITY, rate, ch, &Prefs::default()).unwrap()
     }
 
+    fn range(path: &Path, c: &Case, from: f64, to: f64) -> crate::media::AudioBuffer {
+        audio_pcm_range(path, 0, from, to, c.rate, c.channels, &Prefs::default()).unwrap()
+    }
+
+    fn at(c: &Case, t: f64) -> usize {
+        (t * c.rate as f64).round() as usize * c.channels as usize
+    }
+
+    fn streamed(path: &Path, c: &Case, from: f64) -> Vec<f32> {
+        crate::media::audio_stream(path, 0, from, c.rate, c.channels, &Prefs::default())
+            .unwrap()
+            .flat_map(|b| b.unwrap().samples)
+            .collect()
+    }
+
     #[test]
     fn a_bare_ogg_reads_through_probe_and_audio_pcm_range() {
-        for c in cases() {
-            let path = encode(c, "ogg").unwrap();
-            let oga = crate::fixture::once(&path.with_extension("oga"), |part| {
-                std::fs::copy(&path, part).unwrap();
-            });
+        let r = open();
+        for c in &refs::CASES {
+            let path = r.path(&c.ogg());
+            let data = std::fs::read(&path).unwrap();
+            let oga = scratch(&format!("{}.oga", c.name));
+            testref::write_atomic(&oga, &data).unwrap();
+            let frames = expected_frames(c, &data);
             for p in [&path, &oga] {
                 let pr = probe(p, &Prefs::default()).unwrap();
                 let a = &pr.audio[0];
@@ -437,352 +218,296 @@ mod front {
                 assert!(a.native(), "{}", c.name);
                 assert_eq!((a.channels, a.rate), (c.channels, c.rate), "{}", c.name);
                 assert!(
-                    (pr.duration - expected_frames(c, p) as f64 / c.rate as f64).abs() < 1e-6,
+                    (pr.duration - frames as f64 / c.rate as f64).abs() < 1e-6,
                     "{}: {}",
                     c.name,
                     pr.duration
                 );
                 let b = whole(p, c.rate, c.channels);
-                assert_eq!(b.frames(), expected_frames(c, p), "{}", c.name);
-                let direct = decode(&std::fs::read(p).unwrap()).unwrap();
+                assert_eq!(b.frames(), frames, "{}", c.name);
+                let direct = decode(&data).unwrap();
                 assert_eq!(b.samples, direct.samples, "{}", c.name);
                 if c.channels <= 2 {
                     let pcm = audio_pcm(p, 0, c.rate, c.channels == 1, &Prefs::default()).unwrap();
                     assert_eq!(pcm.samples, b.samples, "{}", c.name);
                 }
             }
-            let from = 0.25;
-            let to = 0.5;
-            let part =
-                audio_pcm_range(&path, 0, from, to, c.rate, c.channels, &Prefs::default()).unwrap();
-            let at = |t: f64| (t * c.rate as f64).round() as usize * c.channels as usize;
-            let direct = decode(&std::fs::read(&path).unwrap()).unwrap();
-            assert_eq!(part.samples, direct.samples[at(from)..at(to)], "{}", c.name);
+            let (from, to) = (c.seconds * 0.35, c.seconds * 0.7);
+            let part = range(&path, c, from, to);
+            let direct = decode(&data).unwrap();
+            assert_eq!(
+                part.samples,
+                direct.samples[at(c, from)..at(c, to)],
+                "{}",
+                c.name
+            );
         }
     }
 
     #[test]
     fn webm_vorbis_matches_ffmpeg_sample_for_sample_and_in_length() {
-        for c in cases().into_iter().filter(|c| c.encoder == "libvorbis") {
-            for ext in ["webm", "mkv"] {
-                let path = encode(c, ext).unwrap();
-                let pr = probe(&path, &Prefs::default()).unwrap();
-                assert!(pr.audio[0].native(), "{} {ext}", c.name);
-                assert!(pr.unsupported().is_empty(), "{} {ext}", c.name);
-                let ours = whole(&path, c.rate, c.channels);
-                let theirs = ffmpeg_pcm(&path);
-                assert_eq!(
-                    ours.samples.len(),
-                    theirs.len(),
-                    "{} {ext}: frames ours {} ffmpeg {}",
-                    c.name,
-                    ours.frames(),
-                    theirs.len() / c.channels as usize
-                );
-                assert_eq!(ours.frames(), expected_frames(c, &path), "{} {ext}", c.name);
-                compare(&format!("{} {ext}", c.name), &ours.samples, &theirs);
-                if c.channels <= 2 {
-                    let pcm =
-                        audio_pcm(&path, 0, c.rate, c.channels == 1, &Prefs::default()).unwrap();
-                    assert_eq!(pcm.samples, ours.samples, "{} {ext}", c.name);
-                }
+        let r = open();
+        for m in refs::MADE.iter().filter(|m| !m.mp4()) {
+            let c = m.case();
+            let path = r.path(m.file);
+            let pr = probe(&path, &Prefs::default()).unwrap();
+            assert!(pr.audio[0].native(), "{}", m.file);
+            assert!(pr.unsupported().is_empty(), "{}", m.file);
+            let ours = whole(&path, c.rate, c.channels);
+            assert_eq!(ours.frames(), c.frames(), "{}", m.file);
+            like_ffmpeg(&r, m.file, &c, &ours.samples, true);
+            if c.channels <= 2 {
+                let pcm = audio_pcm(&path, 0, c.rate, c.channels == 1, &Prefs::default()).unwrap();
+                assert_eq!(pcm.samples, ours.samples, "{}", m.file);
             }
         }
     }
 
     #[test]
     fn a_webm_window_lines_up_with_the_whole_decode() {
-        let Some(c) = cases().into_iter().find(|c| c.name == "stereo_44k_q3") else {
-            return;
-        };
-        let path = encode(c, "webm").unwrap();
-        let all = whole(&path, c.rate, 2);
+        let c = refs::LONG;
+        let path = open().path(refs::LONG_WEBM);
+        let all = whole(&path, c.rate, c.channels);
         let (from, to) = (0.3, 0.6);
-        let part = audio_pcm_range(&path, 0, from, to, c.rate, 2, &Prefs::default()).unwrap();
-        let at = |t: f64| (t * c.rate as f64).round() as usize * 2;
-        compare("webm window", &part.samples, &all.samples[at(from)..at(to)]);
-        assert_eq!(part.samples.len(), at(to) - at(from));
+        let part = range(&path, &c, from, to);
+        assert_eq!(part.samples.len(), at(&c, to) - at(&c, from));
+        close(
+            "webm window",
+            &part.samples,
+            &all.samples[at(&c, from)..at(&c, to)],
+        );
     }
 
     #[test]
     fn a_long_webm_decodes_in_pieces_that_join_without_a_seam() {
-        let Some(c) = cases().into_iter().find(|c| c.name == "stereo_44k_q3") else {
-            return;
-        };
-        let path = encode_for(c, "webm", 9.0).unwrap();
-        let ours = whole(&path, c.rate, 2);
-        let theirs = ffmpeg_pcm(&path);
-        assert_eq!(ours.samples.len(), theirs.len());
-        assert_eq!(ours.frames(), 9 * 44100);
-        compare("long webm", &ours.samples, &theirs);
-        let (from, to) = (3.9, 4.1);
-        let part = audio_pcm_range(&path, 0, from, to, c.rate, 2, &Prefs::default()).unwrap();
-        let at = |t: f64| (t * c.rate as f64).round() as usize * 2;
-        assert_eq!(part.samples.len(), at(to) - at(from));
-        compare("long webm window", &part.samples, &theirs[at(from)..at(to)]);
+        let r = open();
+        let c = refs::LONG;
+        let path = r.path(refs::LONG_WEBM);
+        let ours = whole(&path, c.rate, c.channels);
+        assert_eq!(ours.frames(), c.frames());
+        like_ffmpeg(&r, refs::LONG_WEBM, &c, &ours.samples, true);
+        let (a, b) = refs::seam_span(&c);
+        let ch = c.channels as usize;
+        close(
+            "long webm across the seam",
+            &ours.samples[a * ch..b * ch],
+            &r.f32s(&refs::seam(refs::LONG_WEBM)),
+        );
+        let (from, to) = (refs::SEAM - 0.1, refs::SEAM + 0.1);
+        let part = range(&path, &c, from, to);
+        assert_eq!(part.samples.len(), at(&c, to) - at(&c, from));
+        close(
+            "long webm window",
+            &part.samples,
+            &ours.samples[at(&c, from)..at(&c, to)],
+        );
     }
 
     #[test]
     fn high_rate_matroska_pieces_and_windows_land_on_ffmpegs_samples() {
-        for c in cases_of(&HIGH) {
-            for ext in ["webm", "mkv"] {
-                let name = format!("{} {ext}", c.name);
-                let path = encode_for(c, ext, 9.0).unwrap();
-                let ours = whole(&path, c.rate, 2);
-                let theirs = ffmpeg_pcm(&path);
-                assert_eq!(ours.samples.len(), theirs.len(), "{name}");
-                assert_eq!(ours.frames(), 9 * c.rate as usize, "{name}");
-                compare(&name, &ours.samples, &theirs);
-                let at = |t: f64| (t * c.rate as f64).round() as usize * 2;
-                for (from, to) in [(3.9, 4.1), (1.2345, 1.5), (6.013, 6.4), (8.0, 9.0)] {
-                    let part =
-                        audio_pcm_range(&path, 0, from, to, c.rate, 2, &Prefs::default()).unwrap();
-                    assert_eq!(part.samples.len(), at(to) - at(from), "{name} {from}");
-                    compare(
-                        &format!("{name} window {from}"),
-                        &part.samples,
-                        &theirs[at(from)..at(to)],
-                    );
-                }
+        let r = open();
+        let windows: [(&str, &[(f64, f64)]); 2] = [
+            (
+                refs::LONG_WEBM,
+                &[(3.9, 4.1), (1.2345, 1.5), (0.613, 0.9), (4.0, 4.5)],
+            ),
+            (refs::HIGH_MKV, &[(1.2345, 1.5), (0.613, 0.9), (0.5, 1.5)]),
+        ];
+        for (file, spans) in windows {
+            let c = made(file).case();
+            let path = r.path(file);
+            let ours = whole(&path, c.rate, c.channels);
+            assert_eq!(ours.frames(), c.frames(), "{file}");
+            like_ffmpeg(&r, file, &c, &ours.samples, true);
+            for &(from, to) in spans {
+                let part = range(&path, &c, from, to);
+                assert_eq!(
+                    part.samples.len(),
+                    at(&c, to) - at(&c, from),
+                    "{file} {from}"
+                );
+                close(
+                    &format!("{file} window {from}"),
+                    &part.samples,
+                    &ours.samples[at(&c, from)..at(&c, to)],
+                );
             }
         }
     }
 
     #[test]
     fn matroska_vorbis_off_the_millisecond_ends_on_ffmpegs_last_sample() {
-        let all: Vec<&Case> = cases()
-            .into_iter()
-            .filter(|c| c.name == "stereo_44k_q3")
-            .chain(cases_of(&HIGH).into_iter().filter(|c| c.rate == 96000))
-            .collect();
-        for c in all {
-            let ogg = encode_for(c, "ogg", 9.0123).unwrap();
-            for (ext, copied) in [
-                ("webm", false),
-                ("mkv", false),
-                ("webm", true),
-                ("mkv", true),
+        let r = open();
+        for file in [refs::LONG_WEBM, refs::HIGH_MKV, refs::COPIED_MKV] {
+            let m = made(file);
+            let c = m.case();
+            let name = format!("{file}{}", if m.copied { " copied" } else { "" });
+            let path = r.path(file);
+            let ours = whole(&path, c.rate, c.channels);
+            like_ffmpeg(&r, file, &c, &ours.samples, true);
+            let frames = ours.frames();
+            assert_ne!(frames % (c.rate as usize / 1000), 0, "{name}");
+            assert_eq!(
+                streamed(&path, &c, 0.0).len(),
+                ours.samples.len(),
+                "{name} stream"
+            );
+            let tail = r.f32s(&refs::tail(file));
+            let end = frames as f64 / c.rate as f64;
+            for (from, to) in [
+                (end * 0.94, f64::INFINITY),
+                (end * 0.99, end + 0.5),
+                (end * 0.22, f64::INFINITY),
             ] {
-                let name = format!("{} {ext}{}", c.name, if copied { " copied" } else { "" });
-                let path = if copied {
-                    let to = dir().join(format!("{}_9.0123s_copy.{ext}", c.name));
-                    crate::fixture::once(&to, |part| {
-                        let ok = Command::new("ffmpeg")
-                            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
-                            .arg(&ogg)
-                            .args(["-c", "copy"])
-                            .arg(part)
-                            .status()
-                            .unwrap()
-                            .success();
-                        assert!(ok, "ffmpeg copy {name}");
-                    })
-                } else {
-                    encode_for(c, ext, 9.0123).unwrap()
-                };
-                let theirs = ffmpeg_pcm(&path);
-                let frames = theirs.len() / 2;
-                assert_ne!(frames % (c.rate as usize / 1000), 0, "{name}");
-                let ours = whole(&path, c.rate, 2);
-                assert_eq!(ours.frames(), frames, "{name}");
-                compare(&name, &ours.samples, &theirs);
-                let streamed: Vec<f32> =
-                    crate::media::audio_stream(&path, 0, 0.0, c.rate, 2, &Prefs::default())
-                        .unwrap()
-                        .flat_map(|b| b.unwrap().samples)
-                        .collect();
-                assert_eq!(streamed.len(), theirs.len(), "{name} stream");
-                let at = |t: f64| (t * c.rate as f64).round() as usize * 2;
-                for (from, to) in [(8.5, f64::INFINITY), (8.9, 9.5), (2.0, f64::INFINITY)] {
-                    let part =
-                        audio_pcm_range(&path, 0, from, to, c.rate, 2, &Prefs::default()).unwrap();
-                    assert_eq!(part.samples.len(), theirs.len() - at(from), "{name} {from}");
-                    compare(
-                        &format!("{name} to the end from {from}"),
-                        &part.samples,
-                        &theirs[at(from)..],
-                    );
-                }
-                let tail: Vec<f32> =
-                    crate::media::audio_stream(&path, 0, 8.5, c.rate, 2, &Prefs::default())
-                        .unwrap()
-                        .flat_map(|b| b.unwrap().samples)
-                        .collect();
-                assert_eq!(tail.len(), theirs.len() - at(8.5), "{name} stream from 8.5");
+                let part = range(&path, &c, from, to);
+                assert_eq!(
+                    part.samples.len(),
+                    ours.samples.len() - at(&c, from),
+                    "{name} {from}"
+                );
+                close(
+                    &format!("{name} to the end from {from}"),
+                    &part.samples,
+                    &ours.samples[at(&c, from)..],
+                );
+                let n = tail.len().min(part.samples.len());
+                close(
+                    &format!("{name} last samples from {from}"),
+                    &part.samples[part.samples.len() - n..],
+                    &tail[tail.len() - n..],
+                );
             }
+            let from = end * 0.94;
+            assert_eq!(
+                streamed(&path, &c, from).len(),
+                ours.samples.len() - at(&c, from),
+                "{name} stream from {from}"
+            );
         }
     }
 
     #[test]
     fn a_webm_cut_short_ends_on_ffmpegs_last_sample_though_its_header_says_longer() {
-        let Some(c) = cases().into_iter().find(|c| c.name == "stereo_44k_q3") else {
-            return;
-        };
-        let full = encode_for(c, "webm", 24.0123).unwrap();
-        let path = crate::fixture::once(&dir().join("stereo_44k_q3_cut_short.webm"), |part| {
-            let file = std::fs::read(&full).unwrap();
-            let clusters: Vec<usize> = file
-                .windows(4)
-                .enumerate()
-                .filter(|(_, w)| *w == [0x1f, 0x43, 0xb6, 0x75])
-                .map(|(i, _)| i)
-                .collect();
-            assert!(clusters.len() > 4, "{} clusters", clusters.len());
-            let cluster = clusters[clusters.len() / 2];
-            let r = crate::mkv::Reader::open(&full).unwrap();
-            let mut s = r.stream();
-            let mut data = Vec::new();
-            let mut blocks = Vec::new();
-            let mut from = 0;
-            while s.next_into(&mut data).unwrap().is_some() {
-                let i = from
-                    + file[from..]
-                        .windows(data.len())
-                        .position(|w| w == &data[..])
-                        .expect("a block's bytes in the file");
-                if i > cluster {
-                    break;
-                }
-                blocks.push(i);
-                from = i + data.len();
-            }
-            let at = blocks[blocks.len() - 3];
-            let header = |body: usize, id: u8| {
-                (1..=8).find_map(|n| {
-                    let e = body.checked_sub(n + 1)?;
-                    (file[e] == id && file[e + 1].leading_zeros() as usize + 1 == n).then_some(e)
-                })
-            };
-            let cut = header(at - 4, 0xa3)
-                .or_else(|| header(header(at - 4, 0xa1)?, 0xa0))
-                .expect("the block's header");
-            std::fs::write(part, &file[..cut]).unwrap();
-        });
-        let theirs = ffmpeg_pcm(&path);
-        let frames = theirs.len() / 2;
+        let r = open();
+        let c = refs::LONG;
+        let cut = refs::cut_short(&r.path(refs::LONG_WEBM)).unwrap();
+        r.assert_digest(refs::CUT_SHORT, &testref::sha256(&cut));
+        let path = scratch(refs::CUT_SHORT);
+        testref::write_atomic(&path, &cut).unwrap();
+        let ours = whole(&path, c.rate, c.channels);
+        like_ffmpeg(&r, refs::CUT_SHORT, &c, &ours.samples, true);
+        let frames = ours.frames();
         let rate = c.rate as f64;
         assert!(
-            (5.0 * rate..14.0 * rate).contains(&(frames as f64)),
+            (1.0 * rate..3.5 * rate).contains(&(frames as f64)),
             "{frames}"
         );
         assert_ne!(frames % (c.rate as usize / 1000), 0, "{frames}");
-        let r = crate::mkv::Reader::open(&path).unwrap();
+        let rd = crate::mkv::Reader::open(&path).unwrap();
         assert!(
-            r.duration_seconds() > frames as f64 / rate + 10.0,
+            rd.duration_seconds() > frames as f64 / rate + 1.0,
             "{}",
-            r.duration_seconds()
+            rd.duration_seconds()
         );
-        let ours = whole(&path, c.rate, 2);
-        assert_eq!(ours.frames(), frames);
-        compare("webm cut short", &ours.samples, &theirs);
-        let at = |t: f64| (t * rate).round() as usize * 2;
         let from = frames as f64 / rate - 0.7;
-        let part =
-            audio_pcm_range(&path, 0, from, f64::INFINITY, c.rate, 2, &Prefs::default()).unwrap();
-        assert_eq!(part.samples.len(), theirs.len() - at(from));
-        compare(
+        let part = range(&path, &c, from, f64::INFINITY);
+        assert_eq!(part.samples.len(), ours.samples.len() - at(&c, from));
+        close(
             "webm cut short to the end",
             &part.samples,
-            &theirs[at(from)..],
+            &ours.samples[at(&c, from)..],
         );
     }
 
     #[test]
     fn a_damaged_block_where_a_window_lands_is_refused_and_a_window_at_the_end_still_fits() {
-        let Some(c) = cases_of(&HIGH).into_iter().find(|c| c.rate == 96000) else {
-            return;
-        };
-        let path = encode_for(c, "webm", 9.0).unwrap();
-        let theirs = ffmpeg_pcm(&path);
-        let at = |t: f64| (t * c.rate as f64).round() as usize * 2;
-        let (from, to) = (8.95, 9.0);
-        let part = audio_pcm_range(&path, 0, from, to, c.rate, 2, &Prefs::default()).unwrap();
-        assert_eq!(part.samples.len(), at(to) - at(from));
-        compare("96k webm end", &part.samples, &theirs[at(from)..at(to)]);
-        let bad = crate::fixture::once(&dir().join("damaged_96k.webm"), |part| {
-            let r = crate::mkv::Reader::open(&path).unwrap();
-            let mut s = r.stream();
-            let mut data = Vec::new();
-            let mut file = std::fs::read(&path).unwrap();
-            let mut hit = 0;
-            while let Some(b) = s.next_into(&mut data).unwrap() {
-                if !(3940..=4000).contains(&b.pts) {
-                    continue;
-                }
-                let i = file
-                    .windows(data.len())
-                    .position(|w| w == &data[..])
-                    .expect("a block's bytes in the file");
-                file[i] |= 1;
-                hit += 1;
+        let c = refs::LONG;
+        let path = open().path(refs::LONG_WEBM);
+        let all = whole(&path, c.rate, c.channels);
+        let (from, to) = (4.45, 4.5);
+        let part = range(&path, &c, from, to);
+        assert_eq!(part.samples.len(), at(&c, to) - at(&c, from));
+        close(
+            "96k webm end",
+            &part.samples,
+            &all.samples[at(&c, from)..at(&c, to)],
+        );
+        let r = crate::mkv::Reader::open(&path).unwrap();
+        let mut s = r.stream();
+        let mut data = Vec::new();
+        let mut file = std::fs::read(&path).unwrap();
+        let mut hit = 0;
+        while let Some(b) = s.next_into(&mut data).unwrap() {
+            if !(1940..=2000).contains(&b.pts) {
+                continue;
             }
-            assert!(hit > 2, "{hit}");
-            std::fs::write(part, &file).unwrap();
-        });
-        let e = audio_pcm_range(&bad, 0, 4.0, 4.2, c.rate, 2, &Prefs::default())
+            let i = file
+                .windows(data.len())
+                .position(|w| w == &data[..])
+                .expect("a block's bytes in the file");
+            file[i] |= 1;
+            hit += 1;
+        }
+        assert!(hit > 2, "{hit}");
+        let bad = scratch("damaged_96k.webm");
+        testref::write_atomic(&bad, &file).unwrap();
+        let e = audio_pcm_range(&bad, 0, 2.0, 2.2, c.rate, 2, &Prefs::default())
             .unwrap_err()
             .to_string();
         assert_eq!(
             e,
             "invalid data: Vorbis header where an audio packet was expected"
         );
-        let fine = audio_pcm_range(&bad, 0, 6.0, 6.2, c.rate, 2, &Prefs::default()).unwrap();
-        compare(
+        let fine = range(&bad, &c, 3.0, 3.2);
+        close(
             "96k webm past the damage",
             &fine.samples,
-            &theirs[at(6.0)..at(6.2)],
+            &all.samples[at(&c, 3.0)..at(&c, 3.2)],
         );
     }
 
     #[test]
     fn mp4_vorbis_reads_through_probe_audio_pcm_and_matches_ffmpeg() {
-        for c in cases()
-            .into_iter()
-            .filter(|c| matches!(c.name, "stereo_44k_q3" | "mono_22k_q0" | "surround_48k_q5"))
-        {
-            let Some(path) = encode(c, "mp4") else {
-                eprintln!(
-                    "skipped Vorbis in MP4 {}: ffmpeg would not write one",
-                    c.name
-                );
-                continue;
-            };
+        let r = open();
+        for m in refs::MADE.iter().filter(|m| m.mp4()) {
+            let c = m.case();
+            let path = r.path(m.file);
             let pr = probe(&path, &Prefs::default()).unwrap();
-            assert_eq!(pr.audio[0].codec, "vorbis", "{}", c.name);
-            assert!(pr.audio[0].native(), "{}", c.name);
-            assert!(pr.unsupported().is_empty(), "{}", c.name);
+            assert_eq!(pr.audio[0].codec, "vorbis", "{}", m.file);
+            assert!(pr.audio[0].native(), "{}", m.file);
+            assert!(pr.unsupported().is_empty(), "{}", m.file);
             assert_eq!(
                 (pr.audio[0].channels, pr.audio[0].rate),
                 (c.channels, c.rate),
                 "{}",
-                c.name
+                m.file
             );
             let ours = whole(&path, c.rate, c.channels);
-            let theirs = ffmpeg_pcm(&path);
-            let ogg = path.with_extension("ogg");
-            let src = OggVorbis::parse(&std::fs::read(&ogg).unwrap()).unwrap();
+            let ogg = r.bytes(&c.ogg());
+            let src = OggVorbis::parse(&ogg).unwrap();
             let primed = src.decoder().unwrap().lead_in(src.packet(0)).unwrap();
             let mp4 = crate::mp4::Reader::open(&path).unwrap();
             let t = &mp4.tracks[0];
-            assert_eq!(t.edit_offset, -(primed as i64), "{} mp4", c.name);
+            assert_eq!(t.edit_offset, -(primed as i64), "{}", m.file);
             let media_end = t.samples.last().map_or(0, |s| s.pts + s.duration as i64) as usize;
             assert_eq!(
                 ours.frames(),
-                expected_frames(c, &ogg).min(media_end) - primed,
-                "{} mp4: the first packet's span is priming",
-                c.name
+                expected_frames(&c, &ogg).min(media_end) - primed,
+                "{}: the first packet's span is priming",
+                m.file
             );
+            let theirs = r.f32s(&refs::every(m.file)).len();
+            let mine = refs::decimate(&ours.samples, c.channels, c.stride()).len();
             assert!(
-                theirs.len() >= ours.samples.len(),
-                "{} mp4: frames ours {} ffmpeg {}",
-                c.name,
-                ours.frames(),
-                theirs.len() / c.channels as usize
+                theirs >= mine,
+                "{}: every {}th frame, ours {mine} samples, ffmpeg {theirs}",
+                m.file,
+                c.stride()
             );
-            compare(&format!("{} mp4", c.name), &ours.samples, &theirs);
+            like_ffmpeg(&r, m.file, &c, &ours.samples, false);
             if c.channels <= 2 {
                 let pcm = audio_pcm(&path, 0, c.rate, c.channels == 1, &Prefs::default()).unwrap();
-                assert_eq!(pcm.samples, ours.samples, "{} mp4", c.name);
+                assert_eq!(pcm.samples, ours.samples, "{}", m.file);
             }
             let mut data = std::fs::read(&path).unwrap();
             let at = data
@@ -791,68 +516,54 @@ mod front {
                 .expect("an mp4a sample entry");
             data[at + 20..at + 22].copy_from_slice(&3u16.to_be_bytes());
             data[at + 28..at + 32].copy_from_slice(&(8000u32 << 16).to_be_bytes());
-            let lying = dir().join(format!("{}-entry.mp4", c.name));
-            std::fs::write(&lying, &data).unwrap();
+            let lying = scratch(&format!("{}-entry.mp4", c.name));
+            testref::write_atomic(&lying, &data).unwrap();
             let pr = probe(&lying, &Prefs::default()).unwrap();
             assert_eq!(
                 (pr.audio[0].channels, pr.audio[0].rate),
                 (c.channels, c.rate),
                 "{}: the ident header wins over the sample entry",
-                c.name
+                m.file
             );
         }
     }
 
     #[test]
     fn mp4_vorbis_extradata_and_packets_rebuild_the_source_decode() {
-        for c in cases()
-            .into_iter()
-            .filter(|c| matches!(c.name, "stereo_44k_q3" | "surround_48k_q5"))
-        {
-            let Some(path) = encode(c, "mp4") else {
-                eprintln!(
-                    "skipped Vorbis in MP4 {}: ffmpeg would not write one",
-                    c.name
-                );
-                continue;
-            };
-            let r = crate::mp4::Reader::open(&path).unwrap();
-            let t = &r.tracks[0];
+        let r = open();
+        for m in refs::MADE.iter().filter(|m| m.mp4()) {
+            let c = m.case();
+            let rd = crate::mp4::Reader::open(r.path(m.file)).unwrap();
+            let t = &rd.tracks[0];
             let private = t.extradata().unwrap();
             let [ident, comment, setup] = xiph_headers(&private).unwrap();
-            let src =
-                OggVorbis::parse(&std::fs::read(path.with_extension("ogg")).unwrap()).unwrap();
-            assert_eq!(ident, &src.headers[0][..], "{}", c.name);
-            assert_eq!(setup, &src.headers[2][..], "{}", c.name);
-            assert_eq!(t.samples.len(), src.packets.len(), "{}", c.name);
+            let src = OggVorbis::parse(&r.bytes(&c.ogg())).unwrap();
+            assert_eq!(ident, &src.headers[0][..], "{}", m.file);
+            assert_eq!(setup, &src.headers[2][..], "{}", m.file);
+            assert_eq!(t.samples.len(), src.packets.len(), "{}", m.file);
             let mut dec = Decoder::from_headers(ident, comment, setup).unwrap();
             let mut ours = Vec::new();
             for k in 0..t.samples.len() {
-                dec.decode_into(&r.read(0, k).unwrap(), &mut ours).unwrap();
+                dec.decode_into(&rd.read(0, k).unwrap(), &mut ours).unwrap();
             }
             let mut theirs_dec = src.decoder().unwrap();
             let mut theirs = Vec::new();
             for k in 0..src.packets.len() {
                 theirs_dec.decode_into(src.packet(k), &mut theirs).unwrap();
             }
-            assert!(!ours.is_empty(), "{}", c.name);
-            assert_eq!(ours, theirs, "{}", c.name);
+            assert!(!ours.is_empty(), "{}", m.file);
+            assert_eq!(ours, theirs, "{}", m.file);
         }
     }
 
     #[test]
     fn a_broken_vorbis_file_fails_in_one_line() {
-        let Some(c) = cases().into_iter().find(|c| c.name == "stereo_44k_q3") else {
-            return;
-        };
-        let path = encode(c, "ogg").unwrap();
-        let ogg = OggVorbis::parse(&std::fs::read(&path).unwrap()).unwrap();
-        let mut packets: Vec<Vec<u8>> = ogg.headers.to_vec();
-        packets.extend((0..ogg.packets.len()).map(|i| ogg.packet(i).to_vec()));
+        let (_, mut packets) = real_packets();
         packets[5][0] |= 1;
-        let bad = dir().join("header_bit_audio.ogg");
-        std::fs::write(&bad, ogg_file(&packets, 44100 * 7 / 10)).unwrap();
-        let e = audio_pcm_range(&bad, 0, 0.0, f64::INFINITY, 44100, 2, &Prefs::default())
+        let c = stereo();
+        let bad = scratch("header_bit_audio.ogg");
+        testref::write_atomic(&bad, &ogg_file(&packets, c.frames() as i64)).unwrap();
+        let e = audio_pcm_range(&bad, 0, 0.0, f64::INFINITY, c.rate, 2, &Prefs::default())
             .unwrap_err()
             .to_string();
         assert_eq!(
@@ -861,9 +572,9 @@ mod front {
         );
         let mut misfit = packets[..3].to_vec();
         misfit.extend([vec![0x0E], vec![0x00]]);
-        let bad = dir().join("misfit_window.ogg");
-        std::fs::write(&bad, ogg_file(&misfit, 1000)).unwrap();
-        let e = audio_pcm_range(&bad, 0, 0.0, f64::INFINITY, 44100, 2, &Prefs::default())
+        let bad = scratch("misfit_window.ogg");
+        testref::write_atomic(&bad, &ogg_file(&misfit, 1000)).unwrap();
+        let e = audio_pcm_range(&bad, 0, 0.0, f64::INFINITY, c.rate, 2, &Prefs::default())
             .unwrap_err()
             .to_string();
         assert_eq!(e, "invalid data: malformed Vorbis audio packet");
@@ -1046,9 +757,7 @@ fn a_reservation_past_memory_is_refused_in_one_line() {
 
 #[test]
 fn a_flood_of_one_byte_packets_stops_at_the_last_granule() {
-    let Some((ogg, packets)) = real_packets() else {
-        return;
-    };
+    let (ogg, packets) = real_packets();
     let long = 1usize << ogg.decoder().unwrap().ident.blocksize_1;
     let mut flood: Vec<Vec<u8>> = packets[..3].to_vec();
     flood.extend(std::iter::repeat_n(vec![0u8], 20_000));
@@ -1066,9 +775,7 @@ fn a_flood_of_one_byte_packets_stops_at_the_last_granule() {
 
 #[test]
 fn a_misfit_window_through_decode_fails_in_one_line() {
-    let Some((ogg, packets)) = real_packets() else {
-        return;
-    };
+    let (ogg, packets) = real_packets();
     let dec = ogg.decoder().unwrap();
     assert_eq!(dec.setup.modes.len(), 2);
     assert!(!dec.setup.modes[0].mode_blockflag);
@@ -1079,13 +786,15 @@ fn a_misfit_window_through_decode_fails_in_one_line() {
     assert_eq!(one_line(e), "invalid data: malformed Vorbis audio packet");
 }
 
-fn real_packets() -> Option<(OggVorbis, Vec<Vec<u8>>)> {
-    let c = cases().into_iter().find(|c| c.name == "stereo_44k_q3")?;
-    let path = encode(c, "ogg")?;
-    let ogg = OggVorbis::parse(&std::fs::read(&path).unwrap()).unwrap();
+fn real_packets() -> (OggVorbis, Vec<Vec<u8>>) {
+    let ogg = OggVorbis::parse(&open().bytes(&stereo().ogg())).unwrap();
     let mut packets: Vec<Vec<u8>> = ogg.headers.to_vec();
     packets.extend((0..ogg.packets.len()).map(|i| ogg.packet(i).to_vec()));
-    Some((ogg, packets))
+    (ogg, packets)
+}
+
+fn last_granule() -> i64 {
+    stereo().frames() as i64
 }
 
 fn one_line(e: crate::media::Error) -> String {
@@ -1096,9 +805,7 @@ fn one_line(e: crate::media::Error) -> String {
 
 #[test]
 fn a_packet_before_the_headers_is_refused_in_one_line() {
-    let Some((ogg, packets)) = real_packets() else {
-        return;
-    };
+    let (ogg, packets) = real_packets();
     let audio = ogg.packet(1);
     let e = Decoder::from_headers(audio, &ogg.headers[1], &ogg.headers[2])
         .err()
@@ -1110,13 +817,13 @@ fn a_packet_before_the_headers_is_refused_in_one_line() {
     let mut moved = packets.clone();
     let a = moved.remove(4);
     moved.insert(1, a);
-    let file = ogg_file(&moved, 30870);
+    let file = ogg_file(&moved, last_granule());
     let e = decode(&file).err().unwrap();
     assert_eq!(
         one_line(e),
         "invalid data: Vorbis audio packet where a header was expected"
     );
-    let audio_first = ogg_file(&packets[3..], 30870);
+    let audio_first = ogg_file(&packets[3..], last_granule());
     let e = decode(&audio_first).err().unwrap();
     assert_eq!(
         one_line(e),
@@ -1126,25 +833,21 @@ fn a_packet_before_the_headers_is_refused_in_one_line() {
 
 #[test]
 fn a_corrupted_audio_packet_is_refused_in_one_line() {
-    let Some((_, packets)) = real_packets() else {
-        return;
-    };
+    let (_, packets) = real_packets();
     let mut bad = packets.clone();
     bad[6][0] |= 1;
-    let e = decode(&ogg_file(&bad, 30870)).err().unwrap();
+    let e = decode(&ogg_file(&bad, last_granule())).err().unwrap();
     assert_eq!(
         one_line(e),
         "invalid data: Vorbis header where an audio packet was expected"
     );
-    let good = decode(&ogg_file(&packets, 30870)).unwrap();
-    assert_eq!(good.frames(), 30870);
+    let good = decode(&ogg_file(&packets, last_granule())).unwrap();
+    assert_eq!(good.frames() as i64, last_granule());
 }
 
 #[test]
 fn random_damage_to_audio_packets_never_panics() {
-    let Some((ogg, _)) = real_packets() else {
-        return;
-    };
+    let (ogg, _) = real_packets();
     let mut seed = 0x1234_5678_9abc_def0u64;
     let mut next = || {
         seed ^= seed << 13;
@@ -1176,10 +879,8 @@ fn random_damage_to_audio_packets_never_panics() {
 
 #[test]
 fn ogg_damage_is_survived_or_refused_by_name() {
-    let Some((_, packets)) = real_packets() else {
-        return;
-    };
-    let file = ogg_file(&packets, 30870);
+    let (_, packets) = real_packets();
+    let file = ogg_file(&packets, last_granule());
     let e = decode(b"not an ogg file at all, only words here")
         .err()
         .unwrap();
@@ -1195,7 +896,7 @@ fn ogg_damage_is_survived_or_refused_by_name() {
     let ogg = OggVorbis::parse(cut).unwrap();
     assert!(!ogg.warnings.is_empty());
     let part = ogg.decode().unwrap();
-    assert!(part.frames() < 30870 && part.frames() > 0);
+    assert!((part.frames() as i64) < last_granule() && part.frames() > 0);
     let mut flipped = file.clone();
     let last = flipped.len() - 10;
     flipped[last] ^= 0xff;
@@ -1275,11 +976,9 @@ fn xiph_laced_codec_private_splits_into_three_headers() {
 
 #[test]
 fn sniff_wants_a_vorbis_ident_on_the_first_page() {
-    let Some((_, packets)) = real_packets() else {
-        return;
-    };
-    assert!(ogg::sniff(&ogg_file(&packets, 30870)));
-    assert!(!ogg::sniff(&ogg_file(&packets[3..], 30870)));
+    let (_, packets) = real_packets();
+    assert!(ogg::sniff(&ogg_file(&packets, last_granule())));
+    assert!(!ogg::sniff(&ogg_file(&packets[3..], last_granule())));
     assert!(!ogg::sniff(b"OggS"));
     assert!(!ogg::sniff(&[0; 64]));
 }

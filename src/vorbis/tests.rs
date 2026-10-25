@@ -1,7 +1,8 @@
 use super::header::{Floor, HeaderReadError};
 use super::*;
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use crate::testref::Refs;
+
+use super::decode_tests::refs;
 
 struct BitWriter {
     out: Vec<u8>,
@@ -819,34 +820,6 @@ fn comment_header_refusals() {
     }
 }
 
-fn dir() -> PathBuf {
-    let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp/test-vorbis");
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
-
-fn has(tool: &str) -> bool {
-    Command::new(tool)
-        .arg("-version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-}
-
-fn encoders() -> String {
-    let out = Command::new("ffmpeg")
-        .args(["-hide_banner", "-encoders"])
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-fn has_encoder(list: &str, name: &str) -> bool {
-    list.lines()
-        .any(|l| l.split_whitespace().nth(1) == Some(name))
-}
-
 fn ogg_packets(data: &[u8], want: usize) -> Vec<Vec<u8>> {
     let mut packets = Vec::new();
     let mut cur = Vec::new();
@@ -869,125 +842,14 @@ fn ogg_packets(data: &[u8], want: usize) -> Vec<Vec<u8>> {
     packets
 }
 
-fn probe(path: &str) -> Vec<(String, String)> {
-    let out = Command::new("ffprobe")
-        .args([
-            "-v",
-            "error",
-            "-select_streams",
-            "a:0",
-            "-show_entries",
-            "stream=sample_rate,channels,bit_rate:stream_tags",
-            "-of",
-            "default=nw=1",
-            path,
-        ])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "ffprobe {path}");
-    String::from_utf8_lossy(&out.stdout)
+
+fn probed(r: &Refs, c: &refs::Case) -> Vec<(String, String)> {
+    String::from_utf8(r.bytes(&c.probe()))
+        .unwrap()
         .lines()
         .filter_map(|l| l.split_once('='))
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect()
-}
-
-struct Case {
-    name: &'static str,
-    encoder: &'static str,
-    rate: u32,
-    layout: &'static str,
-    channels: u8,
-}
-
-const CASES: [Case; 7] = [
-    Case {
-        name: "lib_mono_22k",
-        encoder: "libvorbis",
-        rate: 22050,
-        layout: "mono",
-        channels: 1,
-    },
-    Case {
-        name: "lib_stereo_32k",
-        encoder: "libvorbis",
-        rate: 32000,
-        layout: "stereo",
-        channels: 2,
-    },
-    Case {
-        name: "lib_stereo_44k",
-        encoder: "libvorbis",
-        rate: 44100,
-        layout: "stereo",
-        channels: 2,
-    },
-    Case {
-        name: "lib_51_48k",
-        encoder: "libvorbis",
-        rate: 48000,
-        layout: "5.1",
-        channels: 6,
-    },
-    Case {
-        name: "lib_51_22k",
-        encoder: "libvorbis",
-        rate: 22050,
-        layout: "5.1",
-        channels: 6,
-    },
-    Case {
-        name: "native_stereo_44k",
-        encoder: "vorbis",
-        rate: 44100,
-        layout: "stereo",
-        channels: 2,
-    },
-    Case {
-        name: "native_stereo_48k",
-        encoder: "vorbis",
-        rate: 48000,
-        layout: "stereo",
-        channels: 2,
-    },
-];
-
-fn encode(c: &Case) -> Option<(String, Vec<Vec<u8>>)> {
-    let path = crate::fixture::once(&dir().join(format!("{}.ogg", c.name)), |part| {
-        let src = format!("sine=frequency=440:sample_rate={}:duration=0.4", c.rate);
-        let fmt = format!("aformat=channel_layouts={}", c.layout);
-        let ok = Command::new("ffmpeg")
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                &src,
-            ])
-            .args(["-af", &fmt, "-c:a", c.encoder, "-strict", "-2"])
-            .arg(part)
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-        if !ok {
-            let _ = std::fs::remove_file(part);
-        }
-    });
-    if !path.exists() {
-        eprintln!(
-            "skipped {}: ffmpeg {} refused this layout or rate",
-            c.name, c.encoder
-        );
-        return None;
-    }
-    let data = std::fs::read(&path).ok()?;
-    let path = path.to_str().unwrap().to_string();
-    let packets = ogg_packets(&data, 3);
-    assert_eq!(packets.len(), 3, "{}: three header packets", c.name);
-    Some((path, packets))
 }
 
 fn consistent(s: &SetupHeader, channels: u8, name: &str) {
@@ -1044,33 +906,28 @@ fn consistent(s: &SetupHeader, channels: u8, name: &str) {
     }
 }
 
-fn encoded() -> Vec<(&'static Case, String, Vec<Vec<u8>>)> {
-    if !has("ffmpeg") || !has("ffprobe") {
-        eprintln!("skipped vorbis header fixtures: ffmpeg and ffprobe not on PATH");
-        return Vec::new();
-    }
-    let list = encoders();
-    let mut out = Vec::new();
-    for c in &CASES {
-        if !has_encoder(&list, c.encoder) {
-            eprintln!("skipped {}: ffmpeg has no {} encoder", c.name, c.encoder);
-            continue;
-        }
-        if let Some((path, packets)) = encode(c) {
-            out.push((c, path, packets));
-        }
-    }
-    out
+type Encoded = (&'static refs::Case, Vec<(String, String)>, Vec<Vec<u8>>);
+
+fn encoded() -> Vec<Encoded> {
+    let r = Refs::open(refs::AREA);
+    refs::CASES
+        .iter()
+        .map(|c| {
+            let packets = ogg_packets(&r.bytes(&c.ogg()), 3);
+            assert_eq!(packets.len(), 3, "{}: three header packets", c.name);
+            (c, probed(&r, c), packets)
+        })
+        .collect()
 }
 
 #[test]
 fn ffmpeg_vorbis_headers_parse_to_what_ffprobe_reports() {
-    for (c, path, packets) in encoded() {
+    for (c, probed, packets) in encoded() {
+        let channels = c.channels as u8;
         let (ident, comments, setup) = read_header_set(&packets[0], &packets[1], &packets[2])
             .unwrap_or_else(|e| {
                 panic!("{}: {e}", c.name);
             });
-        let probed = probe(&path);
         let get = |k: &str| {
             probed
                 .iter()
@@ -1091,7 +948,7 @@ fn ffmpeg_vorbis_headers_parse_to_what_ffprobe_reports() {
             c.name
         );
         assert_eq!(ident.audio_sample_rate, c.rate, "{}", c.name);
-        assert_eq!(ident.audio_channels, c.channels, "{}", c.name);
+        assert_eq!(ident.audio_channels, channels, "{}", c.name);
         match get("bit_rate").parse::<i32>() {
             Ok(b) => assert_eq!(b, ident.bitrate_nominal, "{}", c.name),
             Err(_) => assert!(ident.bitrate_nominal <= 0, "{}", c.name),
@@ -1117,11 +974,11 @@ fn ffmpeg_vorbis_headers_parse_to_what_ffprobe_reports() {
         assert!(!setup.codebooks.is_empty(), "{}", c.name);
         assert!(!setup.modes.is_empty(), "{}", c.name);
         for m in &setup.mappings {
-            assert_eq!(m.mapping_mux.len(), c.channels as usize, "{}", c.name);
-            assert!(m.mapping_magnitudes.iter().all(|&x| x < c.channels));
-            assert!(m.mapping_angles.iter().all(|&x| x < c.channels));
+            assert_eq!(m.mapping_mux.len(), usize::from(channels), "{}", c.name);
+            assert!(m.mapping_magnitudes.iter().all(|&x| x < channels));
+            assert!(m.mapping_angles.iter().all(|&x| x < channels));
         }
-        if c.channels == 2 {
+        if channels == 2 {
             assert!(
                 setup
                     .mappings
@@ -1144,7 +1001,7 @@ fn ffmpeg_vorbis_headers_parse_to_what_ffprobe_reports() {
                 );
             }
         }
-        if c.encoder == "libvorbis" {
+        if !c.native {
             assert!(
                 setup.floors.iter().all(|f| matches!(f, Floor::TypeOne(_))),
                 "{}: libvorbis writes floor 1 only",
@@ -1153,7 +1010,7 @@ fn ffmpeg_vorbis_headers_parse_to_what_ffprobe_reports() {
             let flags: Vec<bool> = setup.modes.iter().map(|m| m.mode_blockflag).collect();
             assert_eq!(flags, [false, true], "{}: short and long modes", c.name);
         }
-        if c.name == "lib_stereo_44k" {
+        if c.name == "stereo_44k_q3" {
             assert_eq!((ident.blocksize_0, ident.blocksize_1), (8, 11));
             assert!(setup.residues.iter().all(|r| r.residue_type == 2));
             assert_eq!(setup.mappings[0].mapping_magnitudes, [0]);
