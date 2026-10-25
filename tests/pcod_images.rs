@@ -1,5 +1,12 @@
 #![cfg(feature = "cli")]
 
+#[path = "../src/testref.rs"]
+mod testref;
+
+#[allow(dead_code)]
+#[path = "../src/pcod/refs.rs"]
+mod refs;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -7,6 +14,7 @@ use std::process::{Command, Output};
 use pito_codecs::media::Rgba;
 use pito_codecs::{gif, jpeg, png, webp};
 use serde_json::Value;
+use testref::Refs;
 
 fn dir(name: &str) -> PathBuf {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -189,11 +197,11 @@ fn probe_reads_a_gifs_rate_frames_and_seconds() {
     let ntsc: Vec<u16> = [3, 3, 4].iter().copied().cycle().take(17).collect();
     let cases: [(&str, Vec<u16>, f64, u64, f64); 6] = [
         ("uniform-4", vec![4; 10], 25.0, 10, 0.4),
-        ("uniform-3-ffprobe-33", vec![3; 6], 100.0 / 3.0, 6, 0.18),
+        ("uniform-3-33", vec![3; 6], 100.0 / 3.0, 6, 0.18),
         ("uniform-3-long", vec![3; 20], 100.0 / 3.0, 20, 0.6),
-        ("fifteen-ffprobe-ntsc", [7, 7, 6].repeat(5), 15.0, 15, 1.0),
+        ("fifteen-ntsc", [7, 7, 6].repeat(5), 15.0, 15, 1.0),
         ("thirty", [3, 3, 4].repeat(10), 30.0, 30, 1.0),
-        ("ragged-ffprobe-ntsc", ntsc, 30.357, 17, 0.56),
+        ("ragged-ntsc", ntsc, 30.357, 17, 0.56),
     ];
     for (name, delays, fps, frames, seconds) in cases {
         let path = put(&out, &format!("{name}.gif"), &gif_file(&delays));
@@ -461,87 +469,19 @@ fn bad_still_inputs_are_refused() {
     assert!(err.contains("same file"), "{err}");
 }
 
-fn ui_like(width: u32, height: u32) -> Rgba {
-    let mut img = Rgba::new(width, height);
-    for (i, px) in img.data.chunks_exact_mut(4).enumerate() {
-        let (x, y) = (i as u32 % width, i as u32 / width);
-        let panel = (x / 80 + y / 60) % 3;
-        let mut rgb: [u8; 3] = [[246, 246, 248], [30, 34, 44], [64, 120, 220]][panel as usize];
-        let line = y % 20;
-        let glyph = (x * 7 + y * 3 + (x / 6) * 13) % 11 < 4;
-        if (4..14).contains(&line) && x % 80 > 8 && x % 80 < 70 && glyph {
-            rgb = if panel == 0 {
-                [20, 20, 24]
-            } else {
-                [236, 236, 240]
-            };
-        }
-        let shade = ((x + y) / 8 % 3) as u8;
-        let alpha = if y < 12 || x < 12 { 0 } else { 255 };
-        px.copy_from_slice(&[rgb[0].saturating_add(shade), rgb[1], rgb[2], alpha]);
-    }
-    img
-}
-
 #[test]
-fn lossless_size_is_near_ffmpegs_compression_level_six() {
-    let has_libwebp = Command::new("ffmpeg")
-        .args(["-hide_banner", "-encoders"])
-        .output()
-        .is_ok_and(|o| text(&o.stdout).contains("libwebp "));
-    if !has_libwebp {
-        eprintln!("no ffmpeg with libwebp on PATH: skipped");
-        return;
+fn lossless_size_is_near_libwebps_compression_level_six() {
+    let r = Refs::open(refs::AREA);
+    let out = dir("vs-libwebp");
+    for name in refs::WEBP_INPUTS {
+        let input = put(&out, &format!("{name}.png"), &refs::webp_png(name).unwrap());
+        let ours = out.join(format!("{name}-ours.webp"));
+        ok(&run(&[s(&input), s(&ours), "--lossless"]));
+        assert_eq!(chunks(&fs::read(&ours).unwrap()), vec![*b"VP8L"], "{name}");
+        let a = fs::metadata(&ours).unwrap().len() as f64;
+        let b = r.bytes(&refs::webp_name(name)).len() as f64;
+        assert!(a <= b * 1.10, "{name}: ours {a} bytes, libwebp {b} bytes");
     }
-    let out = dir("vs-ffmpeg");
-    let mut inputs = vec![(
-        "ui",
-        put(
-            &out,
-            "ui.png",
-            &png::encode_rgba(&ui_like(640, 360)).unwrap(),
-        ),
-    )];
-    for (name, source) in [("testsrc2", "testsrc2"), ("mandelbrot", "mandelbrot")] {
-        let path = out.join(format!("{name}.png"));
-        let made = Command::new("ffmpeg")
-            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
-            .arg(format!("{source}=size=640x360:rate=1"))
-            .args(["-frames:v", "1", "-pix_fmt", "rgb24"])
-            .arg(&path)
-            .output()
-            .unwrap();
-        assert!(made.status.success(), "{}", text(&made.stderr));
-        inputs.push((name, path));
-    }
-    for (name, input) in inputs {
-        let (a, b) = lossless_sizes(&out, name, &input);
-        eprintln!("{name}: ours {a} bytes, ffmpeg {b} bytes");
-        assert!(a <= b * 1.10, "{name}: ours {a} bytes, ffmpeg {b} bytes");
-    }
-}
-
-fn lossless_sizes(out: &Path, name: &str, input: &Path) -> (f64, f64) {
-    let ours = out.join(format!("{name}-ours.webp"));
-    ok(&run(&[s(input), s(&ours), "--lossless"]));
-    let theirs = out.join(format!("{name}-ffmpeg.webp"));
-    let made = Command::new("ffmpeg")
-        .args(["-v", "error", "-y", "-i", s(input)])
-        .args([
-            "-c:v",
-            "libwebp",
-            "-lossless",
-            "1",
-            "-compression_level",
-            "6",
-        ])
-        .arg(&theirs)
-        .output()
-        .unwrap();
-    assert!(made.status.success(), "{}", text(&made.stderr));
-    let a = fs::metadata(&ours).unwrap().len() as f64;
-    let b = fs::metadata(&theirs).unwrap().len() as f64;
-    (a, b)
 }
 
 fn with_orientation(file: &[u8], orientation: u16) -> Vec<u8> {

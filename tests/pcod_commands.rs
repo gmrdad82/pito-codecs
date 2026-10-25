@@ -1,15 +1,20 @@
 #![cfg(feature = "cli")]
 
-#[path = "../src/fixture.rs"]
+#[path = "../src/testref.rs"]
+mod testref;
+
 #[allow(dead_code)]
-mod fixture;
+#[path = "../src/pcod/refs.rs"]
+mod refs;
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
 
-use pito_codecs::media::{Prefs, Rgba, probe};
+use pito_codecs::aac;
+use pito_codecs::media::{AudioBuffer, Prefs, Rgba, probe};
+use testref::{AudioCodec, Clip, Refs, Sound, VideoCodec};
 
 const RATE: u32 = 48_000;
 const SECONDS: f64 = 1.0;
@@ -74,10 +79,8 @@ fn after<'a>(json: &'a str, marker: &str) -> &'a str {
 
 const SAW_SHA256: &str = "10612187de060fefd0b166c1aa72daf38c0fd0bab4e1dba7e7a173639ffe34b9";
 
-fn sha256sum(path: &Path) -> Option<String> {
-    let out = Command::new("sha256sum").arg(path).output().ok()?;
-    let shown = text(&out.stdout);
-    (out.status.success() && shown.len() >= 64).then(|| shown[..64].to_string())
+fn sha256sum(path: &Path) -> String {
+    testref::sha256(&fs::read(path).unwrap())
 }
 
 fn digest_of(got: Option<&str>, path: &Path, json: &str) {
@@ -88,9 +91,7 @@ fn digest_of(got: Option<&str>, path: &Path, json: &str) {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
         "{json}"
     );
-    if let Some(want) = sha256sum(path) {
-        assert_eq!(got, want, "{}: {json}", path.display());
-    }
+    assert_eq!(got, sha256sum(path), "{}: {json}", path.display());
 }
 
 fn sample(i: usize, channel: usize) -> i16 {
@@ -146,28 +147,44 @@ fn read_wav(path: &Path) -> Wav {
     }
 }
 
-fn has_encoder(name: &str) -> bool {
-    Command::new("ffmpeg")
-        .args(["-hide_banner", "-encoders"])
-        .output()
-        .is_ok_and(|o| text(&o.stdout).contains(name))
+fn clip(frames: u64) -> Clip {
+    Clip::new((352, 240), (30, 1), frames)
 }
 
-fn ffmpeg(name: &str, args: &[&str]) -> Option<PathBuf> {
-    let media = root().join("media");
-    fs::create_dir_all(&media).unwrap();
-    let path = fixture::once(&media.join(name), |part| {
-        let made = Command::new("ffmpeg")
-            .args(["-v", "error", "-y"])
-            .args(args)
-            .arg(part)
-            .status()
-            .is_ok_and(|s| s.success());
-        if !made {
-            let _ = fs::remove_file(part);
-        }
-    });
-    path.exists().then_some(path)
+fn adts(path: &Path) -> PathBuf {
+    let mut e = aac::Encoder::new(aac::EncoderConfig {
+        rate: RATE,
+        channels: 2,
+        bitrate: 64_000,
+    })
+    .unwrap();
+    let tone = Sound::Sine {
+        hz: 440.0,
+        amp: 0.25,
+    };
+    let buf = AudioBuffer {
+        samples: testref::pcm(tone, RATE, 2, 0, RATE as usize / 2),
+        rate: RATE,
+        channels: 2,
+    };
+    let mut packets = e.encode(&buf).unwrap();
+    packets.extend(e.flush());
+    let mut out = Vec::new();
+    for p in packets {
+        let len = p.data.len() + 7;
+        out.extend_from_slice(&[
+            0xff,
+            0xf1,
+            0x4c,
+            0x80 | (len >> 11) as u8,
+            (len >> 3) as u8,
+            ((len & 7) << 5) as u8 | 0x1f,
+            0xfc,
+        ]);
+        out.extend_from_slice(&p.data);
+    }
+    testref::write_atomic(path, &out).unwrap();
+    path.to_path_buf()
 }
 
 fn write_frames(folder: &Path) {
@@ -190,8 +207,8 @@ fn write_frames(folder: &Path) {
 struct Media {
     wav: PathBuf,
     frames: PathBuf,
-    mp4: Option<PathBuf>,
-    silent: Option<PathBuf>,
+    mp4: PathBuf,
+    silent: PathBuf,
 }
 
 fn media() -> &'static Media {
@@ -216,59 +233,11 @@ fn media() -> &'static Media {
                 let _ = fs::remove_dir_all(&part);
             }
         }
-        let x264 = has_encoder("libx264");
-        let mp4 = x264
-            .then(|| {
-                ffmpeg(
-                    "tone.mp4",
-                    &[
-                        "-f",
-                        "lavfi",
-                        "-i",
-                        "testsrc2=s=352x240:r=30:d=1",
-                        "-f",
-                        "lavfi",
-                        "-i",
-                        "sine=f=440:r=48000:d=1",
-                        "-ac",
-                        "2",
-                        "-c:v",
-                        "libx264",
-                        "-preset",
-                        "ultrafast",
-                        "-pix_fmt",
-                        "yuv420p",
-                        "-c:a",
-                        "aac",
-                        "-shortest",
-                    ],
-                )
-            })
-            .flatten();
-        let silent = x264
-            .then(|| {
-                ffmpeg(
-                    "silent.mp4",
-                    &[
-                        "-f",
-                        "lavfi",
-                        "-i",
-                        "testsrc2=s=352x240:r=30:d=1",
-                        "-c:v",
-                        "libx264",
-                        "-preset",
-                        "ultrafast",
-                        "-pix_fmt",
-                        "yuv420p",
-                    ],
-                )
-            })
-            .flatten();
         Media {
             wav,
             frames,
-            mp4,
-            silent,
+            mp4: clip(30).make(refs::AREA, "commands-tone.mp4"),
+            silent: clip(30).video_only().make(refs::AREA, "commands-silent.mp4"),
         }
     })
 }
@@ -276,66 +245,30 @@ fn media() -> &'static Media {
 #[test]
 fn probe_names_every_container_family_in_text_and_json() {
     let m = media();
+    let r = Refs::open(refs::AREA);
     let mut cases: Vec<(PathBuf, &str, &str, &str)> = vec![(m.wav.clone(), "WAV", "null", "pcm")];
-    let tone = |name: &str, codec: &[&str]| {
-        let mut args = vec!["-f", "lavfi", "-i", "sine=f=440:r=48000:d=0.5", "-ac", "2"];
-        args.extend_from_slice(codec);
-        ffmpeg(name, &args)
-    };
-    if let Some(p) = tone("tone.flac", &["-c:a", "flac"]) {
-        cases.push((p, "FLAC", "null", "flac"));
+    for (file, _, container, codec) in refs::TONES {
+        cases.push((r.path(file), container, "null", codec));
     }
-    if has_encoder("libmp3lame")
-        && let Some(p) = tone("tone.mp3", &["-c:a", "libmp3lame"])
-    {
-        cases.push((p, "MP3", "null", "mp3"));
-    }
-    if let Some(p) = tone("tone.m4a", &["-c:a", "aac"]) {
-        cases.push((p, "MP4", "null", "aac"));
-    }
-    if let Some(p) = tone("alac.m4a", &["-c:a", "alac"]) {
-        cases.push((p, "MP4", "null", "alac"));
-    }
+    let m4a = clip(30).audio_only().make(refs::AREA, "commands-tone.m4a");
+    cases.push((m4a, "MP4", "null", "aac"));
     let opus = dir("probe-opus").join("saw.opus");
     ok(&run(&[s(&m.wav), s(&opus)]));
     cases.push((opus, "Ogg", "null", "opus"));
-    if let Some(mp4) = &m.mp4 {
-        cases.push((mp4.clone(), "MP4", "h264", "aac"));
-        for (name, container) in [("tone.mov", "QuickTime"), ("tone.mkv", "Matroska")] {
-            if let Some(p) = ffmpeg(name, &["-i", s(mp4), "-c", "copy"]) {
-                cases.push((p, container, "h264", "aac"));
-            }
-        }
+    cases.push((m.mp4.clone(), "MP4", "h264", "aac"));
+    for (name, container) in [
+        ("commands-tone.mov", "QuickTime"),
+        ("commands-tone.mkv", "Matroska"),
+    ] {
+        cases.push((clip(30).make(refs::AREA, name), container, "h264", "aac"));
     }
-    if has_encoder("libvpx-vp9")
-        && has_encoder("libopus")
-        && let Some(p) = ffmpeg(
-            "tone.webm",
-            &[
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc2=s=352x240:r=30:d=0.5",
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=f=440:r=48000:d=0.5",
-                "-ac",
-                "2",
-                "-c:v",
-                "libvpx-vp9",
-                "-deadline",
-                "realtime",
-                "-cpu-used",
-                "8",
-                "-c:a",
-                "libopus",
-                "-shortest",
-            ],
-        )
-    {
-        cases.push((p, "Matroska", "vp9", "opus"));
+    let webm = Clip {
+        video: Some(VideoCodec::Vp9),
+        audio: Some(AudioCodec::Opus),
+        ..clip(15)
     }
+    .make(refs::AREA, "commands-tone.webm");
+    cases.push((webm, "Matroska", "vp9", "opus"));
     for (path, container, video, audio) in cases {
         let shown = ok(&run(&["probe", s(&path)]));
         let name = path.display();
@@ -378,23 +311,10 @@ fn probe_refuses_what_it_cannot_read_in_one_line() {
     let junk = folder.join("junk.mp4");
     fs::write(&junk, b"not a video").unwrap();
     let missing = folder.join("missing.mp4");
-    let adts = ffmpeg(
-        "tone.aac",
-        &[
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=f=440:r=48000:d=0.5",
-            "-c:a",
-            "aac",
-            "-f",
-            "adts",
-        ],
-    );
-    if let Some(adts) = &adts {
-        refused(&run(&["probe", s(adts)]), s(adts));
-        refused(&run(&["probe", s(adts), "--json"]), s(adts));
-    }
+    let adts = adts(&folder.join("tone.aac"));
+    assert_eq!(&fs::read(&adts).unwrap()[..2], &[0xff, 0xf1]);
+    refused(&run(&["probe", s(&adts)]), s(&adts));
+    refused(&run(&["probe", s(&adts), "--json"]), s(&adts));
     for args in [
         vec!["probe", s(&junk)],
         vec!["probe", s(&junk), "--json"],
@@ -641,9 +561,7 @@ fn the_shared_source_is_the_wav_its_known_digest_was_taken_from() {
     let bytes = fs::read(&m.wav).unwrap();
     assert_eq!(bytes, wav_bytes((SECONDS * f64::from(RATE)) as usize));
     assert_eq!(bytes.len(), 192_044);
-    if let Some(got) = sha256sum(&m.wav) {
-        assert_eq!(got, SAW_SHA256);
-    }
+    assert_eq!(sha256sum(&m.wav), SAW_SHA256);
 }
 
 #[test]
@@ -660,9 +578,7 @@ fn extract_refuses_bad_windows_and_sources_in_one_line() {
         "--from 2 is at or past the end of the audio (1.000 s)",
     );
     refused(&run(&[s(&m.wav), s(&m.wav)]), "the output is the input");
-    if let Some(silent) = &m.silent {
-        refused(&run(&[s(silent), s(&output)]), "the source has no audio");
-    }
+    refused(&run(&[s(&m.silent), s(&output)]), "the source has no audio");
     assert!(!output.exists());
     fs::write(&output, b"old").unwrap();
     refused(&run(&[s(&m.wav), s(&output)]), "use --force to replace it");
@@ -717,17 +633,12 @@ fn loudness_measures_a_track_in_text_and_json() {
         &run(&["loudness", s(&m.wav), "--track", "3"]),
         "there is no audio track 3; the file has 1",
     );
-    if let Some(silent) = &m.silent {
-        refused(&run(&["loudness", s(silent)]), "the file has no audio");
-    }
+    refused(&run(&["loudness", s(&m.silent)]), "the file has no audio");
 }
 
 #[test]
 fn decode_reports_its_route_and_every_frame() {
-    let Some(mp4) = &media().mp4 else {
-        eprintln!("no ffmpeg with libx264 on PATH: skipped");
-        return;
-    };
+    let mp4 = &media().mp4;
     let shown = ok(&run(&[
         "decode",
         s(mp4),
@@ -762,10 +673,7 @@ fn decode_reports_its_route_and_every_frame() {
 
 #[test]
 fn encode_re_encodes_the_video_and_copies_the_audio() {
-    let Some(mp4) = &media().mp4 else {
-        eprintln!("no ffmpeg with libx264 on PATH: skipped");
-        return;
-    };
+    let mp4 = &media().mp4;
     let folder = dir("encode");
     for (name, codec) in [("h264.mp4", "h264"), ("hevc.mp4", "hevc")] {
         let output = folder.join(name);
@@ -920,10 +828,7 @@ fn every_subcommand_answers_a_bad_command_line_like_clap() {
 #[test]
 fn join_through_pcod_reports_its_method_and_hashes_every_clip() {
     let m = media();
-    let (Some(mp4), Some(silent)) = (&m.mp4, &m.silent) else {
-        eprintln!("no ffmpeg with libx264 on PATH: skipped");
-        return;
-    };
+    let (mp4, silent) = (&m.mp4, &m.silent);
     let folder = dir("join");
     let copied = folder.join("copied.mkv");
     let shown = ok(&run(&["join", s(mp4), s(mp4), s(&copied)]));

@@ -10,16 +10,22 @@
     feature = "vp9"
 ))]
 
-#[path = "../src/fixture.rs"]
+#[path = "../src/testref.rs"]
+mod testref;
+
 #[allow(dead_code)]
-mod fixture;
+#[path = "../src/join/refs.rs"]
+mod refs;
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::sync::OnceLock;
 
 use pito_codecs::media::{
-    Choice, Codec, Error, JoinAudio, JoinMethod, JoinOptions, Joined, Prefs, join, probe,
+    Bitstream, Choice, Codec, Error, JoinAudio, JoinMethod, JoinOptions, Joined, Packet, Prefs,
+    Rate, TimeBase, audio_pcm, decode_video, join, probe,
 };
+use pito_codecs::{h264, mp4};
+use testref::{AudioCodec, Clip, Refs, VideoCodec};
 
 fn dir() -> PathBuf {
     let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/test-media");
@@ -27,55 +33,20 @@ fn dir() -> PathBuf {
     d
 }
 
-fn ffmpeg(out: &Path, args: &[&str]) -> bool {
-    fixture::once(out, |part| {
-        let made = Command::new("ffmpeg")
-            .args(["-v", "error", "-y"])
-            .args(args)
-            .arg(part)
-            .status()
-            .is_ok_and(|s| s.success());
-        if !made {
-            let _ = std::fs::remove_file(part);
-        }
-    });
-    out.exists()
-}
-
-fn output(args: &[&str], path: &Path, tail: &[&str]) -> Vec<u8> {
-    let out = Command::new(args[0])
-        .args(&args[1..])
-        .arg(path)
-        .args(tail)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    out.stdout
-}
-
 fn seconds(path: &Path) -> f64 {
-    let text = output(
-        &[
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "csv=p=0",
-        ],
-        path,
-        &[],
-    );
-    String::from_utf8_lossy(&text).trim().parse().unwrap()
+    probe(path, &Prefs::default()).unwrap().duration
+}
+
+fn decoding() -> Prefs {
+    Prefs {
+        decode: Choice::Cpu,
+        encode: Choice::Cpu,
+        ..Prefs::default()
+    }
 }
 
 fn video_samples(path: &Path) -> Vec<Vec<u8>> {
-    let r = pito_codecs::mp4::Reader::open(path).unwrap();
+    let r = mp4::Reader::open(path).unwrap();
     let v = r.video().unwrap();
     (0..r.tracks[v].samples.len())
         .map(|i| {
@@ -86,51 +57,16 @@ fn video_samples(path: &Path) -> Vec<Vec<u8>> {
         .collect()
 }
 
+fn fixture(name: &str) -> PathBuf {
+    Refs::open(refs::JOIN).path(name)
+}
+
 #[test]
 fn a_join_copies_matching_clips_and_letterboxes_the_rest_with_silence() {
-    let part = dir().join("join-part.mp4");
-    let tall = dir().join("join-tall.mp4");
-    let made = ffmpeg(
-        &part,
-        &[
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=s=640x360:r=30:d=2",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=f=440:r=48000:d=2",
-            "-ac",
-            "2",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-shortest",
-        ],
-    ) && ffmpeg(
-        &tall,
-        &[
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=s=360x640:r=30:d=1",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-pix_fmt",
-            "yuv420p",
-        ],
-    );
-    if !made {
-        return;
-    }
+    let part = Clip::new((640, 360), (30, 1), 60).make(refs::JOIN, "join-part.mp4");
+    let tall = Clip::new((360, 640), (30, 1), 30)
+        .video_only()
+        .make(refs::JOIN, "join-tall.mp4");
     let copied = dir().join("join-copied.mp4");
     let three = [part.clone(), part.clone(), part.clone()];
     let j = join(&three, &copied, cpu(), |_| true).unwrap();
@@ -147,25 +83,24 @@ fn a_join_copies_matching_clips_and_letterboxes_the_rest_with_silence() {
     assert_eq!(j.method, JoinMethod::Encode);
     assert!(j.reason.contains("is 360x640, not 640x360"), "{}", j.reason);
     assert_eq!((j.size, j.fps), ((640, 360), (30, 1)));
-    let gray = output(
-        &["ffmpeg", "-v", "error", "-ss", "2.5", "-i"],
-        &mixed,
-        &["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
-    );
-    assert_eq!(gray.len(), 640 * 360);
-    let column = |x: usize| (0..360).map(|y| gray[y * 640 + x] as f64).sum::<f64>() / 360.0;
+    let frame = decode_video(&mixed, 2.5, None, &decoding())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    assert_eq!((frame.width, frame.height), (640, 360));
+    let y = &frame.planes[0];
+    let column = |x: usize| {
+        (0..360)
+            .map(|r| y.data[r * y.stride + x] as f64)
+            .sum::<f64>()
+            / 360.0
+    };
     assert!(column(10) < 20.0 && column(630) < 20.0);
     assert!((230..410).map(column).sum::<f64>() / 180.0 > 40.0);
-    let pcm: Vec<f32> = output(
-        &["ffmpeg", "-v", "error", "-i"],
-        &mixed,
-        &[
-            "-map", "0:a:0", "-ac", "2", "-ar", "48000", "-f", "f32le", "-",
-        ],
-    )
-    .chunks_exact(4)
-    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-    .collect();
+    let pcm = audio_pcm(&mixed, 0, 48_000, false, &decoding())
+        .unwrap()
+        .samples;
     assert!(
         (pcm.len() as f64 / 96_000.0 - 3.0).abs() < 0.05,
         "{}",
@@ -180,48 +115,10 @@ fn a_join_copies_matching_clips_and_letterboxes_the_rest_with_silence() {
     assert!(loud(2.2, 2.9) < 0.001);
 }
 
-fn has_encoder(name: &str) -> bool {
-    Command::new("ffmpeg")
-        .args(["-hide_banner", "-encoders"])
-        .output()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(name))
-}
-
-fn h264_clip(name: &str, pix: &str, profile: &str) -> Option<PathBuf> {
-    let path = dir().join(name);
-    ffmpeg(
-        &path,
-        &[
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=s=352x240:r=30:d=1",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-pix_fmt",
-            pix,
-            "-profile:v",
-            profile,
-        ],
-    )
-    .then_some(path)
-}
-
 #[test]
 fn a_10_bit_4_2_2_h264_joins_by_copy_and_is_refused_by_name_when_it_must_be_re_encoded() {
-    if !has_encoder("libx264") {
-        eprintln!("no ffmpeg with libx264 on PATH: skipped");
-        return;
-    }
-    let (Some(deep), Some(plain)) = (
-        h264_clip("join-h264-422-10.mp4", "yuv422p10le", "high422"),
-        h264_clip("join-h264-420-8.mp4", "yuv420p", "high"),
-    ) else {
-        eprintln!("ffmpeg could not make the clips: skipped");
-        return;
-    };
+    let deep = fixture("h264-422-10.mp4");
+    let plain = clips().silent.clone();
     let prefs = Prefs::default();
     let copied = dir().join("join-h264-422-10-copied.mp4");
     let j = join(&[deep.clone(), deep.clone()], &copied, cpu(), |_| true).unwrap();
@@ -262,9 +159,6 @@ fn a_10_bit_4_2_2_h264_joins_by_copy_and_is_refused_by_name_when_it_must_be_re_e
     }
 }
 
-const CLIP: &str = "testsrc2=s=352x240:r=30:d=1";
-const TONE: &str = "sine=f=440:r=48000:d=1";
-
 fn story(name: &str) -> PathBuf {
     let d = dir().join("join-story").join(name);
     let _ = std::fs::remove_dir_all(&d);
@@ -272,37 +166,95 @@ fn story(name: &str) -> PathBuf {
     d
 }
 
-fn made(name: &str, args: &[&str]) -> Option<PathBuf> {
-    let path = dir().join(name);
-    ffmpeg(&path, args).then_some(path)
+fn clip(frames: u64) -> Clip {
+    Clip::new((352, 240), (30, 1), frames)
 }
 
-fn x264(extra: &[&str]) -> Vec<String> {
-    let mut args: Vec<String> = [
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-pix_fmt",
-        "yuv420p",
-    ]
-    .map(String::from)
-    .to_vec();
-    args.extend(extra.iter().map(|s| s.to_string()));
-    args
+fn made(clip: Clip, name: &str) -> PathBuf {
+    clip.make(refs::JOIN, name)
 }
 
-fn h264_with(name: &str, video: &str, audio: Option<&str>, extra: &[&str]) -> Option<PathBuf> {
-    let mut args: Vec<String> = vec!["-f".into(), "lavfi".into(), "-i".into(), video.into()];
-    if let Some(a) = audio {
-        args.extend(["-f", "lavfi", "-i", a].map(String::from));
-    }
-    args.extend(x264(extra));
-    if audio.is_some() {
-        args.extend(["-c:a", "aac", "-shortest"].map(String::from));
-    }
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    made(name, &args)
+fn atomically(to: &Path, write: impl FnOnce(&Path)) -> PathBuf {
+    let name = to.file_name().unwrap().to_string_lossy().into_owned();
+    let part = to.with_file_name(format!(".{}-{name}", std::process::id()));
+    write(&part);
+    std::fs::rename(&part, to).unwrap();
+    to.to_path_buf()
+}
+
+fn remuxed(parts: &[(&Path, bool)], name: &str) -> PathBuf {
+    let to = testref::scratch(refs::JOIN).join(name);
+    atomically(&to, |part| {
+        let mut w = mp4::Writer::create(part).unwrap();
+        let mut lanes = Vec::new();
+        for (from, video) in parts {
+            let r = mp4::Reader::open(from).unwrap();
+            let k = if *video { r.video() } else { r.audio().first().copied() }.unwrap();
+            let t = &r.tracks[k];
+            let cfg = mp4::TrackConfig {
+                media_start: t.edits.first().map(|e| e.media_time).filter(|m| *m > 0),
+                ..mp4::TrackConfig::from_track(t).unwrap()
+            };
+            lanes.push((w.add_track(cfg).unwrap(), r, k));
+        }
+        for (out, r, k) in &lanes {
+            for (i, s) in r.tracks[*k].samples.iter().enumerate() {
+                w.push_timed(*out, &r.packet(*k, i).unwrap(), s.duration)
+                    .unwrap();
+            }
+        }
+        w.finish().unwrap();
+    })
+}
+
+fn hdr_video(name: &str) -> PathBuf {
+    let to = testref::scratch(refs::JOIN).join(name);
+    atomically(&to, |part| {
+        let (w, h) = (352, 240);
+        let mut e = h264::Encoder::new(h264::EncoderConfig {
+            width: w,
+            height: h,
+            fps: (30, 1),
+            rate: Rate::Qp(24),
+            gop: 30,
+            b_frames: 0,
+            threads: 1,
+            bitstream: Bitstream::LengthPrefixed,
+            color: h264::Color {
+                primaries: 9,
+                transfer: 16,
+                matrix: 9,
+                full_range: false,
+            },
+            ..Default::default()
+        })
+        .unwrap();
+        let entry = mp4::SampleEntry::h264(
+            mp4::AvcConfig::parse(&e.avcc()).unwrap(),
+            w as u16,
+            h as u16,
+        );
+        let mut out = mp4::Writer::create(part).unwrap();
+        let track = out
+            .add_track(mp4::TrackConfig::new(entry, 30 * 64))
+            .unwrap();
+        let mut packets = Vec::new();
+        for n in 0..30 {
+            let mut f = testref::yuv_frame(w, h, n, 0);
+            f.time_base = TimeBase::new(1, 30);
+            packets.extend(e.encode(&f).unwrap());
+        }
+        packets.extend(e.flush().unwrap());
+        for p in packets {
+            let p = Packet {
+                pts: p.pts * 64,
+                dts: p.dts * 64,
+                ..p
+            };
+            out.push(track, &p).unwrap();
+        }
+        out.finish().unwrap();
+    })
 }
 
 struct Clips {
@@ -317,62 +269,34 @@ struct Clips {
     sound: PathBuf,
 }
 
-fn clips() -> Option<Clips> {
-    if !has_encoder("libx264") {
-        eprintln!("no ffmpeg with libx264 on PATH: skipped");
-        return None;
-    }
-    let plain = h264_with("js-plain.mp4", CLIP, Some(TONE), &["-ac", "2"])?;
-    let plain_mkv = made("js-plain.mkv", &["-i", plain.to_str()?, "-c", "copy"])?;
-    let slower = h264_with(
-        "js-25.mp4",
-        "testsrc2=s=352x240:r=25:d=1",
-        Some(TONE),
-        &["-ac", "2"],
-    )?;
-    let silent = h264_with("js-silent.mp4", CLIP, None, &[])?;
-    let mono = h264_with("js-mono.mp4", CLIP, Some(TONE), &["-ac", "1"])?;
-    let cd_rate = h264_with(
-        "js-44k.mp4",
-        CLIP,
-        Some(TONE),
-        &["-ac", "2", "-ar", "44100"],
-    )?;
-    let swapped = made(
-        "js-swapped.mp4",
-        &[
-            "-i",
-            plain.to_str()?,
-            "-map",
-            "0:a",
-            "-map",
-            "0:v",
-            "-c",
-            "copy",
-        ],
-    )?;
-    let hdr = h264_with(
-        "js-hdr-tagged.mp4",
-        CLIP,
-        Some(TONE),
-        &[
-            "-ac",
-            "2",
-            "-x264-params",
-            "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc",
-        ],
-    )?;
-    let sound = made("js-sound.m4a", &["-f", "lavfi", "-i", TONE, "-c:a", "aac"])?;
-    Some(Clips {
-        plain,
-        plain_mkv,
-        slower,
-        silent,
-        mono,
-        cd_rate,
-        swapped,
-        hdr,
-        sound,
+fn clips() -> &'static Clips {
+    static CLIPS: OnceLock<Clips> = OnceLock::new();
+    CLIPS.get_or_init(|| {
+        let plain = made(clip(30), "js-plain.mp4");
+        let hdr = hdr_video("js-hdr-video.mp4");
+        Clips {
+            plain_mkv: made(clip(30), "js-plain.mkv"),
+            slower: made(Clip::new((352, 240), (25, 1), 25), "js-25.mp4"),
+            silent: made(clip(30).video_only(), "js-silent.mp4"),
+            mono: made(
+                Clip {
+                    channels: 1,
+                    ..clip(30)
+                },
+                "js-mono.mp4",
+            ),
+            cd_rate: made(
+                Clip {
+                    rate: 44_100,
+                    ..clip(30)
+                },
+                "js-44k.mp4",
+            ),
+            swapped: remuxed(&[(&plain, false), (&plain, true)], "js-swapped.mp4"),
+            hdr: remuxed(&[(&hdr, true), (&plain, false)], "js-hdr-tagged.mp4"),
+            sound: made(clip(30).audio_only(), "js-sound.m4a"),
+            plain,
+        }
     })
 }
 
@@ -419,7 +343,7 @@ fn audio_codecs(path: &Path) -> Vec<String> {
 
 #[test]
 fn the_same_streams_in_mp4_and_mkv_join_by_copy_into_either_container() {
-    let Some(c) = clips() else { return };
+    let c = clips();
     let folder = story("mixed-containers");
     for out in ["copied.mp4", "copied.mkv", "copied.mov"] {
         let out = folder.join(out);
@@ -443,7 +367,7 @@ fn the_same_streams_in_mp4_and_mkv_join_by_copy_into_either_container() {
 
 #[test]
 fn each_mismatch_re_encodes_with_its_own_reason() {
-    let Some(c) = clips() else { return };
+    let c = clips();
     let folder = story("mismatches");
     let name = |p: &Path| p.display().to_string();
     let cases = [
@@ -525,7 +449,7 @@ fn each_mismatch_re_encodes_with_its_own_reason() {
 
 #[test]
 fn hdr_tags_differ_and_the_re_encode_refuses_to_tone_map() {
-    let Some(c) = clips() else { return };
+    let c = clips();
     let folder = story("hdr");
     let e = refused(
         &[c.plain.clone(), c.hdr.clone()],
@@ -549,7 +473,7 @@ fn hdr_tags_differ_and_the_re_encode_refuses_to_tone_map() {
 
 #[test]
 fn silent_clips_stay_silent_whether_copied_or_re_encoded() {
-    let Some(c) = clips() else { return };
+    let c = clips();
     let folder = story("silent");
     let two = [c.silent.clone(), c.silent.clone()];
     let out = folder.join("copied.mp4");
@@ -592,7 +516,7 @@ fn silent_clips_stay_silent_whether_copied_or_re_encoded() {
 
 #[test]
 fn an_audio_bitrate_re_encodes_only_the_audio_at_a_rate_its_encoder_takes() {
-    let Some(c) = clips() else { return };
+    let c = clips();
     let folder = story("audio-bitrate");
     let two = [c.plain.clone(), c.plain.clone()];
     for (kbps, got) in [(6, 32), (192, 192), (512, 512)] {
@@ -634,7 +558,7 @@ fn an_audio_bitrate_re_encodes_only_the_audio_at_a_rate_its_encoder_takes() {
 
 #[test]
 fn h264_clips_into_webm_encode_vp9_and_opus_and_say_why() {
-    let Some(c) = clips() else { return };
+    let c = clips();
     let folder = story("into-webm");
     let out = folder.join("out.webm");
     let j = joined(&[c.plain.clone(), c.plain.clone()], &out, cpu());
@@ -663,39 +587,14 @@ fn h264_clips_into_webm_encode_vp9_and_opus_and_say_why() {
 
 #[test]
 fn vp9_clips_copy_into_webm_and_mp4_and_re_encode_into_mov() {
-    if !has_encoder("libvpx-vp9") || !has_encoder("libopus") {
-        eprintln!("no ffmpeg with libvpx-vp9 and libopus on PATH: skipped");
-        return;
-    }
-    let Some(vp9) = made(
+    let vp9 = made(
+        Clip {
+            video: Some(VideoCodec::Vp9),
+            audio: Some(AudioCodec::Opus),
+            ..clip(30)
+        },
         "js-vp9.webm",
-        &[
-            "-f",
-            "lavfi",
-            "-i",
-            CLIP,
-            "-f",
-            "lavfi",
-            "-i",
-            TONE,
-            "-ac",
-            "2",
-            "-c:v",
-            "libvpx-vp9",
-            "-deadline",
-            "realtime",
-            "-cpu-used",
-            "8",
-            "-b:v",
-            "500k",
-            "-c:a",
-            "libopus",
-            "-shortest",
-        ],
-    ) else {
-        eprintln!("ffmpeg could not make the clip: skipped");
-        return;
-    };
+    );
     let folder = story("vp9");
     let two = [vp9.clone(), vp9.clone()];
 
@@ -770,40 +669,8 @@ fn vp9_clips_copy_into_webm_and_mp4_and_re_encode_into_mov() {
 
 #[test]
 fn hevc_and_h264_clips_re_encode_to_h264() {
-    if !has_encoder("libx265") {
-        eprintln!("no ffmpeg with libx265 on PATH: skipped");
-        return;
-    }
-    let Some(c) = clips() else { return };
-    let Some(hevc) = made(
-        "js-hevc.mp4",
-        &[
-            "-f",
-            "lavfi",
-            "-i",
-            CLIP,
-            "-f",
-            "lavfi",
-            "-i",
-            TONE,
-            "-ac",
-            "2",
-            "-c:v",
-            "libx265",
-            "-preset",
-            "ultrafast",
-            "-pix_fmt",
-            "yuv420p",
-            "-x265-params",
-            "log-level=error",
-            "-c:a",
-            "aac",
-            "-shortest",
-        ],
-    ) else {
-        eprintln!("ffmpeg could not make the clip: skipped");
-        return;
-    };
+    let c = clips();
+    let hevc = fixture("hevc.mp4");
     let out = story("hevc").join("out.mp4");
     let j = joined(&[c.plain.clone(), hevc.clone()], &out, cpu());
     assert_eq!(j.method, JoinMethod::Encode);
@@ -824,7 +691,7 @@ fn hevc_and_h264_clips_re_encode_to_h264() {
 
 #[test]
 fn video_options_re_encode_to_the_asked_even_size_and_rate() {
-    let Some(c) = clips() else { return };
+    let c = clips();
     let folder = story("options");
     let two = [c.plain.clone(), c.plain.clone()];
     let out = folder.join("sized.mp4");
@@ -866,7 +733,7 @@ fn video_options_re_encode_to_the_asked_even_size_and_rate() {
 
 #[test]
 fn a_join_refuses_bad_clips_and_outputs_by_name_and_leaves_nothing() {
-    let Some(c) = clips() else { return };
+    let c = clips();
     let folder = story("refused");
     let out = folder.join("out.mp4");
     let missing = folder.join("missing.mp4");
@@ -934,7 +801,7 @@ fn emptied(from: &Path, to: &Path) {
 
 #[test]
 fn a_clip_with_no_frames_is_refused_by_name_on_both_paths() {
-    let Some(c) = clips() else { return };
+    let c = clips();
     let folder = story("zero-length");
     let empty = folder.join("empty.mp4");
     emptied(&c.silent, &empty);
@@ -965,11 +832,8 @@ fn a_clip_with_no_frames_is_refused_by_name_on_both_paths() {
 
 #[test]
 fn a_clip_shorter_than_one_output_frame_adds_no_time() {
-    let Some(c) = clips() else { return };
-    let Some(one) = h264_with("js-one-frame.mp4", CLIP, None, &["-frames:v", "1"]) else {
-        eprintln!("ffmpeg could not make the clip: skipped");
-        return;
-    };
+    let c = clips();
+    let one = made(clip(1).video_only(), "js-one-frame.mp4");
     let folder = story("sub-frame");
     let out = folder.join("out.mp4");
     let j = joined(
@@ -998,74 +862,50 @@ fn a_clip_shorter_than_one_output_frame_adds_no_time() {
 
 #[test]
 fn clips_the_join_cannot_read_are_refused_by_name_and_4_4_4_only_when_re_encoded() {
-    let Some(c) = clips() else { return };
+    let c = clips();
     let folder = story("undecodable");
     let out = folder.join("out.mp4");
-    if let Some(full) = h264_clip("js-h264-444.mp4", "yuv444p", "high444") {
-        let copied = folder.join("copied.mp4");
-        let j = joined(&[full.clone(), full.clone()], &copied, cpu());
-        assert_eq!(j.method, JoinMethod::Copy, "{}", j.reason);
-        assert_eq!(video_samples(&copied).len(), 2 * video_samples(&full).len());
-        let want = format!(
-            "unsupported: {}: 8-bit 4:4:4 H.264 video is not supported",
-            full.display()
-        );
-        for inputs in [
-            [full.clone(), c.silent.clone()],
-            [c.silent.clone(), full.clone()],
-        ] {
-            assert_eq!(refused(&inputs, &out, cpu()), want);
-        }
+    let full = fixture("h264-444.mp4");
+    let copied = folder.join("copied.mp4");
+    let j = joined(&[full.clone(), full.clone()], &copied, cpu());
+    assert_eq!(j.method, JoinMethod::Copy, "{}", j.reason);
+    assert_eq!(video_samples(&copied).len(), 2 * video_samples(&full).len());
+    let want = format!(
+        "unsupported: {}: 8-bit 4:4:4 H.264 video is not supported",
+        full.display()
+    );
+    for inputs in [
+        [full.clone(), c.silent.clone()],
+        [c.silent.clone(), full.clone()],
+    ] {
+        assert_eq!(refused(&inputs, &out, cpu()), want);
     }
-    if has_encoder("libx265")
-        && let Some(hevc) = made(
-            "js-hevc-422.mp4",
-            &[
-                "-f",
-                "lavfi",
-                "-i",
-                CLIP,
-                "-c:v",
-                "libx265",
-                "-preset",
-                "ultrafast",
-                "-pix_fmt",
-                "yuv422p",
-                "-x265-params",
-                "log-level=error",
-            ],
+    let hevc = fixture("hevc-422.mp4");
+    assert_eq!(
+        refused(&[c.silent.clone(), hevc.clone()], &out, cpu()),
+        format!(
+            "unsupported: {}: 8-bit 4:2:2 HEVC video is not supported",
+            hevc.display()
         )
-    {
+    );
+    let part2 = fixture("mpeg4.mp4");
+    for inputs in [
+        [c.silent.clone(), part2.clone()],
+        [part2.clone(), part2.clone()],
+    ] {
         assert_eq!(
-            refused(&[c.silent.clone(), hevc.clone()], &out, cpu()),
+            refused(&inputs, &out, cpu()),
             format!(
-                "unsupported: {}: 8-bit 4:2:2 HEVC video is not supported",
-                hevc.display()
+                "unsupported: {}: MPEG-4 Part 2 video is not supported",
+                part2.display()
             )
         );
-    }
-    if let Some(part2) = made(
-        "js-mpeg4.mp4",
-        &["-f", "lavfi", "-i", CLIP, "-c:v", "mpeg4", "-q:v", "5"],
-    ) {
-        for inputs in [
-            [c.silent.clone(), part2.clone()],
-            [part2.clone(), part2.clone()],
-        ] {
-            assert_eq!(
-                refused(&inputs, &out, cpu()),
-                format!(
-                    "unsupported: {}: MPEG-4 Part 2 video is not supported",
-                    part2.display()
-                )
-            );
-        }
     }
 }
 
 #[test]
 fn a_cancelled_join_stops_and_leaves_nothing() {
-    let Some(c) = clips() else { return };
+    let c = clips();
     let folder = story("cancelled");
     let two = [c.plain.clone(), c.plain.clone()];
     for (name, encode) in [

@@ -1,385 +1,313 @@
 use super::*;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use crate::testref::Refs;
 
-fn dir() -> PathBuf {
-    let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp/test-mp4");
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
-
-fn tools() -> bool {
-    ["ffmpeg", "ffprobe"].iter().all(|t| {
-        Command::new(t)
-            .arg("-version")
-            .output()
-            .is_ok_and(|o| o.status.success())
-    })
-}
-
-fn generate(name: &str, seconds: u32, video: &[&str]) -> PathBuf {
-    crate::fixture::once(&dir().join(name), |tmp| {
-        let st = Command::new("ffmpeg")
-            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
-            .arg(format!("testsrc2=size=320x240:rate=30:duration={seconds}"))
-            .args(["-f", "lavfi", "-i"])
-            .arg(format!(
-                "sine=frequency=440:sample_rate=48000:duration={seconds}"
-            ))
-            .args(video)
-            .args([
-                "-c:a", "aac", "-b:a", "96k", "-ac", "2", "-pix_fmt", "yuv420p",
-            ])
-            .arg(tmp)
-            .status()
-            .unwrap();
-        assert!(st.success());
-    })
-}
-
-fn probe(path: &Path, args: &[&str]) -> String {
-    let out = Command::new("ffprobe")
-        .args(["-v", "error"])
-        .args(args)
-        .arg(path)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-fn duration(path: &Path, stream: Option<&str>) -> f64 {
-    let out = match stream {
-        Some(s) => probe(
-            path,
-            &[
-                "-select_streams",
-                s,
-                "-show_entries",
-                "stream=duration",
-                "-of",
-                "csv=p=0",
-            ],
-        ),
-        None => probe(
-            path,
-            &["-show_entries", "format=duration", "-of", "csv=p=0"],
-        ),
-    };
-    out.trim().parse().unwrap()
-}
-
-fn decodes_clean(path: &Path) -> usize {
-    let out = Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
-        .arg(path)
-        .args(["-map", "0:v", "-f", "framemd5", "-"])
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    assert!(
-        out.stderr.is_empty(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|l| !l.starts_with('#'))
-        .count()
-}
+#[allow(dead_code)]
+#[path = "refs.rs"]
+mod refs;
 
 #[test]
 fn reader_matches_ffprobe_packets() {
-    if !tools() {
-        return;
-    }
-    let mp4 = generate(
-        "bframes.mp4",
-        2,
-        &["-c:v", "libx264", "-bf", "3", "-g", "30"],
-    );
-    let mov = generate(
-        "hevc.mov",
-        2,
-        &[
-            "-c:v",
-            "libx265",
-            "-x265-params",
-            "log-level=none:bframes=4",
-            "-tag:v",
-            "hvc1",
-        ],
-    );
-    let frag = generate(
-        "fragmented.mp4",
-        2,
-        &[
-            "-c:v",
-            "libx264",
-            "-bf",
-            "3",
-            "-g",
-            "30",
-            "-movflags",
-            "frag_keyframe+empty_moov",
-        ],
-    );
-    let based = generate(
-        "fragmented-base.mp4",
-        2,
-        &[
-            "-c:v",
-            "libx264",
-            "-bf",
-            "2",
-            "-g",
-            "15",
-            "-movflags",
-            "frag_keyframe+default_base_moof",
-        ],
-    );
-    for path in [mp4, mov, frag, based] {
-        let r = Reader::open(&path).unwrap();
-        assert_eq!(r.quicktime, path.extension().unwrap() == "mov");
-        assert_eq!(
-            r.fragmented,
-            path.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("fragmented")
-        );
-        for (i, t) in r.tracks.iter().enumerate() {
-            let listed = probe(
-                &path,
-                &[
-                    "-select_streams",
-                    &i.to_string(),
-                    "-show_entries",
-                    "packet=pts,dts,size,flags",
-                    "-of",
-                    "csv=p=0",
-                ],
-            );
-            let theirs: Vec<String> = listed
-                .lines()
-                .map(|l| {
-                    let f: Vec<&str> = l.split(',').collect();
-                    let key = if f[3].contains('K') { "K" } else { "_" };
-                    format!("{},{},{},{key}", f[0], f[1], f[2])
-                })
-                .collect();
+    let r = Refs::open(refs::AREA);
+    for (file, _) in refs::FOREIGN {
+        let path = r.path(file);
+        let csv = String::from_utf8(r.bytes(&refs::packets_of(file))).unwrap();
+        let listed = refs::parse_packets(&csv);
+        let m = Reader::open(&path).unwrap();
+        assert_eq!(m.quicktime, file.ends_with(".mov"));
+        assert_eq!(m.fragmented, file.starts_with("fragmented"));
+        assert_eq!(listed.len(), m.tracks.len(), "{file}");
+        for (i, t) in m.tracks.iter().enumerate() {
             let ours: Vec<String> = (0..t.samples.len())
                 .map(|k| {
-                    let p = r.packet(i, k).unwrap();
+                    let p = m.packet(i, k).unwrap();
                     let key = if p.keyframe { "K" } else { "_" };
                     format!("{},{},{},{key}", p.pts, p.dts, p.data.len())
                 })
                 .collect();
-            assert_eq!(ours, theirs, "{} track {i}", path.display());
+            assert_eq!(ours, listed[i], "{file} track {i}");
         }
-        let v = r.video().unwrap();
+        let v = m.video().unwrap();
         assert!(matches!(
-            r.tracks[v].codec(),
+            m.tracks[v].codec(),
             Some(crate::media::Codec::H264 | crate::media::Codec::Hevc)
         ));
-        assert!((r.tracks[v].fps() - 30.0).abs() < 0.01);
-        let a = r.audio()[0];
         assert_eq!(
-            (r.tracks[a].channels(), r.tracks[a].sample_rate()),
+            (m.tracks[v].width, m.tracks[v].height),
+            refs::SIZE,
+            "{file}"
+        );
+        assert!((m.tracks[v].fps() - f64::from(refs::FPS)).abs() < 0.01);
+        let a = m.audio()[0];
+        assert_eq!(
+            (m.tracks[a].channels(), m.tracks[a].sample_rate()),
             (2, 48_000)
         );
-        assert!((80_000..112_000).contains(&r.tracks[a].bitrate()));
-    }
-}
-
-#[cfg(feature = "aac")]
-fn rewrite<W: std::io::Write + std::io::Seek>(r: &Reader, mut w: Writer<W>) -> Writer<W> {
-    let v = r.video().unwrap();
-    let vt = w
-        .add_track(TrackConfig::from_track(&r.tracks[v]).unwrap())
-        .unwrap();
-    for k in 0..r.tracks[v].samples.len() {
-        let s = r.tracks[v].samples[k];
-        let data = r.read(v, k).unwrap();
-        w.push_sample(vt, &data, s.pts, s.dts, s.duration, s.keyframe)
-            .unwrap();
-    }
-    w
-}
-
-#[cfg(feature = "aac")]
-fn add_tone<W: std::io::Write + std::io::Seek>(w: &mut Writer<W>, seconds: f32) {
-    use crate::aac::{Encoder, EncoderConfig};
-    use crate::media::AudioBuffer;
-    let mut enc = Encoder::new(EncoderConfig {
-        rate: 48_000,
-        channels: 2,
-        bitrate: 128_000,
-    })
-    .unwrap();
-    let mut a = AudioBuffer::new(48_000, 2);
-    for i in 0..(48_000.0 * seconds) as usize {
-        let s = 0.3 * (std::f32::consts::TAU * 440.0 * i as f32 / 48_000.0).sin();
-        a.samples.extend([s, s]);
-    }
-    let mut cfg = TrackConfig::new(
-        SampleEntry::aac(enc.extradata(), 2, 48_000, 128_000),
-        48_000,
-    );
-    cfg.media_start = Some(enc.priming() as i64);
-    let at = w.add_track(cfg).unwrap();
-    let mut packets: Vec<crate::media::Packet> = enc.encode(&a).unwrap();
-    packets.extend(enc.flush());
-    for p in &packets {
-        w.push(at, p).unwrap();
-    }
-}
-
-#[cfg(feature = "aac")]
-#[test]
-fn written_files_read_back_in_ffprobe() {
-    if !tools() {
-        return;
-    }
-    let src = generate(
-        "bframes.mp4",
-        2,
-        &["-c:v", "libx264", "-bf", "3", "-g", "30"],
-    );
-    let r = Reader::open(&src).unwrap();
-    for (name, brand, fast) in [
-        ("out.mp4", Brand::Mp4, true),
-        ("out.mov", Brand::Mov, false),
-    ] {
-        let path = dir().join(name);
-        let mut w = rewrite(
-            &r,
-            Writer::create_with(&path, Options { brand, reserve: 0 }).unwrap(),
+        let kbps = refs::AUDIO_KBPS * 1000;
+        assert!(
+            (kbps * 5 / 6..kbps * 7 / 6).contains(&m.tracks[a].bitrate()),
+            "{file}: {}",
+            m.tracks[a].bitrate()
         );
-        add_tone(&mut w, 2.0);
-        if fast {
-            w.finish_faststart().unwrap();
+    }
+}
+
+#[test]
+fn a_damaged_fixture_is_refused_before_use() {
+    let r = Refs::open(refs::AREA);
+    let (file, _) = refs::FOREIGN[0];
+    let mut bytes = r.bytes(file);
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    assert_ne!(crate::testref::sha256(&bytes), r.digest(file));
+}
+
+#[cfg(all(
+    feature = "h264",
+    feature = "hevc",
+    feature = "aac",
+    feature = "gpu",
+    feature = "filter",
+    feature = "mkv",
+    feature = "vp9"
+))]
+mod decoded {
+    use super::*;
+    use crate::media::{Choice, Frame, Prefs, decode_video};
+    use crate::testref::{Clip, Digest};
+    use std::path::{Path, PathBuf};
+
+    fn dir() -> PathBuf {
+        crate::testref::scratch(refs::AREA)
+    }
+
+    fn frames(path: &Path) -> Vec<Frame> {
+        let cpu = Prefs {
+            decode: Choice::Cpu,
+            ..Prefs::default()
+        };
+        decode_video(path, 0.0, None, &cpu)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+            .collect::<crate::media::Result<_>>()
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    fn digest(frames: &[Frame]) -> String {
+        let mut d = Digest::new();
+        for f in frames {
+            d.frame(f);
+        }
+        d.hex()
+    }
+
+    fn track_seconds(path: &Path, video: bool) -> f64 {
+        let r = Reader::open(path).unwrap();
+        let t = if video {
+            r.video().unwrap()
         } else {
-            w.finish().unwrap();
-        }
-        let bytes = std::fs::read(&path).unwrap();
-        let at = |k: &[u8]| bytes.windows(4).position(|w| w == k).unwrap();
-        assert_eq!(fast, at(b"moov") < at(b"mdat"), "{name}");
-        let brand_probe = probe(
-            &path,
-            &[
-                "-show_entries",
-                "format=format_name:format_tags=major_brand",
-                "-of",
-                "csv=p=0",
-            ],
-        );
-        assert!(
-            brand_probe.contains(if fast { "isom" } else { "qt" }),
-            "{brand_probe}"
-        );
-        assert!(
-            (duration(&path, Some("v:0")) - 2.0).abs() < 0.04,
-            "{name} video"
-        );
-        assert!(
-            (duration(&path, Some("a:0")) - 2.0).abs() < 0.03,
-            "{name} audio"
-        );
-        assert!((duration(&path, None) - 2.0).abs() < 0.04, "{name}");
-        assert_eq!(decodes_clean(&path), 60);
+            r.audio()[0]
+        };
+        r.tracks[t].duration_seconds()
     }
-    let path = dir().join("frag.mp4");
-    let mut w = FragmentedWriter::create(&path, 0.5).unwrap();
-    let v = r.video().unwrap();
-    let vt = w
-        .add_track(TrackConfig::from_track(&r.tracks[v]).unwrap())
-        .unwrap();
-    for k in 0..r.tracks[v].samples.len() {
-        w.push(vt, &r.packet(v, k).unwrap()).unwrap();
-    }
-    w.finish().unwrap();
-    assert!(
-        probe(
-            &path,
-            &["-show_entries", "format=duration", "-of", "csv=p=0"]
-        )
-        .trim()
-        .parse::<f64>()
-        .unwrap()
-            > 1.9
-    );
-    assert_eq!(decodes_clean(&path), 60);
-}
 
-#[test]
-fn remux_cuts_play_in_ffmpeg() {
-    if !tools() {
-        return;
+    fn movie_seconds(path: &Path) -> f64 {
+        Reader::open(path).unwrap().duration_seconds()
     }
-    let src = generate(
-        "long.mp4",
-        12,
-        &[
-            "-c:v",
-            "libx264",
-            "-bf",
-            "2",
-            "-g",
-            "60",
-            "-keyint_min",
-            "60",
-            "-sc_threshold",
-            "0",
-        ],
-    );
-    let out = dir().join("cut-out.mp4");
-    let span = remux(&src, &out, 3.3, 8.3, Snap::Outward).unwrap();
-    assert_eq!(
-        span,
-        Span {
-            start: 3.3,
-            end: 8.3
+
+    fn rewrite<W: std::io::Write + std::io::Seek>(r: &Reader, mut w: Writer<W>) -> Writer<W> {
+        let v = r.video().unwrap();
+        let vt = w
+            .add_track(TrackConfig::from_track(&r.tracks[v]).unwrap())
+            .unwrap();
+        for k in 0..r.tracks[v].samples.len() {
+            let s = r.tracks[v].samples[k];
+            let data = r.read(v, k).unwrap();
+            w.push_sample(vt, &data, s.pts, s.dts, s.duration, s.keyframe)
+                .unwrap();
         }
-    );
-    assert!((duration(&out, None) - 5.0).abs() < 0.04);
-    assert_eq!(decodes_clean(&out), 150);
-    let out = dir().join("cut-in.mp4");
-    let span = remux(&src, &out, 3.3, 8.3, Snap::Inward).unwrap();
-    assert_eq!(
-        span,
-        Span {
-            start: 4.0,
-            end: 8.0
+        w
+    }
+
+    fn add_tone<W: std::io::Write + std::io::Seek>(w: &mut Writer<W>, seconds: f32) {
+        use crate::aac::{Encoder, EncoderConfig};
+        use crate::media::AudioBuffer;
+        let mut enc = Encoder::new(EncoderConfig {
+            rate: 48_000,
+            channels: 2,
+            bitrate: 128_000,
+        })
+        .unwrap();
+        let mut a = AudioBuffer::new(48_000, 2);
+        for i in 0..(48_000.0 * seconds) as usize {
+            let s = 0.3 * (std::f32::consts::TAU * 440.0 * i as f32 / 48_000.0).sin();
+            a.samples.extend([s, s]);
         }
-    );
-    assert_eq!(decodes_clean(&out), 120);
-    let r = Reader::open(&out).unwrap();
-    assert!(r.tracks[r.video().unwrap()].samples[0].keyframe);
-    let sample = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp/sample/adoption.mp4");
-    if sample.exists() {
-        let out = dir().join("adoption-cut.mp4");
-        let t = std::time::Instant::now();
-        let span = remux(&sample, &out, 12.0, 22.0, Snap::Outward).unwrap();
-        let took = t.elapsed();
-        let size = std::fs::metadata(&out).unwrap().len();
-        eprintln!(
-            "adoption 10 s cut: {size} bytes in {took:?} ({:.0} MB/s)",
-            size as f64 / took.as_secs_f64() / 1e6
+        let mut cfg = TrackConfig::new(
+            SampleEntry::aac(enc.extradata(), 2, 48_000, 128_000),
+            48_000,
         );
+        cfg.media_start = Some(enc.priming() as i64);
+        let at = w.add_track(cfg).unwrap();
+        let mut packets: Vec<crate::media::Packet> = enc.encode(&a).unwrap();
+        packets.extend(enc.flush());
+        for p in &packets {
+            w.push(at, p).unwrap();
+        }
+    }
+
+    #[test]
+    fn written_files_read_back_with_every_frame() {
+        let refs_dir = Refs::open(refs::AREA);
+        let src = refs_dir.path("bframes.mp4");
+        let seconds = f64::from(refs::SECONDS);
+        let frames_in = (refs::SECONDS * refs::FPS) as usize;
+        let want = digest(&frames(&src));
+        let r = Reader::open(&src).unwrap();
+        for (name, brand, fast) in [
+            ("out.mp4", Brand::Mp4, true),
+            ("out.mov", Brand::Mov, false),
+        ] {
+            let path = dir().join(name);
+            let mut w = rewrite(
+                &r,
+                Writer::create_with(&path, Options { brand, reserve: 0 }).unwrap(),
+            );
+            add_tone(&mut w, seconds as f32);
+            if fast {
+                w.finish_faststart().unwrap();
+            } else {
+                w.finish().unwrap();
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            let at = |k: &[u8]| bytes.windows(4).position(|w| w == k).unwrap();
+            assert_eq!(fast, at(b"moov") < at(b"mdat"), "{name}");
+            let major: &[u8] = if fast { b"isom" } else { b"qt  " };
+            assert_eq!(&bytes[8..12], major, "{name}");
+            assert_eq!(Reader::open(&path).unwrap().quicktime, !fast, "{name}");
+            assert!(
+                (track_seconds(&path, true) - seconds).abs() < 0.04,
+                "{name} video"
+            );
+            assert!(
+                (track_seconds(&path, false) - seconds).abs() < 0.03,
+                "{name} audio"
+            );
+            assert!((movie_seconds(&path) - seconds).abs() < 0.04, "{name}");
+            let back = frames(&path);
+            assert_eq!(back.len(), frames_in, "{name}");
+            assert_eq!(digest(&back), want, "{name}");
+        }
+        let path = dir().join("frag.mp4");
+        let mut w = FragmentedWriter::create(&path, 0.5).unwrap();
+        let v = r.video().unwrap();
+        let vt = w
+            .add_track(TrackConfig::from_track(&r.tracks[v]).unwrap())
+            .unwrap();
+        for k in 0..r.tracks[v].samples.len() {
+            w.push(vt, &r.packet(v, k).unwrap()).unwrap();
+        }
+        w.finish().unwrap();
+        assert!(Reader::open(&path).unwrap().fragmented);
+        assert!(movie_seconds(&path) > seconds - 0.1);
+        let back = frames(&path);
+        assert_eq!(back.len(), frames_in);
+        assert_eq!(digest(&back), want);
+    }
+
+    fn long_clip() -> PathBuf {
+        Clip {
+            gop: 60,
+            b_frames: 2,
+            ..Clip::new((160, 120), (30, 1), 360)
+        }
+        .make(refs::AREA, "long.mp4")
+    }
+
+    #[test]
+    fn remux_cuts_decode_every_frame() {
+        let src = long_clip();
+        let out = dir().join("cut-out.mp4");
+        let span = remux(&src, &out, 3.3, 8.3, Snap::Outward).unwrap();
         assert_eq!(
             span,
             Span {
-                start: 12.0,
-                end: 22.0
+                start: 3.3,
+                end: 8.3
             }
         );
-        assert!((duration(&out, None) - 10.0).abs() < 0.03);
-        assert_eq!(decodes_clean(&out), 600);
+        assert!((movie_seconds(&out) - 5.0).abs() < 0.04);
+        assert_eq!(frames(&out).len(), 150);
+        let out = dir().join("cut-in.mp4");
+        let span = remux(&src, &out, 3.3, 8.3, Snap::Inward).unwrap();
+        assert_eq!(
+            span,
+            Span {
+                start: 4.0,
+                end: 8.0
+            }
+        );
+        assert_eq!(frames(&out).len(), 120);
+        let r = Reader::open(&out).unwrap();
+        assert!(r.tracks[r.video().unwrap()].samples[0].keyframe);
+        let sample = crate::testref::root().join("tmp/sample/adoption.mp4");
+        if sample.exists() {
+            let out = dir().join("adoption-cut.mp4");
+            let span = remux(&sample, &out, 12.0, 22.0, Snap::Outward).unwrap();
+            assert_eq!(
+                span,
+                Span {
+                    start: 12.0,
+                    end: 22.0
+                }
+            );
+            assert!((movie_seconds(&out) - 10.0).abs() < 0.03);
+            assert_eq!(frames(&out).len(), 600);
+        }
+    }
+
+    #[test]
+    fn b_frames_keep_one_tick_per_sample_and_decode_every_frame() {
+        let src = Clip {
+            b_frames: 3,
+            ..Clip::new((160, 120), (30, 1), 30)
+        }
+        .video_only()
+        .make(refs::AREA, "bframes-tick.mp4");
+        let r = Reader::open(&src).unwrap();
+        let v = r.video().unwrap();
+        let step = i64::from(r.tracks[v].timescale / 30).max(1);
+        let mut cfg = TrackConfig::from_track(&r.tracks[v]).unwrap();
+        cfg.timescale = 30;
+        cfg.edits.clear();
+        cfg.media_start = None;
+        let out = dir().join("bframes-tick-out.mp4");
+        let mut w = Writer::create_with(&out, Options::default()).unwrap();
+        let t = w.add_track(cfg).unwrap();
+        let n = r.tracks[v].samples.len();
+        assert!(
+            r.tracks[v].samples.iter().any(|s| s.pts != s.dts),
+            "the clip has no reordered frames"
+        );
+        for k in 0..n {
+            let s = r.tracks[v].samples[k];
+            let dts = k as i64 - 1;
+            w.push_sample(
+                t,
+                &r.read(v, k).unwrap(),
+                (s.pts - s.dts) / step + dts,
+                dts,
+                1,
+                s.keyframe,
+            )
+            .unwrap();
+        }
+        w.finish_faststart().unwrap();
+        let back = Reader::open(&out).unwrap();
+        let bv = back.video().unwrap();
+        assert!(back.tracks[bv].samples.iter().all(|s| s.duration == 1));
+        let decoded = frames(&out);
+        assert_eq!(decoded.len(), n);
+        assert!(decoded.iter().all(|f| (f.width, f.height) == (160, 120)));
+        assert_eq!(digest(&decoded), digest(&frames(&src)));
     }
 }
 
@@ -430,63 +358,6 @@ fn an_av1c_record_reads_and_writes_back_byte_for_byte() {
     );
     assert_eq!(c.to_bytes(), raw);
     assert!(Av1Config::parse(&raw[..3]).is_err());
-}
-
-#[test]
-fn b_frames_keep_one_tick_per_sample_and_decode_every_frame() {
-    if !tools() {
-        return;
-    }
-    let src = generate(
-        "bframes-tick.mp4",
-        1,
-        &[
-            "-c:v",
-            "libx264",
-            "-bf",
-            "3",
-            "-x264-params",
-            "b-adapt=0:scenecut=0",
-            "-g",
-            "30",
-            "-video_track_timescale",
-            "30",
-        ],
-    );
-    let r = Reader::open(&src).unwrap();
-    let v = r.video().unwrap();
-    let mut cfg = TrackConfig::from_track(&r.tracks[v]).unwrap();
-    cfg.edits.clear();
-    cfg.media_start = None;
-    let out = dir().join("bframes-tick-out.mp4");
-    let mut w = Writer::create_with(&out, Options::default()).unwrap();
-    let t = w.add_track(cfg).unwrap();
-    let n = r.tracks[v].samples.len();
-    for k in 0..n {
-        let s = r.tracks[v].samples[k];
-        let dts = k as i64 - 1;
-        w.push_sample(
-            t,
-            &r.read(v, k).unwrap(),
-            s.pts - s.dts + dts,
-            dts,
-            1,
-            s.keyframe,
-        )
-        .unwrap();
-    }
-    w.finish_faststart().unwrap();
-    let back = Reader::open(&out).unwrap();
-    let bv = back.video().unwrap();
-    assert!(back.tracks[bv].samples.iter().all(|s| s.duration == 1));
-    let raw = Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
-        .arg(&out)
-        .args(["-f", "rawvideo", "-pix_fmt", "gray", "-"])
-        .output()
-        .unwrap();
-    assert!(raw.status.success());
-    assert_eq!(raw.stdout.len(), n * 320 * 240);
 }
 
 #[test]
