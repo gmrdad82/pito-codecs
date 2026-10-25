@@ -50,6 +50,10 @@ fn ffmpeg_decodes_our_stream_bit_exact() {
             .unwrap();
         let name = o.name;
         r.assert_digest(&format!("{name}.ivf"), &sha256(&ivf));
+        assert!(
+            refs::encode_ours(name).unwrap() == ivf,
+            "{name}: encode_ours is not this encode"
+        );
         let ours = sha256(&recon);
         r.assert_digest(&format!("{name}.yuv"), &ours);
         r.assert_digest(&format!("{name}.libvpx.yuv"), &ours);
@@ -367,4 +371,9 @@ fn a_block_that_fails_in_a_worker_fails_the_frame_and_the_encoder() {
             .to_string();
         assert!(again.contains("an earlier frame failed"), "{again}");
     }
+}
+
+#[test]
+fn an_unknown_encoder_setting_is_refused() {
+    assert!(refs::encode_ours("nothing").is_err());
 }

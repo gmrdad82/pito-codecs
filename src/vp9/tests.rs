@@ -72,7 +72,6 @@ fn decode_pictures(dec: &mut Decoder, chunks: &[&[u8]]) -> Vec<Picture> {
     out
 }
 
-
 fn is_420(f: &Libvpx) -> bool {
     matches!(f.pix_fmt, "yuv420p" | "yuv420p10le")
 }
@@ -203,7 +202,6 @@ fn cpu_secs() -> f64 {
     (tick(11) + tick(12)) / 100.0
 }
 
-
 #[test]
 #[ignore]
 fn decode_speed() {
@@ -248,6 +246,7 @@ fn decode_speed() {
     }
 }
 
+#[cfg(all(feature = "gpu", target_os = "linux"))]
 fn on_the_gpu_floor(f: &Libvpx) -> bool {
     is_420(f) && f.size.0 >= refs::GPU_FLOOR.0 && f.size.1 >= refs::GPU_FLOOR.1
 }
@@ -322,4 +321,52 @@ fn vaapi_decodes_while_the_caller_holds_frames_on_the_gpu() {
     }
     n += dec.flush_gpu().unwrap().len();
     assert!(n > 12, "{}: {n} frames", f.name);
+}
+
+#[test]
+fn the_libvpx_sources_are_what_the_recorder_feeds_libvpx() {
+    for f in &refs::CONFORMANCE {
+        let bytes = refs::source_bytes(f);
+        assert_eq!(
+            bytes.len(),
+            refs::frame_bytes(f) * f.frames as usize,
+            "{}",
+            f.name
+        );
+        assert_eq!(refs::source(f.name).unwrap(), bytes, "{}", f.name);
+        let bits = if f.pix_fmt.ends_with("12le") {
+            12
+        } else if f.pix_fmt.ends_with("10le") {
+            10
+        } else {
+            8
+        };
+        if bits > 8 {
+            assert!(
+                bytes
+                    .chunks_exact(2)
+                    .all(|s| u16::from_le_bytes([s[0], s[1]]) < 1 << bits),
+                "{}: a sample above {bits} bits",
+                f.name
+            );
+        }
+    }
+    let size = |name: &str| refs::frame_bytes(refs::find(name).unwrap());
+    assert_eq!(size("lossless"), 64 * 64 * 3 / 2);
+    assert_eq!(size("profile1_444"), 176 * 144 * 3);
+    assert_eq!(size("profile3_422_12bit"), 176 * 144 * 2 * 2);
+    assert_eq!(size("odd_aq"), (173 * 125 + 2 * 87 * 63));
+    assert!(refs::source("nothing").is_err());
+}
+
+#[test]
+fn the_alpha_sources_are_rgba_frames() {
+    for (name, w, h) in refs::ALPHA {
+        let bytes = refs::alpha_source(name).unwrap();
+        assert_eq!(bytes.len(), (w * h * 4) as usize * refs::ALPHA_FRAMES as usize);
+        assert_eq!(bytes, refs::alpha_rgba(w, h, refs::ALPHA_FRAMES));
+        assert!(bytes.chunks_exact(4).any(|p| p[3] == 0));
+        assert!(bytes.chunks_exact(4).any(|p| p[3] == 255));
+    }
+    assert!(refs::alpha_source("nothing").is_err());
 }

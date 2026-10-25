@@ -7,6 +7,9 @@ mod h264;
 #[path = "../../src/hevc/refs.rs"]
 mod hevc;
 #[allow(dead_code)]
+#[path = "../../src/hevc/refs_synth.rs"]
+mod hevc_synth;
+#[allow(dead_code)]
 #[path = "../../src/vp9/refs.rs"]
 mod vp9;
 #[allow(dead_code)]
@@ -15,6 +18,7 @@ mod vp9_alpha;
 
 const FFPROBE: &str = "ffprobe";
 const X265: &str = "x265";
+const STRICT: &[&str] = &["-err_detect", "explode", "-xerror"];
 
 fn raw_input(pix_fmt: &str, (w, h): (u32, u32), rate: &str) -> Vec<String> {
     [
@@ -100,7 +104,7 @@ fn h264_defs() -> Vec<Def> {
         "src/h264/refs.rs crf18()",
         h264::crf18,
     ));
-    defs.push(decoded(area, "crf18.yuv", "crf18.h264", &[], "yuv420p"));
+    defs.push(decoded(area, "crf18.yuv", "crf18.h264", STRICT, "yuv420p"));
     defs.push(Def::exact(
         area,
         "crf18.probe".into(),
@@ -146,6 +150,16 @@ fn h264_defs() -> Vec<Def> {
             ]),
         ));
     }
+    for name in h264::PINNED {
+        let file = format!("{name}.h264");
+        defs.push(Def::ours(
+            area,
+            file.clone(),
+            &format!("src/h264/refs.rs pinned(\"{name}\")"),
+            move || h264::pinned(name),
+        ));
+        defs.push(decoded(area, &format!("{name}.yuv"), &file, STRICT, "yuv420p"));
+    }
     defs
 }
 
@@ -188,25 +202,27 @@ fn hevc_defs() -> Vec<Def> {
         let pix = hevc::pix_fmt(f.ten_bit);
         let file = format!("{name}.hevc");
         if f.recon {
+            let recon = format!("{name}.recon.yuv");
             defs.push(
                 Def::fixture(
                     area,
                     file,
                     X265,
-                    x265_cli(f, &["-o", "{out}"]),
+                    x265_cli(f, &["-o", "{out}", "--recon", &recon]),
                 )
                 .from(move || hevc::source(name)),
             );
-            defs.push(
-                Def::digest(
-                    area,
-                    format!("{name}.yuv"),
-                    X265,
-                    x265_cli(f, &["--recon", "{out}", "-o", &format!("{name}.again.hevc")]),
-                    sha,
-                )
-                .from(move || hevc::source(name)),
-            );
+            let mut copy = raw_input(pix, f.size, "25");
+            copy.pop();
+            copy.push(recon);
+            copy.extend(strs(&["-c", "copy", "-f", "rawvideo", "{out}"]));
+            defs.push(Def::digest(
+                area,
+                format!("{name}.yuv"),
+                FFMPEG,
+                args(&[copy]),
+                sha,
+            ));
             continue;
         }
         let mut encode = strs(&[
@@ -236,6 +252,22 @@ fn hevc_defs() -> Vec<Def> {
             .from(move || hevc::source(name)),
         );
         defs.push(decoded(area, &format!("{name}.yuv"), &file, &[], pix));
+    }
+    for name in hevc_synth::DEBLOCKED {
+        let file = hevc_synth::file(name);
+        defs.push(Def::ours(
+            area,
+            file.clone(),
+            &format!("src/hevc/refs_synth.rs stream(\"{name}\")"),
+            move || hevc_synth::stream(name),
+        ));
+        defs.push(decoded(
+            area,
+            &hevc_synth::decoded(name),
+            &file,
+            STRICT,
+            "yuv420p",
+        ));
     }
     for name in hevc::HVCC {
         defs.push(Def::fixture(
@@ -288,7 +320,7 @@ fn vp9_defs() -> Vec<Def> {
             defs.push(
                 Def::digest(
                     area,
-                    format!("{name}.pass1"),
+                    format!("{name}.pass1-log"),
                     FFMPEG,
                     args(&[raw_input(f.pix_fmt, f.size, "25"), first]),
                     sha,
@@ -328,14 +360,14 @@ fn vp9_defs() -> Vec<Def> {
             area,
             &format!("{name}.yuv"),
             &file,
-            &["-c:v", "vp9"],
+            &["-c:v", "vp9", "-err_detect", "explode", "-xerror"],
             "yuv420p",
         ));
         defs.push(decoded(
             area,
             &format!("{name}.libvpx.yuv"),
             &file,
-            &["-c:v", "libvpx-vp9"],
+            &["-c:v", "libvpx-vp9", "-xerror"],
             "yuv420p",
         ));
     }

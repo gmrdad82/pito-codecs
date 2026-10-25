@@ -375,3 +375,35 @@ fn a_failed_alpha_packet_never_holds_back_colour_frames() {
         }
     }
 }
+
+#[test]
+fn the_export_settings_encode_the_same_at_every_thread_count() {
+    let (w, h) = (192u32, 108u32);
+    let encode = |threads: usize| {
+        let mut enc = AlphaEncoder::new(EncoderConfig {
+            width: w,
+            height: h,
+            fps: (24, 1),
+            rate: Rate::Crf(31),
+            gop: 240,
+            threads,
+            aq: false,
+        })
+        .unwrap();
+        enc.set_color(2, false).unwrap();
+        let mut out = Vec::new();
+        for n in 0..6 {
+            let (f, a) = picture(w, h, n);
+            out.extend(enc.encode(&f, &a).unwrap());
+        }
+        out.extend(enc.flush().unwrap());
+        out.into_iter()
+            .map(|(p, a)| (p.data, a))
+            .collect::<Vec<_>>()
+    };
+    let one = encode(1);
+    assert!(!one.is_empty());
+    for threads in [2, 3, 8] {
+        assert!(encode(threads) == one, "{threads} threads change the stream");
+    }
+}

@@ -88,7 +88,6 @@ fn decode_units(dec: &mut Decoder, units: &[Vec<u8>]) -> Vec<Frame> {
     out
 }
 
-
 fn check_shape(name: &str, frames: &[Frame], f: &X265) {
     for (i, frame) in frames.iter().enumerate() {
         assert_eq!(
@@ -385,7 +384,6 @@ fn assert_feature(name: &str, x: &Facts) {
     }
 }
 
-
 #[test]
 fn feature_streams_bit_exact_against_ffmpeg() {
     let r = Refs::open(refs::AREA);
@@ -462,7 +460,6 @@ fn first_vcl_type(au: &[u8]) -> Option<u8> {
         .map(|n| (n[0] >> 1) & 0x3f)
         .find(|&t| t < 32)
 }
-
 
 fn decode_errors(units: &[Vec<u8>], threads: usize) -> Vec<String> {
     let mut dec = Decoder::with_threads(threads);
@@ -571,4 +568,67 @@ fn a_dropped_reference_picture_is_replaced_without_a_panic() {
             }
         }
     }
+}
+
+#[test]
+fn the_x265_sources_are_what_the_recorder_feeds_x265() {
+    for f in refs::all() {
+        let (w, h) = (f.size.0 as usize, f.size.1 as usize);
+        let samples = w * h + 2 * w.div_ceil(2) * h.div_ceil(2);
+        let bytes = refs::source_bytes(f);
+        let depth = if f.ten_bit { 2 } else { 1 };
+        assert_eq!(bytes.len(), samples * depth * f.frames as usize, "{}", f.name);
+        assert_eq!(refs::source(f.name).unwrap(), bytes, "{}", f.name);
+        if f.ten_bit {
+            assert!(
+                bytes
+                    .chunks_exact(2)
+                    .all(|s| u16::from_le_bytes([s[0], s[1]]) <= 1023),
+                "{}: a sample above 10 bits",
+                f.name
+            );
+        }
+    }
+    assert!(refs::source("nothing").is_err());
+    assert!(refs::find("nothing").is_err());
+    assert_eq!(refs::pix_fmt(true), "yuv420p10le");
+    assert_eq!(refs::pix_fmt(false), "yuv420p");
+}
+
+#[test]
+fn a_faded_source_starts_black() {
+    let f = refs::find("weightp_8bit").unwrap();
+    assert!(f.fade > 0 && !f.ten_bit);
+    let (w, h) = (f.size.0 as usize, f.size.1 as usize);
+    let bytes = refs::source_bytes(f);
+    let luma = w * h;
+    let chroma = (w / 2) * (h / 2);
+    assert!(bytes[..luma].iter().all(|&v| v == 16));
+    assert!(bytes[luma..luma + 2 * chroma].iter().all(|&v| v == 128));
+    let ten = refs::find("weightp_main10").unwrap();
+    let first = refs::source_bytes(ten);
+    assert!(
+        first[..2 * ten.size.0 as usize * ten.size.1 as usize]
+            .chunks_exact(2)
+            .all(|s| u16::from_le_bytes([s[0], s[1]]) >> 2 == 16)
+    );
+}
+
+#[test]
+fn x265_params_become_cli_flags() {
+    assert_eq!(
+        refs::x265_cli("a=1:b:c=-4"),
+        ["--a", "1", "--b", "--c", "-4"]
+    );
+    assert!(refs::x265_cli("").is_empty());
+}
+
+#[test]
+fn the_scaling_list_file_is_the_recorded_one() {
+    let r = Refs::open(refs::AREA);
+    let text = refs::scaling_list_text();
+    r.assert_digest(refs::SCALING_LIST, &crate::testref::sha256(text.as_bytes()));
+    assert_eq!(text.lines().count(), 72);
+    assert!(text.starts_with("INTRA4X4_LUMA =\n"));
+    assert!(text.contains("INTER32X32_CHROMAV_DC =\n"));
 }

@@ -128,6 +128,7 @@ fn crf_18_encode_plays_in_ffmpeg_and_decodes_back() {
     assert_eq!(pts, (0..frames.len() as i64).collect::<Vec<_>>());
 
     let stream = refs::to_annexb(&avcc, &packets).unwrap();
+    assert!(refs::crf18().unwrap() == stream, "crf18() is not this encode");
     r.assert_digest("crf18.h264", &crate::testref::sha256(&stream));
     let probed = String::from_utf8(r.bytes("crf18.probe")).unwrap();
     assert_eq!(probed.trim(), format!("h264,{w},{h},{}", frames.len()));
@@ -527,6 +528,7 @@ fn encoded_frames_carry_the_colour_tags_back_out() {
         let (avcc, packets) = refs::encode(refs::colour_config(n), &refs::colour_frames()).unwrap();
         assert_eq!(packets.len(), 6);
         let stream = refs::to_annexb(&avcc, &packets).unwrap();
+        assert!(refs::colour(n).unwrap() == stream, "colour({n}) is not this encode");
         let starts: Vec<usize> = stream
             .windows(3)
             .enumerate()
@@ -596,4 +598,19 @@ fn encoded_frames_carry_the_colour_tags_back_out() {
             "{text}"
         );
     }
+}
+
+#[test]
+fn the_x264_sources_are_what_the_recorder_feeds_x264() {
+    for s in &refs::X264_STREAMS {
+        let (w, h) = (s.size.0 as usize, s.size.1 as usize);
+        let bytes = refs::x264_source(s.name).unwrap();
+        let frame = w * h + 2 * w.div_ceil(2) * h.div_ceil(2);
+        assert_eq!(bytes.len(), frame * s.frames as usize, "{}", s.name);
+        assert_eq!(refs::x264(s.name).unwrap().name, s.name);
+        assert!(refs::FUZZ.iter().all(|n| refs::x264(n).is_ok()));
+    }
+    assert!(refs::x264("nothing").is_err());
+    assert!(refs::x264_source("nothing").is_err());
+    assert!(refs::to_annexb(&[1, 0x64, 0, 0x1f, 0xff, 0xe1], &[]).is_err());
 }

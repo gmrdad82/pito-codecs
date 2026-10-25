@@ -80,3 +80,14 @@ fn alpha_webm_round_trips_and_matches_libvpx_both_ways() {
     assert_eq!(alpha as u64, refs::LIBVPX_FRAMES);
     r.assert_digest(&format!("{}.yuva", refs::LIBVPX), &sha256(&got));
 }
+
+#[test]
+fn the_pinned_alpha_webm_is_what_the_recorder_makes() {
+    let r = Refs::open(refs::AREA);
+    let webm = refs::ours_webm().unwrap();
+    r.assert_digest(&format!("{}.webm", refs::OURS), &sha256(&webm));
+    let (w, h) = refs::SIZE;
+    let bytes = refs::source_bytes(refs::LIBVPX_FRAMES);
+    assert_eq!(bytes.len() as u64, u64::from(w * h * 4) * refs::LIBVPX_FRAMES);
+    assert_eq!(&bytes[..(w * h * 4) as usize], refs::source(0).data.as_slice());
+}

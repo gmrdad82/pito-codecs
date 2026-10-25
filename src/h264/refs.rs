@@ -1,4 +1,4 @@
-use pito_codecs::h264::{Color, Encoder, EncoderConfig};
+use pito_codecs::h264::{Color, Encoder, EncoderConfig, Profile};
 use pito_codecs::media::{Frame, Packet, PixelFormat, Rate, TimeBase};
 
 pub const AREA: &str = "h264";
@@ -16,7 +16,7 @@ pub const X264_STREAMS: [X264; 4] = [
         name: "baseline",
         size: (176, 144),
         frames: 10,
-        amp: 8,
+        amp: 4,
         opts: &["-profile:v", "baseline", "-g", "5", "-slices", "2"],
     },
     X264 {
@@ -29,7 +29,7 @@ pub const X264_STREAMS: [X264; 4] = [
     X264 {
         name: "high_bpyramid",
         size: (256, 160),
-        frames: 8,
+        frames: 10,
         amp: 6,
         opts: &[
             "-profile:v",
@@ -37,7 +37,7 @@ pub const X264_STREAMS: [X264; 4] = [
             "-bf",
             "3",
             "-g",
-            "5",
+            "10",
             "-x264-params",
             "b-pyramid=normal:weightp=2:direct=temporal:ref=4",
         ],
@@ -46,7 +46,7 @@ pub const X264_STREAMS: [X264; 4] = [
         name: "high_crop_slices",
         size: (238, 158),
         frames: 8,
-        amp: 6,
+        amp: 4,
         opts: &[
             "-profile:v",
             "high",
@@ -227,4 +227,112 @@ pub fn to_annexb(avcc: &[u8], packets: &[Packet]) -> Result<Vec<u8>, String> {
         }
     }
     Ok(out)
+}
+
+pub const CUT: i64 = 10;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Scene {
+    Flat,
+    Gradient,
+    Noise,
+    Motion,
+    Cut,
+}
+
+fn hash(x: usize, y: usize, i: i64, k: usize) -> u32 {
+    let mut s = (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+        ^ (i as u64).wrapping_mul(0x1656_67B1_9E37_79F9)
+        ^ k as u64;
+    s ^= s >> 29;
+    s = s.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    s ^= s >> 32;
+    s as u32
+}
+
+fn sample(scene: Scene, x: usize, y: usize, pw: usize, ph: usize, i: i64, k: usize) -> u8 {
+    let noise = |amp: u32| hash(x, y, i, k) % (2 * amp + 1);
+    let v = match scene {
+        Scene::Flat => [96, 120, 140][k],
+        Scene::Gradient => (x * 200 / pw.max(1) + y * 50 / ph.max(1) + 2 * i as usize) as u32,
+        Scene::Noise => 108 + noise(20),
+        Scene::Motion => {
+            let (mx, my) = (x as i64 + 3 * i, y as i64 + 2 * i);
+            let checker = ((mx / 8 + my / 8) % 2) as u32;
+            50 + checker * 90 + ((x + y) % 7) as u32 + noise(6)
+        }
+        Scene::Cut => {
+            if i < CUT {
+                return sample(Scene::Gradient, x, y, pw, ph, i, k);
+            }
+            255 - (x * 180 / pw.max(1)) as u32
+        }
+    };
+    v.min(255) as u8
+}
+
+pub fn clip(scene: Scene, w: u32, h: u32, n: i64) -> Vec<Frame> {
+    (0..n)
+        .map(|i| {
+            let mut f = Frame::new(PixelFormat::Yuv420p8, w, h, i, TimeBase::new(1, 30));
+            for (k, p) in f.planes.iter_mut().enumerate() {
+                for y in 0..p.height {
+                    for x in 0..p.width {
+                        p.data[y * p.stride + x] = sample(scene, x, y, p.width, p.height, i, k);
+                    }
+                }
+            }
+            f
+        })
+        .collect()
+}
+
+pub fn config(w: u32, h: u32, profile: Profile, rate: Rate) -> EncoderConfig {
+    EncoderConfig {
+        width: w,
+        height: h,
+        profile,
+        rate,
+        gop: 250,
+        threads: 2,
+        ..EncoderConfig::default()
+    }
+}
+
+pub fn odd_config(w: u32, h: u32, profile: Profile) -> EncoderConfig {
+    EncoderConfig {
+        gop: 3,
+        ..config(w, h, profile, Rate::Crf(23))
+    }
+}
+
+pub fn scene_cut_config() -> EncoderConfig {
+    EncoderConfig {
+        gop: 60,
+        ..config(160, 128, Profile::High, Rate::Bitrate(600))
+    }
+}
+
+pub const PINNED: [&str; 3] = ["odd_2x2_Baseline", "odd_100x58_High", "scene_cut"];
+
+pub fn pinned_case(name: &str) -> Option<(EncoderConfig, Vec<Frame>)> {
+    Some(match name {
+        "odd_2x2_Baseline" => (
+            odd_config(2, 2, Profile::Baseline),
+            clip(Scene::Motion, 2, 2, 5),
+        ),
+        "odd_100x58_High" => (
+            odd_config(100, 58, Profile::High),
+            clip(Scene::Motion, 100, 58, 5),
+        ),
+        "scene_cut" => (scene_cut_config(), clip(Scene::Cut, 160, 128, CUT + 6)),
+        _ => return None,
+    })
+}
+
+pub fn pinned(name: &str) -> Result<Vec<u8>, String> {
+    let (config, frames) = pinned_case(name).ok_or(format!("no pinned H.264 encode '{name}'"))?;
+    let (avcc, packets) = encode(config, &frames)?;
+    to_annexb(&avcc, &packets)
 }
