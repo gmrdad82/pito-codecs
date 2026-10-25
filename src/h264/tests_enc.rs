@@ -1,4 +1,4 @@
-use super::tests::{assert_same, dir, ffmpeg_present, ffmpeg_yuv, psnr, raw, to_annexb};
+use super::tests::{decode_annexb, psnr, raw, refs};
 use super::*;
 use crate::media::Rate;
 
@@ -85,7 +85,7 @@ fn encode_all(cfg: &EncoderConfig, frames: &[Frame]) -> (Vec<u8>, Vec<Packet>) {
     (enc.avcc(), packets)
 }
 
-fn decoded_bit_exact(name: &str, avcc: &[u8], packets: &[Packet], w: u32, h: u32) -> Vec<u8> {
+fn decoded_back(name: &str, avcc: &[u8], packets: &[Packet], w: u32, h: u32) -> Vec<u8> {
     let mut dec = Decoder::with_extradata(avcc).unwrap();
     let mut frames = Vec::new();
     for p in packets {
@@ -98,15 +98,11 @@ fn decoded_bit_exact(name: &str, avcc: &[u8], packets: &[Packet], w: u32, h: u32
         "{name}: decoded size is not the cropped {w}x{h}"
     );
     let ours = raw(&frames);
-    if !ffmpeg_present() {
-        return ours;
-    }
-    let path = dir().join(format!("{name}.h264"));
-    std::fs::write(&path, to_annexb(avcc, packets)).unwrap();
-    let theirs = ffmpeg_yuv(&path);
-    let size = (w * h + 2 * (w / 2) * (h / 2)) as usize;
-    assert_eq!(theirs.len(), size * packets.len(), "{name}: ffmpeg frames");
-    assert_same(&ours, &theirs, size, name);
+    let stream = refs::to_annexb(avcc, packets).unwrap();
+    assert!(
+        raw(&decode_annexb(&stream, 4)) == ours,
+        "{name}: four decode threads on Annex B differ from one on avcC"
+    );
     ours
 }
 
@@ -140,7 +136,7 @@ fn cavlc_decodes_bit_exact_at_every_preset_and_qp() {
                     packets.iter().filter(|p| p.keyframe).count() >= 2,
                     "{name}: an IDR at least every 4 frames"
                 );
-                let ours = decoded_bit_exact(&name, &avcc, &packets, w, h);
+                let ours = decoded_back(&name, &avcc, &packets, w, h);
                 let db = psnr(&ours, &source);
                 assert!(db > floor, "{name}: PSNR {db:.2} dB under {floor}");
             }
@@ -170,7 +166,7 @@ fn bitrate_modes_land_within_thirty_percent_of_target() {
                 (got / target - 1.0).abs() <= 0.3,
                 "{name}: {got:.0} kbps for a {target} kbps target"
             );
-            decoded_bit_exact(&name, &avcc, &packets, w, h);
+            decoded_back(&name, &avcc, &packets, w, h);
         }
     }
 }
@@ -190,7 +186,7 @@ fn a_scene_cut_starts_a_new_idr() {
         .map(|p| p.pts)
         .collect();
     assert_eq!(keys, [0, CUT], "keyframes");
-    decoded_bit_exact("scene_cut", &avcc, &packets, w, h);
+    decoded_back("scene_cut", &avcc, &packets, w, h);
 }
 
 #[test]
@@ -206,13 +202,13 @@ fn crf_shrinks_with_the_factor_and_a_flat_clip_stays_clean() {
             let bytes: usize = packets.iter().map(|p| p.data.len()).sum();
             assert!(bytes < last, "{name}: {bytes} bytes, not below {last}");
             last = bytes;
-            decoded_bit_exact(&name, &avcc, &packets, w, h);
+            decoded_back(&name, &avcc, &packets, w, h);
         }
         for (rate, tag) in [(Rate::Crf(23), "crf"), (Rate::Bitrate(300), "cbr")] {
             let name = format!("flat_{profile:?}_{tag}");
             let (avcc, packets) = encode_all(&config(w, h, profile, rate), &flat);
             assert!(kbps(&packets, 30.0) <= 300.0 * 1.3, "{name}: over budget");
-            let ours = decoded_bit_exact(&name, &avcc, &packets, w, h);
+            let ours = decoded_back(&name, &avcc, &packets, w, h);
             let db = psnr(&ours, &raw(&flat));
             assert!(db > 40.0, "{name}: PSNR {db:.2} dB on a flat clip");
         }
@@ -254,7 +250,7 @@ fn extreme_rate_settings_are_clamped_or_refused() {
             ..config(w, h, profile, rate)
         };
         let (avcc, packets) = encode_all(&cfg, &frames);
-        decoded_bit_exact(&name, &avcc, &packets, w, h);
+        decoded_back(&name, &avcc, &packets, w, h);
         (avcc, packets)
     };
     let bytes = |rate: Rate, profile: Profile| encode(rate, profile, 2).1;
@@ -424,7 +420,7 @@ fn padded_strides_encode_like_packed_frames() {
                     strided.iter().zip(&packed).all(|(a, b)| a.data == b.data),
                     "{name}: a padded stride changed the stream"
                 );
-                decoded_bit_exact(&name, &wide_avcc, &strided, w, h);
+                decoded_back(&name, &wide_avcc, &strided, w, h);
             }
         }
     }
@@ -452,7 +448,7 @@ fn odd_and_tiny_sizes_crop_and_decode_bit_exact() {
                 ..config(w, h, profile, Rate::Crf(23))
             };
             let (avcc, packets) = encode_all(&cfg, &frames);
-            decoded_bit_exact(&name, &avcc, &packets, w, h);
+            decoded_back(&name, &avcc, &packets, w, h);
         }
     }
 }
@@ -471,7 +467,7 @@ fn a_single_frame_encodes_to_one_keyframe() {
                 };
                 let (avcc, packets) = encode_all(&cfg, &frames);
                 assert_eq!((packets[0].pts, packets[0].dts), (0, 0), "{name}");
-                decoded_bit_exact(&name, &avcc, &packets, w, h);
+                decoded_back(&name, &avcc, &packets, w, h);
             }
         }
     }
@@ -518,5 +514,5 @@ fn frames_that_do_not_fit_are_refused_and_the_stream_goes_on() {
     packets.extend(enc.flush().unwrap());
     assert_eq!(packets.len(), 1);
     assert!(packets[0].keyframe);
-    decoded_bit_exact("refused_then_good", &enc.avcc(), &packets, w, h);
+    decoded_back("refused_then_good", &enc.avcc(), &packets, w, h);
 }

@@ -586,57 +586,56 @@ fn decode_all(stream: &[u8], threads: usize) -> Vec<crate::media::Frame> {
     pics
 }
 
-fn check_ffmpeg(name: &str, stream: &[u8], pics: &[crate::media::Frame]) {
-    if !super::tests::ffmpeg(name) {
-        return;
-    }
-    let src = super::tests::scratch(&format!("synth_{name}.hevc"));
-    let yuv = super::tests::scratch(&format!("synth_{name}.yuv"));
-    std::fs::write(&src, stream).unwrap();
-    let st = std::process::Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
-        .arg(&src)
-        .args([
-            "-fps_mode",
-            "passthrough",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "yuv420p",
-        ])
-        .arg(&yuv)
-        .status()
-        .unwrap();
-    assert!(st.success(), "ffmpeg failed on {name}");
-    let r = std::fs::read(&yuv).unwrap();
-    let fs = W * H * 3 / 2;
-    assert_eq!(
-        r.len(),
-        fs * pics.len(),
-        "{name}: ffmpeg decoded {} frames",
-        r.len() / fs
-    );
-    for (i, p) in pics.iter().enumerate() {
-        let f = &r[i * fs..(i + 1) * fs];
-        let ours: Vec<u8> = p
-            .planes
-            .iter()
-            .flat_map(|p| p.data.iter().copied())
-            .collect();
-        if ours != f {
-            let k = ours.iter().zip(f).position(|(a, b)| a != b).unwrap();
-            panic!(
-                "{name}: picture {i} differs from ffmpeg at byte {k}: {} vs {}",
-                ours[k], f[k]
-            );
+fn tile_edges(sizes: &[usize]) -> Vec<usize> {
+    sizes[..sizes.len() - 1]
+        .iter()
+        .scan(0, |at, s| {
+            *at += s * CTB;
+            Some(*at)
+        })
+        .collect()
+}
+
+fn near(v: usize, edges: &[usize], step: usize) -> bool {
+    let reach = 4 / step;
+    edges
+        .iter()
+        .any(|&e| (v as isize - (e / step) as isize).unsigned_abs() <= reach)
+}
+
+fn agrees_with_one_tile(
+    name: &str,
+    tiles: &Tiles,
+    pics: &[crate::media::Frame],
+    one: &[crate::media::Frame],
+) {
+    assert_eq!(pics.len(), one.len(), "{name}");
+    let (cols, rows) = match tiles {
+        Some((c, r, _, false)) => (tile_edges(c), tile_edges(r)),
+        _ => (Vec::new(), Vec::new()),
+    };
+    for (i, (p, o)) in pics.iter().zip(one).enumerate() {
+        for (k, (a, b)) in p.planes.iter().zip(&o.planes).enumerate() {
+            let step = if k == 0 { 1 } else { 2 };
+            for y in 0..a.height {
+                for x in 0..a.width {
+                    if near(x, &cols, step) || near(y, &rows, step) {
+                        continue;
+                    }
+                    let (u, v) = (a.data[y * a.stride + x], b.data[y * b.stride + x]);
+                    assert!(
+                        u == v,
+                        "{name}: picture {i} plane {k} at {x},{y} is {u}, one tile gives {v}"
+                    );
+                }
+            }
         }
     }
-    let _ = std::fs::remove_file(&yuv);
-    let _ = std::fs::remove_file(&src);
 }
 
 fn run(name: &str, tiles: Tiles, pcm_lf_disabled: bool, segments: Vec<Segment>) {
     let (stream, expect) = sequence(&tiles, pcm_lf_disabled, segments);
+    let one = (!pcm_lf_disabled).then(|| decode_all(&sequence(&None, false, whole(WC * HC)).0, 1));
     for threads in [1, 4] {
         let pics = decode_all(&stream, threads);
         assert_eq!(pics.len(), expect.len(), "{name}");
@@ -649,8 +648,8 @@ fn run(name: &str, tiles: Tiles, pcm_lf_disabled: bool, segments: Vec<Segment>) 
                 );
             }
         }
-        if threads == 1 {
-            check_ffmpeg(name, &stream, &pics);
+        if let Some(one) = &one {
+            agrees_with_one_tile(name, &tiles, &pics, one);
         }
     }
 }

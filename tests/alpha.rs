@@ -10,45 +10,17 @@
     feature = "vp9"
 ))]
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+#[path = "../src/testref.rs"]
+mod testref;
 
-use pito_codecs::media::{
-    Canvas, Codec, ExportOptions, Prefs, Rgba, decode_alpha, export_rgba, first_frame, probe,
-};
+#[allow(dead_code)]
+#[path = "../src/vp9/refs_alpha.rs"]
+mod refs;
 
-const W: u32 = 192;
-const H: u32 = 108;
-const FRAMES: u64 = 24;
+use std::path::Path;
 
-fn dir() -> PathBuf {
-    let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/test-media");
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
-
-fn libvpx() -> bool {
-    Command::new("ffmpeg")
-        .args(["-hide_banner", "-decoders"])
-        .output()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("libvpx-vp9"))
-}
-
-fn source(n: u64) -> Rgba {
-    let mut img = Rgba::new(W, H);
-    for y in 0..H as usize {
-        for x in 0..W as usize {
-            let o = (y * W as usize + x) * 4;
-            let cx = 40 + n as i64 * 4;
-            let d = ((x as i64 - cx).pow(2) + (y as i64 - 54).pow(2)) as f64;
-            img.data[o] = (x * 255 / W as usize) as u8;
-            img.data[o + 1] = (y * 255 / H as usize) as u8;
-            img.data[o + 2] = ((x + y + n as usize * 8) % 256) as u8;
-            img.data[o + 3] = (255.0 - d.sqrt() * 4.0).clamp(0.0, 255.0) as u8;
-        }
-    }
-    img
-}
+use pito_codecs::media::{Prefs, decode_alpha, first_frame, probe};
+use testref::{Refs, sha256};
 
 fn ours(path: &Path) -> (Vec<u8>, usize) {
     let mut out = Vec::new();
@@ -69,49 +41,21 @@ fn ours(path: &Path) -> (Vec<u8>, usize) {
     (out, alpha)
 }
 
-fn libvpx_yuva(path: &Path) -> Vec<u8> {
-    let o = Command::new("ffmpeg")
-        .args(["-v", "error", "-c:v", "libvpx-vp9", "-i"])
-        .arg(path)
-        .args(["-f", "rawvideo", "-pix_fmt", "yuva420p", "-"])
-        .output()
-        .unwrap();
-    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    o.stdout
-}
-
 #[test]
 fn alpha_webm_round_trips_and_matches_libvpx_both_ways() {
-    let out = dir().join("alpha-round-trip.webm");
-    let opts = ExportOptions {
-        video: Codec::Vp9,
-        ..ExportOptions::default()
-    };
-    let canvas = Canvas {
-        width: W,
-        height: H,
-        fps: (24, 1),
-        frames: Some(FRAMES),
-    };
-    let done = export_rgba(
-        &out,
-        canvas,
-        true,
-        opts,
-        |n, _| Ok(Some(source(n))),
-        |_| true,
-    )
-    .unwrap();
-    assert_eq!(done.frames, FRAMES);
+    let r = Refs::open(refs::AREA);
+    let (w, h) = refs::SIZE;
+    let out = testref::scratch(refs::AREA).join(format!("{}.webm", refs::OURS));
+    assert_eq!(refs::export_ours(&out).unwrap(), refs::FRAMES);
     assert!(probe(&out, &Prefs::default()).unwrap().alpha);
     let (yuva, alpha) = ours(&out);
-    assert_eq!(alpha as u64, FRAMES);
-    let size = (W * H) as usize;
+    assert_eq!(alpha as u64, refs::FRAMES);
+    let size = (w * h) as usize;
     let frame = size * 5 / 2;
     let mut worst = f64::MAX;
-    for n in 0..FRAMES {
+    for n in 0..refs::FRAMES {
         let at = n as usize * frame + size * 3 / 2;
-        let src = source(n);
+        let src = refs::source(n);
         let mse = yuva[at..at + size]
             .iter()
             .zip(src.data.chunks_exact(4))
@@ -124,32 +68,15 @@ fn alpha_webm_round_trips_and_matches_libvpx_both_ways() {
     let still = first_frame(&out, 0, &Prefs::default()).unwrap();
     assert!(still.data.chunks_exact(4).any(|p| p[3] < 16));
     assert!(still.data.chunks_exact(4).any(|p| p[3] > 240));
-    if !libvpx() {
-        return;
-    }
-    assert!(
-        libvpx_yuva(&out) == yuva,
-        "libvpx reads our alpha WebM differently"
+    r.assert_digest(
+        &format!("{}.webm", refs::OURS),
+        &sha256(&std::fs::read(&out).unwrap()),
     );
-    let theirs = dir().join("alpha-libvpx.webm");
-    let raw = dir().join("alpha-source.rgba");
-    let bytes: Vec<u8> = (0..FRAMES).flat_map(|n| source(n).data).collect();
-    std::fs::write(&raw, bytes).unwrap();
-    let made = Command::new("ffmpeg")
-        .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba"])
-        .args(["-s", &format!("{W}x{H}"), "-r", "24", "-i"])
-        .arg(&raw)
-        .args(["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-crf", "30"])
-        .args(["-b:v", "0", "-deadline", "good", "-cpu-used", "4"])
-        .arg(&theirs)
-        .status()
-        .unwrap();
-    assert!(made.success());
+    r.assert_digest(&format!("{}.yuva", refs::OURS), &sha256(&yuva));
+
+    let theirs = r.path(&format!("{}.webm", refs::LIBVPX));
     assert!(probe(&theirs, &Prefs::default()).unwrap().alpha);
     let (got, alpha) = ours(&theirs);
-    assert_eq!(alpha as u64, FRAMES);
-    assert!(
-        got == libvpx_yuva(&theirs),
-        "a libvpx alpha WebM decodes differently"
-    );
+    assert_eq!(alpha as u64, refs::LIBVPX_FRAMES);
+    r.assert_digest(&format!("{}.yuva", refs::LIBVPX), &sha256(&got));
 }
