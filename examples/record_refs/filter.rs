@@ -114,7 +114,11 @@ fn orders() -> Vec<Def> {
     defs.push(from_yuv(
         refs::SCALE_CENTRE.into(),
         refs::SCALE_SIZE,
-        "zscale=w=48:h=36:filter=lanczos:chromal=center:chromalin=center",
+        &format!(
+            "zscale=w={}:h={}:filter=lanczos:chromal=center:chromalin=center",
+            refs::CENTRE_SIZE.0,
+            refs::CENTRE_SIZE.1
+        ),
         "yuv420p",
     ));
     defs

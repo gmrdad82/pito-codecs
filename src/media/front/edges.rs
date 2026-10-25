@@ -37,10 +37,18 @@ fn ready(codec: Codec) -> bool {
     true
 }
 
-fn h264_1080p() -> PathBuf {
-    let mut clip = Clip::new(refs::BIG, (refs::FPS, 1), refs::FRAMES);
+fn h264_clip(size: (u32, u32), name: &str) -> PathBuf {
+    let mut clip = Clip::new(size, (refs::FPS, 1), refs::FRAMES);
     clip.gop = refs::GOP;
-    clip.make(refs::AREA, "edges-h264-1080p.mp4")
+    clip.make(refs::AREA, name)
+}
+
+fn h264_1080p() -> PathBuf {
+    h264_clip(refs::BIG, "edges-h264-1080p.mp4")
+}
+
+fn h264_small() -> PathBuf {
+    h264_clip(refs::SMALL, "edges-h264-small.mp4")
 }
 
 fn fixture(name: &str) -> PathBuf {
@@ -114,7 +122,11 @@ fn sps_look(codec: Codec, nal: &[u8]) -> Look {
         _ => return None,
     };
     let (sar, full_range, primaries, transfer, matrix) = vui;
-    let sar = if sar.0 == 0 || sar.1 == 0 { (0, 0) } else { sar };
+    let sar = if sar.0 == 0 || sar.1 == 0 {
+        (0, 0)
+    } else {
+        sar
+    };
     Some((
         sar,
         Color {
@@ -174,23 +186,87 @@ fn frame_looks(path: &Path, codec: Codec) -> Vec<Look> {
                 look = sps_look(codec, nal);
             }
         }
-        looks.push(look);
+        looks.push(plain(look));
     }
     looks
 }
 
-fn decodes_clean(path: &Path) -> u64 {
+fn plain(look: Look) -> Look {
+    look.or(Some(((0, 0), Color::UNKNOWN)))
+}
+
+fn lumas(path: &Path) -> Vec<Vec<u8>> {
     let prefs = Prefs {
         decode: Choice::Cpu,
         ..Prefs::default()
     };
     let video = decode_video(path, 0.0, None, &prefs).unwrap();
-    let mut n = 0;
+    let mut out = Vec::new();
     for f in video {
-        f.unwrap_or_else(|e| panic!("{} frame {n}: {e}", path.display()));
-        n += 1;
+        let f = f.unwrap_or_else(|e| panic!("{} frame {}: {e}", path.display(), out.len()));
+        let p = &f.planes[0];
+        let mut y = Vec::with_capacity(p.width * p.height);
+        for row in p.data.chunks(p.stride.max(1)).take(p.height) {
+            y.extend_from_slice(&row[..p.width.min(row.len())]);
+        }
+        out.push(y);
     }
-    n
+    out
+}
+
+fn decodes_clean(path: &Path) -> u64 {
+    lumas(path).len() as u64
+}
+
+#[derive(Debug, PartialEq)]
+struct Matched {
+    exact: u64,
+    worst: f64,
+}
+
+fn match_source(source: &[Vec<u8>], cut: &[Vec<u8>]) -> Matched {
+    let mut from = 0;
+    let mut m = Matched {
+        exact: 0,
+        worst: f64::INFINITY,
+    };
+    for (n, frame) in cut.iter().enumerate() {
+        let end = (from + refs::SEARCH).min(source.len());
+        let best = (from..end)
+            .map(|j| {
+                let s = &source[j];
+                let db = if s == frame {
+                    f64::INFINITY
+                } else if s.len() != frame.len() {
+                    0.0
+                } else {
+                    crate::testref::psnr(frame, s)
+                };
+                (j, db)
+            })
+            .fold(None, |b: Option<(usize, f64)>, c| match b {
+                Some(b) if b.1 >= c.1 => Some(b),
+                _ => Some(c),
+            });
+        let Some((j, db)) = best else {
+            panic!("cut frame {n} has no source frame left after {from}");
+        };
+        if db.is_infinite() {
+            m.exact += 1;
+        }
+        m.worst = m.worst.min(db);
+        from = j + 1;
+    }
+    m
+}
+
+fn matches_the_source(src: &Path, e: &Exported, what: &str) {
+    let got = lumas(&e.path);
+    assert_eq!(got.len() as u64, e.frames, "{what} doesn't decode whole");
+    let m = match_source(&lumas(src), &got);
+    eprintln!("{what}: {} frames exact, worst {:.1} dB", m.exact, m.worst);
+    assert!(m.exact >= e.copied, "{what}: {m:?}, {} copied", e.copied);
+    assert!(m.worst >= refs::EDGE_PSNR, "{what}: {m:?}");
 }
 
 fn per_edge(e: &Exported) -> f64 {
@@ -217,12 +293,8 @@ fn source_look(src: &Path, codec: Codec, tag: &str) -> Look {
     first
 }
 
-fn keeps_the_look(e: &Exported, codec: Codec, first: Look, what: &str) {
-    assert_eq!(
-        decodes_clean(&e.path),
-        e.frames,
-        "{what} doesn't decode clean"
-    );
+fn keeps_the_look(src: &Path, e: &Exported, codec: Codec, first: Look, what: &str) {
+    matches_the_source(src, e, what);
     let got = frame_looks(&e.path, codec);
     assert_eq!(got.len() as u64, e.frames, "{what}");
     for (n, t) in got.iter().enumerate() {
@@ -253,7 +325,7 @@ fn smart_cut_on_va(src: &Path, codec: Codec, tag: &str) {
             e.frames
         );
         assert!(e.sessions.edges as usize >= refs::PIECES, "{tag} {label}");
-        keeps_the_look(e, codec, first, &format!("{tag} {label}"));
+        keeps_the_look(src, e, codec, first, &format!("{tag} {label}"));
     }
     assert_eq!(kept.frames, fresh.frames);
 
@@ -299,7 +371,7 @@ fn tags_on_va(src: &Path, codec: Codec, tag: &str) {
     assert_eq!(e.video.route, Route::Gpu, "{tag}: {:?}", e.reasons);
     assert!(e.copied > 0 && e.encoded > 0, "{tag}");
     assert_eq!(e.sessions.refreshed, 0, "{tag}: {:?}", e.reasons);
-    keeps_the_look(&e, codec, first, tag);
+    keeps_the_look(src, &e, codec, first, tag);
 }
 
 #[test]
@@ -323,11 +395,7 @@ fn an_h264_cut_of_an_untagged_source_with_no_aspect_leaves_its_edges_untagged() 
     if !ready(Codec::H264) {
         return;
     }
-    tags_on_va(
-        &fixture(refs::H264_UNTAGGED),
-        Codec::H264,
-        "h264-untagged",
-    );
+    tags_on_va(&fixture(refs::H264_UNTAGGED), Codec::H264, "h264-untagged");
 }
 
 #[test]
@@ -347,11 +415,7 @@ fn an_hevc_cut_of_an_untagged_source_with_no_aspect_leaves_its_edges_untagged() 
     if !ready(Codec::Hevc) {
         return;
     }
-    tags_on_va(
-        &fixture(refs::HEVC_UNTAGGED),
-        Codec::Hevc,
-        "hevc-untagged",
-    );
+    tags_on_va(&fixture(refs::HEVC_UNTAGGED), Codec::Hevc, "hevc-untagged");
 }
 
 #[test]
@@ -370,29 +434,99 @@ fn an_hevc_cut_of_an_anamorphic_full_range_source_keeps_its_aspect_and_range() {
 fn the_edge_fixtures_carry_the_looks_they_were_recorded_with() {
     for f in &refs::FIXTURES {
         let codec = if f.hevc { Codec::Hevc } else { Codec::H264 };
-        let look = source_look(&fixture(f.name), codec, f.name);
+        let Some((sar, color)) = source_look(&fixture(f.name), codec, f.name) else {
+            panic!("{}: no look", f.name);
+        };
         let full = f.color.contains(&"pc");
         let anamorphic = f.sar == "8/9" || f.sar == "4/3";
-        match look {
-            Some((sar, color)) => {
-                assert_eq!(anamorphic, sar != (0, 0) && sar != (1, 1), "{}: {sar:?}", f.name);
-                assert_eq!(color.full_range, full, "{}", f.name);
-                assert_eq!(color.described(), !f.color.is_empty(), "{}", f.name);
-            }
-            None => assert!(!anamorphic && f.color.is_empty(), "{}: no VUI", f.name),
-        }
-        assert!(decodes_clean(&fixture(f.name)) == refs::FRAMES, "{}", f.name);
+        assert_eq!(
+            anamorphic,
+            sar != (0, 0) && sar != (1, 1),
+            "{}: {sar:?}",
+            f.name
+        );
+        assert_eq!(color.full_range, full, "{}", f.name);
+        assert_eq!(color.described(), !f.color.is_empty(), "{}", f.name);
+        assert_eq!(decodes_clean(&fixture(f.name)), refs::FRAMES, "{}", f.name);
     }
 }
 
 #[test]
-fn the_h264_clip_is_tagged_bt709_and_decodes_whole() {
-    let src = h264_1080p();
-    let look = source_look(&src, Codec::H264, "h264-1080p");
-    if let Some((_, color)) = look {
-        assert!(!color.full_range);
-    }
+fn the_small_h264_clip_is_tagged_bt709_tv_with_no_aspect_and_decodes_whole() {
+    let src = h264_small();
+    let look = source_look(&src, Codec::H264, "h264-small");
+    assert_eq!(look, Some(((0, 0), Color::BT709)));
     assert_eq!(decodes_clean(&src), refs::FRAMES);
+}
+
+#[test]
+fn a_missing_vui_reads_as_untagged_with_no_aspect() {
+    assert_eq!(plain(None), Some(((0, 0), Color::UNKNOWN)));
+    let tagged = Some(((8, 9), Color::BT709));
+    assert_eq!(plain(tagged), tagged);
+}
+
+#[test]
+fn a_cut_matches_its_source_frame_by_frame() {
+    let src: Vec<Vec<u8>> = (0..8u8).map(|n| vec![n * 20; 64]).collect();
+    let copied = vec![
+        src[0].clone(),
+        src[1].clone(),
+        src[3].clone(),
+        src[4].clone(),
+    ];
+    assert_eq!(
+        match_source(&src, &copied),
+        Matched {
+            exact: 4,
+            worst: f64::INFINITY
+        }
+    );
+
+    let mut edge = src[5].clone();
+    edge[0] ^= 1;
+    let m = match_source(&src, &[src[2].clone(), edge]);
+    assert_eq!(m.exact, 1);
+    assert!(m.worst > 40.0 && m.worst.is_finite(), "{m:?}");
+
+    let wrong = match_source(&src, &[vec![255; 64]]);
+    assert_eq!(wrong.exact, 0);
+    assert!(wrong.worst < refs::EDGE_PSNR, "{wrong:?}");
+
+    let short = match_source(&src, &[vec![0; 32]]);
+    assert_eq!(short.worst, 0.0);
+}
+
+#[test]
+fn a_cut_that_runs_past_its_source_is_refused() {
+    let src = vec![vec![1u8; 16], vec![2u8; 16]];
+    let caught = std::panic::catch_unwind(|| {
+        match_source(&src, &[src[0].clone(), src[1].clone(), src[1].clone()])
+    });
+    assert!(caught.is_err());
+}
+
+#[test]
+fn a_cut_that_jumps_past_the_search_window_loses_its_match() {
+    let src: Vec<Vec<u8>> = (0..12u8).map(|n| vec![n * 20; 16]).collect();
+    let far = src[refs::SEARCH + 1].clone();
+    let m = match_source(&src, &[far]);
+    assert_eq!(m.exact, 0, "{m:?}");
+}
+
+#[test]
+fn the_recorded_commands_tag_each_fixture_as_named() {
+    for f in &refs::FIXTURES {
+        let a = refs::args(f);
+        assert_eq!(a.last().map(String::as_str), Some("{out}"), "{}", f.name);
+        assert!(a.contains(&format!("setsar={}", f.sar)), "{}", f.name);
+        assert_eq!(a.iter().any(|s| s == "hvc1"), f.hevc, "{}", f.name);
+        assert_eq!(a.iter().any(|s| s == "libx265"), f.hevc, "{}", f.name);
+        assert_eq!(a.iter().any(|s| s == "libx264"), !f.hevc, "{}", f.name);
+        let tail = &a[a.len() - 1 - f.color.len()..a.len() - 1];
+        assert_eq!(tail, f.color, "{}", f.name);
+        assert!(a.contains(&refs::source()), "{}", f.name);
+    }
 }
 
 #[test]

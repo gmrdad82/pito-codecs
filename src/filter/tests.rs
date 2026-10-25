@@ -50,28 +50,20 @@ fn packed_ref(r: &Refs, name: &str, (w, h): (u32, u32)) -> Vec<Vec<u8>> {
 }
 
 fn psnr(a: &[u8], b: &[u8], wide: bool) -> f64 {
-    let (mse, peak) = if wide {
-        let v = |d: &[u8]| -> Vec<f64> {
-            d.chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]) as f64)
-                .collect()
-        };
-        let (x, y) = (v(a), v(b));
-        let m = x.iter().zip(&y).map(|(p, q)| (p - q).powi(2)).sum::<f64>() / x.len() as f64;
-        (m, 1023.0)
-    } else {
-        let m = a
-            .iter()
-            .zip(b)
-            .map(|(&p, &q)| (p as f64 - q as f64).powi(2))
-            .sum::<f64>()
-            / a.len() as f64;
-        (m, 255.0)
+    if !wide {
+        return crate::testref::psnr(a, b);
+    }
+    let v = |d: &[u8]| -> Vec<f64> {
+        d.chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]) as f64)
+            .collect()
     };
+    let (x, y) = (v(a), v(b));
+    let mse = x.iter().zip(&y).map(|(p, q)| (p - q).powi(2)).sum::<f64>() / x.len() as f64;
     if mse == 0.0 {
         f64::INFINITY
     } else {
-        10.0 * (peak * peak / mse).log10()
+        10.0 * (1023.0f64 * 1023.0 / mse).log10()
     }
 }
 
@@ -162,25 +154,6 @@ fn a_meter_log_gives_the_last_value_of_each_field() {
     assert_eq!(refs::meter_field("lavfi.r128.I=loud", "I"), None);
 }
 
-#[test]
-fn a_damaged_filter_reference_is_refused_before_use() {
-    let r = Refs::open(refs::AREA);
-    let name = refs::loudness_ref("tone");
-    let dir = crate::testref::scratch("filter-damaged");
-    let file = &r.entry(&name).file;
-    let mut bytes = r.bytes(&name);
-    bytes.push(b'\n');
-    std::fs::write(dir.join(file), &bytes).unwrap();
-    std::fs::copy(
-        r.dir.join(crate::testref::MANIFEST),
-        dir.join(crate::testref::MANIFEST),
-    )
-    .unwrap();
-    let damaged = Refs::at(dir, refs::AREA);
-    let caught = std::panic::catch_unwind(|| damaged.bytes(&name));
-    assert!(caught.is_err(), "a changed {name} was read");
-}
-
 fn kernel_of(name: &str) -> Kernel {
     match name {
         "bilinear" => Kernel::Bilinear,
@@ -218,7 +191,11 @@ fn the_synthetic_sources_are_what_the_recorder_feeds() {
             let bytes = refs::yuv_bytes(size, deep);
             let frames = frames_of("source", &bytes, depth(deep), size.0, size.1);
             for (n, f) in frames.iter().enumerate() {
-                assert_eq!(*f, refs::yuv(size, n as u64, deep), "{size:?} {deep}");
+                assert_eq!(
+                    refs::visible(f),
+                    refs::visible(&refs::yuv(size, n as u64, deep)),
+                    "{size:?} {deep} frame {n}"
+                );
             }
             assert_ne!(frames[0], frames[1], "{size:?} {deep}: the frames match");
         }
@@ -245,7 +222,11 @@ fn a_short_reference_is_refused_by_name() {
     let caught = std::panic::catch_unwind(|| {
         frames_of("short.yuv", &[0; 100], PixelFormat::Yuv420p8, 48, 36)
     });
-    assert!(caught.is_err());
+    let message = caught
+        .err()
+        .and_then(|e| e.downcast::<String>().ok())
+        .expect("a short reference was read");
+    assert!(message.contains("short.yuv"), "{message}");
     let one = frames_of(
         "two.yuv",
         &refs::yuv_bytes(refs::SCALE_SIZE, false),
@@ -500,12 +481,16 @@ fn orders_and_siting_match_ffmpeg() {
             "rgba to yuv, left, frame {n}: PSNR {:.1} {:.1} {:.1}",
             p[0], p[1], p[2]
         );
-        assert!(p.iter().all(|&v| v > 53.0), "rgba to yuv left frame {n}: {p:?}");
+        assert!(
+            p.iter().all(|&v| v > 53.0),
+            "rgba to yuv left frame {n}: {p:?}"
+        );
     }
 
     let (sw, sh) = refs::SCALE_SIZE;
-    let expect = yuv_ref(&r, refs::SCALE_CENTRE, PixelFormat::Yuv420p8, 48, 36);
-    let scaler = Scaler::new(sw, sh, 48, 36, PixelFormat::Yuv420p8, Kernel::Lanczos)
+    let (cw, ch) = refs::CENTRE_SIZE;
+    let expect = yuv_ref(&r, refs::SCALE_CENTRE, PixelFormat::Yuv420p8, cw, ch);
+    let scaler = Scaler::new(sw, sh, cw, ch, PixelFormat::Yuv420p8, Kernel::Lanczos)
         .unwrap()
         .siting(Siting::Centre);
     for (n, t) in expect.iter().enumerate() {

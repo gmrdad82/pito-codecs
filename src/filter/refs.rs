@@ -6,6 +6,7 @@ pub const FRAMES: u64 = 2;
 pub const NOISE: [u8; 2] = [0, 12];
 pub const SCALE_SIZE: (u32, u32) = (64, 48);
 pub const COLOUR_SIZE: (u32, u32) = (48, 32);
+pub const CENTRE_SIZE: (u32, u32) = (48, 36);
 
 pub const SCALES: [(&str, u32, u32, bool); 6] = [
     ("bilinear", 48, 36, false),
@@ -52,7 +53,13 @@ pub fn yuv8(size: (u32, u32), n: u64) -> Frame {
 
 pub fn yuv10(size: (u32, u32), n: u64) -> Frame {
     let src = yuv8(size, n);
-    let mut f = Frame::new(PixelFormat::Yuv420p10, size.0, size.1, 0, TimeBase::new(1, 30));
+    let mut f = Frame::new(
+        PixelFormat::Yuv420p10,
+        size.0,
+        size.1,
+        0,
+        TimeBase::new(1, 30),
+    );
     for (p, q) in src.planes.iter().zip(f.planes.iter_mut()) {
         for y in 0..p.height {
             for x in 0..p.width {
@@ -138,15 +145,7 @@ pub fn loudness() -> [(&'static str, u32, f64, Sound); 4] {
         ("tone", 48_000, 12.0, Sound::Fn(tone)),
         ("steps", 48_000, 24.0, Sound::Fn(steps)),
         ("pink", 48_000, 15.0, Sound::Fn(pink)),
-        (
-            "white",
-            44_100,
-            10.0,
-            Sound::Noise {
-                amp: 0.3,
-                seed: 3,
-            },
-        ),
+        ("white", 44_100, 10.0, Sound::Noise { amp: 0.3, seed: 3 }),
     ]
 }
 
