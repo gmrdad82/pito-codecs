@@ -1,10 +1,18 @@
 #![cfg(feature = "cli")]
 
+#[path = "../src/testref.rs"]
+mod testref;
+
+#[allow(dead_code)]
+#[path = "../src/pcod/refs.rs"]
+mod refs;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use pito_codecs::media::{Prefs, Rgba, audio_pcm_range, probe};
+use pito_codecs::media::{Prefs, Rgba, audio_pcm, audio_pcm_range, probe};
+use testref::{Clip, Refs};
 
 fn dir(name: &str) -> PathBuf {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -337,32 +345,13 @@ fn six_k_frames_encode_under_an_address_space_cap_or_refuse_in_one_line() {
     assert_eq!((p.width, p.height, p.frames), (W, H, Some(COUNT as u64)));
 }
 
-fn pulse_at(file: &Path) -> Option<(usize, usize)> {
-    let out = Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
-        .arg(file)
-        .args([
-            "-map",
-            "0:a",
-            "-af",
-            "aresample=async=1:first_pts=0",
-            "-ac",
-            "1",
-            "-f",
-            "f32le",
-            "-",
-        ])
-        .output()
-        .ok()?;
-    assert!(out.status.success(), "{}", text(&out.stderr));
-    let samples: Vec<f32> = out
-        .stdout
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .collect();
+fn pulse_at(file: &Path) -> (usize, usize) {
+    let samples = audio_pcm(file, 0, 48_000, true, &Prefs::default())
+        .unwrap()
+        .samples;
     let peak = samples.iter().fold(0f32, |m, v| m.max(v.abs()));
     let at = samples.iter().position(|v| v.abs() > peak / 2.0).unwrap();
-    Some((at, samples.len()))
+    (at, samples.len())
 }
 
 #[test]
@@ -432,14 +421,12 @@ fn ntsc_frames_keep_the_exact_rate_and_the_audio_in_sync() {
             u128::from(ticks) * num as u128,
             u128::from(COUNT) * 1001 * u128::from(t.timescale)
         );
-        let Some(pulse) = pulse_at(&mp4) else {
-            continue;
-        };
+        let pulse = pulse_at(&mp4);
         assert_eq!(pulse, (last, total), "{fps}");
         for ext in ["mkv", "webm"] {
             let copy = out.join(format!("ntsc.{ext}"));
             ok(&run(&[mp4.to_str().unwrap(), copy.to_str().unwrap()]));
-            let (at, _) = pulse_at(&copy).unwrap();
+            let (at, _) = pulse_at(&copy);
             assert!(
                 at.abs_diff(last) <= 2,
                 "{fps} {ext}: pulse at {at}, frame at {last}"
@@ -549,81 +536,29 @@ fn audio_only_wavs_probe_as_audio() {
     }
 }
 
-fn has_encoder(name: &str) -> bool {
-    Command::new("ffmpeg")
-        .args(["-hide_banner", "-encoders"])
-        .output()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(name))
-}
-
-type Shape = (
-    &'static str,
-    &'static [&'static str],
-    &'static str,
-    &'static str,
-    &'static str,
-    &'static str,
-);
+type Shape = (PathBuf, &'static str, &'static str, &'static str, &'static str);
 
 #[test]
 fn probe_json_and_text_name_the_video_variant() {
-    if !has_encoder("libx264") {
-        eprintln!("no ffmpeg with libx264 on PATH: skipped");
-        return;
-    }
-    let out = dir("probe-variant");
+    let r = Refs::open(refs::AREA);
+    let [deep, wide, interlaced] = refs::PROBE_SHAPES.map(|(file, _)| r.path(file));
+    let plain = Clip::new((352, 240), (30, 1), 15)
+        .video_only()
+        .make(refs::AREA, "cli-high.mp4");
     let shapes: [Shape; 4] = [
+        (deep, "4:2:2", "false", "10-bit 4:2:2 H.264", "yuv422p10le"),
+        (wide, "4:2:2", "false", "8-bit 4:2:2 H.264", "yuv422p"),
+        (plain, "4:2:0", "false", "8-bit 4:2:0 H.264", "yuv420p"),
         (
-            "high422-10",
-            &["-pix_fmt", "yuv422p10le", "-profile:v", "high422"],
-            "4:2:2",
-            "false",
-            "10-bit 4:2:2 H.264",
-            "yuv422p10le",
-        ),
-        (
-            "high422-8",
-            &["-pix_fmt", "yuv422p", "-profile:v", "high422"],
-            "4:2:2",
-            "false",
-            "8-bit 4:2:2 H.264",
-            "yuv422p",
-        ),
-        (
-            "high",
-            &["-pix_fmt", "yuv420p", "-profile:v", "high"],
-            "4:2:0",
-            "false",
-            "8-bit 4:2:0 H.264",
-            "yuv420p",
-        ),
-        (
-            "interlaced",
-            &[
-                "-pix_fmt",
-                "yuv420p",
-                "-flags",
-                "+ildct+ilme",
-                "-x264opts",
-                "tff=1",
-            ],
+            interlaced,
             "4:2:0",
             "true",
             "interlaced 8-bit 4:2:0 H.264",
             "yuv420p",
         ),
     ];
-    for (name, args, chroma, interlaced, variant, pix_fmt) in shapes {
-        let path = out.join(format!("{name}.mp4"));
-        let made = Command::new("ffmpeg")
-            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
-            .arg("testsrc2=s=352x240:r=30:d=0.5")
-            .args(["-c:v", "libx264"])
-            .args(args)
-            .arg(&path)
-            .status()
-            .unwrap();
-        assert!(made.success(), "{name}");
+    for (path, chroma, interlaced, variant, pix_fmt) in shapes {
+        let name = path.display().to_string();
         let probed = run(&["probe", path.to_str().unwrap(), "--json"]);
         ok(&probed);
         let json = text(&probed.stdout);
@@ -1034,58 +969,39 @@ fn wav_body(data: &[u8]) -> (u16, u32, Vec<i16>) {
 
 #[test]
 fn ogg_and_webm_vorbis_extract_to_wav_and_convert_to_opus() {
-    if !has_encoder("libvorbis") {
-        eprintln!("skipped Vorbis through pcod: ffmpeg has no libvorbis encoder");
-        return;
-    }
+    let r = Refs::open(refs::AREA);
     let out = dir("vorbis");
-    for ext in ["ogg", "webm"] {
-        let src = out.join(format!("tone.{ext}"));
-        let made = Command::new("ffmpeg")
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-            ])
-            .arg("aevalsrc=0.3*sin(440*2*PI*t)|0.2*sin(660*2*PI*t):s=44100:d=0.7:c=stereo")
-            .args(["-c:a", "libvorbis", "-q:a", "3"])
-            .arg(&src)
-            .status()
-            .unwrap();
-        assert!(made.success(), "{ext}");
+    let (start, end) = refs::VORBIS_SLICE;
+    for file in refs::VORBIS_FILES {
+        let src = r.path(file);
+        let ext = src.extension().unwrap().to_string_lossy().into_owned();
         let wav = out.join(format!("{ext}.wav"));
         ok(&run(&[src.to_str().unwrap(), wav.to_str().unwrap()]));
         let (channels, rate, ours) = wav_body(&fs::read(&wav).unwrap());
         assert_eq!((channels, rate), (2, 44_100), "{ext}");
         assert_eq!(ours.len(), 30_870 * 2, "{ext}");
-        let theirs: Vec<i16> = Command::new("ffmpeg")
-            .args(["-hide_banner", "-loglevel", "error", "-i"])
-            .arg(&src)
-            .args(["-f", "s16le", "-"])
-            .output()
+        let decoded = audio_pcm(&src, 0, 44_100, false, &Prefs::default())
             .unwrap()
-            .stdout
-            .chunks_exact(2)
-            .map(|b| i16::from_le_bytes([b[0], b[1]]))
-            .collect();
-        let n = ours.len().min(theirs.len());
+            .samples;
+        let library = testref::s16_of(&decoded);
+        let n = ours.len().min(library.len());
         assert!(
             n + 256 * 2 >= ours.len(),
-            "{ext}: ffmpeg gave {}",
-            theirs.len()
+            "{ext}: the library gave {}",
+            library.len()
         );
         let worst = ours[..n]
             .iter()
-            .zip(&theirs[..n])
+            .zip(&library[..n])
             .map(|(a, b)| (i32::from(*a) - i32::from(*b)).abs())
             .max()
             .unwrap();
-        eprintln!("{ext}: worst 16-bit difference {worst} over {n} samples");
         assert!(worst <= 1, "{ext}: worst 16-bit difference {worst}");
+        let theirs = r.i16s(&refs::vorbis_slice_name(file));
+        assert_eq!(theirs.len() as u64, (end - start) * 2, "{ext}");
+        let slice = &ours[start as usize * 2..end as usize * 2];
+        let d = testref::diff(slice, &theirs);
+        testref::assert_within(&format!("{ext} against ffmpeg's decode"), &d, 1.0, 1.0);
         let opus = out.join(format!("{ext}.opus"));
         ok(&run(&[src.to_str().unwrap(), opus.to_str().unwrap()]));
         let ogg = pito_codecs::opus::ogg::OggOpus::parse(&fs::read(&opus).unwrap()).unwrap();
@@ -1437,25 +1353,63 @@ fn raw_s16_refusals_are_one_line_and_bad_flags_exit_2() {
     }
 }
 
+fn two_rate_tracks() -> PathBuf {
+    use pito_codecs::mkv;
+    let first = Clip {
+        sounds: vec![testref::Sound::Sine {
+            hz: 300.0,
+            amp: 0.25,
+        }],
+        ..Clip::new((352, 240), (30, 1), 60)
+    }
+    .make(refs::AREA, "cli-two-tracks-48k.mkv");
+    let second = Clip {
+        sounds: vec![testref::Sound::Sine {
+            hz: 1200.0,
+            amp: 0.25,
+        }],
+        rate: 44_100,
+        ..Clip::new((352, 240), (30, 1), 60)
+    }
+    .audio_only()
+    .make(refs::AREA, "cli-two-tracks-44k.mka");
+    let readers = [
+        mkv::Reader::open(&first).unwrap(),
+        mkv::Reader::open(&second).unwrap(),
+    ];
+    let mut w = mkv::Writer::new(std::io::Cursor::new(Vec::new()), mkv::Options::default());
+    let mut blocks = Vec::new();
+    for (n, r) in readers.iter().enumerate() {
+        for (k, t) in r.tracks.iter().enumerate() {
+            let out = w.add_track(mkv::TrackConfig::from_track(t)).unwrap();
+            for (i, s) in t.samples.iter().enumerate() {
+                blocks.push((t.seconds(s.pts), n, k, i, out));
+            }
+        }
+    }
+    blocks.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (_, n, k, i, out) in blocks {
+        let r = &readers[n];
+        let packet = r.packet(k, i).unwrap();
+        w.push_timed(out, &packet, r.tracks[k].samples[i].duration)
+            .unwrap();
+    }
+    let bytes = w.finish().unwrap().into_inner();
+    let to = testref::scratch(refs::AREA).join("cli-two-tracks.mkv");
+    testref::write_atomic(&to, &bytes).unwrap();
+    let merged = mkv::Reader::open(&to).unwrap();
+    let rates: Vec<u32> = merged
+        .audio()
+        .iter()
+        .map(|&k| merged.tracks[k].sample_rate())
+        .collect();
+    assert_eq!(rates, [48_000, 44_100], "the second track keeps its own rate");
+    to
+}
+
 #[test]
 fn raw_s16_track_picks_the_stream_the_container_numbers() {
-    if !has_encoder("mpeg4") {
-        eprintln!("no ffmpeg with mpeg4 on PATH: the raw --track test is skipped");
-        return;
-    }
-    let out = dir("raw-s16-track");
-    let input = out.join("two-tracks.mkv");
-    let made = Command::new("ffmpeg")
-        .args(["-nostdin", "-v", "error", "-y"])
-        .args(["-f", "lavfi", "-i", "testsrc2=s=352x240:r=30:d=2"])
-        .args(["-f", "lavfi", "-i", "sine=f=300:r=48000:d=2"])
-        .args(["-f", "lavfi", "-i", "sine=f=1200:r=44100:d=2"])
-        .args(["-map", "0:v", "-map", "1:a", "-map", "2:a"])
-        .args(["-c:v", "mpeg4", "-c:a", "aac", "-b:a", "128k"])
-        .arg(&input)
-        .status()
-        .unwrap();
-    assert!(made.success());
+    let input = two_rate_tracks();
     let input_s = input.to_str().unwrap();
     let decode = |stream: usize| {
         let span = pito_codecs::media::S16Span {
