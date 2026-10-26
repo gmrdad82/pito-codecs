@@ -940,11 +940,12 @@ fn parse_stbl(
     let mut stsc_i = 0usize;
     if let Some(p) = pcm {
         let a = t.entry().and_then(|e| e.audio.clone()).unwrap_or_default();
-        let frame_bytes = |frames: u64| -> u64 {
-            if const_size > 1 {
-                frames * const_size as u64
-            } else if a.qt_version == 1 && a.bytes_per_frame > 0 && a.samples_per_packet > 0 {
+        let v1 = a.qt_version == 1 && a.bytes_per_frame > 0 && a.samples_per_packet > 0;
+        let frame_bytes = |frames: u64, ticks: u64| -> u64 {
+            if v1 && (const_size <= 1 || ticks <= frames) {
                 frames / a.samples_per_packet as u64 * a.bytes_per_frame as u64
+            } else if const_size > 1 {
+                frames * const_size as u64
             } else {
                 frames * p.bytes_per_frame() as u64
             }
@@ -965,7 +966,7 @@ fn parse_stbl(
                 continue;
             }
             let dur = stts_c.take(spc as u64);
-            let size = frame_bytes(spc as u64).min(u32::MAX as u64) as u32;
+            let size = frame_bytes(spc as u64, dur).min(u32::MAX as u64) as u32;
             samples.push(Sample {
                 offset: off,
                 size,

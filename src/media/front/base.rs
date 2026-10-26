@@ -147,7 +147,7 @@ pub(super) fn video_track(r: &Reader) -> Result<(usize, &Track)> {
 }
 
 pub(super) fn gop_start(t: &Track, seconds: f64) -> usize {
-    t.keyframe_before(t.sample_at(t.ticks(seconds)).unwrap_or(0))
+    t.keyframe_before(t.sample_at(t.shown_at(seconds)).unwrap_or(0))
 }
 
 pub(super) fn sorted(mut keys: Vec<f64>) -> Vec<f64> {
@@ -539,4 +539,34 @@ fn decode_track(d: &Demux, i: usize, from: f64, to: f64) -> Result<(AudioBuffer,
         out.samples.resize(w * feed.channels as usize, 0.0);
     }
     Ok((out, feed.end()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mp4::{AvcConfig, Options, TrackConfig, Writer};
+
+    #[test]
+    fn a_seek_on_a_half_tick_tie_starts_at_the_earlier_frames_gop() {
+        let mut w = Writer::new(std::io::Cursor::new(Vec::new()), Options::default()).unwrap();
+        let avc = AvcConfig::new(vec![vec![0x67, 1]], vec![vec![0x68, 2]]);
+        let t = w
+            .add_track(TrackConfig::new(SampleEntry::h264(avc, 64, 48), 1000))
+            .unwrap();
+        for (pts, step, key) in [
+            (0, 62, true),
+            (62, 1, false),
+            (63, 31, true),
+            (94, 31, false),
+        ] {
+            w.push_sample(t, &[0, 0, 0, 1, 0x65], pts, pts, step, key)
+                .unwrap();
+        }
+        let r = Reader::new(w.finish().unwrap().into_inner()).unwrap();
+        let t = &r.tracks[0];
+        assert_eq!(t.shown_at(0.0625), 62);
+        assert_eq!(gop_start(t, 0.0625), 0);
+        assert_eq!(gop_start(t, 0.0626), 2);
+        assert_eq!(gop_start(t, 0.0624), 0);
+    }
 }
