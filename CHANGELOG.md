@@ -18,6 +18,9 @@
 - A PNG whose transparency table is longer than its palette is read as libpng reads it.
 - Opus decoding from the middle of a stream starts from a longer pre-roll, so its first samples match a whole decode.
 - An MP4 with a single video sample gets a duration, so it can be joined.
+- VP9 encodes are bit-identical on x86 and ARM: the AVX2 path no longer skipped the last tile of edge-clipped blocks.
+- On the Mac, VideoToolbox bitrate and VBR encodes land on their average (constant bitrate at the average), instead of 60% under it.
+- On Linux AMD GPUs (VA-API), bitrate and VBR encodes land on their average instead of up to twice over it.
 ## v2.1.0 — 2026-10-23
 
 ### Added
