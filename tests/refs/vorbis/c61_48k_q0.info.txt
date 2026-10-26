@@ -1,0 +1,4 @@
+sample_rate=48000
+channels=7
+bit_rate=336000
+TAG:TITLE=c61_48k_q0

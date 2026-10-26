@@ -28,8 +28,8 @@ use pito_codecs::media::AudioBuffer;
 use pito_codecs::opus::enc::{Application, EncoderConfig, encode_ogg};
 
 pub const AREA: &str = "opus";
-pub const SECONDS: f32 = 0.5;
-pub const SPEECH_SECONDS: f32 = 1.0;
+pub const SECONDS: f32 = 0.3;
+pub const SPEECH_SECONDS: f32 = 0.6;
 
 pub struct Libopus {
     pub name: &'static str,

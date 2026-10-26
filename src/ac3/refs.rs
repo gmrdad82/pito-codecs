@@ -1065,7 +1065,3 @@ pub fn plain(c: &Case) -> Result<Vec<u8>, String> {
     }
     Ok(bytes)
 }
-
-pub fn work_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp/record_refs/ac3")
-}

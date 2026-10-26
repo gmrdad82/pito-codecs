@@ -124,6 +124,6 @@ fn the_cases_are_named_once_and_cover_mono_and_stereo() {
         assert!(cases.iter().any(|c| c.channels == 1));
         assert!(cases.iter().any(|c| c.channels == 2));
     }
-    assert_eq!(refs::delay_samples(), (8820, 17_640));
-    assert_eq!(refs::frames(&refs::DELAY), 22_050);
+    assert_eq!(refs::delay_samples(), (4410, 11_025));
+    assert_eq!(refs::frames(&refs::DELAY), 13_230);
 }

@@ -20,14 +20,15 @@ mod refs;
 
 use std::path::{Path, PathBuf};
 
-use pito_codecs::media::{Error, Prefs, S16Span, audio_pcm_range, decode_s16, probe, to_s16};
+use pito_codecs::media::{
+    AudioBuffer, Error, Prefs, S16Span, audio_pcm_range, decode_s16, probe, to_s16,
+};
+use refs::Tone;
 use testref::{Clip, Refs, Sound};
 
-const LOSSY_SNR_DB: f64 = 30.0;
+const LOSSY_SNR_DB: f64 = 28.0;
 const OWN_SNR_DB: f64 = 40.0;
-const SOURCE_SNR_DB: f64 = 20.0;
-
-type Tone = fn(u64, u16, u32) -> f32;
+const SOURCE_SNR_DB: f64 = 40.0;
 
 fn scratch() -> PathBuf {
     testref::scratch(refs::AREA)
@@ -90,7 +91,8 @@ struct Match {
 }
 
 fn best(a: &[i16], b: &[i16], ch: usize, reach: usize) -> Match {
-    (-(reach as i64)..=reach as i64)
+    let shorter = a.len().min(b.len());
+    let (m, n) = (-(reach as i64)..=reach as i64)
         .map(|lag| {
             let skip = lag.unsigned_abs() as usize * ch;
             let (x, y) = if lag < 0 {
@@ -111,10 +113,30 @@ fn best(a: &[i16], b: &[i16], ch: usize, reach: usize) -> Match {
             } else {
                 10.0 * (sig / err).log10()
             };
-            Match { lag, snr, worst }
+            (Match { lag, snr, worst }, n)
         })
-        .max_by(|p, q| p.snr.total_cmp(&q.snr))
-        .unwrap()
+        .max_by(|p, q| p.0.snr.total_cmp(&q.0.snr))
+        .unwrap();
+    assert!(
+        n * 2 >= shorter && n > 0,
+        "{n} samples overlap at the best lag, of {shorter}"
+    );
+    m
+}
+
+fn close_to(what: &str, got: &[i16], want: &[i16], rate: u32, lag: i64) {
+    let m = best(got, want, 1, rate as usize / 100);
+    assert!(
+        m.snr >= LOSSY_SNR_DB,
+        "{what}: {:.1} dB against the source at a lag of {}",
+        m.snr,
+        m.lag
+    );
+    assert!(
+        m.lag.abs() <= lag,
+        "{what}: starts {} frames off the source's file time",
+        m.lag
+    );
 }
 
 #[test]
@@ -268,8 +290,7 @@ fn a_missing_stream_a_late_start_and_a_refused_codec_each_fail_in_one_line_namin
 fn a_delayed_short_track_starts_at_file_time_and_ends_on_its_own() {
     let r = open();
     for ext in ["mkv", "mp4"] {
-        let name = refs::delayed(ext);
-        let path = r.path(&name);
+        let path = r.path(&refs::delayed(ext));
         let rate = refs::LOW_RATE;
         for from in refs::DELAYED_FROM {
             let what = format!("{ext} delayed stream 1 from {from} s");
@@ -282,23 +303,12 @@ fn a_delayed_short_track_starts_at_file_time_and_ends_on_its_own() {
             let got = ours(&path, &span).unwrap();
             let expect = ((refs::DELAYED + refs::DELAYED_SHORT - from) * rate as f64) as usize;
             assert!(
-                got.len().abs_diff(expect) <= rate as usize / 20,
+                got.len().abs_diff(expect) <= rate as usize / 100,
                 "{what}: {} samples, about {expect} expected",
                 got.len()
             );
-            let want = r.i16s(&refs::window(name.clone(), 1, from, rate).name());
-            let m = best(&got, &want, 1, rate as usize / 100);
-            assert!(
-                m.snr >= LOSSY_SNR_DB,
-                "{what}: {:.1} dB against ffmpeg at a lag of {}",
-                m.snr,
-                m.lag
-            );
-            assert!(
-                m.lag.abs() <= rate as i64 / 2000,
-                "{what}: starts {} frames off ffmpeg's file time",
-                m.lag
-            );
+            let want = source(refs::tone_b, 1, from - refs::DELAYED, rate, true, expect);
+            close_to(&what, &got, &want, rate, rate as i64 / 2000);
         }
         let from = refs::DELAYED_PAST;
         let span = S16Span {
@@ -312,7 +322,7 @@ fn a_delayed_short_track_starts_at_file_time_and_ends_on_its_own() {
         let longer = ours(&path, &S16Span { stream: 0, ..span }).unwrap();
         let left = ((refs::DELAYED_LONG - from) * 16_000.0) as usize;
         assert!(
-            longer.len().abs_diff(left) <= 800,
+            longer.len().abs_diff(left) <= 160,
             "{ext}: {}",
             longer.len()
         );
@@ -320,17 +330,16 @@ fn a_delayed_short_track_starts_at_file_time_and_ends_on_its_own() {
 }
 
 #[test]
-fn a_mixed_obs_recording_decodes_every_track_like_ffmpeg() {
+fn a_mixed_obs_recording_decodes_every_track_against_its_source() {
     let r = open();
     for (ext, third) in refs::MIXED_THIRD {
-        let name = refs::mixed(ext);
-        let path = r.path(&name);
+        let path = r.path(&refs::mixed(ext));
         let p = probe(&path, &Prefs::default()).unwrap();
         let streams: Vec<(usize, u16)> = p.audio.iter().map(|t| (t.stream, t.channels)).collect();
         assert_eq!(streams, [(0, 2), (1, 1), (2, 1)], "{ext} with {third}");
         let rate = refs::LOW_RATE;
-        for (stream, _) in streams {
-            let what = format!("{ext} stream {stream}");
+        for (stream, t) in refs::mixed_tracks(third).iter().enumerate() {
+            let what = format!("{ext} stream {stream} ({})", t.codec);
             let from = refs::MIXED_FROM;
             let span = S16Span {
                 stream,
@@ -341,33 +350,21 @@ fn a_mixed_obs_recording_decodes_every_track_like_ffmpeg() {
             let got = ours(&path, &span).unwrap();
             let expect = ((refs::MIXED - from) * rate as f64) as usize;
             assert!(
-                got.len().abs_diff(expect) <= rate as usize / 20,
+                got.len().abs_diff(expect) <= rate as usize / 100,
                 "{what}: {} against about {expect}",
                 got.len()
             );
-            let want = r.i16s(&refs::window(name.clone(), stream, from, rate).name());
-            let m = best(&got, &want, 1, rate as usize / 100);
-            assert!(
-                m.snr >= LOSSY_SNR_DB,
-                "{what}: {:.1} dB at a lag of {}",
-                m.snr,
-                m.lag
-            );
-            assert!(
-                m.lag.abs() <= rate as i64 / 1000,
-                "{what}: starts {} frames off ffmpeg",
-                m.lag
-            );
+            let want = source(t.tone, t.channels, from, rate, true, expect);
+            close_to(&what, &got, &want, rate, rate as i64 / 1000);
         }
     }
 }
 
 #[test]
-fn a_five_one_track_downmixes_to_mono_like_ffmpeg() {
+fn a_five_one_track_downmixes_to_mono_by_the_downmix_table() {
     let r = open();
     for (ext, codec) in refs::FIVE_ONE_CODECS {
-        let name = refs::five_one(ext, codec);
-        let path = r.path(&name);
+        let path = r.path(&refs::five_one(ext, codec));
         let stream = probe(&path, &Prefs::default()).unwrap().audio[0].stream;
         for rate in refs::FIVE_ONE_RATES {
             let what = format!("5.1 {codec} in {ext} to mono at {rate} Hz");
@@ -380,18 +377,14 @@ fn a_five_one_track_downmixes_to_mono_like_ffmpeg() {
             let got = ours(&path, &span).unwrap();
             let expect = (refs::FIVE_ONE_SECONDS * rate as f64) as usize;
             assert!(
-                got.len().abs_diff(expect) <= rate as usize / 20,
+                got.len().abs_diff(expect) <= rate as usize / 100,
                 "{what}: {} against about {expect}",
                 got.len()
             );
-            let want = r.i16s(&refs::window(name.clone(), stream, 0.0, rate).name());
-            let m = best(&got, &want, 1, rate as usize / 100);
-            assert!(
-                m.snr >= LOSSY_SNR_DB,
-                "{what}: {:.1} dB against ffmpeg -ac 1 at a lag of {}",
-                m.snr,
-                m.lag
-            );
+            let mut six = AudioBuffer::new(rate, 6);
+            six.samples = testref::pcm(Sound::Fn(refs::five_one_at), rate, 6, 0, expect);
+            let want = testref::s16_of(&pito_codecs::aac::mono(&six).samples);
+            close_to(&what, &got, &want, rate, rate as i64 / 1000);
         }
     }
 }
@@ -425,7 +418,7 @@ fn a_callback_error_stops_the_stream_and_comes_back_as_is() {
 }
 
 #[test]
-fn every_recorder_codec_decodes_to_s16_like_ffmpeg_or_is_listed_as_refused() {
+fn every_recorder_codec_decodes_to_s16_against_its_source_or_is_listed_as_refused() {
     let r = open();
     let mut refused = Vec::new();
     let mut unexpected = Vec::new();
@@ -459,27 +452,41 @@ fn every_recorder_codec_decodes_to_s16_like_ffmpeg_or_is_listed_as_refused() {
             }
         };
         if kind.lossless {
-            let want = if kind.law() {
-                r.i16s(&kind.reference().name())
-            } else {
-                testref::s16_of(&testref::pcm(refs::SURVEY_SOUND, rate, 2, 0, kind.frames()))
+            let source =
+                testref::s16_of(&testref::pcm(refs::SURVEY_SOUND, rate, 2, 0, kind.frames()));
+            let want: Vec<i16> = match kind.codec {
+                "pcm_alaw" => source
+                    .iter()
+                    .map(|&s| refs::alaw_value(refs::alaw(s)))
+                    .collect(),
+                "pcm_mulaw" => source
+                    .iter()
+                    .map(|&s| refs::mulaw_value(refs::mulaw(s)))
+                    .collect(),
+                _ => source,
             };
             assert_eq!(got.len(), want.len(), "{what}");
             let m = best(&got, &want, 2, 0);
             assert!(m.worst <= 1, "{what}: off by {}", m.worst);
         } else {
-            let want = r.i16s(&kind.reference().name());
+            let frames = (kind.seconds() * f64::from(rate)).round() as usize;
             assert!(
-                got.len().abs_diff(want.len()) <= rate as usize / 20 * ch,
-                "{what}: {} against ffmpeg's {}",
+                got.len().abs_diff(frames * ch) <= rate as usize / 100 * ch,
+                "{what}: {} samples, {} expected",
                 got.len(),
-                want.len()
+                frames * ch
             );
+            let want = source(refs::survey_at, ch as u16, 0.0, rate, false, frames);
             let m = best(&got, &want, ch, rate as usize / 100);
             assert!(
                 m.snr >= LOSSY_SNR_DB,
-                "{what}: {:.1} dB at a lag of {}",
+                "{what}: {:.1} dB against the source at a lag of {}",
                 m.snr,
+                m.lag
+            );
+            assert!(
+                m.lag.abs() <= rate as i64 / 1000,
+                "{what}: starts {} frames off the source's file time",
                 m.lag
             );
         }
@@ -611,57 +618,23 @@ fn a_mov_a_law_entry_with_no_channels_or_a_bad_rate_is_refused_in_one_line() {
 }
 
 #[test]
-fn the_recorder_table_holds_every_file_and_reference_the_tests_read() {
+fn the_recorder_table_holds_every_file_the_tests_read() {
     use std::collections::HashSet;
     let fixtures = refs::fixtures();
     let files: HashSet<&str> = fixtures.iter().map(|f| f.file.as_str()).collect();
     assert_eq!(files.len(), fixtures.len(), "a fixture file name twice");
-    let names: Vec<String> = refs::refs().iter().map(refs::Ref::name).collect();
-    let named: HashSet<&str> = names.iter().map(String::as_str).collect();
-    assert_eq!(named.len(), names.len(), "a reference name twice");
-    assert!(
-        names.iter().all(|n| !files.contains(n.as_str())),
-        "a reference named like a fixture"
-    );
-    for r in refs::refs() {
-        assert!(
-            files.contains(r.input.as_str()),
-            "{}: no fixture {}",
-            r.name(),
-            r.input
-        );
-        assert!(r.rate > 0, "{}", r.name());
-    }
     let mut wanted = vec![refs::REFUSED.to_string(), refs::LAW_MOV.to_string()];
-    let mut read = Vec::new();
     for ext in ["mkv", "mp4"] {
         wanted.push(refs::delayed(ext));
-        for from in refs::DELAYED_FROM {
-            read.push(refs::window(refs::delayed(ext), 1, from, refs::LOW_RATE));
-        }
     }
     for (ext, _) in refs::MIXED_THIRD {
         wanted.push(refs::mixed(ext));
-        for stream in 0..3 {
-            read.push(refs::window(
-                refs::mixed(ext),
-                stream,
-                refs::MIXED_FROM,
-                refs::LOW_RATE,
-            ));
-        }
     }
     for (ext, codec) in refs::FIVE_ONE_CODECS {
         wanted.push(refs::five_one(ext, codec));
-        for rate in refs::FIVE_ONE_RATES {
-            read.push(refs::window(refs::five_one(ext, codec), 0, 0.0, rate));
-        }
     }
     for kind in refs::KINDS {
         wanted.push(kind.file());
-        if kind.checked_by_ref() {
-            read.push(kind.reference());
-        }
     }
     for w in &wanted {
         assert!(
@@ -669,40 +642,28 @@ fn the_recorder_table_holds_every_file_and_reference_the_tests_read() {
             "the tests read {w}, the table makes no such file"
         );
     }
-    for r in &read {
-        assert!(
-            named.contains(r.name().as_str()),
-            "the tests read {}, the table records no such reference",
-            r.name()
-        );
-    }
     assert_eq!(
-        read.len(),
-        names.len(),
-        "the table records references no test reads"
+        wanted.len(),
+        fixtures.len(),
+        "the table makes files no test reads"
     );
     for f in &fixtures {
-        assert!(!f.sources.is_empty() && !f.codecs.is_empty(), "{}", f.file);
-        for s in &f.sources {
-            let l = s.lavfi();
-            assert!(l.starts_with("aevalsrc="), "{}: {l}", f.file);
-            for part in [
-                format!(":s={}", s.rate),
-                format!(":c={}", s.layout),
-                format!(":d={}", s.seconds),
-            ] {
-                assert!(l.contains(&part), "{}: {l} has no {part}", f.file);
-            }
-            assert!(s.rate > 0 && s.seconds > 0.0, "{}: {l}", f.file);
+        assert!(!f.tracks.is_empty(), "{}", f.file);
+        for t in &f.tracks {
+            assert!(
+                t.rate > 0 && t.seconds > 0.0 && t.channels > 0,
+                "{}",
+                f.file
+            );
+            assert!(t.frames() > 0, "{}", f.file);
         }
     }
     let law = refs::KINDS
         .iter()
         .find(|k| k.file() == refs::LAW_MOV)
         .unwrap();
-    assert!(law.law() && law.checked_by_ref());
+    assert!(law.law() && law.lossless);
     for kind in refs::KINDS {
-        assert_eq!(kind.reference().mono, kind.mono(), "{}", kind.label());
         assert_eq!(
             kind.channels(),
             if kind.mono() { 1 } else { 2 },
@@ -712,6 +673,12 @@ fn the_recorder_table_holds_every_file_and_reference_the_tests_read() {
         if kind.lossless {
             assert!(!kind.mono(), "{}", kind.label());
         }
+        assert_eq!(
+            kind.fixture().tracks[0].frames(),
+            kind.frames(),
+            "{}",
+            kind.label()
+        );
     }
     for codec in refs::STEREO {
         assert!(
@@ -733,4 +700,29 @@ fn the_recorder_table_holds_every_file_and_reference_the_tests_read() {
     assert!(refs::DELAYED_PAST > end && refs::DELAYED_PAST < refs::DELAYED_LONG);
     const { assert!(refs::MIXED_FROM + refs::WINDOW <= refs::MIXED) };
     const { assert!(refs::WINDOW <= refs::FIVE_ONE_SECONDS) };
+}
+
+#[test]
+fn g711_by_formula_matches_the_published_codes_and_round_trips() {
+    assert_eq!(refs::alaw_value(0x55), -8);
+    assert_eq!(refs::alaw_value(0xd5), 8);
+    assert_eq!(refs::alaw_value(0xaa), 32_256);
+    assert_eq!(refs::alaw_value(0x2a), -32_256);
+    assert_eq!(refs::mulaw_value(0xff), 0);
+    assert_eq!(refs::mulaw_value(0x7f), 0);
+    assert_eq!(refs::mulaw_value(0x80), 32_124);
+    assert_eq!(refs::mulaw_value(0x00), -32_124);
+    for code in 0..=255u8 {
+        let a = refs::alaw_value(code);
+        assert_eq!(refs::alaw_value(refs::alaw(a)), a, "A-law {code:#04x}");
+        let u = refs::mulaw_value(code);
+        assert_eq!(refs::mulaw_value(refs::mulaw(u)), u, "mu-law {code:#04x}");
+    }
+    for s in [i16::MIN, -1000, -1, 0, 1, 999, i16::MAX] {
+        let a = i32::from(refs::alaw_value(refs::alaw(s)));
+        let u = i32::from(refs::mulaw_value(refs::mulaw(s)));
+        let tol = (i32::from(s).abs() / 16).max(140);
+        assert!((a - i32::from(s)).abs() <= tol, "A-law {s}: {a}");
+        assert!((u - i32::from(s)).abs() <= tol, "mu-law {s}: {u}");
+    }
 }

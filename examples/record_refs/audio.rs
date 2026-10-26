@@ -6,9 +6,9 @@ use crate::{Def, OURS, Take, sha, tool, words};
 #[path = "../../src/aac/refs.rs"]
 mod aac;
 #[path = "../../src/ac3/refs.rs"]
-mod ac3;
+pub mod ac3;
 #[path = "../../src/alac/refs.rs"]
-mod alac;
+pub mod alac;
 #[path = "../../src/flac/refs.rs"]
 mod flac;
 #[path = "../../src/mp3/refs.rs"]
@@ -160,6 +160,7 @@ pub mod mux {
         pub priming: u32,
         pub length: u64,
         pub delay: f64,
+        pub reserve: bool,
     }
 
     impl Track {
@@ -177,6 +178,7 @@ pub mod mux {
                 priming: 0,
                 length,
                 delay: 0.0,
+                reserve: false,
             }
         }
 
@@ -337,6 +339,7 @@ pub mod mux {
                 sample_rate: t.rate,
                 channels: u32::from(t.channels),
                 codec_delay: u64::from(t.priming) * 1_000_000_000 / u64::from(t.rate.max(1)),
+                seek_pre_roll: if t.reserve { 0x00ff_ffff_ffff_ffff } else { 0 },
                 ..pito_codecs::mkv::TrackConfig::new(
                     TrackKind::Audio,
                     t.mkv_id,
@@ -470,7 +473,7 @@ fn mpg123(c: &'static mp3::Case, gapless: bool, window: fn(&[f32], usize) -> Vec
     ]
 }
 
-fn mp3_frames(data: &[u8]) -> Result<(Packets, u32), String> {
+pub fn mp3_frames(data: &[u8]) -> Result<(Packets, u32), String> {
     let mut dec = pito_codecs::mp3::Decoder::new();
     let mut pcm = vec![0.0; pito_codecs::mp3::MAX_SAMPLES_PER_FRAME];
     let mut rest = data;
@@ -507,7 +510,11 @@ fn mp3_defs() -> Vec<Def> {
         defs.extend(mpg123(c, true, mp3::window::window));
     }
     let d = &mp3::DELAY;
-    defs.push(lame(d, true));
+    let mut stream = lame(d, true);
+    stream.file = String::new();
+    stream.kind = Kind::BitExact;
+    stream.take = Take::Digest(sha);
+    defs.push(stream);
     defs.extend(mpg123(d, true, |pcm, ch| {
         let (start, end) = mp3::delay_samples();
         mp3::window::window_range(pcm, ch, start, end)
@@ -567,6 +574,13 @@ pub fn flac_frames(data: &[u8]) -> Result<(Vec<u8>, Packets), String> {
     Ok((streaminfo, frames))
 }
 
+fn tracked_flac(name: &str) -> Bytes {
+    let path = testref::root()
+        .join("tests/fixtures/flac")
+        .join(format!("{name}.flac"));
+    std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 fn flac_defs() -> Vec<Def> {
     let mut defs = Vec::new();
     for (name, exts) in flac::REMUXED {
@@ -577,7 +591,7 @@ fn flac_defs() -> Vec<Def> {
                 flac::remuxed(name, ext),
                 &what,
                 move |_| {
-                    let data = flac::tracked(name)?;
+                    let data = tracked_flac(name)?;
                     let info = pito_codecs::flac::config(&data).map_err(|e| e.to_string())?;
                     let (head, packets) = flac_frames(&data)?;
                     let channels = info.channels as u16;
@@ -1089,33 +1103,43 @@ fn ac3_frames(data: &[u8], size: usize) -> Packets {
     data.chunks(size).map(|f| (f.to_vec(), 1536)).collect()
 }
 
-fn second_track() -> Result<mux::Track, String> {
+pub fn aac_track(pcm: &[f32], rate: u32, channels: u16, kbps: u32) -> Result<mux::Track, String> {
     let text = |e: pito_codecs::media::Error| e.to_string();
     let cfg = pito_codecs::aac::EncoderConfig {
-        rate: 48_000,
-        channels: 2,
-        bitrate: 64_000,
+        rate,
+        channels,
+        bitrate: kbps * 1000,
     };
     let mut enc = pito_codecs::aac::Encoder::new(cfg).map_err(text)?;
-    let mut pcm = pito_codecs::media::AudioBuffer::new(48_000, 2);
-    pcm.samples = (0..9600)
+    let mut buf = pito_codecs::media::AudioBuffer::new(rate, channels);
+    buf.samples = pcm.to_vec();
+    let mut packets = enc.encode(&buf).map_err(text)?;
+    packets.extend(enc.flush());
+    let asc = enc.extradata();
+    let timed: Packets = packets.into_iter().map(|p| (p.data, 1024)).collect();
+    let mut t = mux::Track::new(rate, channels, timed);
+    t.priming = enc.priming();
+    t.length = (pcm.len() / usize::from(channels.max(1))) as u64;
+    t.format = *b"mp4a";
+    t.entry = mux::sound_entry(
+        channels,
+        16,
+        rate,
+        &[(b"esds", mux::esds(0x40, &asc, kbps * 1000))],
+    );
+    t.mkv_id = "A_AAC";
+    t.private = asc;
+    Ok(t)
+}
+
+fn second_track() -> Result<mux::Track, String> {
+    let pcm: Vec<f32> = (0..9600)
         .flat_map(|i| {
             let v = 0.25 * (std::f32::consts::TAU * 440.0 * i as f32 / 48_000.0).sin();
             [v, v]
         })
         .collect();
-    let mut packets = enc.encode(&pcm).map_err(text)?;
-    packets.extend(enc.flush());
-    let asc = enc.extradata();
-    let timed: Packets = packets.into_iter().map(|p| (p.data, 1024)).collect();
-    let mut t = mux::Track::new(48_000, 2, timed);
-    t.priming = enc.priming();
-    t.length = 9600;
-    t.format = *b"mp4a";
-    t.entry = mux::sound_entry(2, 16, 48_000, &[(b"esds", mux::esds(0x40, &asc, 64_000))]);
-    t.mkv_id = "A_AAC";
-    t.private = asc;
-    Ok(t)
+    aac_track(&pcm, 48_000, 2, 64)
 }
 
 fn ac3_defs() -> Vec<Def> {

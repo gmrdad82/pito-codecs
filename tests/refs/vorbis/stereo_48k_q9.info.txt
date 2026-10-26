@@ -1,0 +1,4 @@
+sample_rate=48000
+channels=2
+bit_rate=320000
+TAG:TITLE=stereo_48k_q9

@@ -30,7 +30,7 @@ pub mod window {
 }
 
 pub const AREA: &str = "mp3";
-pub const SECONDS: f64 = 0.5;
+pub const SECONDS: f64 = 0.3;
 
 pub struct Case {
     pub name: &'static str,
@@ -62,7 +62,7 @@ pub const GAPLESS: [Case; 2] = [
 
 pub const DELAY: Case = case("delay", 44100, 2, &["-b", "160"]);
 pub const DELAY_EXTS: [&str; 2] = ["mp4", "mkv"];
-pub const DELAY_RANGE: (f64, f64) = (0.2, 0.4);
+pub const DELAY_RANGE: (f64, f64) = (0.1, 0.25);
 
 pub fn stream(name: &str) -> String {
     format!("{name}.mp3")

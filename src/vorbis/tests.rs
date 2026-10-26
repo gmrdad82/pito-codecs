@@ -843,7 +843,7 @@ fn ogg_packets(data: &[u8], want: usize) -> Vec<Vec<u8>> {
 }
 
 fn probed(r: &Refs, c: &refs::Case) -> Vec<(String, String)> {
-    String::from_utf8(r.bytes(&c.probe()))
+    String::from_utf8(r.bytes(&c.info()))
         .unwrap()
         .lines()
         .filter_map(|l| l.split_once('='))
@@ -920,7 +920,7 @@ fn encoded() -> Vec<Encoded> {
 }
 
 #[test]
-fn ffmpeg_vorbis_headers_parse_to_what_ffprobe_reports() {
+fn libvorbis_headers_parse_to_what_libvorbisenc_reports() {
     for (c, probed, packets) in encoded() {
         let channels = c.channels as u8;
         let (ident, comments, setup) = read_header_set(&packets[0], &packets[1], &packets[2])
@@ -932,7 +932,7 @@ fn ffmpeg_vorbis_headers_parse_to_what_ffprobe_reports() {
                 .iter()
                 .find(|(key, _)| key == k)
                 .map(|(_, v)| v.clone())
-                .unwrap_or_else(|| panic!("{}: ffprobe gave no {k}", c.name))
+                .unwrap_or_else(|| panic!("{}: libvorbisenc reported no {k}", c.name))
         };
         assert_eq!(
             get("sample_rate"),
@@ -1000,15 +1000,13 @@ fn ffmpeg_vorbis_headers_parse_to_what_ffprobe_reports() {
                 );
             }
         }
-        if !c.native {
-            assert!(
-                setup.floors.iter().all(|f| matches!(f, Floor::TypeOne(_))),
-                "{}: libvorbis writes floor 1 only",
-                c.name
-            );
-            let flags: Vec<bool> = setup.modes.iter().map(|m| m.mode_blockflag).collect();
-            assert_eq!(flags, [false, true], "{}: short and long modes", c.name);
-        }
+        assert!(
+            setup.floors.iter().all(|f| matches!(f, Floor::TypeOne(_))),
+            "{}: libvorbis writes floor 1 only",
+            c.name
+        );
+        let flags: Vec<bool> = setup.modes.iter().map(|m| m.mode_blockflag).collect();
+        assert_eq!(flags, [false, true], "{}: short and long modes", c.name);
         if c.name == "stereo_44k_q3" {
             assert_eq!((ident.blocksize_0, ident.blocksize_1), (8, 11));
             assert!(setup.residues.iter().all(|r| r.residue_type == 2));
@@ -1030,7 +1028,7 @@ impl Rng {
 }
 
 #[test]
-fn cut_and_corrupted_ffmpeg_headers_are_refused_without_a_panic() {
+fn cut_and_corrupted_libvorbis_headers_are_refused_without_a_panic() {
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
     for (c, _, packets) in encoded() {
         let ident = read_header_ident(&packets[0]).unwrap();

@@ -1,0 +1,9 @@
+These files are part of this repository and under its MIT licence (see LICENSE at the root).
+
+Their inputs are synthetic: src/testref.rs and examples/record_refs draw every picture and generate every sound with plain arithmetic, so no recorded picture or sound is in them. examples/record_refs made them; run `cargo run --release --example record_refs -- s16` to make them again. manifest.toml gives, for every file and reference, its sha256, the tool and version that made it and the exact command.
+
+Tools:
+- LAME 64bits version 4.0 (https://lame.sourceforge.io)
+- flac 1.5.0
+- libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7
+- pito-codecs 2.1.0

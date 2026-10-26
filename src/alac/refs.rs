@@ -267,10 +267,6 @@ impl Writer {
         }
     }
 
-    pub fn len(&self) -> usize {
-        self.bytes.len() * 8 + self.n as usize
-    }
-
     pub fn finish(mut self) -> Vec<u8> {
         if self.n > 0 {
             let pad = 8 - self.n;

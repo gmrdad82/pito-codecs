@@ -1,0 +1,4 @@
+sample_rate=44100
+channels=2
+bit_rate=112000
+TAG:TITLE=stereo_44k_q3

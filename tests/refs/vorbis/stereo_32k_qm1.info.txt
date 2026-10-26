@@ -1,0 +1,4 @@
+sample_rate=32000
+channels=2
+bit_rate=36000
+TAG:TITLE=stereo_32k_qm1
