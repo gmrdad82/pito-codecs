@@ -1,103 +1,17 @@
 use super::*;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use crate::testref::{Digest, Refs};
 use std::time::Instant;
 
-pub(super) fn dir() -> PathBuf {
-    let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/test/h264");
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
+#[allow(dead_code)]
+#[path = "refs.rs"]
+pub(super) mod refs;
 
-pub(super) fn ffmpeg_present() -> bool {
-    let ok = Command::new("ffmpeg")
-        .arg("-version")
-        .output()
-        .is_ok_and(|o| o.status.success());
-    if !ok {
-        eprintln!("ffmpeg not found, skipping");
-    }
-    ok
-}
+pub(super) use refs::raw;
 
-fn adoption() -> Option<PathBuf> {
-    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/sample/adoption.mp4");
-    if p.exists() {
-        Some(p)
-    } else {
-        eprintln!("{} missing, skipping", p.display());
-        None
-    }
-}
-
-fn run(args: &[&str]) {
-    let out = Command::new("ffmpeg")
-        .args(["-v", "error", "-y"])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "ffmpeg {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-pub(super) fn ffmpeg_yuv(input: &Path) -> Vec<u8> {
-    let out = Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
-        .arg(input)
-        .args(["-f", "rawvideo", "-pix_fmt", "yuv420p", "-"])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    out.stdout
-}
-
-fn x264(name: &str, size: &str, frames: u32, opts: &[&str]) -> PathBuf {
-    let path = dir().join(format!("{name}.h264"));
-    let src = format!("testsrc2=size={size}:rate=25,noise=alls=12:allf=t");
-    let n = frames.to_string();
-    let mut args = vec![
-        "-f",
-        "lavfi",
-        "-i",
-        &src,
-        "-frames:v",
-        &n,
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-    ];
-    args.extend_from_slice(opts);
-    let p = path.to_str().unwrap();
-    args.push(p);
-    run(&args);
-    path
-}
-
-pub(super) fn raw(frames: &[Frame]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for f in frames {
-        for p in &f.planes {
-            for r in 0..p.height {
-                out.extend_from_slice(&p.data[r * p.stride..r * p.stride + p.width]);
-            }
-        }
-    }
-    out
-}
-
-fn decode_annexb(path: &Path, threads: usize) -> Vec<Frame> {
-    let data = std::fs::read(path).unwrap();
+pub(super) fn decode_annexb(data: &[u8], threads: usize) -> Vec<Frame> {
     let mut dec = Decoder::with_threads(threads);
     let mut frames = Vec::new();
-    for (i, au) in access_units(&data).into_iter().enumerate() {
+    for (i, au) in access_units(data).into_iter().enumerate() {
         let packet = Packet {
             data: au.to_vec(),
             pts: i as i64,
@@ -136,151 +50,38 @@ fn access_units(data: &[u8]) -> Vec<&[u8]> {
     starts.windows(2).map(|w| &data[w[0]..w[1]]).collect()
 }
 
-pub(super) fn assert_same(ours: &[u8], theirs: &[u8], frame_size: usize, what: &str) {
-    assert_eq!(
-        ours.len() / frame_size,
-        theirs.len() / frame_size,
-        "{what}: frame count"
-    );
-    if let Some(i) = ours.iter().zip(theirs).position(|(a, b)| a != b) {
-        panic!(
-            "{what}: first difference in frame {} at byte {}",
-            i / frame_size,
-            i % frame_size
-        );
+pub(super) fn frames_digest(frames: &[Frame]) -> String {
+    let mut d = Digest::new();
+    for f in frames {
+        d.frame(f);
     }
+    d.hex()
 }
 
 #[test]
 fn decode_is_bit_exact_with_ffmpeg() {
-    if !ffmpeg_present() {
-        return;
-    }
-    let streams = [
-        (
-            "baseline",
-            "352x288",
-            vec!["-profile:v", "baseline", "-g", "15"],
-        ),
-        (
-            "main_cabac_b",
-            "352x288",
-            vec!["-profile:v", "main", "-bf", "3", "-refs", "3"],
-        ),
-        (
-            "high_bpyramid",
-            "640x360",
-            vec![
-                "-profile:v",
-                "high",
-                "-bf",
-                "3",
-                "-x264-params",
-                "b-pyramid=normal:weightp=2:direct=temporal:ref=4",
-            ],
-        ),
-        (
-            "high_crop_slices",
-            "638x358",
-            vec![
-                "-profile:v",
-                "high",
-                "-bf",
-                "2",
-                "-slices",
-                "4",
-                "-x264-params",
-                "cqm=jvt",
-            ],
-        ),
-    ];
-    for (name, size, opts) in streams {
-        let path = x264(name, size, 24, &opts);
-        let theirs = ffmpeg_yuv(&path);
-        let (w, h) = size
-            .split_once('x')
-            .map(|(w, h)| (w.parse::<usize>().unwrap(), h.parse::<usize>().unwrap()))
-            .unwrap();
-        let frame_size = w * h + 2 * w.div_ceil(2) * h.div_ceil(2);
+    let r = Refs::open(refs::AREA);
+    for s in &refs::X264_STREAMS {
+        let data = r.bytes(&format!("{}.h264", s.name));
         for threads in [1, 4] {
-            let ours = raw(&decode_annexb(&path, threads));
-            assert_same(
-                &ours,
-                &theirs,
-                frame_size,
-                &format!("{name} with {threads} threads"),
+            let what = format!("{} with {threads} threads", s.name);
+            let frames = decode_annexb(&data, threads);
+            assert_eq!(frames.len() as u64, s.frames, "{what}: frame count");
+            assert!(
+                frames.iter().all(|f| (f.width, f.height) == s.size),
+                "{what}: a frame is not {}x{}",
+                s.size.0,
+                s.size.1
             );
+            r.assert_digest(&format!("{}.yuv", s.name), &frames_digest(&frames));
         }
     }
-}
-
-#[test]
-fn adoption_first_two_seconds_are_bit_exact() {
-    let (true, Some(src)) = (ffmpeg_present(), adoption()) else {
-        return;
-    };
-    let path = dir().join("adoption_2s.h264");
-    run(&[
-        "-i",
-        src.to_str().unwrap(),
-        "-t",
-        "2",
-        "-an",
-        "-c:v",
-        "copy",
-        "-bsf:v",
-        "h264_mp4toannexb",
-        path.to_str().unwrap(),
-    ]);
-    let theirs = ffmpeg_yuv(&path);
-    let ours = raw(&decode_annexb(&path, default_threads()));
-    assert_same(&ours, &theirs, 2560 * 1440 * 3 / 2, "adoption");
-    assert!(ours.len() / (2560 * 1440 * 3 / 2) >= 100);
 }
 
 fn default_threads() -> usize {
     std::thread::available_parallelism()
         .map_or(1, |n| n.get())
         .min(16)
-}
-
-fn source_frames(src: &Path, w: u32, h: u32, frames: u32) -> Vec<Frame> {
-    let out = Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
-        .arg(src)
-        .args([
-            "-frames:v",
-            &frames.to_string(),
-            "-vf",
-            &format!("scale={w}:{h}"),
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "yuv420p",
-            "-",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let (ws, hs) = (w as usize, h as usize);
-    let (cw, ch) = (ws / 2, hs / 2);
-    out.stdout
-        .chunks_exact(ws * hs + 2 * cw * ch)
-        .enumerate()
-        .map(|(i, b)| {
-            let mut f = Frame::new(PixelFormat::Yuv420p8, w, h, i as i64, TimeBase::new(1, 30));
-            f.planes[0].data.copy_from_slice(&b[..ws * hs]);
-            f.planes[1]
-                .data
-                .copy_from_slice(&b[ws * hs..ws * hs + cw * ch]);
-            f.planes[2].data.copy_from_slice(&b[ws * hs + cw * ch..]);
-            f
-        })
-        .collect()
 }
 
 pub(super) fn psnr(a: &[u8], b: &[u8]) -> f64 {
@@ -297,86 +98,15 @@ pub(super) fn psnr(a: &[u8], b: &[u8]) -> f64 {
     }
 }
 
-pub(super) fn to_annexb(avcc: &[u8], packets: &[Packet]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut pos = 6;
-    for _ in 0..2 {
-        let count = if pos == 6 {
-            avcc[5] & 0x1f
-        } else {
-            avcc[pos - 1]
-        };
-        for _ in 0..count {
-            let len = u16::from_be_bytes([avcc[pos], avcc[pos + 1]]) as usize;
-            out.extend_from_slice(&[0, 0, 0, 1]);
-            out.extend_from_slice(&avcc[pos + 2..pos + 2 + len]);
-            pos += 2 + len;
-        }
-        pos += 1;
-    }
-    for p in packets {
-        let mut i = 0;
-        while i + 4 <= p.data.len() {
-            let len = u32::from_be_bytes(p.data[i..i + 4].try_into().unwrap()) as usize;
-            out.extend_from_slice(&[0, 0, 0, 1]);
-            out.extend_from_slice(&p.data[i + 4..i + 4 + len]);
-            i += 4 + len;
-        }
-    }
-    out
-}
-
 #[test]
 fn crf_18_encode_plays_in_ffmpeg_and_decodes_back() {
-    if !ffmpeg_present() {
-        return;
-    }
-    let (w, h) = (640, 360);
-    let src = match adoption() {
-        Some(p) => p,
-        None => {
-            let p = dir().join("encode_src.mp4");
-            run(&[
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc2=size=640x360:rate=30",
-                "-frames:v",
-                "30",
-                "-pix_fmt",
-                "yuv420p",
-                p.to_str().unwrap(),
-            ]);
-            p
-        }
-    };
-    let frames = source_frames(&src, w, h, 30);
-    let config = EncoderConfig {
-        width: w,
-        height: h,
-        fps: (30, 1),
-        rate: crate::media::Rate::Crf(18),
-        gop: 15,
-        b_frames: 2,
-        ..EncoderConfig::default()
-    };
-    let mut enc = Encoder::new(config.clone()).unwrap();
-    let mut packets = Vec::new();
-    for f in &frames {
-        packets.extend(enc.encode(f).unwrap());
-    }
-    packets.extend(enc.flush().unwrap());
+    let r = Refs::open(refs::AREA);
+    let (w, h, _) = refs::CRF18;
+    let frames = refs::crf18_source();
+    let config = refs::crf18_config(0);
+    let (avcc, packets) = refs::encode(config.clone(), &frames).unwrap();
     assert_eq!(packets.len(), frames.len());
-    let mut one = Encoder::new(EncoderConfig {
-        threads: 1,
-        ..config.clone()
-    })
-    .unwrap();
-    let mut single = Vec::new();
-    for f in &frames {
-        single.extend(one.encode(f).unwrap());
-    }
-    single.extend(one.flush().unwrap());
+    let (_, single) = refs::encode(refs::crf18_config(1), &frames).unwrap();
     assert!(
         packets
             .iter()
@@ -397,55 +127,43 @@ fn crf_18_encode_plays_in_ffmpeg_and_decodes_back() {
     pts.sort();
     assert_eq!(pts, (0..frames.len() as i64).collect::<Vec<_>>());
 
-    let path = dir().join("encode_crf18.h264");
-    std::fs::write(&path, to_annexb(&enc.avcc(), &packets)).unwrap();
-    let probe = Command::new("ffprobe")
-        .args([
-            "-v",
-            "error",
-            "-count_frames",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=codec_name,width,height,nb_read_frames",
-            "-of",
-            "csv=p=0",
-        ])
-        .arg(&path)
-        .output()
-        .unwrap();
-    assert!(
-        probe.status.success() && probe.stderr.is_empty(),
-        "ffprobe: {}",
-        String::from_utf8_lossy(&probe.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&probe.stdout).trim(),
-        format!("h264,{w},{h},{}", frames.len())
-    );
+    let stream = refs::to_annexb(&avcc, &packets).unwrap();
+    assert!(refs::crf18().unwrap() == stream, "crf18() is not this encode");
+    r.assert_digest("crf18.h264", &crate::testref::sha256(&stream));
+    let probed = String::from_utf8(r.bytes("crf18.probe")).unwrap();
+    assert_eq!(probed.trim(), format!("h264,{w},{h},{}", frames.len()));
 
-    let theirs = ffmpeg_yuv(&path);
-    let source = raw(&frames);
-    let db = psnr(&theirs, &source);
-    assert!(db > 40.0, "PSNR {db:.2} dB at CRF 18");
-
-    let mut dec = Decoder::with_extradata(&enc.avcc()).unwrap();
+    let mut dec = Decoder::with_extradata(&avcc).unwrap();
     let mut ours = Vec::new();
     for p in &packets {
         ours.extend(dec.decode(p).unwrap());
     }
     ours.extend(dec.flush().unwrap());
-    assert_same(
-        &raw(&ours),
-        &theirs,
-        (w * h * 3 / 2) as usize,
-        "our encode, decoded",
+    assert_eq!(ours.len(), frames.len());
+    r.assert_digest("crf18.yuv", &frames_digest(&ours));
+    let db = psnr(&raw(&ours), &raw(&frames));
+    assert!(db > 40.0, "PSNR {db:.2} dB at CRF 18");
+    assert_eq!(
+        frames_digest(&decode_annexb(&stream, 4)),
+        frames_digest(&ours),
+        "the Annex B stream decodes like the avcC one"
     );
 }
 
-fn bench_decode(path: &Path, label: &str) {
-    let data = std::fs::read(path).unwrap();
-    let aus = access_units(&data);
+fn bench_stream(w: u32, h: u32, frames: u64) -> Vec<u8> {
+    let config = EncoderConfig {
+        width: w,
+        height: h,
+        fps: (60, 1),
+        rate: crate::media::Rate::Crf(20),
+        ..EncoderConfig::default()
+    };
+    let (avcc, packets) = refs::encode(config, &refs::source(w, h, frames, 3)).unwrap();
+    refs::to_annexb(&avcc, &packets).unwrap()
+}
+
+fn bench_decode(data: &[u8], label: &str) {
+    let aus = access_units(data);
     let packets: Vec<Packet> = aus
         .iter()
         .enumerate()
@@ -476,68 +194,26 @@ fn bench_decode(path: &Path, label: &str) {
     }
 }
 
-fn bench_files(src: &Path) -> (PathBuf, PathBuf) {
-    let s = src.to_str().unwrap();
-    let p1440 = dir().join("bench_1440.h264");
-    crate::fixture::once(&p1440, |part| {
-        run(&[
-            "-i",
-            s,
-            "-t",
-            "10",
-            "-an",
-            "-c:v",
-            "copy",
-            "-bsf:v",
-            "h264_mp4toannexb",
-            part.to_str().unwrap(),
-        ]);
-    });
-    let p1080 = dir().join("bench_1080.h264");
-    crate::fixture::once(&p1080, |part| {
-        run(&[
-            "-i",
-            s,
-            "-t",
-            "10",
-            "-an",
-            "-vf",
-            "scale=1920:1080",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
-            "-crf",
-            "20",
-            part.to_str().unwrap(),
-        ]);
-    });
-    (p1080, p1440)
-}
-
 #[test]
 #[ignore]
 fn bench_decoder() {
-    let (true, Some(src)) = (ffmpeg_present(), adoption()) else {
+    if let Ok(file) = std::env::var("BENCH_FILE") {
+        bench_decode(&std::fs::read(&file).unwrap(), &file);
         return;
-    };
-    let (p1080, p1440) = bench_files(&src);
+    }
     let only = std::env::var("BENCH_SIZE").unwrap_or_default();
     if only != "1440" {
-        bench_decode(&p1080, "1080p");
+        bench_decode(&bench_stream(1920, 1080, 120), "1080p");
     }
     if only != "1080" {
-        bench_decode(&p1440, "1440p");
+        bench_decode(&bench_stream(2560, 1440, 120), "1440p");
     }
 }
 
 #[test]
 #[ignore]
 fn bench_encoder() {
-    let (true, Some(src)) = (ffmpeg_present(), adoption()) else {
-        return;
-    };
-    let frames = source_frames(&src, 1920, 1080, 120);
+    let frames = refs::source(1920, 1080, 120, 3);
     for (preset, b) in [(Preset::Speed, 2), (Preset::Balanced, 2)] {
         let config = EncoderConfig {
             width: 1920,
@@ -577,32 +253,11 @@ fn bench_encoder() {
 
 #[test]
 fn corrupt_streams_never_panic() {
-    if !ffmpeg_present() {
-        return;
-    }
-    let streams = [
-        x264(
-            "fuzz_cavlc",
-            "176x144",
-            10,
-            &["-profile:v", "baseline", "-g", "5", "-slices", "2"],
-        ),
-        x264(
-            "fuzz_cabac",
-            "176x144",
-            10,
-            &[
-                "-profile:v",
-                "high",
-                "-bf",
-                "2",
-                "-g",
-                "5",
-                "-x264-params",
-                "ref=3:weightp=2:direct=temporal",
-            ],
-        ),
-    ];
+    let r = Refs::open(refs::AREA);
+    let streams: Vec<Vec<u8>> = refs::FUZZ
+        .iter()
+        .map(|name| r.bytes(&format!("{name}.h264")))
+        .collect();
     let me = std::thread::current().id();
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let log = seen.clone();
@@ -624,8 +279,7 @@ fn corrupt_streams_never_panic() {
         seed ^= seed << 17;
         (seed >> 11) as usize % n.max(1)
     };
-    for path in &streams {
-        let data = std::fs::read(path).unwrap();
+    for data in &streams {
         for round in 0..300 {
             let mut d = data.clone();
             match round % 4 {
@@ -869,64 +523,12 @@ fn sps_vui_carries_the_given_colour_tags() {
 
 #[test]
 fn encoded_frames_carry_the_colour_tags_back_out() {
-    let cases = [
-        (Color::BT709, ["tv", "bt709", "bt709", "bt709"]),
-        (
-            Color {
-                primaries: 6,
-                transfer: 6,
-                matrix: 6,
-                full_range: false,
-            },
-            ["tv", "smpte170m", "smpte170m", "smpte170m"],
-        ),
-        (
-            Color {
-                primaries: 1,
-                transfer: 1,
-                matrix: 1,
-                full_range: true,
-            },
-            ["pc", "bt709", "bt709", "bt709"],
-        ),
-        (
-            Color {
-                primaries: 5,
-                transfer: 6,
-                matrix: 5,
-                full_range: true,
-            },
-            ["pc", "bt470bg", "smpte170m", "bt470bg"],
-        ),
-    ];
-    let probe = Command::new("ffprobe").arg("-version").output().is_ok();
-    if !probe {
-        eprintln!("ffprobe not found, skipping its half");
-    }
-    for (n, (color, names)) in cases.into_iter().enumerate() {
-        let mut enc = Encoder::new(EncoderConfig {
-            width: 64,
-            height: 48,
-            gop: 4,
-            color,
-            ..EncoderConfig::default()
-        })
-        .unwrap();
-        let mut packets = Vec::new();
-        for i in 0..6u8 {
-            let mut f = Frame::new(
-                PixelFormat::Yuv420p8,
-                64,
-                48,
-                i64::from(i),
-                TimeBase::new(1, 30),
-            );
-            f.planes[0].data.fill(16 + i * 30);
-            packets.extend(enc.encode(&f).unwrap());
-        }
-        packets.extend(enc.flush().unwrap());
+    let r = Refs::open(refs::AREA);
+    for (n, (color, names)) in refs::COLOURS.into_iter().enumerate() {
+        let (avcc, packets) = refs::encode(refs::colour_config(n), &refs::colour_frames()).unwrap();
         assert_eq!(packets.len(), 6);
-        let stream = to_annexb(&enc.avcc(), &packets);
+        let stream = refs::to_annexb(&avcc, &packets).unwrap();
+        assert!(refs::colour(n).unwrap() == stream, "colour({n}) is not this encode");
         let starts: Vec<usize> = stream
             .windows(3)
             .enumerate()
@@ -963,7 +565,7 @@ fn encoded_frames_carry_the_colour_tags_back_out() {
                 color.full_range
             )
         );
-        let mut dec = Decoder::with_extradata(&enc.avcc()).unwrap();
+        let mut dec = Decoder::with_extradata(&avcc).unwrap();
         let mut shown = 0;
         for p in &packets {
             shown += dec.decode(p).unwrap().len();
@@ -979,26 +581,11 @@ fn encoded_frames_carry_the_colour_tags_back_out() {
                 matrix: color.matrix,
             })
         );
-        if !probe {
-            continue;
-        }
-        let path = dir().join(format!("colour-{n}.h264"));
-        std::fs::write(&path, &stream).unwrap();
-        let out = Command::new("ffprobe")
-            .args([
-                "-v",
-                "error",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=color_range,color_primaries,color_transfer,color_space",
-                "-of",
-                "default=nw=1",
-            ])
-            .arg(&path)
-            .output()
-            .unwrap();
-        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        r.assert_digest(
+            &format!("colour-{n}.h264"),
+            &crate::testref::sha256(&stream),
+        );
+        let text = String::from_utf8(r.bytes(&format!("colour-{n}.probe"))).unwrap();
         let tag = |key: &str| {
             text.lines()
                 .find_map(|l| l.strip_prefix(&format!("{key}=")))
@@ -1006,14 +593,24 @@ fn encoded_frames_carry_the_colour_tags_back_out() {
                 .to_string()
         };
         assert_eq!(
-            [
-                tag("color_range"),
-                tag("color_primaries"),
-                tag("color_transfer"),
-                tag("color_space")
-            ],
+            refs::COLOUR_KEYS.map(tag),
             names.map(String::from),
             "{text}"
         );
     }
+}
+
+#[test]
+fn the_x264_sources_are_what_the_recorder_feeds_x264() {
+    for s in &refs::X264_STREAMS {
+        let (w, h) = (s.size.0 as usize, s.size.1 as usize);
+        let bytes = refs::x264_source(s.name).unwrap();
+        let frame = w * h + 2 * w.div_ceil(2) * h.div_ceil(2);
+        assert_eq!(bytes.len(), frame * s.frames as usize, "{}", s.name);
+        assert_eq!(refs::x264(s.name).unwrap().name, s.name);
+        assert!(refs::FUZZ.iter().all(|n| refs::x264(n).is_ok()));
+    }
+    assert!(refs::x264("nothing").is_err());
+    assert!(refs::x264_source("nothing").is_err());
+    assert!(refs::to_annexb(&[1, 0x64, 0, 0x1f, 0xff, 0xe1], &[]).is_err());
 }
