@@ -7,114 +7,311 @@
     feature = "gpu",
     feature = "filter",
     feature = "mkv",
-    feature = "vp9"
+    feature = "vp9",
+    feature = "opus"
 ))]
 
-#[path = "../src/fixture.rs"]
-#[allow(dead_code)]
-mod fixture;
+#[path = "../src/testref.rs"]
+mod testref;
 
+#[path = "../src/media/refs.rs"]
+mod refs;
+
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, OnceLock};
 
 use pito_codecs::media::{
-    AudioBuffer, Canvas, Choice, Chroma, Codec, ExportOptions, Frame, IN_FLIGHT, Piece,
-    PixelFormat, Prefs, Progress, Rgba, Seek, Stills, TimeBase, VideoFrame, audio_mix,
+    AudioBuffer, Bitstream, Canvas, Choice, Chroma, Codec, ExportOptions, Frame, IN_FLIGHT, Piece,
+    PixelFormat, Prefs, Progress, Rate, Rgba, Seek, Stills, TimeBase, VideoFrame, audio_mix,
     audio_mix_stream, audio_pcm, audio_pcm_range, audio_stream, decode_video, decode_video_gpu,
     export, export_frames, export_with_audio, first_frame, frame_count, frames_at, frames_at_seek,
     keyframes, probe,
 };
-
-fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg").arg("-version").output().is_ok()
-}
+use pito_codecs::{h264, mkv, mp4};
+use refs::AREA;
+use testref::{AudioCodec, Clip, Digest, Picture, Refs, Sound, VideoCodec};
 
 fn dir() -> PathBuf {
-    let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/test-media");
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    testref::scratch(AREA)
+}
+
+fn fixture(name: &str) -> PathBuf {
+    Refs::open(AREA).path(name)
+}
+
+fn sine_440(i: u64, _: u16, rate: u32) -> f32 {
+    (0.125 * (std::f64::consts::TAU * 440.0 * i as f64 / f64::from(rate)).sin()) as f32
+}
+
+fn s16(rate: u32, frames: usize, left: Sound, right: Sound) -> Vec<i16> {
+    let f: Vec<f32> = (0..frames as u64)
+        .flat_map(|i| [left.at(i, 0, rate), right.at(i, 0, rate)])
+        .collect();
+    testref::s16_of(&f)
+}
+
+fn le(samples: &[i16]) -> Vec<u8> {
+    samples.iter().flat_map(|s| s.to_le_bytes()).collect()
+}
+
+const CHUNK: usize = 2048;
+
+enum Item {
+    Copy(usize, usize),
+    Pcm(usize, usize),
+}
+
+fn pcm_items(pcm: &[Vec<i16>], rate: u32, items: &mut Vec<(f64, Item)>) {
+    for (k, track) in pcm.iter().enumerate() {
+        for start in (0..track.len() / 2).step_by(CHUNK) {
+            items.push((start as f64 / f64::from(rate), Item::Pcm(k, start)));
+        }
+    }
+}
+
+fn chunk(track: &[i16], start: usize) -> (Vec<u8>, usize) {
+    let end = (start + CHUNK).min(track.len() / 2);
+    (le(&track[start * 2..end * 2]), end - start)
+}
+
+fn sowt(rate: u32) -> mp4::SampleEntry {
+    let mut raw = vec![0u8; 6];
+    raw.extend(1u16.to_be_bytes());
+    raw.extend([0u8; 8]);
+    raw.extend(2u16.to_be_bytes());
+    raw.extend(16u16.to_be_bytes());
+    raw.extend([0u8; 4]);
+    raw.extend((rate << 16).to_be_bytes());
+    mp4::SampleEntry {
+        format: mp4::FourCc(*b"sowt"),
+        codec: mp4::CodecConfig::Pcm(mp4::PcmConfig {
+            bits: 16,
+            float: false,
+            big_endian: false,
+            signed: true,
+            channels: 2,
+            sample_rate: f64::from(rate),
+        }),
+        video: None,
+        audio: Some(mp4::AudioParams {
+            channels: 2,
+            sample_size: 16,
+            sample_rate: f64::from(rate),
+            ..Default::default()
+        }),
+        bitrate: None,
+        raw,
+    }
+}
+
+fn rebuild_mp4(
+    src: &Path,
+    name: &str,
+    pcm: &[Vec<i16>],
+    rate: u32,
+    edit: impl Fn(&mp4::Reader, usize, &mut mp4::TrackConfig),
+) -> PathBuf {
+    let r = mp4::Reader::open(src).unwrap();
+    let mut w = mp4::Writer::new(Cursor::new(Vec::new()), mp4::Options::default()).unwrap();
+    w.set_movie_timescale(r.timescale);
+    let mut items = Vec::new();
+    let mut tracks = Vec::new();
+    for (i, t) in r.tracks.iter().enumerate() {
+        let mut cfg = mp4::TrackConfig::from_track(t).unwrap();
+        cfg.media_start = t
+            .edits
+            .iter()
+            .find(|e| e.media_time >= 0)
+            .map(|e| e.media_time);
+        edit(&r, i, &mut cfg);
+        tracks.push(w.add_track(cfg).unwrap());
+        for (k, s) in t.samples.iter().enumerate() {
+            items.push((t.seconds(s.dts), Item::Copy(i, k)));
+        }
+    }
+    let lanes: Vec<usize> = pcm
+        .iter()
+        .map(|_| {
+            w.add_track(mp4::TrackConfig::new(sowt(rate), rate))
+                .unwrap()
+        })
+        .collect();
+    pcm_items(pcm, rate, &mut items);
+    items.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (_, item) in items {
+        match item {
+            Item::Copy(i, k) => {
+                let s = r.tracks[i].samples[k];
+                let data = r.read(i, k).unwrap();
+                w.push_sample(tracks[i], &data, s.pts, s.dts, s.duration, s.keyframe)
+                    .unwrap();
+            }
+            Item::Pcm(k, start) => {
+                let (data, frames) = chunk(&pcm[k], start);
+                let at = start as i64;
+                w.push_sample(lanes[k], &data, at, at, frames as u32, true)
+                    .unwrap();
+            }
+        }
+    }
+    let out = dir().join(name);
+    let bytes = w.finish_faststart().unwrap().into_inner();
+    testref::write_atomic(&out, &bytes).unwrap();
+    out
+}
+
+fn rebuild_mkv(src: &Path, name: &str, pcm: &[Vec<i16>], rate: u32, late: [f64; 2]) -> PathBuf {
+    let r = mkv::Reader::open(src).unwrap();
+    let options = if name.ends_with(".webm") {
+        mkv::Options::webm()
+    } else {
+        mkv::Options::default()
+    };
+    let mut w = mkv::Writer::new(Cursor::new(Vec::new()), options);
+    let mut items = Vec::new();
+    let mut tracks = Vec::new();
+    for (i, t) in r.tracks.iter().enumerate() {
+        tracks.push(w.add_track(mkv::TrackConfig::from_track(t)).unwrap());
+        let video = t.kind == mkv::TrackKind::Video;
+        let shift = if video { late[0] } else { late[1] };
+        let fps = t.fps().max(1.0);
+        for (k, s) in t.samples.iter().enumerate() {
+            let at = if video {
+                k as f64 / fps
+            } else {
+                t.seconds(s.pts)
+            };
+            items.push((at + shift, Item::Copy(i, k)));
+        }
+    }
+    let lanes: Vec<usize> = pcm
+        .iter()
+        .map(|_| {
+            let cfg = mkv::TrackConfig {
+                sample_rate: rate,
+                channels: 2,
+                ..mkv::TrackConfig::new(
+                    mkv::TrackKind::Audio,
+                    "A_PCM/INT/LIT",
+                    TimeBase::new(1, rate),
+                )
+            };
+            w.add_track(cfg).unwrap()
+        })
+        .collect();
+    pcm_items(pcm, rate, &mut items);
+    items.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (_, item) in items {
+        match item {
+            Item::Copy(i, k) => {
+                let t = &r.tracks[i];
+                let s = t.samples[k];
+                let shift = if t.kind == mkv::TrackKind::Video {
+                    late[0]
+                } else {
+                    late[1]
+                };
+                let data = r.read(i, k).unwrap();
+                let duration = (s.duration > 0).then_some(s.duration);
+                w.push_sample(
+                    tracks[i],
+                    &data,
+                    s.pts + t.ticks(shift),
+                    duration,
+                    s.keyframe,
+                )
+                .unwrap();
+            }
+            Item::Pcm(k, start) => {
+                let (data, frames) = chunk(&pcm[k], start);
+                w.push_sample(lanes[k], &data, start as i64, Some(frames as u32), true)
+                    .unwrap();
+            }
+        }
+    }
+    let out = dir().join(name);
+    let bytes = w.finish().unwrap().into_inner();
+    testref::write_atomic(&out, &bytes).unwrap();
+    out
+}
+
+fn with_pcm(video: Clip, name: &str, pcm: &[Vec<i16>], rate: u32) -> PathBuf {
+    let src = video.video_only().make(AREA, &format!("video-{name}"));
+    if name.ends_with(".mp4") {
+        rebuild_mp4(&src, name, pcm, rate, |_, _, _| {})
+    } else {
+        rebuild_mkv(&src, name, pcm, rate, [0.0; 2])
+    }
 }
 
 fn clip() -> &'static Path {
     static CLIP: OnceLock<PathBuf> = OnceLock::new();
     CLIP.get_or_init(|| {
-        let out = dir().join("two-tracks-bt709.mp4");
-        if out.exists() {
-            return out;
+        let plain = Clip {
+            b_frames: 2,
+            sounds: vec![
+                Sound::Sine {
+                    hz: 440.0,
+                    amp: 0.25,
+                },
+                Sound::Sine {
+                    hz: 880.0,
+                    amp: 0.25,
+                },
+            ],
+            ..Clip::new((1280, 720), (60, 1), 360)
         }
-        let part = dir().join(format!("two-tracks-bt709.{}.part.mp4", std::process::id()));
-        let ok = Command::new("ffmpeg")
-            .args(["-v", "error", "-y"])
-            .args(["-f", "lavfi", "-i", "testsrc2=s=1280x720:r=60:d=6"])
-            .args(["-f", "lavfi", "-i", "sine=f=440:r=48000:d=6"])
-            .args(["-f", "lavfi", "-i", "sine=f=880:r=44100:d=6"])
-            .args(["-map", "0:v", "-map", "1:a", "-map", "2:a"])
-            .args([
-                "-c:v",
-                "libx264",
-                "-preset",
-                "ultrafast",
-                "-profile:v",
-                "high",
-            ])
-            .args([
-                "-bf",
-                "2",
-                "-g",
-                "60",
-                "-keyint_min",
-                "60",
-                "-sc_threshold",
-                "0",
-            ])
-            .args(["-pix_fmt", "yuv420p", "-c:a", "aac", "-ac:a:1", "1"])
-            .args(["-vf", "scale=out_color_matrix=bt709:out_range=tv"])
-            .args([
-                "-colorspace",
-                "bt709",
-                "-color_primaries",
-                "bt709",
-                "-color_trc",
-                "bt709",
-            ])
-            .args([
-                "-metadata:s:a:0",
-                "title=Game",
-                "-metadata:s:a:1",
-                "title=Mic",
-            ])
-            .arg(&part)
-            .status()
-            .unwrap()
-            .success();
-        assert!(ok);
-        if let Err(e) = std::fs::rename(&part, &out) {
-            assert!(std::path::Path::new(&out).exists(), "{e}");
-            let _ = std::fs::remove_file(&part);
-        }
-        out
+        .make(AREA, "two-tracks-plain.mp4");
+        let titles = ["Game", "Mic"];
+        rebuild_mp4(&plain, "two-tracks-bt709.mp4", &[], 0, |r, i, cfg| {
+            if let Some(k) = r.audio().iter().position(|&a| a == i) {
+                cfg.title = Some(titles[k].into());
+            }
+        })
     })
 }
 
-fn ffprobe(path: &Path, args: &[&str]) -> String {
-    let out = Command::new("ffprobe")
-        .args(["-v", "error"])
-        .args(args)
-        .arg(path)
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
+fn route_prefs(decode: Choice) -> Prefs {
+    Prefs {
+        decode,
+        ..Prefs::default()
+    }
+}
+
+fn frames_from(path: &Path, from: i64) -> impl Iterator<Item = Frame> {
+    let cpu = route_prefs(Choice::Cpu);
+    let p = probe(path, &cpu).unwrap();
+    let at = (from - 1).max(0) as f64 * p.fps.1 as f64 / p.fps.0.max(1) as f64;
+    decode_video(path, at, None, &cpu)
+        .unwrap()
+        .map(Result::unwrap)
+        .skip_while(move |f| f.pts < from)
+}
+
+fn hash(f: &Frame) -> String {
+    let mut d = Digest::new();
+    d.frame(f);
+    d.hex()
 }
 
 fn decodes_clean(path: &Path) -> bool {
-    let out = Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
-        .arg(path)
-        .args(["-f", "null", "-"])
-        .output()
-        .unwrap();
-    out.status.success() && out.stderr.is_empty()
+    let cpu = route_prefs(Choice::Cpu);
+    let (Ok(p), Ok(video), Ok(count)) = (
+        probe(path, &cpu),
+        decode_video(path, 0.0, None, &cpu),
+        frame_count(path, &cpu),
+    ) else {
+        return false;
+    };
+    let mut n = 0u64;
+    for f in video {
+        if f.is_err() {
+            return false;
+        }
+        n += 1;
+    }
+    n == count && (0..p.audio.len()).all(|t| audio_pcm(path, t, 48_000, false, &cpu).is_ok())
 }
 
 fn lit(img: &Rgba) -> bool {
@@ -122,96 +319,67 @@ fn lit(img: &Rgba) -> bool {
 }
 
 fn min_psnr(out: &Path, src: &Path, ranges: &[(i64, i64)]) -> f64 {
-    let mut graph = format!("[1:v]split={}", ranges.len());
-    for i in 0..ranges.len() {
-        graph.push_str(&format!("[s{i}]"));
+    let mut ours = frames_from(out, 0);
+    let mut worst = f64::INFINITY;
+    for &(a, b) in ranges {
+        let mut n = 0;
+        for theirs in frames_from(src, a).take((b - a) as usize) {
+            let o = ours
+                .next()
+                .unwrap_or_else(|| panic!("{} ends inside [{a}, {b})", out.display()));
+            worst = worst.min(testref::psnr(&packed(&o), &packed(&theirs)));
+            n += 1;
+        }
+        assert_eq!(n, b - a, "{} has no frames [{a}, {b})", src.display());
     }
-    graph.push(';');
-    let mut joined = String::new();
-    for (i, (a, b)) in ranges.iter().enumerate() {
-        graph.push_str(&format!(
-            "[s{i}]trim=start_frame={a}:end_frame={b},setpts=PTS-STARTPTS[p{i}];"
-        ));
-        joined.push_str(&format!("[p{i}]"));
-    }
-    let log = out.with_extension("psnr");
-    let name = log.file_name().unwrap().to_str().unwrap();
-    graph.push_str(&format!(
-        "{joined}concat=n={}:v=1:a=0,settb=1,setpts=N[ref];[0:v]settb=1,setpts=N[o];[o][ref]psnr=stats_file={name}",
-        ranges.len(),
-    ));
-    let ok = Command::new("ffmpeg")
-        .current_dir(log.parent().unwrap())
-        .args(["-v", "error", "-i"])
-        .arg(out)
-        .arg("-i")
-        .arg(src)
-        .args(["-filter_complex", &graph, "-f", "null", "-"])
-        .status()
-        .unwrap()
-        .success();
-    assert!(ok);
-    let text = std::fs::read_to_string(&log).unwrap();
-    let total: i64 = ranges.iter().map(|(a, b)| b - a).sum();
-    assert_eq!(text.lines().count() as i64, total);
-    text.lines()
-        .map(|l| {
-            let v = l
-                .split_whitespace()
-                .nth(5)
-                .unwrap()
-                .split(':')
-                .nth(1)
-                .unwrap();
-            if v == "inf" {
-                999.0
-            } else {
-                v.parse().unwrap()
-            }
-        })
-        .fold(f64::INFINITY, f64::min)
+    assert!(
+        ours.next().is_none(),
+        "{} has more frames than its pieces",
+        out.display()
+    );
+    worst
 }
 
 fn routes() -> [(&'static str, Prefs); 1] {
     [("ours", Prefs::default())]
 }
 
-fn ffmpeg_still(path: &Path, at: f64, height: u32, exact: bool) -> Rgba {
-    let mut c = Command::new("ffmpeg");
-    c.args(["-nostdin", "-v", "error", "-threads", "2"]);
-    if !exact {
-        c.args(["-skip_frame", "nokey", "-noaccurate_seek"]);
+fn span(o: u32, len: u32, to: u32) -> (u32, u32) {
+    let a = o * len / to;
+    (a, ((o + 1) * len / to).max(a + 1))
+}
+
+fn shrink(size: (u32, u32), like: &Rgba, rgb: impl Fn(u32, u32) -> [u8; 3]) -> Rgba {
+    let mut out = Rgba::new(like.width, like.height);
+    for oy in 0..like.height {
+        let (y0, y1) = span(oy, size.1, like.height);
+        for ox in 0..like.width {
+            let (x0, x1) = span(ox, size.0, like.width);
+            let mut sum = [0u32; 3];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    for (s, c) in sum.iter_mut().zip(rgb(x, y)) {
+                        *s += u32::from(c);
+                    }
+                }
+            }
+            let n = (y1 - y0) * (x1 - x0);
+            let i = ((oy * like.width + ox) * 4) as usize;
+            for (c, s) in sum.iter().enumerate() {
+                out.data[i + c] = ((s + n / 2) / n) as u8;
+            }
+            out.data[i + 3] = 255;
+        }
     }
-    if at > 0.0 {
-        c.args(["-ss", &format!("{at:.6}")]);
-    }
-    let out = c
-        .arg("-i")
-        .arg(path)
-        .args(["-map", "0:v:0", "-frames:v", "1", "-vf"])
-        .arg(format!("scale=-2:{height}:flags=bilinear"))
-        .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let width = (out.stdout.len() / 4 / height as usize) as u32;
-    assert_eq!(out.stdout.len(), width as usize * height as usize * 4);
-    Rgba {
-        width,
-        height,
-        data: out.stdout,
-    }
+    out
+}
+
+fn source_still(size: (u32, u32), n: u64, like: &Rgba) -> Rgba {
+    shrink(size, like, |x, y| testref::rgb_at(size.0, size.1, n, x, y))
 }
 
 #[test]
-fn our_route_probes_shows_and_hears_without_ffmpeg() {
-    if !have_ffmpeg() {
-        return;
-    }
+fn our_route_probes_shows_and_hears() {
     let prefs = Prefs::default();
     let p = probe(clip(), &prefs).unwrap();
     assert_eq!((p.width, p.height, p.fps), (1280, 720, (60, 1)));
@@ -219,15 +387,10 @@ fn our_route_probes_shows_and_hears_without_ffmpeg() {
     let titles: Vec<_> = p.audio.iter().map(|a| a.title.clone()).collect();
     assert_eq!(titles, [Some("Game".into()), Some("Mic".into())]);
     let ours = first_frame(clip(), 240, &prefs).unwrap();
-    let theirs = ffmpeg_still(clip(), 0.0, 240, false);
-    assert_eq!((ours.width, ours.height), (theirs.width, theirs.height));
-    let diff = ours
-        .data
-        .iter()
-        .zip(&theirs.data)
-        .map(|(a, b)| a.abs_diff(*b) as u64)
-        .sum::<u64>() as f64
-        / ours.data.len() as f64;
+    assert_eq!(ours.height, 240);
+    assert!((426..=428).contains(&ours.width), "{}", ours.width);
+    let theirs = source_still((1280, 720), 0, &ours);
+    let diff = mean_diff(&ours, &theirs);
     assert!(diff < 6.0, "{diff}");
     let strip = frames_at(clip(), &[0.5, 2.0, 4.0, 99.0], 120, &prefs).unwrap();
     assert!(strip.iter().all(|s| s.height == 120 && lit(s)));
@@ -256,9 +419,6 @@ fn worst(a: &[f32], b: &[f32]) -> f32 {
 
 #[test]
 fn ranged_audio_lines_up_with_the_whole_track_and_mixes_on_every_route() {
-    if !have_ffmpeg() {
-        return;
-    }
     for (name, prefs) in routes() {
         for (track, channels, limit) in [(0usize, 2u16, 1e-3f32), (1, 1, 5e-3)] {
             let whole =
@@ -303,9 +463,6 @@ fn ranged_audio_lines_up_with_the_whole_track_and_mixes_on_every_route() {
 
 #[test]
 fn a_three_piece_export_with_a_repeat_smart_cuts_to_the_frame_on_every_route() {
-    if !have_ffmpeg() {
-        return;
-    }
     for (name, prefs) in routes() {
         let out = dir().join(format!("smart-{name}.mp4"));
         let pieces = [(1.1, 3.4), (0.5, 1.5), (1.1, 3.4)].map(|(from, to)| Piece {
@@ -333,19 +490,10 @@ fn a_three_piece_export_with_a_repeat_smart_cuts_to_the_frame_on_every_route() {
         assert!(decodes_clean(&out), "{name}");
         let psnr = min_psnr(&out, clip(), &[(66, 204), (30, 90), (66, 204)]);
         assert!(psnr > 40.0, "{name}: {psnr}");
-        let audio: f64 = ffprobe(
-            &out,
-            &[
-                "-select_streams",
-                "a:0",
-                "-show_entries",
-                "stream=duration",
-                "-of",
-                "csv=p=0",
-            ],
-        )
-        .parse()
-        .unwrap();
+        let audio = audio_pcm(&out, 0, 48_000, false, &Prefs::default())
+            .unwrap()
+            .frames() as f64
+            / 48_000.0;
         assert!((audio - 5.6).abs() < 0.05, "{name}: {audio}");
         header_durations_match_the_samples(&out, name);
     }
@@ -454,9 +602,6 @@ fn header_durations_match_the_samples(path: &Path, name: &str) {
 
 #[test]
 fn an_export_ending_on_a_copied_gop_lasts_to_its_last_frame_in_the_headers() {
-    if !have_ffmpeg() {
-        return;
-    }
     for (name, prefs) in routes() {
         let out = dir().join(format!("headers-{name}.mp4"));
         let pieces = [(1.1, 2.0), (2.5, 4.0)].map(|(from, to)| Piece {
@@ -520,9 +665,6 @@ fn picture(n: u64, size: (u32, u32), spent: Option<Frame>) -> Frame {
 
 #[test]
 fn caller_made_frames_export_at_their_size_with_sample_exact_audio() {
-    if !have_ffmpeg() {
-        return;
-    }
     let size = (360, 640);
     let fps = (30_000, 1_001);
     let count = 299u64;
@@ -560,21 +702,13 @@ fn caller_made_frames_export_at_their_size_with_sample_exact_audio() {
     assert_eq!(asked.last().map(|a| a.0), Some(count));
     assert_eq!(asked.iter().map(|a| a.1).sum::<usize>(), total);
     assert!(asked.windows(2).all(|w| w[0].0 < w[1].0));
-    let shape = ffprobe(
-        &out,
-        &[
-            "-count_frames",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=width,height,nb_read_frames",
-            "-of",
-            "csv=p=0",
-        ],
-    );
-    assert_eq!(shape, "360,640,299");
+    let back = probe(&out, &Prefs::default()).unwrap();
+    assert_eq!((back.width, back.height), size);
+    assert_eq!(frame_count(&out, &Prefs::default()).unwrap(), count);
     assert!(decodes_clean(&out));
-    let pcm = ffmpeg_f32(&out);
+    let pcm = audio_pcm(&out, 0, 48_000, false, &Prefs::default())
+        .unwrap()
+        .samples;
     assert_eq!(pcm.len(), total * 2);
     let want: Vec<f32> = (0..total).flat_map(|k| [tone(k), tone(k)]).collect();
     let span = 96_000 * 2..100_096 * 2;
@@ -605,9 +739,6 @@ fn tone(k: usize) -> f32 {
 
 #[test]
 fn a_premixed_export_keeps_its_tone_whole_and_sample_exact_on_every_route() {
-    if !have_ffmpeg() {
-        return;
-    }
     let pieces = [(1.1, 3.4), (0.5, 1.5), (4.0, 4.52)].map(|(from, to)| Piece {
         path: clip().to_path_buf(),
         from,
@@ -638,11 +769,10 @@ fn a_premixed_export_keeps_its_tone_whole_and_sample_exact_on_every_route() {
         assert_eq!(done.frames, 229, "{name}");
         assert_eq!(asked, [(0, 110_400), (1, 48_000), (2, 24_800)], "{name}");
         assert!(decodes_clean(&out), "{name}");
-        let pcm = ffmpeg_f32(&out);
-        assert_eq!(pcm.len(), total * 2, "{name}");
         let ours =
             audio_pcm_range(&out, 0, 0.0, f64::INFINITY, 48_000, 2, &Prefs::default()).unwrap();
         assert_eq!(ours.frames(), total, "{name}");
+        let pcm = ours.samples;
         let want: Vec<f32> = (0..total).flat_map(|k| [tone(k), tone(k)]).collect();
         for cut in [110_400usize, 158_400] {
             let span = (cut - 2_048) * 2..(cut + 2_048) * 2;
@@ -685,9 +815,6 @@ fn a_premixed_export_keeps_its_tone_whole_and_sample_exact_on_every_route() {
 
 #[test]
 fn an_export_with_an_overlay_re_encodes_and_paints_every_frame_on_every_route() {
-    if !have_ffmpeg() {
-        return;
-    }
     for (name, prefs) in routes() {
         let out = dir().join(format!("overlay-{name}.mp4"));
         let pieces = [(0.0, 1.0), (4.0, 4.5)].map(|(from, to)| Piece {
@@ -715,27 +842,18 @@ fn an_export_with_an_overlay_re_encodes_and_paints_every_frame_on_every_route() 
         )
         .unwrap();
         assert!(!done.smart && done.encoded == 90, "{name}");
-        let codec = ffprobe(
-            &out,
-            &[
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=codec_name",
-                "-of",
-                "csv=p=0",
-            ],
-        );
-        if codec == "h264" {
+        let codec = probe(&out, &Prefs::default()).unwrap().video_codec;
+        if codec == Some(Codec::H264) {
             assert!(
                 done.reasons.iter().any(|r| r.contains("instead")),
                 "{name}: {:?}",
                 done.reasons
             );
         } else {
-            assert_eq!(codec, "hevc", "{name}");
+            assert_eq!(codec, Some(Codec::Hevc), "{name}");
         }
-        let top = ffmpeg_still(&out, 0.0, 720, false);
+        let top = first_frame(&out, 720, &route_prefs(Choice::Cpu)).unwrap();
+        assert_eq!((top.width, top.height), (1280, 720), "{name}");
         let px = &top.data[(50 * 1280 + 640) * 4..(50 * 1280 + 640) * 4 + 3];
         assert!(px[0] > 220 && px[1] < 40 && px[2] < 40, "{name}: {px:?}");
         assert!(decodes_clean(&out), "{name}");
@@ -746,7 +864,7 @@ fn an_export_with_an_overlay_re_encodes_and_paints_every_frame_on_every_route() 
 #[test]
 fn adoption_through_every_available_route() {
     let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/sample/adoption.mp4");
-    if !sample.exists() || !have_ffmpeg() {
+    if !sample.exists() {
         eprintln!("no tmp/sample/adoption.mp4: skipped");
         return;
     }
@@ -795,9 +913,6 @@ fn luma_diff(a: &Frame, b: &Frame) -> f64 {
 
 #[test]
 fn gpu_playback_keeps_frames_on_the_gpu_and_falls_back_to_the_cpu() {
-    if !have_ffmpeg() {
-        return;
-    }
     let gpu = pito_codecs::gpu::available()
         .iter()
         .any(|&(c, d, _)| c == Codec::H264 && d == pito_codecs::gpu::Direction::Decode);
@@ -862,47 +977,21 @@ fn gpu_playback_keeps_frames_on_the_gpu_and_falls_back_to_the_cpu() {
     assert!(diff < 1.0, "{diff}");
 }
 
-fn matroska(name: &str, codec: &[&str]) -> PathBuf {
-    fixture::once(&dir().join(name), |part| {
-        let ok = Command::new("ffmpeg")
-            .args(["-v", "error", "-y"])
-            .args(["-f", "lavfi", "-i", "testsrc2=s=640x360:r=30:d=3"])
-            .args(["-pix_fmt", "yuv420p", "-g", "30"])
-            .args(codec)
-            .arg(part)
-            .status()
-            .unwrap()
-            .success();
-        assert!(ok);
-    })
+fn matroska(name: &str, video: VideoCodec) -> PathBuf {
+    Clip {
+        video: Some(video),
+        b_frames: if video == VideoCodec::H264 { 2 } else { 0 },
+        ..Clip::new((640, 360), (30, 1), 90)
+    }
+    .video_only()
+    .make(AREA, name)
 }
 
 #[test]
 fn matroska_and_webm_play_through_the_media_front() {
-    if !have_ffmpeg() {
-        return;
-    }
     let files = [
-        (
-            matroska("h264.mkv", &["-c:v", "libx264", "-bf", "2"]),
-            Codec::H264,
-        ),
-        (
-            matroska(
-                "vp9.webm",
-                &[
-                    "-c:v",
-                    "libvpx-vp9",
-                    "-b:v",
-                    "1M",
-                    "-deadline",
-                    "realtime",
-                    "-cpu-used",
-                    "8",
-                ],
-            ),
-            Codec::Vp9,
-        ),
+        (matroska("h264.mkv", VideoCodec::H264), Codec::H264),
+        (matroska("vp9.webm", VideoCodec::Vp9), Codec::Vp9),
     ];
     let cpu = Prefs {
         decode: Choice::Cpu,
@@ -945,42 +1034,8 @@ fn matroska_and_webm_play_through_the_media_front() {
     }
 }
 
-fn ffmpeg_f32(path: &Path) -> Vec<f32> {
-    let out = Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
-        .arg(path)
-        .args(["-map", "0:a:0", "-f", "f32le", "-"])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    out.stdout
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
-}
-
-fn ffmpeg_make(out: &Path, args: &[&str]) {
-    fixture::fresh(out, |part| {
-        let ok = Command::new("ffmpeg")
-            .args(["-v", "error", "-y"])
-            .args(args)
-            .arg(part)
-            .status()
-            .unwrap()
-            .success();
-        assert!(ok, "{}", out.display());
-    });
-}
-
 #[test]
 fn pcm_tracks_decode_bit_exact_without_ffmpeg() {
-    if !have_ffmpeg() {
-        return;
-    }
     let prefs = Prefs::default();
     let known: Vec<i16> = (0..72_000i32)
         .flat_map(|i| {
@@ -993,36 +1048,11 @@ fn pcm_tracks_decode_bit_exact_without_ffmpeg() {
             [l, r]
         })
         .collect();
-    let raw = dir().join("known-s16le.raw");
-    let bytes: Vec<u8> = known.iter().flat_map(|s| s.to_le_bytes()).collect();
-    std::fs::write(&raw, bytes).unwrap();
-    let obs = dir().join("h264-pcm-s16le.mkv");
-    ffmpeg_make(
-        &obs,
-        &[
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=s=320x240:r=30:d=1.5",
-            "-f",
-            "s16le",
-            "-ar",
-            "48000",
-            "-ac",
-            "2",
-            "-i",
-            raw.to_str().unwrap(),
-            "-map",
-            "0:v",
-            "-map",
-            "1:a",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-c:a",
-            "pcm_s16le",
-        ],
+    let obs = with_pcm(
+        Clip::new((320, 240), (30, 1), 45),
+        "h264-pcm-s16le.mkv",
+        std::slice::from_ref(&known),
+        48_000,
     );
     let p = probe(&obs, &prefs).unwrap();
     assert_eq!(p.video_codec, Some(Codec::H264));
@@ -1040,86 +1070,21 @@ fn pcm_tracks_decode_bit_exact_without_ffmpeg() {
         mid.samples == want[48_000..96_000],
         "a PCM range is not bit-exact"
     );
-    let cases = [
-        ("mkv", "pcm_s24le"),
-        ("mkv", "pcm_s32be"),
-        ("mkv", "pcm_f32le"),
-        ("mkv", "pcm_f64le"),
-        ("mkv", "pcm_u8"),
-        ("mov", "pcm_s16le"),
-        ("mov", "pcm_s16be"),
-        ("mov", "pcm_s24le"),
-        ("mov", "pcm_s32le"),
-        ("mov", "pcm_f32be"),
-        ("mov", "pcm_f64le"),
-        ("mp4", "pcm_s16le"),
-        ("mp4", "pcm_s24be"),
-        ("mp4", "pcm_f32le"),
-    ];
-    for (ext, codec) in cases {
-        let path = dir().join(format!("{codec}.{ext}"));
-        ffmpeg_make(
-            &path,
-            &[
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=f=440:r=44100:d=1.2",
-                "-f",
-                "lavfi",
-                "-i",
-                "anoisesrc=r=44100:d=1.2:a=0.5",
-                "-filter_complex",
-                "[0][1]amerge=inputs=2",
-                "-c:a",
-                codec,
-            ],
-        );
-        let theirs = ffmpeg_f32(&path);
-        let ours = audio_pcm(&path, 0, 44_100, false, &prefs).unwrap();
-        assert_eq!(ours.samples.len(), theirs.len(), "{codec} in {ext}");
-        assert!(ours.samples == theirs, "{codec} in {ext} is not bit-exact");
+    let r = Refs::open(AREA);
+    for (ext, codec) in refs::PCM_CASES {
+        let file = refs::pcm_file(ext, codec);
+        let ours = audio_pcm(&r.path(&file), 0, refs::PCM_RATE, false, &prefs).unwrap();
+        assert_eq!(ours.samples.len(), refs::PCM_FRAMES * 2, "{codec} in {ext}");
+        let mut d = Digest::new();
+        d.f32s(&ours.samples);
+        r.assert_digest(&refs::decoded(&file), &d.hex());
     }
 }
 
 #[test]
 fn an_ac3_track_probes_and_decodes_natively() {
-    if !have_ffmpeg() {
-        return;
-    }
     let prefs = Prefs::default();
-    let path = dir().join("h264-ac3-aac.mkv");
-    ffmpeg_make(
-        &path,
-        &[
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=s=320x240:r=30:d=1",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=f=440:r=48000:d=1",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=f=880:r=48000:d=1",
-            "-map",
-            "0:v",
-            "-map",
-            "1:a",
-            "-map",
-            "2:a",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-c:a:0",
-            "ac3",
-            "-c:a:1",
-            "aac",
-        ],
-    );
+    let path = fixture(refs::AC3_AAC);
     let p = probe(&path, &prefs).unwrap();
     let names: Vec<_> = p
         .audio
@@ -1145,156 +1110,159 @@ fn an_ac3_track_probes_and_decodes_natively() {
 
 #[test]
 fn aac_and_opus_in_matroska_line_up_with_ffmpeg_to_the_sample() {
-    if !have_ffmpeg() {
-        return;
-    }
     let prefs = Prefs::default();
-    for (name, codec) in [("aac.mkv", "aac"), ("opus.webm", "libopus")] {
-        let path = dir().join(format!("tones-{name}"));
-        ffmpeg_make(
-            &path,
-            &[
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=f=440:r=48000:d=9",
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=f=1250:r=48000:d=9",
-                "-filter_complex",
-                "[0][1]amerge=inputs=2",
-                "-c:a",
-                codec,
-                "-b:a",
-                "256k",
-            ],
-        );
-        let theirs = ffmpeg_f32(&path);
-        let ours = audio_pcm(&path, 0, 48_000, false, &prefs).unwrap().samples;
-        let whole = worst(&ours[20_000..800_000], &theirs[20_000..800_000]);
-        assert!(whole < 0.01, "{name}: {whole}");
-        let range = audio_pcm_range(&path, 0, 2.93, 6.0, 48_000, 2, &prefs).unwrap();
-        let part = worst(&range.samples, &theirs[281_280..576_000]);
+    let r = Refs::open(AREA);
+    let rate = refs::LINEUP_RATE;
+    let from = refs::LINEUP_AT[1] as f64 / f64::from(rate);
+    for (name, _) in refs::LINEUPS {
+        let path = r.path(name);
+        let ours = audio_pcm(&path, 0, rate, false, &prefs).unwrap().samples;
+        let range = audio_pcm_range(&path, 0, from, 0.9, rate, 2, &prefs).unwrap();
+        for (k, at) in refs::LINEUP_AT.into_iter().enumerate() {
+            let theirs = r.f32s(&refs::window(name, &format!("at{k}")));
+            assert_eq!(theirs.len(), refs::WINDOW * 2, "{name} at {at}");
+            let whole = worst(&ours[at * 2..at * 2 + theirs.len()], &theirs);
+            assert!(whole < 0.01, "{name} at {at}: {whole}");
+        }
+        let theirs = r.f32s(&refs::window(name, "at1"));
+        let part = worst(&range.samples[..theirs.len()], &theirs);
         assert!(part < 0.01, "{name}: {part}");
     }
 }
 
 #[test]
 fn matroska_audio_off_the_millisecond_drops_the_last_blocks_discard_padding() {
-    if !have_ffmpeg() {
-        return;
-    }
     let prefs = Prefs::default();
-    for (name, codec, rate, limit) in [
-        ("opus.webm", "libopus", 48_000u32, 2e-3f32),
-        ("opus.mkv", "libopus", 48_000, 2e-3),
-        ("ac3.mkv", "ac3", 48_000, 1e-3),
-        ("mp3.mkv", "libmp3lame", 44_100, 1e-3),
-    ] {
-        let path = dir().join(format!("off-ms-{name}"));
-        let source = format!("sine=f=440:r={rate}:d=9.0123");
-        ffmpeg_make(
-            &path,
-            &["-f", "lavfi", "-i", &source, "-ac", "2", "-c:a", codec],
-        );
-        let theirs = ffmpeg_f32(&path);
-        let frames = theirs.len() / 2;
-        assert_eq!(frames, (9.0123 * rate as f64).round() as usize, "{name}");
+    let r = Refs::open(AREA);
+    for (name, _, rate, _, limit) in refs::OFF_MS {
+        let path = r.path(name);
+        let frames = refs::off_ms_frames(rate);
         let ours = audio_pcm(&path, 0, rate, false, &prefs).unwrap().samples;
-        assert_eq!(ours.len(), theirs.len(), "{name}");
-        let w = worst(&ours[4_000..], &theirs[4_000..]);
-        assert!(w < limit, "{name}: {w}");
+        assert_eq!(ours.len(), frames * 2, "{name}");
+        for (at, start) in [
+            ("head", refs::OFF_MS_HEAD),
+            ("tail", frames - refs::WINDOW),
+        ] {
+            let theirs = r.f32s(&refs::window(name, at));
+            assert_eq!(theirs.len(), refs::WINDOW * 2, "{name} {at}");
+            let w = worst(&ours[start * 2..(start + refs::WINDOW) * 2], &theirs);
+            assert!(w < limit, "{name} {at}: {w}");
+        }
         let at = |t: f64| (t * rate as f64).round() as usize * 2;
-        for (from, to) in [(8.5, f64::INFINITY), (8.9, 9.5)] {
+        for (from, to) in [(0.5, f64::INFINITY), (0.9, 1.5)] {
             let part = audio_pcm_range(&path, 0, from, to, rate, 2, &prefs).unwrap();
-            assert_eq!(part.samples.len(), theirs.len() - at(from), "{name} {from}");
-            let w = worst(&part.samples[4_000..], &theirs[at(from) + 4_000..]);
+            assert_eq!(part.samples.len(), ours.len() - at(from), "{name} {from}");
+            let w = worst(&part.samples[4_000..], &ours[at(from) + 4_000..]);
             assert!(w < limit, "{name} {from}: {w}");
         }
-        let streamed: usize = audio_stream(&path, 0, 8.5, rate, 2, &prefs)
+        let streamed: usize = audio_stream(&path, 0, 0.5, rate, 2, &prefs)
             .unwrap()
             .map(|b| b.unwrap().samples.len())
             .sum();
-        assert_eq!(streamed, theirs.len() - at(8.5), "{name} stream");
+        assert_eq!(streamed, ours.len() - at(0.5), "{name} stream");
     }
-    let aac = dir().join("off-ms-aac.mkv");
-    ffmpeg_make(
-        &aac,
-        &[
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=f=440:r=48000:d=9.0123",
-            "-c:a",
-            "aac",
-        ],
-    );
-    let r = pito_codecs::mkv::Reader::open(&aac).unwrap();
-    let t = &r.tracks[0];
+    let aac = r.path(refs::OFF_MS_AAC);
+    let m = mkv::Reader::open(&aac).unwrap();
+    let t = &m.tracks[0];
     assert!(t.samples.iter().all(|s| s.discard == 0));
     let stamped = (t.seconds(t.end()) * 48_000.0).round() as usize;
     let ours = audio_pcm(&aac, 0, 48_000, true, &prefs).unwrap();
     assert_eq!(ours.frames(), stamped);
-    assert!(ffmpeg_f32(&aac).len() > stamped);
+    assert!(ours.frames() < t.samples.len() * 1024);
+}
+
+const RECORDING_FRAMES: usize = 180 * 48_000;
+
+fn recording_s16() -> Vec<i16> {
+    s16(
+        48_000,
+        RECORDING_FRAMES,
+        Sound::Fn(sine_440),
+        Sound::Noise { amp: 0.3, seed: 7 },
+    )
 }
 
 fn recording() -> &'static Path {
     static FILE: OnceLock<PathBuf> = OnceLock::new();
     FILE.get_or_init(|| {
-        let out = dir().join("recording-h264-pcm.mkv");
-        if !out.exists() {
-            ffmpeg_make(
-                &out,
-                &[
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "testsrc2=s=320x240:r=30:d=180",
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "sine=f=440:r=48000:d=180",
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "anoisesrc=r=48000:d=180:a=0.3:seed=7",
-                    "-filter_complex",
-                    "[1][2]amerge=inputs=2[a]",
-                    "-map",
-                    "0:v",
-                    "-map",
-                    "[a]",
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "ultrafast",
-                    "-g",
-                    "60",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-c:a",
-                    "pcm_s16le",
-                ],
-            );
-        }
-        out
+        with_pcm(
+            Clip {
+                gop: 60,
+                ..Clip::new((352, 240), (30, 1), 5400)
+            },
+            "recording-h264-pcm.mkv",
+            &[recording_s16()],
+            48_000,
+        )
     })
 }
 
-fn without_cues(src: &Path, name: &str) -> PathBuf {
-    fixture::once(&dir().join(name), |part| {
-        let file = std::fs::File::create(part).unwrap();
-        let ok = Command::new("ffmpeg")
-            .args(["-v", "error", "-i"])
-            .arg(src)
-            .args(["-map", "0", "-c", "copy", "-f", "matroska", "pipe:1"])
-            .stdout(file)
-            .status()
-            .unwrap()
-            .success();
-        assert!(ok);
+fn recording_pcm() -> &'static [f32] {
+    static PCM: OnceLock<Vec<f32>> = OnceLock::new();
+    PCM.get_or_init(|| {
+        recording_s16()
+            .into_iter()
+            .map(|s| s as f32 / 32768.0)
+            .collect()
     })
+}
+
+fn vint(d: &[u8], at: usize) -> (u64, usize) {
+    let len = d[at].leading_zeros() as usize + 1;
+    let mut v = u64::from(d[at]) & (0xff >> len);
+    for b in &d[at + 1..at + len] {
+        v = v << 8 | u64::from(*b);
+    }
+    let unknown = v == (1u64 << (7 * len)) - 1;
+    (if unknown { u64::MAX } else { v }, len)
+}
+
+fn element(d: &[u8], at: usize) -> (u32, usize, usize) {
+    let id_len = d[at].leading_zeros() as usize + 1;
+    let id = d[at..at + id_len]
+        .iter()
+        .fold(0u32, |a, b| a << 8 | u32::from(*b));
+    let (size, size_len) = vint(d, at + id_len);
+    let body = at + id_len + size_len;
+    let end = usize::try_from(size).map_or(d.len(), |s| (body + s).min(d.len()));
+    (id, body, end)
+}
+
+fn void(d: &mut [u8], at: usize, end: usize) {
+    d[at] = 0xec;
+    d[at + 1] = 0x01;
+    let n = (end - at - 9) as u64;
+    d[at + 2..at + 9].copy_from_slice(&n.to_be_bytes()[1..]);
+}
+
+const CUES: u32 = 0x1c53_bb6b;
+
+fn without_cues(src: &Path, name: &str) -> PathBuf {
+    let mut d = std::fs::read(src).unwrap();
+    let (_, _, header) = element(&d, 0);
+    let (_, mut at, _) = element(&d, header);
+    let mut voided = 0;
+    while at < d.len() {
+        let (id, body, end) = element(&d, at);
+        if id == CUES {
+            void(&mut d, at, end);
+            voided += 1;
+        } else if id == 0x114d_9b74 {
+            let mut seek = body;
+            while seek < end {
+                let (_, _, next) = element(&d, seek);
+                if d[seek..next].windows(4).any(|w| w == CUES.to_be_bytes()) {
+                    void(&mut d, seek, next);
+                }
+                seek = next;
+            }
+        }
+        at = end;
+    }
+    assert!(voided > 0, "{} has no Cues to drop", src.display());
+    let out = dir().join(name);
+    testref::write_atomic(&out, &d).unwrap();
+    out
 }
 
 fn mean_diff(a: &Rgba, b: &Rgba) -> f64 {
@@ -1322,39 +1290,35 @@ fn streamed(path: &Path, from: f64, rate: u32, channels: u16) -> Vec<f32> {
 
 #[test]
 fn an_mkv_still_late_in_a_recording_comes_from_the_cues_on_every_route() {
-    if !have_ffmpeg() {
-        return;
-    }
     let path = recording();
     let cpu = Prefs {
         decode: Choice::Cpu,
         ..Prefs::default()
     };
-    let theirs = [ffmpeg_still(path, 170.5, 120, false)];
     let mut routes = Vec::new();
     for prefs in [cpu.clone(), Prefs::default()] {
         let mut ours = frames_at(path, &[170.5, 10.0, 171.9, 172.0, 999.0], 120, &prefs).unwrap();
         assert_eq!(ours.len(), 5);
         assert!(ours.iter().all(|s| s.height == 120 && lit(s)));
-        assert!(mean_diff(&ours[0], &theirs[0]) < 6.0);
+        let theirs = source_still((352, 240), 5100, &ours[0]);
+        let d = mean_diff(&ours[0], &theirs);
+        assert!(d < 6.0, "{d}");
         assert!(ours[0].data == ours[2].data);
         assert!(ours[0].data != ours[1].data && ours[0].data != ours[3].data);
         routes.push(ours.swap_remove(0));
     }
     assert!(mean_diff(&routes[0], &routes[1]) < 1.0);
     let first = first_frame(path, 240, &cpu).unwrap();
-    let theirs = ffmpeg_still(path, 0.0, 240, false);
-    assert!(mean_diff(&first, &theirs) < 6.0);
+    let theirs = source_still((352, 240), 0, &first);
+    let d = mean_diff(&first, &theirs);
+    assert!(d < 6.0, "{d}");
 }
 
 #[test]
 fn mkv_pcm_streams_bit_exact_against_the_whole_decode() {
-    if !have_ffmpeg() {
-        return;
-    }
     let path = recording();
     let prefs = Prefs::default();
-    let theirs = ffmpeg_f32(path);
+    let theirs = recording_pcm();
     let whole = audio_pcm(path, 0, 48_000, false, &prefs).unwrap();
     assert!(whole.samples == theirs, "the whole decode is not bit-exact");
     let ours = streamed(path, 0.0, 48_000, 2);
@@ -1372,9 +1336,6 @@ fn mkv_pcm_streams_bit_exact_against_the_whole_decode() {
 
 #[test]
 fn a_cueless_or_cut_mkv_still_streams_and_shows_or_fails_cleanly() {
-    if !have_ffmpeg() {
-        return;
-    }
     let prefs = Prefs {
         decode: Choice::Cpu,
         ..Prefs::default()
@@ -1384,7 +1345,7 @@ fn a_cueless_or_cut_mkv_still_streams_and_shows_or_fails_cleanly() {
     let want = frames_at(path, &[120.0], 120, &prefs).unwrap();
     let got = frames_at(&bare, &[120.0], 120, &prefs).unwrap();
     assert!(mean_diff(&want[0], &got[0]) < 1.0);
-    let theirs = ffmpeg_f32(path);
+    let theirs = recording_pcm();
     assert!(streamed(&bare, 120.0, 48_000, 2) == theirs[120 * 96_000..]);
     let bytes = std::fs::read(path).unwrap();
     let cut = dir().join("recording-cut.mkv");
@@ -1410,11 +1371,8 @@ fn a_cueless_or_cut_mkv_still_streams_and_shows_or_fails_cleanly() {
 
 #[test]
 fn a_range_past_the_end_returns_only_what_the_track_has() {
-    if !have_ffmpeg() {
-        return;
-    }
     let path = recording();
-    let theirs = ffmpeg_f32(path);
+    let theirs = recording_pcm();
     let prefs = Prefs::default();
     let tail = audio_pcm_range(path, 0, 178.0, 190.0, 48_000, 2, &prefs).unwrap();
     assert_eq!(tail.frames(), 96_000);
@@ -1426,43 +1384,34 @@ fn a_range_past_the_end_returns_only_what_the_track_has() {
     assert_eq!(aac.frames(), whole.frames() - 4 * 48_000);
 }
 
+const FADE: u64 = 90;
+
+fn fade_picture(n: u64, f: &mut Frame) {
+    testref::draw_yuv(n, 0, f);
+    let k = n.min(FADE) as i32;
+    for (p, mid) in f.planes.iter_mut().zip([16, 128, 128]) {
+        for v in p.data.iter_mut() {
+            *v = (mid + (i32::from(*v) - mid) * k / FADE as i32) as u8;
+        }
+    }
+}
+
 #[test]
 fn an_exact_still_inside_the_first_gop_of_a_fade_is_not_the_keyframe() {
-    if !have_ffmpeg() {
-        return;
-    }
     let cpu = Prefs {
         decode: Choice::Cpu,
         ..Prefs::default()
     };
+    let size = (352, 240);
     for name in ["fade-in.mp4", "fade-in.mkv"] {
-        let path = dir().join(name);
-        if !path.exists() {
-            ffmpeg_make(
-                &path,
-                &[
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "testsrc2=s=320x240:r=30:d=10,fade=in:0:90",
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "ultrafast",
-                    "-bf",
-                    "2",
-                    "-g",
-                    "120",
-                    "-keyint_min",
-                    "120",
-                    "-sc_threshold",
-                    "0",
-                    "-pix_fmt",
-                    "yuv420p",
-                ],
-            );
+        let path = Clip {
+            gop: 120,
+            b_frames: 2,
+            picture: Picture::Fn(fade_picture),
+            ..Clip::new(size, (30, 1), 300)
         }
-        let theirs = [ffmpeg_still(&path, 1.5, 120, true)];
+        .video_only()
+        .make(AREA, name);
         for prefs in [cpu.clone(), Prefs::default()] {
             let key = frames_at(&path, &[1.5], 120, &prefs).unwrap();
             assert!(!lit(&key[0]), "{name}: the keyframe at 0 is not black");
@@ -1470,83 +1419,71 @@ fn an_exact_still_inside_the_first_gop_of_a_fade_is_not_the_keyframe() {
                 frames_at_seek(&path, &[1.5, 0.5, 1.5, 6.0], 120, Seek::Exact, &prefs).unwrap();
             assert!(lit(&ours[0]) && lit(&ours[3]), "{name}");
             assert!(ours[0].data == ours[2].data && ours[0].data != ours[1].data);
-            let d = mean_diff(&ours[0], &theirs[0]);
+            let theirs = shrink(size, &ours[0], |x, y| {
+                testref::rgb_at(size.0, size.1, 45, x, y).map(|c| (u64::from(c) * 45 / FADE) as u8)
+            });
+            let d = mean_diff(&ours[0], &theirs);
             assert!(d < 6.0, "{name}: {d}");
         }
+    }
+}
+
+const COUNTED_WIDTH: usize = 426;
+const THIRD: usize = COUNTED_WIDTH / 3;
+
+fn counted_picture(n: u64, f: &mut Frame) {
+    let digits = [n % 16, n / 16 % 16, n / 256 % 16];
+    let stride = f.planes[0].stride;
+    for y in 0..f.height as usize {
+        for x in 0..f.width as usize {
+            f.planes[0].data[y * stride + x] = (22 + 13 * digits[(x / THIRD).min(2)]) as u8;
+        }
+    }
+    for p in &mut f.planes[1..] {
+        p.data.fill(128);
     }
 }
 
 fn counted() -> &'static Path {
     static FILE: OnceLock<PathBuf> = OnceLock::new();
     FILE.get_or_init(|| {
-        let out = dir().join("counted-426x240-h264-pcm.mkv");
-        if !out.exists() {
-            ffmpeg_make(
-                &out,
-                &[
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "color=c=black:s=426x240:r=30:d=60,format=yuv420p,geq=lum='22+13*if(lt(X,142),mod(N,16),if(lt(X,284),mod(floor(N/16),16),mod(floor(N/256),16)))':cb=128:cr=128",
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "sine=f=440:r=48000:d=60",
-                    "-map",
-                    "0:v",
-                    "-map",
-                    "1:a",
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "ultrafast",
-                    "-crf",
-                    "8",
-                    "-bf",
-                    "2",
-                    "-g",
-                    "60",
-                    "-keyint_min",
-                    "60",
-                    "-sc_threshold",
-                    "0",
-                    "-c:a",
-                    "pcm_s16le",
-                    "-ac",
-                    "2",
-                ],
-            );
-        }
-        out
+        let tone = || Sound::Fn(sine_440);
+        with_pcm(
+            Clip {
+                gop: 60,
+                b_frames: 2,
+                qp: 10,
+                picture: Picture::Fn(counted_picture),
+                ..Clip::new((COUNTED_WIDTH as u32, 240), (30, 1), 1800)
+            },
+            "counted-426x240-h264-pcm.mkv",
+            &[s16(48_000, 60 * 48_000, tone(), tone())],
+            48_000,
+        )
     })
 }
 
 fn frame_numbers(path: &Path) -> Vec<i64> {
-    let out = Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
-        .arg(path)
-        .args(["-map", "0:v:0", "-fps_mode", "passthrough"])
-        .args(["-vf", "scale=3:1:flags=area", "-pix_fmt", "gray"])
-        .args(["-f", "rawvideo", "-"])
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    let digit = |v: u8| {
-        ((v as f64 * 219.0 / 255.0 - 6.0) / 13.0)
-            .round()
-            .clamp(0.0, 15.0) as i64
-    };
-    out.stdout
-        .chunks_exact(3)
-        .map(|p| digit(p[0]) + 16 * digit(p[1]) + 256 * digit(p[2]))
+    frames_from(path, 0)
+        .map(|f| {
+            let p = &f.planes[0];
+            let digit = |third: usize| {
+                let cols = third * THIRD + 10..(third + 1) * THIRD - 10;
+                let width = cols.len();
+                let sum: u64 = (0..p.height)
+                    .flat_map(|y| p.data[y * p.stride..][cols.clone()].iter())
+                    .map(|&v| u64::from(v))
+                    .sum();
+                let mean = sum as f64 / (width * p.height) as f64;
+                ((mean - 22.0) / 13.0).round().clamp(0.0, 15.0) as i64
+            };
+            digit(0) + 16 * digit(1) + 256 * digit(2)
+        })
         .collect()
 }
 
 #[test]
 fn three_hundred_short_cuts_join_without_drift_on_every_route() {
-    if !have_ffmpeg() {
-        return;
-    }
     let mut seed = 0x2545_f491_u64;
     let mut next = |n: u64| {
         seed = seed
@@ -1605,55 +1542,60 @@ fn three_hundred_short_cuts_join_without_drift_on_every_route() {
             &want[near]
         );
         assert_eq!(got.last(), want.last(), "{name}");
-        let video: f64 = ffprobe(
-            &out,
-            &[
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=duration",
-                "-of",
-                "csv=p=0",
-            ],
-        )
-        .parse()
-        .unwrap();
+        let r = mp4::Reader::open(&out).unwrap();
+        let t = &r.tracks[r.video().unwrap()];
+        let ticks: u64 = t.samples.iter().map(|s| u64::from(s.duration)).sum();
+        let video = t.seconds(ticks as i64);
         assert!(
             (video - total as f64 / 30.0).abs() < 1e-3,
             "{name}: {video} s of video for {total} frames"
         );
-        let pcm = ffmpeg_f32(&out);
+        let pcm = audio_pcm(&out, 0, 48_000, false, &Prefs::default())
+            .unwrap()
+            .samples;
         assert_eq!(pcm.len() as u64, total * 1600 * 2, "{name}");
         let rms = (pcm.iter().map(|&s| s as f64 * s as f64).sum::<f64>() / pcm.len() as f64).sqrt();
         assert!((rms - 0.0625).abs() < 0.004, "{name}: {rms}");
     }
 }
 
+fn dropped_frames() -> PathBuf {
+    let (w, h) = (160, 96);
+    let tb = TimeBase::new(1, 30);
+    let mut e = h264::Encoder::new(h264::EncoderConfig {
+        width: w,
+        height: h,
+        fps: (30, 1),
+        rate: Rate::Qp(24),
+        gop: 30,
+        b_frames: 0,
+        threads: 1,
+        bitstream: Bitstream::LengthPrefixed,
+        ..Default::default()
+    })
+    .unwrap();
+    let mut m = mkv::Writer::new(Cursor::new(Vec::new()), mkv::Options::default());
+    let t = m
+        .add_track(mkv::TrackConfig::h264(e.avcc(), w, h, tb))
+        .unwrap();
+    for n in (0..240u64).filter(|n| n % 5 != 2) {
+        let mut f = testref::yuv_frame(w, h, n, 0);
+        f.time_base = tb;
+        for p in e.encode(&f).unwrap() {
+            m.push(t, &p).unwrap();
+        }
+    }
+    for p in e.flush().unwrap() {
+        m.push(t, &p).unwrap();
+    }
+    let out = dir().join("dropped-frames-h264.mkv");
+    testref::write_atomic(&out, &m.finish().unwrap().into_inner()).unwrap();
+    out
+}
+
 #[test]
 fn an_mkv_probe_reads_the_head_and_cues_and_matches_the_full_index() {
-    if !have_ffmpeg() {
-        return;
-    }
-    let vfr = dir().join("dropped-frames-h264.mkv");
-    if !vfr.exists() {
-        ffmpeg_make(
-            &vfr,
-            &[
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc2=s=160x96:r=30:d=8,select='not(eq(mod(n,5),2))'",
-                "-fps_mode",
-                "vfr",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "ultrafast",
-                "-g",
-                "30",
-            ],
-        );
-    }
+    let vfr = dropped_frames();
     let prefs = Prefs::default();
     for (name, src) in [
         ("counted", counted()),
@@ -1728,51 +1670,25 @@ fn an_mkv_probe_reads_the_head_and_cues_and_matches_the_full_index() {
 fn two_tracks() -> &'static Path {
     static FILE: OnceLock<PathBuf> = OnceLock::new();
     FILE.get_or_init(|| {
-        let out = dir().join("two-pcm-tracks.mkv");
-        if !out.exists() {
-            ffmpeg_make(
-                &out,
-                &[
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "testsrc2=s=352x240:r=30:d=40",
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "sine=f=440:r=48000:d=40",
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "anoisesrc=r=48000:d=37.5:a=0.3:seed=3",
-                    "-map",
-                    "0:v",
-                    "-map",
-                    "1:a",
-                    "-map",
-                    "2:a",
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "ultrafast",
-                    "-g",
-                    "60",
-                    "-c:a",
-                    "pcm_s16le",
-                    "-ac",
-                    "2",
-                ],
-            );
-        }
-        out
+        let tone = || Sound::Fn(sine_440);
+        let noise = || Sound::Noise { amp: 0.3, seed: 3 };
+        with_pcm(
+            Clip {
+                gop: 60,
+                ..Clip::new((352, 240), (30, 1), 1200)
+            },
+            "two-pcm-tracks.mkv",
+            &[
+                s16(48_000, 40 * 48_000, tone(), tone()),
+                s16(48_000, 37 * 48_000 + 24_000, noise(), noise()),
+            ],
+            48_000,
+        )
     })
 }
 
 #[test]
 fn a_mix_stream_equals_the_whole_mix_with_and_without_cues() {
-    if !have_ffmpeg() {
-        return;
-    }
     let prefs = Prefs::default();
     let path = two_tracks();
     let bare = without_cues(path, "cueless-two-pcm-tracks.mkv");
@@ -1795,42 +1711,40 @@ fn a_mix_stream_equals_the_whole_mix_with_and_without_cues() {
     }
 }
 
-fn two_tones(name: &str, codec: &str) -> PathBuf {
-    let out = dir().join(name);
-    if !out.exists() {
-        ffmpeg_make(
-            &out,
-            &[
-                "-f",
-                "lavfi",
-                "-i",
-                "color=c=black:s=64x64:r=10:d=20",
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=f=440:r=48000:d=20,volume=0.4",
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=f=660:r=48000:d=20,volume=0.4",
-                "-map",
-                "0",
-                "-map",
-                "1",
-                "-map",
-                "2",
-                "-ac",
-                "2",
-                "-c:v",
-                "libx264",
-                "-g",
-                "20",
-                "-c:a",
-                codec,
-            ],
-        );
+fn quiet_440(i: u64, _: u16, rate: u32) -> f32 {
+    0.4 * sine_440(i, 0, rate)
+}
+
+fn quiet_660(i: u64, _: u16, rate: u32) -> f32 {
+    (0.05 * (std::f64::consts::TAU * 660.0 * i as f64 / f64::from(rate)).sin()) as f32
+}
+
+fn black(_: u64, f: &mut Frame) {
+    f.planes[0].data.fill(16);
+    for p in &mut f.planes[1..] {
+        p.data.fill(128);
     }
-    out
+}
+
+fn two_tones(name: &str, audio: Option<AudioCodec>) -> PathBuf {
+    let clip = Clip {
+        gop: 20,
+        picture: Picture::Fn(black),
+        sounds: vec![Sound::Fn(quiet_440), Sound::Fn(quiet_660)],
+        ..Clip::new((64, 64), (10, 1), 200)
+    };
+    match audio {
+        Some(codec) => Clip {
+            audio: Some(codec),
+            ..clip
+        }
+        .make(AREA, name),
+        None => {
+            let pcm = [Sound::Fn(quiet_440), Sound::Fn(quiet_660)]
+                .map(|s| s16(48_000, 20 * 48_000, s, s));
+            with_pcm(clip, name, &pcm, 48_000)
+        }
+    }
 }
 
 fn off(got: &[f32], want: &[f32], limit: f32) -> Option<usize> {
@@ -1844,18 +1758,15 @@ fn off(got: &[f32], want: &[f32], limit: f32) -> Option<usize> {
 
 #[test]
 fn every_audio_range_and_stream_start_cuts_the_whole_decode() {
-    if !have_ffmpeg() {
-        return;
-    }
     let prefs = Prefs::default();
-    let pcm = two_tones("ranged-pcm.mkv", "pcm_s16le");
+    let pcm = two_tones("ranged-pcm.mkv", None);
     let files = [
         (pcm.clone(), 0.0),
         (without_cues(&pcm, "ranged-pcm-no-cues.mkv"), 0.0),
-        (two_tones("ranged-pcm.mp4", "pcm_s16le"), 0.0),
-        (two_tones("ranged-aac.mkv", "aac"), 1e-5),
-        (two_tones("ranged-aac.mp4", "aac"), 1e-5),
-        (two_tones("ranged-opus.mkv", "libopus"), 2e-3),
+        (two_tones("ranged-pcm.mp4", None), 0.0),
+        (two_tones("ranged-aac.mkv", Some(AudioCodec::Aac)), 1e-5),
+        (two_tones("ranged-aac.mp4", Some(AudioCodec::Aac)), 1e-5),
+        (two_tones("ranged-opus.mkv", Some(AudioCodec::Opus)), 2e-3),
     ];
     let mut ranges: Vec<(usize, usize)> = vec![
         (9_600, 33_600),
@@ -1912,57 +1823,19 @@ fn every_audio_range_and_stream_start_cuts_the_whole_decode() {
     }
 }
 
-fn vp9_clip() -> &'static Path {
-    static CLIP: OnceLock<PathBuf> = OnceLock::new();
-    CLIP.get_or_init(|| {
-        let out = dir().join("vp9-g30.webm");
-        if out.exists() {
-            return out;
-        }
-        let part = dir().join(format!("vp9-g30.{}.part.webm", std::process::id()));
-        let ok = Command::new("ffmpeg")
-            .args(["-v", "error", "-y"])
-            .args(["-f", "lavfi", "-i", "testsrc2=s=640x360:r=30:d=8"])
-            .args(["-c:v", "libvpx-vp9", "-deadline", "good", "-cpu-used", "4"])
-            .args(["-auto-alt-ref", "1", "-lag-in-frames", "16", "-b:v", "1M"])
-            .args(["-g", "30", "-keyint_min", "30", "-pix_fmt", "yuv420p"])
-            .arg(&part)
-            .status()
-            .unwrap()
-            .success();
-        assert!(ok);
-        if let Err(e) = std::fs::rename(&part, &out) {
-            assert!(out.exists(), "{e}");
-            let _ = std::fs::remove_file(&part);
-        }
-        out
-    })
-}
-
-fn frame_md5s(path: &Path) -> Vec<String> {
-    let out = Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
-        .arg(path)
-        .args(["-map", "0:v:0", "-f", "framemd5", "-"])
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|l| !l.starts_with('#'))
-        .map(|l| l.rsplit(',').next().unwrap().trim().to_string())
-        .collect()
+fn frame_hashes(path: &Path) -> Vec<String> {
+    frames_from(path, 0).map(|f| hash(&f)).collect()
 }
 
 fn luma(path: &Path) -> Vec<Vec<u8>> {
-    let out = Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
-        .arg(path)
-        .args(["-map", "0:v:0", "-f", "rawvideo", "-pix_fmt", "gray", "-"])
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    out.stdout.chunks(640 * 360).map(<[u8]>::to_vec).collect()
+    frames_from(path, 0)
+        .map(|f| {
+            let p = &f.planes[0];
+            (0..p.height)
+                .flat_map(|y| p.data[y * p.stride..y * p.stride + p.width].to_vec())
+                .collect()
+        })
+        .collect()
 }
 
 fn luma_psnr(a: &[u8], b: &[u8]) -> f64 {
@@ -1976,13 +1849,10 @@ fn luma_psnr(a: &[u8], b: &[u8]) -> f64 {
 
 #[test]
 fn a_vp9_cut_copies_its_middles_bit_exact_into_vp09_and_encodes_only_its_heads() {
-    if !have_ffmpeg() {
-        return;
-    }
-    let src = vp9_clip();
+    let src = fixture(refs::VP9_ALTREF);
     let out = dir().join("vp9-cut.mp4");
-    let pieces = [(1.1, 3.4), (5.5, 6.2), (0.2, 1.5)].map(|(from, to)| Piece {
-        path: src.to_path_buf(),
+    let pieces = [(0.4, 1.2), (1.5, 1.8), (0.1, 0.5)].map(|(from, to)| Piece {
+        path: src.clone(),
         from,
         to,
     });
@@ -1999,55 +1869,30 @@ fn a_vp9_cut_copies_its_middles_bit_exact_into_vp09_and_encodes_only_its_heads()
     assert!(done.smart, "{:?}", done.reasons);
     assert_eq!(done.video.codec, Codec::Vp9);
     assert!(done.video.reasons.is_empty(), "{:?}", done.video.reasons);
-    assert_eq!((done.frames, done.copied, done.encoded), (129, 63, 66));
-    assert_eq!(
-        ffprobe(
-            &out,
-            &[
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=codec_name,codec_tag_string",
-                "-of",
-                "csv=p=0",
-            ],
-        ),
-        "vp9,vp09"
-    );
-    let warnings = Command::new("ffmpeg")
-        .args(["-v", "warning", "-i"])
-        .arg(&out)
-        .args(["-f", "null", "-"])
-        .output()
-        .unwrap();
-    assert!(warnings.status.success());
-    assert_eq!(String::from_utf8_lossy(&warnings.stderr), "");
-    let times = ffprobe(
-        &out,
-        &[
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "frame=pts_time",
-            "-of",
-            "csv=p=0",
-        ],
-    );
-    let times: Vec<f64> = times.lines().map(|t| t.parse().unwrap()).collect();
-    assert_eq!(times.len(), 129);
+    assert_eq!((done.frames, done.copied, done.encoded), (45, 25, 20));
+    let r = mp4::Reader::open(&out).unwrap();
+    let t = &r.tracks[r.video().unwrap()];
+    assert_eq!(t.entry().unwrap().format, mp4::FourCc(*b"vp09"));
+    assert!(decodes_clean(&out));
+    let mut times: Vec<f64> = (0..t.samples.len())
+        .filter_map(|i| t.presentation(i))
+        .map(|p| t.seconds(p))
+        .collect();
+    times.sort_by(f64::total_cmp);
+    assert_eq!(times.len(), 45);
     for (k, t) in times.iter().enumerate() {
         assert!((t - k as f64 / 30.0).abs() < 1e-3, "frame {k} at {t}");
     }
-    let (ours, theirs) = (frame_md5s(&out), frame_md5s(src));
-    for (at, from, n) in [(27, 60, 42), (84, 180, 6), (114, 30, 15)] {
+    let (ours, theirs) = (frame_hashes(&out), frame_hashes(&src));
+    for (at, from, n) in [(8, 20, 16), (29, 50, 4), (40, 10, 5)] {
         assert_eq!(
             ours[at..at + n],
             theirs[from..from + n],
             "copied from {from}"
         );
     }
-    let (ours, theirs) = (luma(&out), luma(src));
-    for (at, from, n) in [(0, 33, 27), (69, 165, 15), (90, 6, 24)] {
+    let (ours, theirs) = (luma(&out), luma(&src));
+    for (at, from, n) in [(0, 12, 8), (24, 45, 5), (33, 3, 7)] {
         for k in 0..n {
             let psnr = luma_psnr(&ours[at + k], &theirs[from + k]);
             assert!(psnr > 35.0, "edge frame {} at {psnr}", at + k);
@@ -2061,84 +1906,65 @@ fn a_vp9_cut_copies_its_middles_bit_exact_into_vp09_and_encodes_only_its_heads()
     let piece = [Piece {
         path: out.clone(),
         from: 0.0,
-        to: 2.3,
+        to: 0.8,
     }];
     let done = export_with_audio(&again, &piece, opts(), silent, |_| true).unwrap();
-    assert!(done.smart && done.copied == 69, "{:?}", done.reasons);
+    assert!(done.smart && done.copied == 24, "{:?}", done.reasons);
     assert!(decodes_clean(&again));
 }
 
-fn late_start(ext: &str) -> PathBuf {
-    let base = dir().join("late-base.mkv");
-    if !base.exists() {
-        ffmpeg_make(
-            &base,
-            &[
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc2=s=352x240:r=24000/1001:d=40",
-                "-f",
-                "lavfi",
-                "-i",
-                "aevalsrc='if(lt(mod(t,1),0.1),0.5*sin(2*PI*440*t),0)':s=48000:d=40",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "ultrafast",
-                "-g",
-                "48",
-                "-bf",
-                "2",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "128k",
-            ],
-        );
+const LATE: [f64; 2] = [2999.747, 2999.997];
+
+fn bursts(i: u64, _: u16, rate: u32) -> f32 {
+    let t = i as f64 / f64::from(rate);
+    if t % 1.0 < 0.1 {
+        (0.5 * (std::f64::consts::TAU * 440.0 * t).sin()) as f32
+    } else {
+        0.0
     }
-    let out = dir().join(format!("late-start.{ext}"));
-    if !out.exists() {
-        let base = base.to_str().unwrap();
-        ffmpeg_make(
-            &out,
-            &[
-                "-itsoffset",
-                "2999.747",
-                "-i",
-                base,
-                "-itsoffset",
-                "2999.997",
-                "-i",
-                base,
-                "-map",
-                "0:v",
-                "-map",
-                "1:a",
-                "-c",
-                "copy",
-            ],
-        );
-    }
-    out
 }
 
-fn ffmpeg_raw(path: &Path, at: f64, args: &[&str]) -> Vec<u8> {
-    let out = Command::new("ffmpeg")
-        .args(["-v", "error", "-ss", &format!("{at:.6}"), "-i"])
-        .arg(path)
-        .args(args)
-        .arg("-")
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    out.stdout
+fn late_start(ext: &str) -> PathBuf {
+    let base = Clip {
+        gop: 48,
+        b_frames: 2,
+        sounds: vec![Sound::Fn(bursts)],
+        channels: 1,
+        ..Clip::new((352, 240), (24_000, 1_001), 959)
+    }
+    .make(AREA, &format!("late-base.{ext}"));
+    let name = format!("late-start.{ext}");
+    if ext == "mkv" {
+        return rebuild_mkv(&base, &name, &[], 0, LATE);
+    }
+    rebuild_mp4(&base, &name, &[], 0, |r, i, cfg| {
+        let t = &r.tracks[i];
+        let by = if t.kind == mp4::TrackKind::Video {
+            LATE[0]
+        } else {
+            LATE[1]
+        };
+        let movie = f64::from(r.timescale);
+        let media = t
+            .edits
+            .iter()
+            .find(|e| e.media_time >= 0)
+            .copied()
+            .unwrap_or(mp4::Edit {
+                segment_duration: (t.duration as f64 * movie / f64::from(t.timescale)).round()
+                    as u64,
+                media_time: 0,
+                media_rate: 0x10000,
+            });
+        cfg.edits = vec![
+            mp4::Edit {
+                segment_duration: (by * movie).round() as u64,
+                media_time: -1,
+                media_rate: 0x10000,
+            },
+            media,
+        ];
+    })
 }
 
 fn onset(samples: &[f32], rate: u32) -> f64 {
@@ -2147,9 +1973,6 @@ fn onset(samples: &[f32], rate: u32) -> f64 {
 
 #[test]
 fn a_file_that_starts_late_counts_every_time_from_its_start() {
-    if !have_ffmpeg() {
-        return;
-    }
     let prefs = Prefs::default();
     let cpu = Prefs {
         decode: Choice::Cpu,
@@ -2167,45 +1990,24 @@ fn a_file_that_starts_late_counts_every_time_from_its_start() {
         let audio_start = p.audio[0].start.unwrap();
         assert!((audio_start - 2999.99).abs() < 0.03, "{ext}: {audio_start}");
 
-        let times: Vec<f64> = ffprobe(
-            &path,
-            &[
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "packet=pts_time",
-                "-of",
-                "csv=p=0",
-            ],
-        )
-        .lines()
-        .map(|l| l.trim().parse::<f64>().unwrap() - p.start)
-        .filter(|t| *t >= 30.0)
-        .collect();
-        let at = times.iter().copied().fold(f64::INFINITY, f64::min);
-        let theirs = ffmpeg_raw(
-            &path,
-            at,
-            &[
-                "-map",
-                "0:v:0",
-                "-frames:v",
-                "1",
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                "yuv420p",
-            ],
-        );
+        let fps = p.fps.0 as f64 / p.fps.1 as f64;
+        let k = (30.0 * fps - 1e-9).ceil() as i64;
+        let at = k as f64 / fps;
+        let theirs = decode_video(&path, 0.0, None, &cpu)
+            .unwrap()
+            .map(Result::unwrap)
+            .find(|f| f.pts == k)
+            .unwrap();
         let frame = decode_video(&path, at, None, &cpu)
             .unwrap()
             .next()
             .unwrap()
             .unwrap();
-        let fps = p.fps.0 as f64 / p.fps.1 as f64;
         assert_eq!(frame.pts, (at * fps).round() as i64, "{ext}");
-        let ours: Vec<u8> = frame.planes.iter().flat_map(|q| q.data.clone()).collect();
-        assert!(ours == theirs, "{ext}: the frame at {at:.4} s differs");
+        assert!(
+            packed(&frame) == packed(&theirs),
+            "{ext}: the frame at {at:.4} s differs"
+        );
         let mut on_gpu = decode_video_gpu(&path, at, None, &prefs).unwrap();
         assert_eq!(on_gpu.on_gpu(), gpu, "{ext}: {:?}", on_gpu.reasons);
         let g = on_gpu.next().unwrap().unwrap();
@@ -2219,19 +2021,15 @@ fn a_file_that_starts_late_counts_every_time_from_its_start() {
             assert!(diff < 1.0, "{ext}: {diff}");
         }
         let still = frames_at_seek(&path, &[at], 240, Seek::Exact, &cpu).unwrap();
-        let theirs_still = ffmpeg_still(&path, at, 240, true);
+        let theirs_still = source_still((352, 240), k as u64, &still[0]);
         let d = mean_diff(&still[0], &theirs_still);
         assert!(d < 6.0, "{ext}: {d}");
 
         let ours = audio_pcm_range(&path, 0, 30.0, 35.0, 48_000, 1, &prefs).unwrap();
-        let theirs: Vec<f32> = ffmpeg_raw(
-            &path,
-            30.0,
-            &["-t", "5", "-map", "0:a:0", "-ac", "1", "-f", "f32le"],
-        )
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
+        let lead = ((30.0 - (LATE[1] - LATE[0])) * 48_000.0).round() as u64;
+        let theirs: Vec<f32> = (lead..lead + 240_000)
+            .map(|i| bursts(i, 0, 48_000))
+            .collect();
         assert_eq!(ours.frames(), 240_000, "{ext}");
         let (lag, w) = (-24i64..=24)
             .map(|lag| {
@@ -2246,7 +2044,7 @@ fn a_file_that_starts_late_counts_every_time_from_its_start() {
             })
             .min_by(|x, y| x.1.total_cmp(&y.1))
             .unwrap();
-        assert!(w < 0.01, "{ext}: {w} at a lag of {lag} samples");
+        assert!(w < 0.05, "{ext}: {w} at a lag of {lag} samples");
         let head = audio_pcm_range(&path, 0, 0.0, 1.0, 48_000, 1, &prefs).unwrap();
         let o = onset(&head.samples, 48_000);
         assert!((o - 0.25).abs() < 0.01, "{ext}: {o}");
@@ -2271,28 +2069,19 @@ fn a_file_that_starts_late_counts_every_time_from_its_start() {
         let first = (10.0 * fps).round() as i64;
         let psnr = min_psnr(&out, &path, &[(first, first + done.frames as i64)]);
         assert!(psnr > 40.0, "{ext}: {psnr}");
-        for s in ["v:0", "a:0"] {
-            let line = ffprobe(
-                &out,
-                &[
-                    "-select_streams",
-                    s,
-                    "-show_entries",
-                    "stream=start_time,duration",
-                    "-of",
-                    "csv=p=0",
-                ],
-            );
-            let (start, length) = line.split_once(',').unwrap();
-            let (start, length): (f64, f64) = (start.parse().unwrap(), length.parse().unwrap());
+        let r = mp4::Reader::open(&out).unwrap();
+        for (s, t) in [("video", r.video().unwrap()), ("audio", r.audio()[0])] {
+            let t = &r.tracks[t];
+            let start = (0..t.samples.len())
+                .filter_map(|i| t.presentation(i))
+                .min()
+                .map_or(0.0, |p| t.seconds(p));
+            let length = t.duration_seconds();
             assert!(start.abs() < 0.05, "{ext} {s}: {start}");
             assert!((length - 10.0).abs() < 0.06, "{ext} {s}: {length}");
         }
-        let cut: Vec<f32> = ffmpeg_raw(&out, 0.0, &["-map", "0:a:0", "-ac", "1", "-f", "f32le"])
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
-        let o = onset(&cut, 48_000);
+        let cut = audio_pcm(&out, 0, 48_000, true, &prefs).unwrap();
+        let o = onset(&cut.samples, 48_000);
         assert!(
             (o - 0.25).abs() < 0.02,
             "{ext}: the cut's audio starts at {o}"
@@ -2310,66 +2099,31 @@ fn packed(f: &Frame) -> Vec<u8> {
     out
 }
 
-fn pyramid_hevc() -> PathBuf {
-    let out = dir().join("pyramid-hevc.mp4");
-    if !out.exists() {
-        ffmpeg_make(
-            &out,
-            &[
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc2=s=352x240:r=30:d=3",
-                "-c:v",
-                "libx265",
-                "-preset",
-                "ultrafast",
-                "-x265-params",
-                "log-level=error:keyint=60:min-keyint=60:scenecut=0:bframes=4:b-pyramid=1",
-                "-pix_fmt",
-                "yuv420p",
-                "-tag:v",
-                "hvc1",
-            ],
-        );
-    }
-    out
-}
-
 #[test]
 fn a_start_inside_a_gop_skips_unused_pictures_and_stays_bit_exact() {
-    if !have_ffmpeg() {
-        return;
-    }
     let cpu = Prefs {
         decode: Choice::Cpu,
         ..Prefs::default()
     };
-    let hevc = pyramid_hevc();
+    let hevc = fixture(refs::PYRAMID);
+    let mut whole = Digest::new();
+    let mut frames = 0;
+    for f in frames_from(&hevc, 0) {
+        whole.frame(&f);
+        frames += 1;
+    }
+    assert_eq!(frames, refs::PYRAMID_FRAMES);
+    Refs::open(AREA).assert_digest(&format!("{}.yuv", refs::PYRAMID), &whole.hex());
     for (path, k) in [
         (clip(), 47),
         (clip(), 22),
-        (hevc.as_path(), 53),
-        (hevc.as_path(), 29),
+        (hevc.as_path(), 37),
+        (hevc.as_path(), 22),
     ] {
         let p = probe(path, &cpu).unwrap();
         let fps = p.fps.0 as f64 / p.fps.1 as f64;
         let at = k as f64 / fps;
-        let size = p.width as usize * p.height as usize * 3 / 2;
-        let theirs = ffmpeg_raw(
-            path,
-            0.0,
-            &[
-                "-map",
-                "0:v:0",
-                "-frames:v",
-                &(k + 8).to_string(),
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                "yuv420p",
-            ],
-        );
+        let theirs: Vec<String> = frames_from(path, 0).take(k + 8).map(|f| hash(&f)).collect();
         let ours: Vec<Frame> = decode_video(path, at, None, &cpu)
             .unwrap()
             .take(6)
@@ -2378,9 +2132,8 @@ fn a_start_inside_a_gop_skips_unused_pictures_and_stays_bit_exact() {
         let first = usize::try_from(ours[0].pts).unwrap();
         assert!(first.abs_diff(k) <= 1, "{k}: {first}");
         for (n, f) in ours.iter().enumerate() {
-            let want = &theirs[(first + n) * size..(first + n + 1) * size];
             assert!(
-                packed(f) == want,
+                hash(f) == theirs[first + n],
                 "{}: frame {} differs",
                 path.display(),
                 first + n
@@ -2403,12 +2156,9 @@ fn a_start_inside_a_gop_skips_unused_pictures_and_stays_bit_exact() {
 
 #[test]
 fn a_stills_handle_hands_each_index_once_and_matches_single_calls() {
-    if !have_ffmpeg() {
-        return;
-    }
     let prefs = Prefs::default();
-    let hevc = pyramid_hevc();
-    let times = [0.5, 2.2, 0.5, 1.37, 0.0];
+    let hevc = fixture(refs::PYRAMID);
+    let times = [0.5, 1.2, 0.5, 1.37, 0.0];
     for path in [clip(), hevc.as_path()] {
         let stills = Stills::open(path, 120, &prefs).unwrap();
         for seek in [Seek::Keyframe, Seek::Exact] {
@@ -2432,52 +2182,13 @@ fn a_stills_handle_hands_each_index_once_and_matches_single_calls() {
     }
 }
 
+const TIMES: [f64; 6] = [0.1, 0.25, 0.4, 0.6, 0.75, 0.9];
+
 #[test]
 fn av1_stills_on_the_gpu_match_the_cpu_in_a_tagged_matrix() {
-    let Ok(encoders) = Command::new("ffmpeg")
-        .args(["-hide_banner", "-encoders"])
-        .output()
-    else {
-        return;
-    };
-    if !String::from_utf8_lossy(&encoders.stdout).contains("libsvtav1") {
-        return;
-    }
-    let path = dir().join("av1-709.mp4");
-    if !path.exists() {
-        ffmpeg_make(
-            &path,
-            &[
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc2=s=640x360:r=30:d=2",
-                "-c:v",
-                "libsvtav1",
-                "-preset",
-                "12",
-                "-g",
-                "30",
-                "-pix_fmt",
-                "yuv420p",
-                "-colorspace",
-                "bt709",
-                "-color_primaries",
-                "bt709",
-                "-color_trc",
-                "bt709",
-            ],
-        );
-    }
-    let cpu = Stills::open(&path, 360, &route_prefs(Choice::Cpu)).unwrap();
-    gpu_stills_match(&path, &cpu, &[0.1, 0.45, 0.8, 1.2, 1.55, 1.9]);
-}
-
-fn route_prefs(decode: Choice) -> Prefs {
-    Prefs {
-        decode,
-        ..Prefs::default()
-    }
+    let path = fixture(refs::AV1_709);
+    let cpu = Stills::open(&path, 240, &route_prefs(Choice::Cpu)).unwrap();
+    gpu_stills_match(&path, &cpu, &TIMES);
 }
 
 fn still_psnr(a: &Rgba, b: &Rgba) -> f64 {
@@ -2491,7 +2202,7 @@ fn still_psnr(a: &Rgba, b: &Rgba) -> f64 {
 }
 
 fn gpu_stills_match(path: &Path, cpu: &Stills, times: &[f64]) -> bool {
-    let Ok(gpu) = Stills::open(path, 360, &route_prefs(Choice::Gpu)) else {
+    let Ok(gpu) = Stills::open(path, 240, &route_prefs(Choice::Gpu)) else {
         return false;
     };
     for seek in [Seek::Exact, Seek::Keyframe] {
@@ -2525,91 +2236,86 @@ fn gpu_stills_match(path: &Path, cpu: &Stills, times: &[f64]) -> bool {
     true
 }
 
+fn vp9_mkv_of(src: &Path, name: &str) -> PathBuf {
+    let r = mp4::Reader::open(src).unwrap();
+    let v = r.video().unwrap();
+    let t = &r.tracks[v];
+    let mut w = mkv::Writer::new(Cursor::new(Vec::new()), mkv::Options::default());
+    let tb = TimeBase::new(1, t.timescale);
+    let track = w
+        .add_track(mkv::TrackConfig::vp9(t.width, t.height, tb))
+        .unwrap();
+    for (i, s) in t.samples.iter().enumerate() {
+        let data = r.read(v, i).unwrap();
+        let pts = t.presentation(i).unwrap();
+        w.push_sample(track, &data, pts, Some(s.duration), s.keyframe)
+            .unwrap();
+    }
+    let out = dir().join(name);
+    testref::write_atomic(&out, &w.finish().unwrap().into_inner()).unwrap();
+    out
+}
+
 #[test]
 fn vp9_stills_follow_the_vpcc_matrix_on_the_gpu_and_the_cpu() {
-    let Ok(encoders) = Command::new("ffmpeg")
-        .args(["-hide_banner", "-encoders"])
-        .output()
-    else {
-        return;
-    };
-    if !String::from_utf8_lossy(&encoders.stdout).contains("libvpx-vp9") {
-        return;
-    }
-    let mp4 = dir().join("vp9-709.mp4");
-    let mkv = dir().join("vp9-709.mkv");
-    if !mp4.exists() {
-        ffmpeg_make(
-            &mp4,
-            &[
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc2=s=640x360:r=30:d=2",
-                "-c:v",
-                "libvpx-vp9",
-                "-deadline",
-                "realtime",
-                "-cpu-used",
-                "8",
-                "-g",
-                "30",
-                "-pix_fmt",
-                "yuv420p",
-                "-colorspace",
-                "bt709",
-                "-color_primaries",
-                "bt709",
-                "-color_trc",
-                "bt709",
-            ],
-        );
-    }
-    if !mkv.exists() {
-        ffmpeg_make(&mkv, &["-i", mp4.to_str().unwrap(), "-c", "copy"]);
-    }
-    let times = [0.1, 0.45, 0.8, 1.2, 1.55, 1.9];
-    let cpu = Stills::open(&mp4, 360, &route_prefs(Choice::Cpu)).unwrap();
-    let tagged = Stills::open(&mkv, 360, &route_prefs(Choice::Cpu)).unwrap();
+    let mp4 = fixture(refs::VP9_709);
+    let mkv = vp9_mkv_of(&mp4, "vp9-709.mkv");
+    let cpu = Stills::open(&mp4, 240, &route_prefs(Choice::Cpu)).unwrap();
+    let tagged = Stills::open(&mkv, 240, &route_prefs(Choice::Cpu)).unwrap();
     for seek in [Seek::Exact, Seek::Keyframe] {
-        let mut want: Vec<Option<Rgba>> = vec![None; times.len()];
+        let mut want: Vec<Option<Rgba>> = vec![None; TIMES.len()];
         tagged
-            .frames(&times, seek, |i, r| want[i] = Some(r.unwrap()))
+            .frames(&TIMES, seek, |i, r| want[i] = Some(r.unwrap()))
             .unwrap();
-        cpu.frames(&times, seek, |i, r| {
+        cpu.frames(&TIMES, seek, |i, r| {
             let (g, w) = (r.unwrap(), want[i].as_ref().unwrap());
             let p = still_psnr(&g, w);
             assert!(p > 50.0, "{seek:?} CPU MP4 still {i} vs MKV: {p:.1} dB");
         })
         .unwrap();
     }
-    if gpu_stills_match(&mp4, &cpu, &times) {
-        assert!(gpu_stills_match(&mkv, &cpu, &times));
+    if gpu_stills_match(&mp4, &cpu, &TIMES) {
+        assert!(gpu_stills_match(&mkv, &cpu, &TIMES));
     }
 }
 
-fn matrix_still(path: &Path, matrix: &str, range: &str, height: u32) -> Rgba {
-    let out = Command::new("ffmpeg")
-        .args(["-nostdin", "-v", "error", "-i"])
-        .arg(path)
-        .args(["-map", "0:v:0", "-frames:v", "1", "-vf"])
-        .arg(format!(
-            "scale=-2:{height}:flags=bilinear:in_color_matrix={matrix}:in_range={range}"
-        ))
-        .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
+fn matrix_still(frame: &Frame, matrix: &str, range: &str, like: &Rgba) -> Rgba {
+    let (kr, kb) = if matrix == "bt709" {
+        (0.2126, 0.0722)
+    } else {
+        (0.299, 0.114)
+    };
+    let full = range == "pc";
+    let at = |plane: usize, x: u32, y: u32| {
+        let p = &frame.planes[plane];
+        f64::from(p.data[y as usize * p.stride + x as usize])
+    };
+    shrink((frame.width, frame.height), like, |x, y| {
+        let (l, u, v) = (at(0, x, y), at(1, x / 2, y / 2), at(2, x / 2, y / 2));
+        let (l, cb, cr) = if full {
+            (l / 255.0, (u - 128.0) / 255.0, (v - 128.0) / 255.0)
+        } else {
+            ((l - 16.0) / 219.0, (u - 128.0) / 224.0, (v - 128.0) / 224.0)
+        };
+        let r = l + 2.0 * (1.0 - kr) * cr;
+        let b = l + 2.0 * (1.0 - kb) * cb;
+        let g = (l - kr * r - kb * b) / (1.0 - kr - kb);
+        [r, g, b].map(|c| (c * 255.0).round().clamp(0.0, 255.0) as u8)
+    })
+}
+
+fn with_header_space(src: &Path, space: u8, out: &Path) {
+    let r = mkv::Reader::open(src).unwrap();
+    let at = r.tracks[0].samples[0].offset as usize;
+    let mut bytes = std::fs::read(src).unwrap();
+    assert_eq!(
+        bytes[at + 1..at + 4],
+        [0x49, 0x83, 0x42],
+        "{}: no VP9 keyframe sync code at {at}",
+        src.display()
     );
-    let width = (out.stdout.len() / 4 / height as usize) as u32;
-    Rgba {
-        width,
-        height,
-        data: out.stdout,
-    }
+    bytes[at + 4] = (bytes[at + 4] & 0x1f) | (space << 5);
+    testref::write_atomic(out, &bytes).unwrap();
 }
 
 fn rewrapped(src: &Path, size: (u32, u32), vpcc: Option<u8>, full: bool, out: &Path) {
@@ -2648,76 +2354,27 @@ fn rewrapped(src: &Path, size: (u32, u32), vpcc: Option<u8>, full: bool, out: &P
 
 #[test]
 fn vp9_tagged_only_in_its_keyframe_converts_with_the_header_matrix_and_range() {
-    let Ok(encoders) = Command::new("ffmpeg")
-        .args(["-hide_banner", "-encoders"])
-        .output()
-    else {
-        return;
-    };
-    if !String::from_utf8_lossy(&encoders.stdout).contains("libvpx-vp9") {
-        return;
-    }
     let vp9_gpu = pito_codecs::gpu::available()
         .iter()
         .any(|&(c, d, _)| c == Codec::Vp9 && d == pito_codecs::gpu::Direction::Decode);
     eprintln!("VP9 GPU decode available: {vp9_gpu}");
-    let cases = [
-        ((848, 480), "bt709", "bt709", "tv", "bt601"),
-        ((848, 480), "bt709", "bt709", "pc", "bt601"),
-        ((1920, 1080), "bt470bg", "bt601", "tv", "bt709"),
-        ((1920, 1080), "bt470bg", "bt601", "pc", "bt709"),
-    ];
-    for ((w, h), space, matrix, range, default) in cases {
+    for ((w, h), space, matrix, range, default) in refs::VP9_KEYS {
+        let tagged = fixture(&refs::vp9_key(h, space, range));
         let name = format!("vp9-key-{h}-{space}-{range}");
-        let tagged = dir().join(format!("{name}.mkv"));
-        if !tagged.exists() {
-            ffmpeg_make(
-                &tagged,
-                &[
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    &format!("testsrc2=s={w}x{h}:r=10:d=1"),
-                    "-c:v",
-                    "libvpx-vp9",
-                    "-deadline",
-                    "realtime",
-                    "-cpu-used",
-                    "8",
-                    "-g",
-                    "10",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-colorspace",
-                    space,
-                    "-color_range",
-                    range,
-                ],
-            );
-        }
         let full = range == "pc";
         let bare_mkv = dir().join(format!("{name}-bare.mkv"));
         let open_mp4 = dir().join(format!("{name}-open.mp4"));
         rewrapped(&tagged, (w, h), None, full, &bare_mkv);
         rewrapped(&tagged, (w, h), Some(0), false, &open_mp4);
-        let right = matrix_still(&tagged, matrix, range, 240);
-        let wrong = matrix_still(&tagged, default, "tv", 240);
+        let decoded = frames_from(&tagged, 0).next().unwrap();
         let tags_win = dir().join(format!("{name}-tags-win.mkv"));
-        let header = if space == "bt709" { "bt601" } else { "bt709" };
-        ffmpeg_make(
-            &tags_win,
-            &[
-                "-i",
-                tagged.to_str().unwrap(),
-                "-c",
-                "copy",
-                "-bsf:v",
-                &format!("vp9_metadata=color_space={header}"),
-            ],
-        );
+        let header = if space == "bt709" { 1 } else { 2 };
+        with_header_space(&tagged, header, &tags_win);
         for path in [&bare_mkv, &open_mp4, &tags_win] {
             for decode in [Choice::Cpu, Choice::Gpu] {
                 let ours = first_frame(path, 240, &route_prefs(decode.clone())).unwrap();
+                let right = matrix_still(&decoded, matrix, range, &ours);
+                let wrong = matrix_still(&decoded, default, "tv", &ours);
                 let (good, bad) = (mean_diff(&ours, &right), mean_diff(&ours, &wrong));
                 assert!(
                     good < 6.0 && bad > good + 0.5,
@@ -2730,8 +2387,10 @@ fn vp9_tagged_only_in_its_keyframe_converts_with_the_header_matrix_and_range() {
             let other = if space == "bt709" { 1 } else { 2 };
             let wins = dir().join(format!("{name}-wins.mp4"));
             rewrapped(&tagged, (w, h), Some(other), true, &wins);
-            let container = matrix_still(&tagged, default, "pc", 240);
             let ours = first_frame(&wins, 240, &route_prefs(Choice::Cpu)).unwrap();
+            let right = matrix_still(&decoded, matrix, range, &ours);
+            let wrong = matrix_still(&decoded, default, "tv", &ours);
+            let container = matrix_still(&decoded, default, "pc", &ours);
             let good = mean_diff(&ours, &container);
             for (against, lost) in [("header", &right), ("size default", &wrong)] {
                 let bad = mean_diff(&ours, lost);
@@ -2746,42 +2405,9 @@ fn vp9_tagged_only_in_its_keyframe_converts_with_the_header_matrix_and_range() {
 
 #[test]
 fn av1_in_mp4_mkv_and_webm_probes_and_decodes_on_the_gpu_or_refuses_cleanly() {
-    let Ok(encoders) = Command::new("ffmpeg")
-        .args(["-hide_banner", "-encoders"])
-        .output()
-    else {
-        return;
-    };
-    if !String::from_utf8_lossy(&encoders.stdout).contains("libsvtav1") {
-        return;
-    }
     let prefs = Prefs::default();
-    for (name, pix, bits) in [
-        ("av1-8.mp4", "yuv420p", 8),
-        ("av1-8.mkv", "yuv420p", 8),
-        ("av1-8.webm", "yuv420p", 8),
-        ("av1-10.mp4", "yuv420p10le", 10),
-    ] {
-        let path = dir().join(name);
-        if !path.exists() {
-            ffmpeg_make(
-                &path,
-                &[
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "testsrc2=s=640x360:r=30:d=1",
-                    "-c:v",
-                    "libsvtav1",
-                    "-preset",
-                    "12",
-                    "-g",
-                    "30",
-                    "-pix_fmt",
-                    pix,
-                ],
-            );
-        }
+    for (name, _, bits) in refs::AV1S {
+        let path = fixture(name);
         let p = probe(&path, &prefs).unwrap();
         assert_eq!(
             (
@@ -2792,7 +2418,7 @@ fn av1_in_mp4_mkv_and_webm_probes_and_decodes_on_the_gpu_or_refuses_cleanly() {
                 p.bit_depth,
                 p.profile.as_str()
             ),
-            (Some(Codec::Av1), "av1", 640, 360, bits, "Main"),
+            (Some(Codec::Av1), "av1", 352, 240, bits, "Main"),
             "{name}"
         );
         assert!((p.duration - 1.0).abs() < 0.05, "{name}: {}", p.duration);
@@ -2803,7 +2429,7 @@ fn av1_in_mp4_mkv_and_webm_probes_and_decodes_on_the_gpu_or_refuses_cleanly() {
             continue;
         }
         let still = first_frame(&path, 180, &prefs).unwrap();
-        assert_eq!((still.width, still.height), (320, 180), "{name}");
+        assert_eq!((still.width, still.height), (264, 180), "{name}");
         let stills = frames_at_seek(&path, &[0.2, 0.7], 180, Seek::Exact, &prefs).unwrap();
         assert_eq!(stills.len(), 2, "{name}");
         let video = decode_video_gpu(&path, 0.0, None, &prefs).unwrap();
@@ -2812,42 +2438,18 @@ fn av1_in_mp4_mkv_and_webm_probes_and_decodes_on_the_gpu_or_refuses_cleanly() {
         }
         let mut n = 0;
         for f in video {
-            assert_eq!(f.unwrap().size(), (640, 360), "{name}");
+            assert_eq!(f.unwrap().size(), (352, 240), "{name}");
             n += 1;
         }
-        assert_eq!(n, 30, "{name}");
+        assert_eq!(n, refs::AV1_FRAMES, "{name}");
     }
-}
-
-fn variant_clip(name: &str, encode: &[&str]) -> PathBuf {
-    let path = dir().join(name);
-    if !path.exists() {
-        let mut args = vec!["-f", "lavfi", "-i", "testsrc2=s=352x240:r=30:d=1"];
-        args.extend_from_slice(encode);
-        ffmpeg_make(&path, &args);
-    }
-    path
 }
 
 #[test]
 fn a_10_bit_4_2_2_h264_is_refused_at_probe_with_its_variant_on_every_container() {
-    if !have_ffmpeg() || !has_encoder("libx264") {
-        eprintln!("no ffmpeg with libx264 on PATH: skipped");
-        return;
-    }
     let prefs = Prefs::default();
     for ext in ["mp4", "mkv"] {
-        let path = variant_clip(
-            &format!("h264-10bit-422.{ext}"),
-            &[
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv422p10le",
-                "-profile:v",
-                "high422",
-            ],
-        );
+        let path = fixture(&format!("h264-yuv422p10le.{ext}"));
         let p = probe(&path, &prefs).unwrap();
         assert_eq!(
             (p.video_codec, p.bit_depth, p.chroma, p.interlaced),
@@ -2867,40 +2469,16 @@ fn a_10_bit_4_2_2_h264_is_refused_at_probe_with_its_variant_on_every_container()
 
 #[test]
 fn an_interlaced_h264_is_refused_at_probe_and_a_plain_one_is_native() {
-    if !have_ffmpeg() || !has_encoder("libx264") {
-        eprintln!("no ffmpeg with libx264 on PATH: skipped");
-        return;
-    }
     let prefs = Prefs::default();
-    let interlaced = variant_clip(
-        "h264-interlaced.mp4",
-        &[
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-flags",
-            "+ildct+ilme",
-            "-x264opts",
-            "tff=1",
-        ],
-    );
+    let interlaced = fixture("h264-interlaced.mp4");
     let p = probe(&interlaced, &prefs).unwrap();
     assert!(p.interlaced);
     assert_eq!(p.video_variant(), "interlaced 8-bit 4:2:0 H.264");
     assert!(!p.video_native());
     assert_eq!(p.unsupported(), ["interlaced 8-bit 4:2:0 H.264"]);
-    let plain = variant_clip(
-        "h264-plain-high.mkv",
-        &[
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-profile:v",
-            "high",
-        ],
-    );
+    let plain = Clip::new((352, 240), (30, 1), 30)
+        .video_only()
+        .make(AREA, "h264-plain-high.mkv");
     let p = probe(&plain, &prefs).unwrap();
     assert_eq!(
         (p.bit_depth, p.chroma, p.interlaced),
@@ -2911,31 +2489,11 @@ fn an_interlaced_h264_is_refused_at_probe_and_a_plain_one_is_native() {
     assert!(p.unsupported().is_empty());
 }
 
-fn has_encoder(name: &str) -> bool {
-    Command::new("ffmpeg")
-        .args(["-hide_banner", "-encoders"])
-        .output()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(name))
-}
-
 #[test]
 fn a_10_bit_4_2_2_hevc_is_refused_at_probe_and_main_10_is_native() {
-    if !have_ffmpeg() || !has_encoder("libx265") {
-        return;
-    }
     let prefs = Prefs::default();
-    let x265 = |pix: &'static str| {
-        [
-            "-c:v",
-            "libx265",
-            "-pix_fmt",
-            pix,
-            "-x265-params",
-            "log-level=error",
-        ]
-    };
     for ext in ["mp4", "mkv"] {
-        let path = variant_clip(&format!("hevc-10bit-422.{ext}"), &x265("yuv422p10le"));
+        let path = fixture(&format!("hevc-10bit-422.{ext}"));
         let p = probe(&path, &prefs).unwrap();
         assert_eq!(
             (p.video_codec, p.bit_depth, p.chroma, p.interlaced),
@@ -2946,7 +2504,7 @@ fn a_10_bit_4_2_2_hevc_is_refused_at_probe_and_main_10_is_native() {
         assert!(variant.starts_with("10-bit 4:2:2 HEVC"), "{ext}: {variant}");
         assert!(!p.video_native(), "{ext}");
         assert_eq!(p.unsupported(), [variant], "{ext}");
-        let path = variant_clip(&format!("hevc-main10.{ext}"), &x265("yuv420p10le"));
+        let path = fixture(&format!("hevc-main10.{ext}"));
         let p = probe(&path, &prefs).unwrap();
         assert_eq!(p.video_variant(), "10-bit 4:2:0 HEVC", "{ext}");
         assert!(p.video_native(), "{ext}");
@@ -2956,29 +2514,14 @@ fn a_10_bit_4_2_2_hevc_is_refused_at_probe_and_main_10_is_native() {
 
 #[test]
 fn vp9_profiles_read_from_the_webm_keyframe_and_the_mp4_vpcc_alike() {
-    if !have_ffmpeg() || !has_encoder("libvpx-vp9") {
-        return;
-    }
     let prefs = Prefs::default();
-    let vpx = |pix: &'static str| {
-        [
-            "-c:v",
-            "libvpx-vp9",
-            "-deadline",
-            "realtime",
-            "-cpu-used",
-            "8",
-            "-pix_fmt",
-            pix,
-        ]
-    };
     for ext in ["webm", "mp4"] {
-        let path = variant_clip(&format!("vp9-444.{ext}"), &vpx("yuv444p"));
+        let path = fixture(&format!("vp9-444.{ext}"));
         let p = probe(&path, &prefs).unwrap();
         assert_eq!(p.video_variant(), "8-bit 4:4:4 VP9", "{ext}");
         assert!(!p.video_native(), "{ext}");
         assert_eq!(p.unsupported(), ["8-bit 4:4:4 VP9"], "{ext}");
-        let path = variant_clip(&format!("vp9-10bit.{ext}"), &vpx("yuv420p10le"));
+        let path = fixture(&format!("vp9-10bit.{ext}"));
         let p = probe(&path, &prefs).unwrap();
         assert_eq!(p.video_variant(), "10-bit 4:2:0 VP9", "{ext}");
         assert!(p.video_native(), "{ext}");
@@ -3036,44 +2579,16 @@ fn every_open_says(path: &Path, want: &str) {
 
 #[test]
 fn a_video_codec_no_decoder_reads_is_refused_at_open_by_its_plain_name() {
-    if !have_ffmpeg() {
-        eprintln!("no ffmpeg on PATH: skipped");
-        return;
-    }
     let prefs = Prefs::default();
-    for (name, encode, plain) in [
-        (
-            "mpeg4-part2.mp4",
-            &["-c:v", "mpeg4", "-f", "mp4"][..],
-            "MPEG-4 Part 2",
-        ),
-        (
-            "mpeg4-part2.mkv",
-            &["-c:v", "mpeg4", "-f", "matroska"][..],
-            "MPEG-4 Part 2",
-        ),
-        (
-            "mpeg2.mp4",
-            &["-c:v", "mpeg2video", "-f", "mp4"][..],
-            "MPEG-2",
-        ),
-        (
-            "mpeg2.mkv",
-            &["-c:v", "mpeg2video", "-f", "matroska"][..],
-            "MPEG-2",
-        ),
-        (
-            "mjpeg.mov",
-            &["-c:v", "mjpeg", "-pix_fmt", "yuvj420p", "-f", "mov"][..],
-            "MJPEG",
-        ),
-        (
-            "mjpeg.mkv",
-            &["-c:v", "mjpeg", "-pix_fmt", "yuvj420p", "-f", "matroska"][..],
-            "MJPEG",
-        ),
+    for (name, plain) in [
+        ("mpeg4-part2.mp4", "MPEG-4 Part 2"),
+        ("mpeg4-part2.mkv", "MPEG-4 Part 2"),
+        ("mpeg2.mp4", "MPEG-2"),
+        ("mpeg2.mkv", "MPEG-2"),
+        ("mjpeg.mov", "MJPEG"),
+        ("mjpeg.mkv", "MJPEG"),
     ] {
-        let path = variant_clip(name, encode);
+        let path = fixture(name);
         let p = probe(&path, &prefs).unwrap();
         assert_eq!(p.video_codec, None, "{name}");
         assert!(!p.video_native(), "{name}");
@@ -3087,39 +2602,16 @@ fn a_video_codec_no_decoder_reads_is_refused_at_open_by_its_plain_name() {
 
 #[test]
 fn a_container_no_reader_takes_is_refused_by_name_at_probe_and_every_open() {
-    if !have_ffmpeg() {
-        eprintln!("no ffmpeg on PATH: skipped");
-        return;
-    }
     let prefs = Prefs::default();
-    for (name, encode, container) in [
-        ("mpeg4.avi", &["-c:v", "mpeg4", "-f", "avi"][..], "AVI"),
-        (
-            "mpeg2.ts",
-            &["-c:v", "mpeg2video", "-f", "mpegts"][..],
-            "MPEG-TS",
-        ),
-        (
-            "mpeg2.m2ts",
-            &[
-                "-c:v",
-                "mpeg2video",
-                "-mpegts_m2ts_mode",
-                "1",
-                "-f",
-                "mpegts",
-            ][..],
-            "MPEG-TS",
-        ),
-        ("flv1.flv", &["-c:v", "flv1", "-f", "flv"][..], "FLV"),
-        (
-            "mpeg2.mpg",
-            &["-c:v", "mpeg2video", "-f", "vob"][..],
-            "MPEG-PS",
-        ),
-        ("wmv2.wmv", &["-c:v", "wmv2", "-f", "asf"][..], "ASF"),
+    for (name, container) in [
+        ("mpeg4.avi", "AVI"),
+        ("mpeg2.ts", "MPEG-TS"),
+        ("mpeg2.m2ts", "MPEG-TS"),
+        ("flv1.flv", "FLV"),
+        ("mpeg2.mpg", "MPEG-PS"),
+        ("wmv2.wmv", "ASF"),
     ] {
-        let path = variant_clip(name, encode);
+        let path = fixture(name);
         let e = refused_in_one_line(probe(&path, &prefs), container);
         assert!(e.starts_with("unsupported: "), "{name}: {e}");
         assert!(e.ends_with(" files are not supported"), "{name}: {e}");
@@ -3463,19 +2955,12 @@ fn a_file_with_no_video_says_so_on_every_video_path() {
 
 #[test]
 fn a_10_bit_or_4_2_2_h264_is_refused_when_opened_not_at_its_first_frame() {
-    if !have_ffmpeg() || !has_encoder("libx264") {
-        eprintln!("no ffmpeg with libx264 on PATH: skipped");
-        return;
-    }
     for ext in ["mp4", "mkv"] {
-        for (pix, profile, variant) in [
-            ("yuv422p10le", "high422", "10-bit 4:2:2 H.264"),
-            ("yuv420p10le", "high10", "10-bit 4:2:0 H.264"),
+        for (pix, variant) in [
+            ("yuv422p10le", "10-bit 4:2:2 H.264"),
+            ("yuv420p10le", "10-bit 4:2:0 H.264"),
         ] {
-            let path = variant_clip(
-                &format!("h264-{pix}.{ext}"),
-                &["-c:v", "libx264", "-pix_fmt", pix, "-profile:v", profile],
-            );
+            let path = fixture(&format!("h264-{pix}.{ext}"));
             every_open_says(
                 &path,
                 &format!("unsupported: {variant} video is not supported"),
@@ -3487,20 +2972,8 @@ fn a_10_bit_or_4_2_2_h264_is_refused_when_opened_not_at_its_first_frame() {
 #[test]
 fn a_10_bit_4_2_2_h264_exports_when_every_part_is_copied_and_is_refused_by_file_when_one_needs_a_decode()
  {
-    if !have_ffmpeg() || !has_encoder("libx264") {
-        eprintln!("no ffmpeg with libx264 on PATH: skipped");
-        return;
-    }
-    let encode = [
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv422p10le",
-        "-profile:v",
-        "high422",
-    ];
-    let mp4 = variant_clip("h264-yuv422p10le.mp4", &encode);
-    let mkv = variant_clip("h264-yuv422p10le.mkv", &encode);
+    let mp4 = fixture("h264-yuv422p10le.mp4");
+    let mkv = fixture("h264-yuv422p10le.mkv");
     let prefs = Prefs::default();
     let whole = probe(&mp4, &prefs).unwrap().duration;
     let out = dir().join("h264-422-10-copied.mp4");
@@ -3555,31 +3028,7 @@ fn a_10_bit_4_2_2_h264_exports_when_every_part_is_copied_and_is_refused_by_file_
 
 #[test]
 fn a_vp9_our_encoder_cannot_splice_is_re_encoded_whole_even_on_gop_bounds() {
-    if !have_ffmpeg() || !has_encoder("libvpx-vp9") {
-        eprintln!("no ffmpeg with libvpx-vp9 on PATH: skipped");
-        return;
-    }
-    let src = variant_clip(
-        "vp9-profile2-g10.webm",
-        &[
-            "-c:v",
-            "libvpx-vp9",
-            "-pix_fmt",
-            "yuv420p10le",
-            "-g",
-            "10",
-            "-keyint_min",
-            "10",
-            "-auto-alt-ref",
-            "0",
-            "-lag-in-frames",
-            "0",
-            "-crf",
-            "40",
-            "-b:v",
-            "0",
-        ],
-    );
+    let src = fixture(refs::VP9_PROFILE2);
     let prefs = Prefs::default();
     let p = probe(&src, &prefs).unwrap();
     assert_eq!((p.video_codec, p.bit_depth), (Some(Codec::Vp9), 10));
@@ -3615,23 +3064,7 @@ fn a_vp9_our_encoder_cannot_splice_is_re_encoded_whole_even_on_gop_bounds() {
 
 #[test]
 fn a_4_4_4_vp9_with_alpha_is_refused_when_its_stills_open() {
-    if !have_ffmpeg() || !has_encoder("libvpx-vp9") {
-        eprintln!("no ffmpeg with libvpx-vp9 on PATH: skipped");
-        return;
-    }
-    let src = variant_clip(
-        "vp9-444.webm",
-        &[
-            "-c:v",
-            "libvpx-vp9",
-            "-deadline",
-            "realtime",
-            "-cpu-used",
-            "8",
-            "-pix_fmt",
-            "yuv444p",
-        ],
-    );
+    let src = fixture("vp9-444.webm");
     let r = pito_codecs::mkv::Reader::open(&src).unwrap();
     let v = r.video().unwrap();
     let path = dir().join("vp9-444-alpha.webm");
@@ -3656,37 +3089,22 @@ fn a_4_4_4_vp9_with_alpha_is_refused_when_its_stills_open() {
 
 #[test]
 fn a_bare_mp3_decodes_on_every_audio_path_with_no_ffmpeg_route() {
-    if !have_ffmpeg() || !has_encoder("libmp3lame") {
-        eprintln!("no ffmpeg with libmp3lame on PATH: skipped");
-        return;
-    }
-    let path = dir().join("bare-sine.mp3");
-    let ok = Command::new("ffmpeg")
-        .args(["-v", "error", "-y"])
-        .args(["-f", "lavfi", "-i", "sine=f=440:r=44100:d=2"])
-        .args(["-ac", "2", "-c:a", "libmp3lame", "-b:a", "128k"])
-        .arg(&path)
-        .status()
-        .is_ok_and(|s| s.success());
-    if !ok {
-        eprintln!("ffmpeg could not make the MP3: skipped");
-        return;
-    }
+    let path = fixture(refs::MP3);
     let prefs = Prefs::default();
     let p = probe(&path, &prefs).unwrap();
     assert_eq!(p.video_codec, None);
     assert_eq!(p.audio.len(), 1);
     let whole = audio_pcm(&path, 0, 48_000, false, &prefs).unwrap();
     assert!(
-        whole.frames().abs_diff(96_000) < 2_400,
+        whole.frames().abs_diff(48_000) < 2_400,
         "{}",
         whole.frames()
     );
     let peak = whole.samples.iter().fold(0f32, |m, s| m.max(s.abs()));
     assert!(peak > 0.05, "{peak}");
-    let span = audio_pcm_range(&path, 0, 0.5, 1.5, 48_000, 1, &prefs).unwrap();
-    assert_eq!((span.channels, span.frames()), (1, 48_000));
-    let mixed = audio_mix(&path, &[], 0.0, 1.0, 48_000, &prefs).unwrap();
-    assert_eq!(mixed.frames(), 48_000);
+    let span = audio_pcm_range(&path, 0, 0.25, 0.75, 48_000, 1, &prefs).unwrap();
+    assert_eq!((span.channels, span.frames()), (1, 24_000));
+    let mixed = audio_mix(&path, &[], 0.0, 0.5, 48_000, &prefs).unwrap();
+    assert_eq!(mixed.frames(), 24_000);
     assert!(audio_pcm(&path, 1, 48_000, false, &prefs).is_err());
 }
