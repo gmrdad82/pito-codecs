@@ -398,3 +398,98 @@ fn byte_sources_read_exactly_or_fail_at_the_end() {
     drop(f);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+fn full(body: &[&[u8]]) -> Vec<u8> {
+    let mut b = vec![0; 4];
+    for part in body {
+        b.extend_from_slice(part);
+    }
+    b
+}
+
+fn quicktime_v1_pcm(stts: (u32, u32), stsc_run: u32, stsz: (u32, u32), mdat: usize) -> Vec<u8> {
+    let mut sowt = vec![
+        0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 16, 0, 0, 0, 0,
+    ];
+    sowt.extend((48_000u32 << 16).to_be_bytes());
+    for v in [1u32, 2, 4, 2] {
+        sowt.extend(v.to_be_bytes());
+    }
+    let mut stsd = full(&[&1u32.to_be_bytes()]);
+    stsd.extend((8 + sowt.len() as u32).to_be_bytes());
+    stsd.extend(b"sowt");
+    stsd.extend(&sowt);
+    let stbl = vec![
+        Node::Leaf(*b"stsd", stsd),
+        Node::Leaf(
+            *b"stts",
+            full(&[
+                &1u32.to_be_bytes(),
+                &stts.0.to_be_bytes(),
+                &stts.1.to_be_bytes(),
+            ]),
+        ),
+        Node::Leaf(
+            *b"stsc",
+            full(&[
+                &1u32.to_be_bytes(),
+                &1u32.to_be_bytes(),
+                &stsc_run.to_be_bytes(),
+                &1u32.to_be_bytes(),
+            ]),
+        ),
+        Node::Leaf(
+            *b"stsz",
+            full(&[&stsz.0.to_be_bytes(), &stsz.1.to_be_bytes()]),
+        ),
+        Node::Leaf(*b"stco", full(&[&1u32.to_be_bytes(), &24u32.to_be_bytes()])),
+    ];
+    let mut hdlr = full(&[&[0; 4], b"soun"]);
+    hdlr.extend([0; 13]);
+    let mut mdhd = full(&[&[0; 8], &48_000u32.to_be_bytes(), &4096u32.to_be_bytes()]);
+    mdhd.extend([0x55, 0xC4, 0, 0]);
+    let mut mvhd = full(&[&[0; 8], &1000u32.to_be_bytes(), &85u32.to_be_bytes()]);
+    mvhd.extend([0; 80]);
+    let mdia = vec![
+        Node::Leaf(*b"mdhd", mdhd),
+        Node::Leaf(*b"hdlr", hdlr),
+        Node::Tree(*b"minf", vec![Node::Tree(*b"stbl", stbl)]),
+    ];
+    write(
+        &[
+            Node::Leaf(*b"ftyp", b"qt  \0\0\0\0".to_vec()),
+            Node::Leaf(*b"mdat", (0..mdat).map(|i| i as u8).collect()),
+            Node::Tree(
+                *b"moov",
+                vec![
+                    Node::Leaf(*b"mvhd", mvhd),
+                    Node::Tree(*b"trak", vec![Node::Tree(*b"mdia", mdia)]),
+                ],
+            ),
+        ],
+        &[],
+        None,
+    )
+}
+
+#[test]
+fn quicktime_v1_pcm_sizes_follow_how_many_frames_each_sample_holds() {
+    let one_big = quicktime_v1_pcm((1, 4096), 1, (16_384, 1), 16_384);
+    let r = Reader::new(one_big.as_slice()).unwrap();
+    let s = &r.tracks[0].samples;
+    assert_eq!(s.len(), 1);
+    assert_eq!((s[0].offset, s[0].size, s[0].duration), (24, 16_384, 4096));
+    assert_eq!(r.read(0, 0).unwrap().len(), 16_384);
+    let per_frame = quicktime_v1_pcm((4096, 1), 4096, (2, 4096), 16_384);
+    let r = Reader::new(per_frame.as_slice()).unwrap();
+    let s = &r.tracks[0].samples;
+    assert_eq!(s.len(), 1);
+    assert_eq!((s[0].offset, s[0].size, s[0].duration), (24, 16_384, 4096));
+    assert_eq!(
+        r.read(0, 0).unwrap(),
+        (0..16_384).map(|i| i as u8).collect::<Vec<u8>>()
+    );
+    let classic = quicktime_v1_pcm((4096, 1), 4096, (1, 4096), 16_384);
+    let r = Reader::new(classic.as_slice()).unwrap();
+    assert_eq!(r.tracks[0].samples[0].size, 16_384);
+}
