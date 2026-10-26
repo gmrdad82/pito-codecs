@@ -13,7 +13,7 @@ fn dir() -> PathBuf {
     crate::testref::scratch(refs::AREA)
 }
 
-fn ours<S: ByteSource>(r: &Reader<S>) -> Packets {
+fn ours<S: ByteSource>(r: &Reader<S>) -> Vec<Vec<(i64, u32, bool)>> {
     r.tracks
         .iter()
         .map(|t| {
@@ -25,13 +25,59 @@ fn ours<S: ByteSource>(r: &Reader<S>) -> Packets {
         .collect()
 }
 
-fn listed(r: &Refs, file: &str) -> Packets {
-    let csv = String::from_utf8(r.bytes(&refs::packets_of(file))).unwrap();
-    refs::parse_packets(&csv)
+fn timed<S: ByteSource>(r: &Reader<S>) -> Packets {
+    let t = &r.tracks[r.video().unwrap()];
+    refs::normalized(
+        t.samples
+            .iter()
+            .map(|s| {
+                (
+                    (t.seconds(s.pts) * 1000.0).round() as i64,
+                    s.size,
+                    s.keyframe,
+                )
+            })
+            .collect(),
+    )
 }
 
-fn streamed<S: ByteSource>(r: &Reader<S>) -> Packets {
-    let mut out: Packets = vec![Vec::new(); r.tracks.len()];
+fn twin(r: &Refs, file: &str) -> Packets {
+    let bytes = r.bytes(file);
+    if file.ends_with(".ivf") {
+        return refs::normalized(refs::ivf_packets(&bytes));
+    }
+    if file.ends_with(".flv") {
+        return refs::normalized(refs::flv_packets(&bytes));
+    }
+    let m = crate::mp4::Reader::new(bytes).unwrap();
+    let v = m.video().unwrap();
+    let t = &m.tracks[v];
+    refs::normalized(
+        (0..t.samples.len())
+            .map(|k| {
+                let at = t.seconds(t.presentation(k).unwrap());
+                let s = t.samples[k];
+                ((at * 1000.0).round() as i64, s.size, s.keyframe)
+            })
+            .collect(),
+    )
+}
+
+fn same_packets(ours: &Packets, theirs: &Packets, what: &str) {
+    assert_eq!(ours.len(), theirs.len(), "{what}");
+    for (k, (a, b)) in ours.iter().zip(theirs).enumerate() {
+        assert_eq!((a.1, a.2), (b.1, b.2), "{what}: packet {k}");
+        assert!(
+            (a.0 - b.0).abs() <= 1,
+            "{what}: packet {k} at {} ms, not {} ms",
+            a.0,
+            b.0
+        );
+    }
+}
+
+fn streamed<S: ByteSource>(r: &Reader<S>) -> Vec<Vec<(i64, u32, bool)>> {
+    let mut out = vec![Vec::new(); r.tracks.len()];
     let mut stream = r.stream();
     let mut data = Vec::new();
     while let Some(b) = stream.next_into(&mut data).unwrap() {
@@ -41,20 +87,26 @@ fn streamed<S: ByteSource>(r: &Reader<S>) -> Packets {
 }
 
 #[test]
-fn reader_matches_ffprobe_and_streams_and_seeks() {
+fn reader_matches_its_muxers_own_twin_and_streams_and_seeks() {
     let refs_dir = Refs::open(refs::AREA);
     let seconds = f64::from(refs::SECONDS);
-    for (file, _, _) in refs::FOREIGN {
+    for (file, other) in refs::FOREIGN {
         let path = refs_dir.path(file);
         let r = Reader::open(&path).unwrap();
         assert!(r.warnings.is_empty(), "{file}: {:?}", r.warnings);
-        assert_eq!(ours(&r), listed(&refs_dir, file), "{file}");
+        let mine = timed(&r);
+        assert_eq!(mine.len() as u32, refs::FPS * refs::SECONDS, "{file}");
+        same_packets(
+            &mine,
+            &twin(&refs_dir, other),
+            &format!("{file} against {other}"),
+        );
         assert_eq!(r.is_webm(), file.ends_with(".webm"));
         let codecs: Vec<_> = r.tracks.iter().map(|t| t.codec()).collect();
         if r.is_webm() {
-            assert_eq!(codecs, [Some(Codec::Vp9), Some(Codec::Opus)]);
+            assert_eq!(codecs, [Some(Codec::Vp9)]);
         } else {
-            assert_eq!(codecs, [Some(Codec::H264), Some(Codec::Aac)]);
+            assert_eq!(codecs, [Some(Codec::H264)]);
         }
         let v = r.video().unwrap();
         assert_eq!((r.tracks[v].width, r.tracks[v].height), refs::SIZE);
@@ -86,7 +138,11 @@ fn reader_matches_ffprobe_and_streams_and_seeks() {
             }
         }
         keys.dedup();
-        assert_eq!(keys.len(), 4, "{file}: the seeks land on distinct keyframes");
+        assert_eq!(
+            keys.len(),
+            4,
+            "{file}: the seeks land on distinct keyframes"
+        );
     }
 }
 
@@ -138,7 +194,10 @@ mod decoded {
     #[test]
     fn writer_output_keeps_every_packet_and_frame() {
         let refs_dir = Refs::open(refs::AREA);
-        for (file, webm) in [("h264.mkv", false), ("vp9.webm", true)] {
+        for (file, other, webm) in [
+            ("h264.mkv", "h264.flv", false),
+            ("vp9.webm", "vp9.ivf", true),
+        ] {
             let src = refs_dir.path(file);
             let r = Reader::open(&src).unwrap();
             let out = dir().join(format!("ours.{}", if webm { "webm" } else { "mkv" }));
@@ -170,7 +229,8 @@ mod decoded {
             }
             w.finish().unwrap();
             let back = Reader::open(&out).unwrap();
-            assert_eq!(ours(&back), listed(&refs_dir, file), "{file}");
+            assert_eq!(ours(&back), ours(&r), "{file}");
+            same_packets(&timed(&back), &twin(&refs_dir, other), file);
             assert_eq!(back.is_webm(), webm);
             assert!(!back.cues.is_empty());
             assert!((back.duration_seconds() - r.duration_seconds()).abs() < 0.05);

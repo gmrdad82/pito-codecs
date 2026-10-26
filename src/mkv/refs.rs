@@ -2,61 +2,59 @@ pub const AREA: &str = "mkv";
 pub const SIZE: (u32, u32) = (160, 120);
 pub const FPS: u32 = 15;
 pub const SECONDS: u32 = 2;
+pub const GOP: u32 = 7;
 
-pub const H264: &str = "-c:v|libx264|-bf|2|-g|7|-crf|40|-pix_fmt|yuv420p|-c:a|aac|-b:a|48k";
-pub const VP9: &str =
-    "-c:v|libvpx-vp9|-g|7|-deadline|realtime|-cpu-used|8|-b:v|40k|-c:a|libopus|-b:a|24k";
-
-pub const FOREIGN: [(&str, &str, &str); 3] = [
-    ("h264.mkv", H264, ""),
-    ("vp9.webm", VP9, ""),
-    ("piped.mkv", H264, "-f|matroska|-seekable|0"),
+pub const FOREIGN: [(&str, &str); 3] = [
+    ("h264.mkv", "h264.flv"),
+    ("vp9.webm", "vp9.ivf"),
+    ("piped.mkv", "h264.flv"),
 ];
 
-pub const PACKETS: &str = "packet=stream_index,pts,size,flags";
+pub type Packets = Vec<(i64, u32, bool)>;
 
-pub fn packets_of(file: &str) -> String {
-    format!("{file}.csv")
-}
-
-pub fn sources() -> Vec<String> {
-    let (w, h) = SIZE;
-    vec![
-        "-f".into(),
-        "lavfi".into(),
-        "-i".into(),
-        format!("testsrc2=size={w}x{h}:rate={FPS}:duration={SECONDS}"),
-        "-f".into(),
-        "lavfi".into(),
-        "-i".into(),
-        format!("sine=frequency=440:sample_rate=48000:duration={SECONDS}"),
-    ]
-}
-
-pub fn split(args: &str) -> Vec<String> {
-    args.split('|')
-        .filter(|a| !a.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
-pub type Packets = Vec<Vec<(i64, u32, bool)>>;
-
-pub fn parse_packets(csv: &str) -> Packets {
-    let mut streams: Packets = Vec::new();
-    for line in csv.lines().filter(|l| !l.trim().is_empty()) {
-        let f: Vec<&str> = line.split(',').collect();
-        let (Some(s), Some(pts), Some(size)) = (
-            f.first().and_then(|s| s.parse::<usize>().ok()),
-            f.get(1).and_then(|p| p.parse::<i64>().ok()),
-            f.get(2).and_then(|p| p.parse::<u32>().ok()),
-        ) else {
-            continue;
-        };
-        if streams.len() <= s {
-            streams.resize(s + 1, Vec::new());
-        }
-        streams[s].push((pts, size, f.get(3).is_some_and(|k| k.contains('K'))));
+pub fn ivf_packets(data: &[u8]) -> Packets {
+    let at = |i: usize| u32::from_le_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
+    let (den, num) = (i64::from(at(16)), i64::from(at(20)));
+    let mut pos = usize::from(u16::from_le_bytes([data[6], data[7]]));
+    let mut out = Vec::new();
+    while pos + 12 <= data.len() {
+        let size = at(pos);
+        let pts = i64::from_le_bytes(data[pos + 4..pos + 12].try_into().unwrap_or_default());
+        let first = data.get(pos + 12).copied().unwrap_or_default();
+        let profile = (first >> 5 & 1) | (first >> 3 & 2);
+        let skip = usize::from(profile == 3);
+        let key = first >> (3 - skip) & 1 == 0 && first >> (2 - skip) & 1 == 0;
+        out.push(((pts * num * 1000 + den / 2) / den.max(1), size, key));
+        pos += 12 + size as usize;
     }
-    streams
+    out
+}
+
+pub fn flv_packets(data: &[u8]) -> Packets {
+    let be = |at: usize, n: usize| {
+        data.get(at..at + n)
+            .map_or(0, |b| b.iter().fold(0u32, |v, &x| v << 8 | u32::from(x)))
+    };
+    let mut pos = 13;
+    let mut out = Vec::new();
+    while pos + 11 <= data.len() {
+        let size = be(pos + 1, 3) as usize;
+        let dts = i64::from(be(pos + 4, 3) | be(pos + 7, 1) << 24);
+        let body = pos + 11;
+        if data[pos] == 9 && size > 5 && data.get(body + 1) == Some(&1) {
+            let cts = (be(body + 2, 3) << 8) as i32 >> 8;
+            let key = data[body] >> 4 == 1;
+            out.push((dts + i64::from(cts), (size - 5) as u32, key));
+        }
+        pos = body + size + 4;
+    }
+    out
+}
+
+pub fn normalized(mut packets: Packets) -> Packets {
+    let first = packets.iter().map(|p| p.0).min().unwrap_or(0);
+    for p in &mut packets {
+        p.0 -= first;
+    }
+    packets
 }

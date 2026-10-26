@@ -364,7 +364,7 @@ fn frames_drawn_as_changes_over_the_last_come_out_whole_in_stills() {
 }
 
 #[test]
-fn the_tick_model_matches_ffmpegs_fps_filter() {
+fn the_tick_model_rounds_each_frames_start_to_the_nearest_tick() {
     let r = Refs::open(refs::AREA);
     let gif = refs::ticks_gif().unwrap();
     r.assert_digest(refs::GIF_TICKS, &testref::sha256(&gif));
@@ -372,9 +372,9 @@ fn the_tick_model_matches_ffmpegs_fps_filter() {
         .map(|i| numbered(i as u32 + 1, false))
         .collect();
     assert!(gif == encode(&source, &DELAYS, opts()).unwrap());
-    for rate in refs::GIF_RATES {
-        let numbers = refs::numbers_of_probes(&r.bytes(&refs::ticks_name(rate)));
-        assert_eq!(numbers, expected(rate), "fps={rate}");
+    assert_eq!(DELAYS.map(u64::from), SHOWN);
+    for (rate, picks) in refs::GIF_TICKS_AT {
+        assert_eq!(expected(rate), picks, "fps={rate}");
     }
 }
 

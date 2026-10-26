@@ -3,62 +3,46 @@ use pito_codecs::media::Rgba;
 
 pub const AREA: &str = "pcod";
 
-pub const TONE: &str = "aevalsrc=0.01*sin(2*PI*440*t)|0.01*sin(2*PI*440*t):s=48000:d=0.1";
+pub const TONE_RATE: u32 = 48_000;
+pub const TONE_FRAMES: usize = 4_800;
 
-pub const TONES: [(&str, &[&str], &str, &str); 3] = [
-    ("commands-tone.flac", &["-c:a", "flac"], "FLAC", "flac"),
-    (
-        "commands-tone.mp3",
-        &["-c:a", "libmp3lame", "-b:a", "32k"],
-        "MP3",
-        "mp3",
-    ),
-    ("commands-alac.m4a", &["-c:a", "alac"], "MP4", "alac"),
+pub const TONES: [(&str, &str, &str); 3] = [
+    ("commands-tone.flac", "FLAC", "flac"),
+    ("commands-tone.mp3", "MP3", "mp3"),
+    ("commands-alac.m4a", "MP4", "alac"),
 ];
 
-pub const PROBED: &str = "testsrc2=s=128x96:r=30:d=0.5";
+pub const PROBED_SIZE: (u32, u32) = (128, 96);
+pub const PROBED_FRAMES: u64 = 15;
 
-pub const PROBE_SHAPES: [(&str, &[&str]); 3] = [
-    (
-        "cli-high422-10.mp4",
-        &["-pix_fmt", "yuv422p10le", "-profile:v", "high422"],
-    ),
-    (
-        "cli-high422-8.mp4",
-        &["-pix_fmt", "yuv422p", "-profile:v", "high422"],
-    ),
-    (
-        "cli-interlaced.mp4",
-        &[
-            "-pix_fmt",
-            "yuv420p",
-            "-flags",
-            "+ildct+ilme",
-            "-x264opts",
-            "tff=1",
-        ],
-    ),
+pub const PROBE_SHAPES: [(&str, u8, u8, bool); 3] = [
+    ("cli-high422-10.mp4", 2, 10, false),
+    ("cli-high422-8.mp4", 2, 8, false),
+    ("cli-interlaced.mp4", 1, 8, true),
 ];
 
-pub const VORBIS: &str = "aevalsrc=0.3*sin(440*2*PI*t)|0.2*sin(660*2*PI*t):s=44100:d=0.7:c=stereo";
+pub const VORBIS_RATE: u32 = 44_100;
+pub const VORBIS_FRAMES: usize = 30_870;
+pub const VORBIS_QUALITY: f32 = 0.3;
 pub const VORBIS_FILES: [&str; 2] = ["cli-tone.ogg", "cli-tone.webm"];
 pub const VORBIS_SLICE: (u64, u64) = (13_230, 19_845);
+pub const VORBIS_DECODED: &str = "cli-tone.ogg.s16";
 
-pub fn vorbis_slice_name(file: &str) -> String {
-    format!("{file}.s16")
+pub fn vorbis_slice_name() -> String {
+    format!("{VORBIS_DECODED}.slice")
 }
 
 pub const SMOKE_HEVC: &str = "smoke-hevc.mp4";
+pub const SMOKE_SIZE: (u32, u32) = (352, 240);
+pub const SMOKE_FRAMES: u64 = 10;
 
 pub const GIF_SIZE: (u32, u32) = (384, 240);
 pub const GIF_DELAYS: [u16; 6] = [7, 1, 13, 4, 25, 3];
-pub const GIF_RATES: [u64; 2] = [10, 30];
 pub const GIF_TICKS: &str = "gif-ticks.gif";
-pub const GIF_PROBE: (u32, u32) = (8, 1);
-
-pub fn ticks_name(rate: u64) -> String {
-    format!("gif-fps{rate}.gray")
-}
+pub const GIF_TICKS_AT: [(u64, &[usize]); 2] = [
+    (10, &[0, 2, 3, 4, 4]),
+    (30, &[0, 0, 2, 2, 2, 2, 3, 3, 4, 4, 4, 4, 4, 4, 4, 5]),
+];
 
 pub fn numbered_at(width: u32, height: u32, n: u32, clear: bool) -> Rgba {
     let block = width / 8;
@@ -92,29 +76,8 @@ pub fn ticks_gif() -> Result<Vec<u8>, String> {
     encode(&frames, &GIF_DELAYS, gif_options()).map_err(|e| e.to_string())
 }
 
-pub fn numbers_of_probes(gray: &[u8]) -> Vec<usize> {
-    let per = (GIF_PROBE.0 * GIF_PROBE.1) as usize;
-    gray.chunks_exact(per)
-        .map(|frame| {
-            let n = frame
-                .iter()
-                .take(8)
-                .enumerate()
-                .fold(
-                    0usize,
-                    |n, (bit, &v)| if v > 128 { n | 1 << bit } else { n },
-                );
-            n.saturating_sub(1)
-        })
-        .collect()
-}
-
 pub const WEBP_SIZE: (u32, u32) = (256, 144);
 pub const WEBP_INPUTS: [&str; 3] = ["ui", "pattern", "mandelbrot"];
-
-pub fn webp_name(input: &str) -> String {
-    format!("images-{input}.webp")
-}
 
 pub fn webp_size_name(input: &str) -> String {
     format!("images-{input}.size")

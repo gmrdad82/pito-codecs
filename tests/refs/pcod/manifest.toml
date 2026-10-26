@@ -1,0 +1,143 @@
+[[ref]]
+name = "commands-tone.flac"
+file = "commands-tone.flac"
+sha256 = "8054341568033989b1b5842e97e545bdbaa74420625b22aaf796218166f05d2e"
+kind = "fixture"
+tool = "flac 1.5.0"
+command = "flac --force-raw-format --endian=little --sign=signed --channels=2 --bps=16 --sample-rate=48000 --silent --force -o {out} {src}"
+
+[[ref]]
+name = "commands-tone.mp3"
+file = "commands-tone.mp3"
+sha256 = "0a006fafe979cef9e88205de0dbfc8fbbcc97a08ea4e1a278ff0874035785901"
+kind = "fixture"
+tool = "LAME 64bits version 4.0 (https://lame.sourceforge.io)"
+command = "lame -r -s 48 --resample 48 --bitwidth 16 --little-endian -m j --cbr -b 32 --quiet {src} {out}"
+
+[[ref]]
+name = "commands-alac.m4a"
+file = "commands-alac.m4a"
+sha256 = "8fad9d01bca305116987e4e49c02570fada10523b05f86afb5b8b1c6dee4c7e9"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the tone as uncompressed (escape) ALAC frames in our MP4 writer"
+
+[[ref]]
+name = "cli-high422-10.mp4.mkv"
+file = ""
+sha256 = "26ee136aabe1bc0c9dc899e219e049302e1fb818ac7f949ed7997d439de8f7ab"
+kind = "bit-exact"
+tool = "x264 0.165.3222 b35605a"
+command = "x264 --demuxer y4m --muxer mkv --threads 1 --preset ultrafast --no-scenecut --quiet --no-progress --crf 35 --output-depth 10 --output-csp i422 --profile high422 -o {out} {src}"
+
+[[ref]]
+name = "cli-high422-10.mp4"
+file = "cli-high422-10.mp4"
+sha256 = "70fe4229436a3c2d0a45dc167e52142f1702d25409702286f40704da0eba7122"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:cli-high422-10.mp4.mkv}'s frames at their Matroska times in our MP4 writer"
+
+[[ref]]
+name = "cli-high422-8.mp4.mkv"
+file = ""
+sha256 = "ac1a46646d50e63f8d0c6f0373f8bbd1c425d87cd43bf4aedf28e47aa8161331"
+kind = "bit-exact"
+tool = "x264 0.165.3222 b35605a"
+command = "x264 --demuxer y4m --muxer mkv --threads 1 --preset ultrafast --no-scenecut --quiet --no-progress --crf 35 --output-depth 8 --output-csp i422 --profile high422 -o {out} {src}"
+
+[[ref]]
+name = "cli-high422-8.mp4"
+file = "cli-high422-8.mp4"
+sha256 = "85b5b44351cd2647f31cd5209a9c6224198352a01f7874be735006ff19312bc5"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:cli-high422-8.mp4.mkv}'s frames at their Matroska times in our MP4 writer"
+
+[[ref]]
+name = "cli-interlaced.mp4.mkv"
+file = ""
+sha256 = "5b361be26d8046c4760f8c6ab36efc0e0570abfe97a458e0f12e28708356f552"
+kind = "bit-exact"
+tool = "x264 0.165.3222 b35605a"
+command = "x264 --demuxer y4m --muxer mkv --threads 1 --preset ultrafast --no-scenecut --quiet --no-progress --crf 35 --output-depth 8 --tff -o {out} {src}"
+
+[[ref]]
+name = "cli-interlaced.mp4"
+file = "cli-interlaced.mp4"
+sha256 = "b85a80ee580474466843b0e6a53ff17650cd63e9b0cb77050d744ad77c9e54e5"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:cli-interlaced.mp4.mkv}'s frames at their Matroska times in our MP4 writer"
+
+[[ref]]
+name = "cli-tone.ogg"
+file = "cli-tone.ogg"
+sha256 = "57ca654bd00305abd158f077f5c515c20708c07bdff95880143d0730cec6e811"
+kind = "fixture"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisenc at quality 0.3 of 0.7 s of 440 and 660 Hz, in our Ogg pages"
+
+[[ref]]
+name = "cli-tone.webm"
+file = "cli-tone.webm"
+sha256 = "4f67014d1db89981160e9288c5925053c10c0b8edca528f181fae725edc5534a"
+kind = "fixture"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: the same libvorbisenc packets in our WebM writer, each block lasting to its granule"
+
+[[ref]]
+name = "cli-tone.ogg.s16.slice"
+file = "cli-tone.ogg.s16.slice"
+sha256 = "2acccf134c3d3bbb87767fb018c077fe2cca478393c21dd443bca0bc20b09034"
+kind = "tolerance"
+tool = "libvorbisfile.so.3.3.8 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisfile's 16-bit decode of {ref:cli-tone.ogg}, frames 13230 to 19845"
+
+[[ref]]
+name = "smoke-hevc.mp4.hevc"
+file = ""
+sha256 = "b8dfa2ed89f865e8cad316ed418bf3e1392ebd67349639fc9929b6e3100e57a7"
+kind = "bit-exact"
+tool = "x265 [info]: HEVC encoder version 4.3"
+command = "x265 --input {src} --input-res 352x240 --fps 30 --input-csp i420 --frames 10 --preset ultrafast --bframes 0 --crf 36 --frame-threads 1 --no-wpp --pools none --log-level error --no-info --no-progress --output {out}"
+
+[[ref]]
+name = "smoke-hevc.mp4"
+file = "smoke-hevc.mp4"
+sha256 = "33ae9d563a199c30985872b0f6276186e5f9189f058d0a0fd1270984c70959c2"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:smoke-hevc.mp4.hevc} in our MP4 writer as hvc1"
+
+[[ref]]
+name = "gif-ticks.gif"
+file = ""
+sha256 = "7b211ad490e00c772f00d047b0e77b0ef561ebf6cde613dd11983a8e4cca4dc1"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/pcod/refs.rs ticks_gif()"
+
+[[ref]]
+name = "images-ui.size"
+file = "images-ui.size"
+sha256 = "baa3912744f580a1c5439d46da4dea963e395582ead24d466c61e052fdcbd607"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: the byte count of libwebp's WebPEncodeLosslessRGBA of the ui picture from src/pcod/refs.rs"
+
+[[ref]]
+name = "images-pattern.size"
+file = "images-pattern.size"
+sha256 = "774b11a99fc0c33ff82cb34de26b0be1c6005495b399843bbb60e889298006b9"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: the byte count of libwebp's WebPEncodeLosslessRGBA of the pattern picture from src/pcod/refs.rs"
+
+[[ref]]
+name = "images-mandelbrot.size"
+file = "images-mandelbrot.size"
+sha256 = "85c9426d27f33483f0fadca6a68f4b81224fe48d485d051339effdaf0956ac5a"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: the byte count of libwebp's WebPEncodeLosslessRGBA of the mandelbrot picture from src/pcod/refs.rs"

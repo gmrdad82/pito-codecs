@@ -58,7 +58,7 @@ fn le(samples: &[i16]) -> Vec<u8> {
 const CHUNK: usize = 2048;
 
 enum Item {
-    Copy(usize, usize),
+    Copy(usize, usize, usize),
     Pcm(usize, usize),
 }
 
@@ -105,30 +105,296 @@ fn sowt(rate: u32) -> mp4::SampleEntry {
     }
 }
 
+const PCM_RATE: u32 = 44_100;
+const PCM_FRAMES: usize = 256;
+
+#[derive(Clone, Copy)]
+enum Layout {
+    Mkv(&'static str),
+    Sowt,
+    Twos,
+    In24,
+    Fl32,
+    Fl64,
+    Lpcm,
+    Ipcm,
+    Fpcm,
+}
+
+#[derive(Clone, Copy)]
+struct PcmCase {
+    file: &'static str,
+    layout: Layout,
+    bits: u16,
+    float: bool,
+    big: bool,
+}
+
+const fn case(file: &'static str, layout: Layout, bits: u16, float: bool, big: bool) -> PcmCase {
+    PcmCase {
+        file,
+        layout,
+        bits,
+        float,
+        big,
+    }
+}
+
+const PCM_CASES: [PcmCase; 14] = [
+    case(
+        "pcm-s24le.mkv",
+        Layout::Mkv("A_PCM/INT/LIT"),
+        24,
+        false,
+        false,
+    ),
+    case(
+        "pcm-s32be.mkv",
+        Layout::Mkv("A_PCM/INT/BIG"),
+        32,
+        false,
+        true,
+    ),
+    case(
+        "pcm-f32le.mkv",
+        Layout::Mkv("A_PCM/FLOAT/IEEE"),
+        32,
+        true,
+        false,
+    ),
+    case(
+        "pcm-f64le.mkv",
+        Layout::Mkv("A_PCM/FLOAT/IEEE"),
+        64,
+        true,
+        false,
+    ),
+    case("pcm-u8.mkv", Layout::Mkv("A_PCM/INT/LIT"), 8, false, false),
+    case("pcm-s16le.mov", Layout::Sowt, 16, false, false),
+    case("pcm-s16be.mov", Layout::Twos, 16, false, true),
+    case("pcm-s24le.mov", Layout::In24, 24, false, false),
+    case("pcm-s32le.mov", Layout::Lpcm, 32, false, false),
+    case("pcm-f32be.mov", Layout::Fl32, 32, true, true),
+    case("pcm-f64le.mov", Layout::Fl64, 64, true, false),
+    case("pcm-s16le.mp4", Layout::Ipcm, 16, false, false),
+    case("pcm-s24be.mp4", Layout::Ipcm, 24, false, true),
+    case("pcm-f32le.mp4", Layout::Fpcm, 32, true, false),
+];
+
+fn pcm_tone(i: u64, ch: u16, rate: u32) -> f32 {
+    let t = i as f64 / f64::from(rate);
+    if ch == 0 {
+        (0.5 * (std::f64::consts::TAU * 440.0 * t).sin()) as f32
+    } else {
+        Sound::Noise { amp: 0.5, seed: 7 }.at(i, 0, rate)
+    }
+}
+
+impl PcmCase {
+    fn unsigned(&self) -> bool {
+        self.bits == 8 && !self.float
+    }
+
+    fn stored(&self, x: f32) -> (Vec<u8>, f32) {
+        let x = f64::from(x);
+        if self.float {
+            let (le, be, back) = if self.bits == 64 {
+                (x.to_le_bytes().to_vec(), x.to_be_bytes().to_vec(), x as f32)
+            } else {
+                let v = x as f32;
+                (v.to_le_bytes().to_vec(), v.to_be_bytes().to_vec(), v)
+            };
+            return (if self.big { be } else { le }, back);
+        }
+        if self.unsigned() {
+            let v = ((x * 128.0).round() + 128.0).clamp(0.0, 255.0) as u8;
+            return (vec![v], (f32::from(v) - 128.0) / 128.0);
+        }
+        let scale = (1i64 << (self.bits - 1)) as f64;
+        let v = (x * scale).round().clamp(-scale, scale - 1.0) as i64;
+        let back = v as f32 / scale as f32;
+        let n = usize::from(self.bits / 8);
+        let be = (v as i32).to_be_bytes();
+        let bytes = be[4 - n..].to_vec();
+        let bytes = if self.big {
+            bytes
+        } else {
+            bytes.into_iter().rev().collect()
+        };
+        (bytes, back)
+    }
+
+    fn samples(&self) -> (Vec<u8>, Vec<f32>) {
+        let source = testref::pcm(Sound::Fn(pcm_tone), PCM_RATE, 2, 0, PCM_FRAMES);
+        let mut data = Vec::new();
+        let mut want = Vec::new();
+        for s in source {
+            let (b, back) = self.stored(s);
+            data.extend(b);
+            want.push(back);
+        }
+        (data, want)
+    }
+
+    fn entry(&self) -> mp4::SampleEntry {
+        let (format, version) = match self.layout {
+            Layout::Sowt => (*b"sowt", 0),
+            Layout::Twos => (*b"twos", 0),
+            Layout::In24 => (*b"in24", 1),
+            Layout::Fl32 => (*b"fl32", 1),
+            Layout::Fl64 => (*b"fl64", 1),
+            Layout::Lpcm => (*b"lpcm", 2),
+            Layout::Ipcm => (*b"ipcm", 0),
+            Layout::Fpcm => (*b"fpcm", 0),
+            Layout::Mkv(_) => unreachable!("an mkv case has no sample entry"),
+        };
+        let bytes = u32::from(self.bits / 8) * 2;
+        let mut raw = vec![0u8; 6];
+        raw.extend(1u16.to_be_bytes());
+        raw.extend((version as u16).to_be_bytes());
+        raw.extend([0u8; 6]);
+        if version == 2 {
+            raw.extend(3u16.to_be_bytes());
+            raw.extend(16u16.to_be_bytes());
+            raw.extend((-2i16).to_be_bytes());
+            raw.extend(0u16.to_be_bytes());
+            raw.extend(0x0001_0000u32.to_be_bytes());
+            raw.extend(72u32.to_be_bytes());
+            raw.extend(f64::from(PCM_RATE).to_be_bytes());
+            raw.extend(2u32.to_be_bytes());
+            raw.extend(0x7F00_0000u32.to_be_bytes());
+            raw.extend(u32::from(self.bits).to_be_bytes());
+            let flags =
+                u32::from(self.float) | u32::from(self.big) << 1 | u32::from(!self.float) << 2;
+            raw.extend(flags.to_be_bytes());
+            raw.extend(bytes.to_be_bytes());
+            raw.extend(1u32.to_be_bytes());
+        } else {
+            raw.extend(2u16.to_be_bytes());
+            raw.extend(self.bits.to_be_bytes());
+            raw.extend([0u8; 4]);
+            raw.extend((PCM_RATE << 16).to_be_bytes());
+            if version == 1 {
+                raw.extend(1u32.to_be_bytes());
+                raw.extend((bytes / 2).to_be_bytes());
+                raw.extend(bytes.to_be_bytes());
+                raw.extend((bytes / 2).to_be_bytes());
+            }
+        }
+        let leaf = |kind: &[u8; 4], body: &[u8]| {
+            let mut b = (8 + body.len() as u32).to_be_bytes().to_vec();
+            b.extend_from_slice(kind);
+            b.extend_from_slice(body);
+            b
+        };
+        match self.layout {
+            Layout::In24 | Layout::Fl64 => {
+                let wave = [
+                    leaf(b"frma", &format),
+                    leaf(b"enda", &u16::from(!self.big).to_be_bytes()),
+                ]
+                .concat();
+                raw.extend(leaf(b"wave", &wave));
+            }
+            Layout::Ipcm | Layout::Fpcm => {
+                let body = [0, 0, 0, 0, u8::from(!self.big), self.bits as u8];
+                raw.extend(leaf(b"pcmC", &body));
+            }
+            _ => {}
+        }
+        mp4::SampleEntry {
+            format: mp4::FourCc(format),
+            codec: mp4::CodecConfig::Pcm(mp4::PcmConfig {
+                bits: self.bits,
+                float: self.float,
+                big_endian: self.big,
+                signed: !self.unsigned(),
+                channels: 2,
+                sample_rate: f64::from(PCM_RATE),
+            }),
+            video: None,
+            audio: Some(mp4::AudioParams {
+                channels: 2,
+                sample_size: self.bits,
+                sample_rate: f64::from(PCM_RATE),
+                ..Default::default()
+            }),
+            bitrate: None,
+            raw,
+        }
+    }
+
+    fn write(&self) -> (PathBuf, Vec<f32>) {
+        let (data, want) = self.samples();
+        let bytes = match self.layout {
+            Layout::Mkv(codec) => {
+                let track = refs::MkvTrack {
+                    codec,
+                    rate: f64::from(PCM_RATE),
+                    channels: 2,
+                    bits: u64::from(self.bits),
+                    ..refs::MkvTrack::default()
+                };
+                let block = refs::MkvBlock {
+                    track: 0,
+                    ms: 0,
+                    key: true,
+                    data,
+                    discard_ns: 0,
+                };
+                let ms = PCM_FRAMES as f64 * 1000.0 / f64::from(PCM_RATE);
+                refs::matroska("matroska", &[track], &[block], ms, refs::Sizes::Known)
+            }
+            _ => {
+                let brand = if self.file.ends_with(".mov") {
+                    mp4::Brand::Mov
+                } else {
+                    mp4::Brand::Mp4
+                };
+                let options = mp4::Options { brand, reserve: 0 };
+                let mut w = mp4::Writer::new(Cursor::new(Vec::new()), options).unwrap();
+                let t = w
+                    .add_track(mp4::TrackConfig::new(self.entry(), PCM_RATE))
+                    .unwrap();
+                w.push_sample(t, &data, 0, 0, PCM_FRAMES as u32, true)
+                    .unwrap();
+                w.finish_faststart().unwrap().into_inner()
+            }
+        };
+        let out = dir().join(self.file);
+        testref::write_atomic(&out, &bytes).unwrap();
+        (out, want)
+    }
+}
+
 fn rebuild_mp4(
-    src: &Path,
+    srcs: &[&Path],
     name: &str,
     pcm: &[Vec<i16>],
     rate: u32,
-    edit: impl Fn(&mp4::Reader, usize, &mut mp4::TrackConfig),
+    edit: impl Fn(&mp4::Reader, usize, usize, &mut mp4::TrackConfig),
 ) -> PathBuf {
-    let r = mp4::Reader::open(src).unwrap();
+    let readers: Vec<mp4::Reader> = srcs.iter().map(|s| mp4::Reader::open(s).unwrap()).collect();
     let mut w = mp4::Writer::new(Cursor::new(Vec::new()), mp4::Options::default()).unwrap();
-    w.set_movie_timescale(r.timescale);
+    w.set_movie_timescale(readers[0].timescale);
     let mut items = Vec::new();
     let mut tracks = Vec::new();
-    for (i, t) in r.tracks.iter().enumerate() {
-        let mut cfg = mp4::TrackConfig::from_track(t).unwrap();
-        cfg.media_start = t
-            .edits
-            .iter()
-            .find(|e| e.media_time >= 0)
-            .map(|e| e.media_time);
-        edit(&r, i, &mut cfg);
-        tracks.push(w.add_track(cfg).unwrap());
-        for (k, s) in t.samples.iter().enumerate() {
-            items.push((t.seconds(s.dts), Item::Copy(i, k)));
+    for (n, r) in readers.iter().enumerate() {
+        let mut mine = Vec::new();
+        for (i, t) in r.tracks.iter().enumerate() {
+            let mut cfg = mp4::TrackConfig::from_track(t).unwrap();
+            cfg.media_start = t
+                .edits
+                .iter()
+                .find(|e| e.media_time >= 0)
+                .map(|e| e.media_time);
+            edit(r, n, i, &mut cfg);
+            mine.push(w.add_track(cfg).unwrap());
+            for (k, s) in t.samples.iter().enumerate() {
+                items.push((t.seconds(s.dts), Item::Copy(n, i, k)));
+            }
         }
+        tracks.push(mine);
     }
     let lanes: Vec<usize> = pcm
         .iter()
@@ -141,10 +407,11 @@ fn rebuild_mp4(
     items.sort_by(|a, b| a.0.total_cmp(&b.0));
     for (_, item) in items {
         match item {
-            Item::Copy(i, k) => {
+            Item::Copy(n, i, k) => {
+                let r = &readers[n];
                 let s = r.tracks[i].samples[k];
                 let data = r.read(i, k).unwrap();
-                w.push_sample(tracks[i], &data, s.pts, s.dts, s.duration, s.keyframe)
+                w.push_sample(tracks[n][i], &data, s.pts, s.dts, s.duration, s.keyframe)
                     .unwrap();
             }
             Item::Pcm(k, start) => {
@@ -182,7 +449,7 @@ fn rebuild_mkv(src: &Path, name: &str, pcm: &[Vec<i16>], rate: u32, late: [f64; 
             } else {
                 t.seconds(s.pts)
             };
-            items.push((at + shift, Item::Copy(i, k)));
+            items.push((at + shift, Item::Copy(0, i, k)));
         }
     }
     let lanes: Vec<usize> = pcm
@@ -204,7 +471,7 @@ fn rebuild_mkv(src: &Path, name: &str, pcm: &[Vec<i16>], rate: u32, late: [f64; 
     items.sort_by(|a, b| a.0.total_cmp(&b.0));
     for (_, item) in items {
         match item {
-            Item::Copy(i, k) => {
+            Item::Copy(_, i, k) => {
                 let t = &r.tracks[i];
                 let s = t.samples[k];
                 let shift = if t.kind == mkv::TrackKind::Video {
@@ -239,7 +506,7 @@ fn rebuild_mkv(src: &Path, name: &str, pcm: &[Vec<i16>], rate: u32, late: [f64; 
 fn with_pcm(video: Clip, name: &str, pcm: &[Vec<i16>], rate: u32) -> PathBuf {
     let src = video.video_only().make(AREA, &format!("video-{name}"));
     if name.ends_with(".mp4") {
-        rebuild_mp4(&src, name, pcm, rate, |_, _, _| {})
+        rebuild_mp4(&[&src], name, pcm, rate, |_, _, _, _| {})
     } else {
         rebuild_mkv(&src, name, pcm, rate, [0.0; 2])
     }
@@ -248,27 +515,38 @@ fn with_pcm(video: Clip, name: &str, pcm: &[Vec<i16>], rate: u32) -> PathBuf {
 fn clip() -> &'static Path {
     static CLIP: OnceLock<PathBuf> = OnceLock::new();
     CLIP.get_or_init(|| {
-        let plain = Clip {
+        let shape = || Clip::new((1280, 720), (60, 1), 360);
+        let game = Clip {
             b_frames: 2,
-            sounds: vec![
-                Sound::Sine {
-                    hz: 440.0,
-                    amp: 0.25,
-                },
-                Sound::Sine {
-                    hz: 880.0,
-                    amp: 0.25,
-                },
-            ],
-            ..Clip::new((1280, 720), (60, 1), 360)
+            sounds: vec![Sound::Sine {
+                hz: 440.0,
+                amp: 0.25,
+            }],
+            ..shape()
         }
-        .make(AREA, "two-tracks-plain.mp4");
-        let titles = ["Game", "Mic"];
-        rebuild_mp4(&plain, "two-tracks-bt709.mp4", &[], 0, |r, i, cfg| {
-            if let Some(k) = r.audio().iter().position(|&a| a == i) {
-                cfg.title = Some(titles[k].into());
-            }
-        })
+        .make(AREA, "two-tracks-game.mp4");
+        let mic = Clip {
+            sounds: vec![Sound::Sine {
+                hz: 880.0,
+                amp: 0.25,
+            }],
+            rate: 44_100,
+            channels: 1,
+            ..shape()
+        }
+        .audio_only()
+        .make(AREA, "two-tracks-mic.m4a");
+        rebuild_mp4(
+            &[&game, &mic],
+            "two-tracks-bt709.mp4",
+            &[],
+            0,
+            |r, n, i, cfg| {
+                if r.audio().contains(&i) {
+                    cfg.title = Some(["Game", "Mic"][n].into());
+                }
+            },
+        )
     })
 }
 
@@ -304,6 +582,17 @@ fn decodes_clean(path: &Path) -> bool {
     ) else {
         return false;
     };
+    if let Ok(r) = mp4::Reader::open(path) {
+        for t in &r.tracks {
+            let mut pts: Vec<i64> = t.samples.iter().map(|s| s.pts).collect();
+            pts.sort_unstable();
+            let rising = t.samples.windows(2).all(|w| w[1].dts > w[0].dts);
+            let timed = t.samples.iter().all(|s| s.duration > 0);
+            if !rising || !timed || pts.windows(2).any(|w| w[0] == w[1]) {
+                return false;
+            }
+        }
+    }
     let mut n = 0u64;
     for f in video {
         if f.is_err() {
@@ -1035,7 +1324,7 @@ fn matroska_and_webm_play_through_the_media_front() {
 }
 
 #[test]
-fn pcm_tracks_decode_bit_exact_without_ffmpeg() {
+fn pcm_tracks_decode_bit_exact_in_every_layout() {
     let prefs = Prefs::default();
     let known: Vec<i16> = (0..72_000i32)
         .flat_map(|i| {
@@ -1070,21 +1359,78 @@ fn pcm_tracks_decode_bit_exact_without_ffmpeg() {
         mid.samples == want[48_000..96_000],
         "a PCM range is not bit-exact"
     );
-    let r = Refs::open(AREA);
-    for (ext, codec) in refs::PCM_CASES {
-        let file = refs::pcm_file(ext, codec);
-        let ours = audio_pcm(&r.path(&file), 0, refs::PCM_RATE, false, &prefs).unwrap();
-        assert_eq!(ours.samples.len(), refs::PCM_FRAMES * 2, "{codec} in {ext}");
-        let mut d = Digest::new();
-        d.f32s(&ours.samples);
-        r.assert_digest(&refs::decoded(&file), &d.hex());
+    for c in PCM_CASES {
+        let (path, want) = c.write();
+        let p = probe(&path, &prefs).unwrap();
+        assert_eq!(p.audio.len(), 1, "{}", c.file);
+        assert!(p.audio[0].native(), "{}: {}", c.file, p.audio[0].codec);
+        let ours = audio_pcm(&path, 0, PCM_RATE, false, &prefs).unwrap();
+        assert_eq!(ours.samples.len(), PCM_FRAMES * 2, "{}", c.file);
+        assert!(ours.samples == want, "{} is not bit-exact", c.file);
     }
+}
+
+fn with_ac3() -> PathBuf {
+    let src = Clip {
+        sounds: vec![Sound::Sine {
+            hz: 880.0,
+            amp: 0.25,
+        }],
+        kbps: 32,
+        ..Clip::new((64, 64), (10, 1), 10)
+    }
+    .make(AREA, "ac3-base.mkv");
+    let r = mkv::Reader::open(&src).unwrap();
+    let mut w = mkv::Writer::new(Cursor::new(Vec::new()), mkv::Options::default());
+    let (v, a) = (r.video().unwrap(), r.audio()[0]);
+    let tv = w
+        .add_track(mkv::TrackConfig::from_track(&r.tracks[v]))
+        .unwrap();
+    let t3 = w
+        .add_track(mkv::TrackConfig {
+            sample_rate: 48_000,
+            channels: 2,
+            ..mkv::TrackConfig::new(mkv::TrackKind::Audio, "A_AC3", TimeBase::new(1, 48_000))
+        })
+        .unwrap();
+    let ta = w
+        .add_track(mkv::TrackConfig::from_track(&r.tracks[a]))
+        .unwrap();
+    let frames = refs::ac3_silence(48_000usize.div_ceil(refs::AC3_FRAME));
+    let mut items: Vec<(f64, usize, usize)> = Vec::new();
+    for (lane, track) in [(0, v), (2, a)] {
+        let t = &r.tracks[track];
+        for (k, s) in t.samples.iter().enumerate() {
+            items.push((t.seconds(s.pts), lane, k));
+        }
+    }
+    for k in 0..frames.len() {
+        items.push(((k * refs::AC3_FRAME) as f64 / 48_000.0, 1, k));
+    }
+    items.sort_by(|x, y| x.0.total_cmp(&y.0));
+    for (_, lane, k) in items {
+        if lane == 1 {
+            let at = (k * refs::AC3_FRAME) as i64;
+            w.push_sample(t3, &frames[k], at, Some(refs::AC3_FRAME as u32), true)
+                .unwrap();
+            continue;
+        }
+        let (track, to) = if lane == 0 { (v, tv) } else { (a, ta) };
+        let s = r.tracks[track].samples[k];
+        let data = r.read(track, k).unwrap();
+        let duration = (s.duration > 0).then_some(s.duration);
+        w.push_sample(to, &data, s.pts, duration, s.keyframe)
+            .unwrap();
+    }
+    let out = dir().join("h264-ac3-aac.mkv");
+    testref::write_atomic(&out, &w.finish().unwrap().into_inner()).unwrap();
+    out
 }
 
 #[test]
 fn an_ac3_track_probes_and_decodes_natively() {
     let prefs = Prefs::default();
-    let path = fixture(refs::AC3_AAC);
+    let path = with_ac3();
     let p = probe(&path, &prefs).unwrap();
     let names: Vec<_> = p
         .audio
@@ -1100,6 +1446,10 @@ fn an_ac3_track_probes_and_decodes_natively() {
         "{}",
         ac3.frames()
     );
+    assert!(
+        ac3.samples.iter().all(|&s| s == 0.0),
+        "silent AC-3 decoded loud"
+    );
     let aac = audio_pcm(&path, 1, 48_000, false, &prefs).unwrap();
     assert!(
         (aac.frames() as i64 - 48_000).abs() < 1_200,
@@ -1109,12 +1459,12 @@ fn an_ac3_track_probes_and_decodes_natively() {
 }
 
 #[test]
-fn aac_and_opus_in_matroska_line_up_with_ffmpeg_to_the_sample() {
+fn aac_and_opus_in_matroska_line_up_with_faad_and_libopus_to_the_sample() {
     let prefs = Prefs::default();
     let r = Refs::open(AREA);
     let rate = refs::LINEUP_RATE;
     let from = refs::LINEUP_AT[1] as f64 / f64::from(rate);
-    for (name, _) in refs::LINEUPS {
+    for name in refs::LINEUPS {
         let path = r.path(name);
         let ours = audio_pcm(&path, 0, rate, false, &prefs).unwrap().samples;
         let range = audio_pcm_range(&path, 0, from, 0.9, rate, 2, &prefs).unwrap();
@@ -1134,16 +1484,18 @@ fn aac_and_opus_in_matroska_line_up_with_ffmpeg_to_the_sample() {
 fn matroska_audio_off_the_millisecond_drops_the_last_blocks_discard_padding() {
     let prefs = Prefs::default();
     let r = Refs::open(AREA);
-    for (name, _, rate, _, limit) in refs::OFF_MS {
+    for o in refs::OFF_MS {
+        let (name, rate, limit) = (o.file, o.rate, o.limit);
         let path = r.path(name);
         let frames = refs::off_ms_frames(rate);
         let ours = audio_pcm(&path, 0, rate, false, &prefs).unwrap().samples;
         assert_eq!(ours.len(), frames * 2, "{name}");
-        for (at, start) in [
-            ("head", refs::OFF_MS_HEAD),
-            ("tail", frames - refs::WINDOW),
-        ] {
-            let theirs = r.f32s(&refs::window(name, at));
+        for (at, start) in [("head", refs::OFF_MS_HEAD), ("tail", frames - refs::WINDOW)] {
+            let theirs = if o.silent {
+                vec![0.0; refs::WINDOW * 2]
+            } else {
+                r.f32s(&refs::window(name, at))
+            };
             assert_eq!(theirs.len(), refs::WINDOW * 2, "{name} {at}");
             let w = worst(&ours[start * 2..(start + refs::WINDOW) * 2], &theirs);
             assert!(w < limit, "{name} {at}: {w}");
@@ -1161,7 +1513,12 @@ fn matroska_audio_off_the_millisecond_drops_the_last_blocks_discard_padding() {
             .sum();
         assert_eq!(streamed, ours.len() - at(0.5), "{name} stream");
     }
-    let aac = r.path(refs::OFF_MS_AAC);
+    let aac = Clip {
+        kbps: 32,
+        ..Clip::new((64, 64), (10_000, 1), 10_123)
+    }
+    .audio_only()
+    .make(AREA, "off-ms-aac.mka");
     let m = mkv::Reader::open(&aac).unwrap();
     let t = &m.tracks[0];
     assert!(t.samples.iter().all(|s| s.discard == 0));
@@ -1590,6 +1947,14 @@ fn dropped_frames() -> PathBuf {
     }
     let out = dir().join("dropped-frames-h264.mkv");
     testref::write_atomic(&out, &m.finish().unwrap().into_inner()).unwrap();
+    let back = mkv::Reader::open(&out).unwrap();
+    let mut pts: Vec<i64> = back.tracks[0].samples.iter().map(|s| s.pts).collect();
+    pts.sort_unstable();
+    let steps: Vec<i64> = pts.windows(2).map(|w| w[1] - w[0]).collect();
+    assert!(
+        steps.iter().min() < steps.iter().max(),
+        "the dropped frames left no gap in the timestamps"
+    );
     out
 }
 
@@ -1850,6 +2215,20 @@ fn luma_psnr(a: &[u8], b: &[u8]) -> f64 {
 #[test]
 fn a_vp9_cut_copies_its_middles_bit_exact_into_vp09_and_encodes_only_its_heads() {
     let src = fixture(refs::VP9_ALTREF);
+    let webm = mkv::Reader::open(&src).unwrap();
+    let superframes = (0..webm.tracks[0].samples.len())
+        .filter(|&k| {
+            webm.read(0, k)
+                .unwrap()
+                .last()
+                .is_some_and(|b| b & 0xe0 == 0xc0)
+        })
+        .count();
+    assert!(
+        superframes > 0,
+        "{}: libvpx placed no alt-ref superframe",
+        src.display()
+    );
     let out = dir().join("vp9-cut.mp4");
     let pieces = [(0.4, 1.2), (1.5, 1.8), (0.1, 0.5)].map(|(from, to)| Piece {
         path: src.clone(),
@@ -1937,7 +2316,7 @@ fn late_start(ext: &str) -> PathBuf {
     if ext == "mkv" {
         return rebuild_mkv(&base, &name, &[], 0, LATE);
     }
-    rebuild_mp4(&base, &name, &[], 0, |r, i, cfg| {
+    rebuild_mp4(&[&base], &name, &[], 0, |r, _, i, cfg| {
         let t = &r.tracks[i];
         let by = if t.kind == mp4::TrackKind::Video {
             LATE[0]
@@ -2113,7 +2492,7 @@ fn a_start_inside_a_gop_skips_unused_pictures_and_stays_bit_exact() {
         frames += 1;
     }
     assert_eq!(frames, refs::PYRAMID_FRAMES);
-    Refs::open(AREA).assert_digest(&format!("{}.yuv", refs::PYRAMID), &whole.hex());
+    Refs::open(AREA).assert_digest(&refs::pyramid_recon(), &whole.hex());
     for (path, k) in [
         (clip(), 47),
         (clip(), 22),
@@ -2261,10 +2640,10 @@ fn vp9_stills_follow_the_vpcc_matrix_on_the_gpu_and_the_cpu() {
     let mp4 = fixture(refs::VP9_709);
     let mkv = vp9_mkv_of(&mp4, "vp9-709.mkv");
     let cpu = Stills::open(&mp4, 240, &route_prefs(Choice::Cpu)).unwrap();
-    let tagged = Stills::open(&mkv, 240, &route_prefs(Choice::Cpu)).unwrap();
+    let by_header = Stills::open(&mkv, 240, &route_prefs(Choice::Cpu)).unwrap();
     for seek in [Seek::Exact, Seek::Keyframe] {
         let mut want: Vec<Option<Rgba>> = vec![None; TIMES.len()];
-        tagged
+        by_header
             .frames(&TIMES, seek, |i, r| want[i] = Some(r.unwrap()))
             .unwrap();
         cpu.frames(&TIMES, seek, |i, r| {
@@ -2406,7 +2785,7 @@ fn vp9_tagged_only_in_its_keyframe_converts_with_the_header_matrix_and_range() {
 #[test]
 fn av1_in_mp4_mkv_and_webm_probes_and_decodes_on_the_gpu_or_refuses_cleanly() {
     let prefs = Prefs::default();
-    for (name, _, bits) in refs::AV1S {
+    for (name, bits) in refs::AV1S {
         let path = fixture(name);
         let p = probe(&path, &prefs).unwrap();
         assert_eq!(
@@ -2577,6 +2956,161 @@ fn every_open_says(path: &Path, want: &str) {
     assert!(!out.exists(), "{name}");
 }
 
+fn mp4_box(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+    let mut b = (8 + body.len() as u32).to_be_bytes().to_vec();
+    b.extend_from_slice(kind);
+    b.extend_from_slice(body);
+    b
+}
+
+fn foreign_video(name: &str) -> PathBuf {
+    let size = (64u16, 64u16);
+    let frames: Vec<Vec<u8>> = (0..10u8)
+        .map(|n| {
+            let mut d = vec![0, 0, 1, 0xb6, n];
+            d.resize(64, n);
+            d
+        })
+        .collect();
+    let bytes = if name.ends_with(".mkv") {
+        let codec = if name.starts_with("mpeg4") {
+            "V_MPEG4/ISO/ASP"
+        } else if name.starts_with("mpeg2") {
+            "V_MPEG2"
+        } else {
+            "V_MJPEG"
+        };
+        let track = refs::MkvTrack {
+            video: true,
+            codec,
+            size: (u32::from(size.0), u32::from(size.1)),
+            ..refs::MkvTrack::default()
+        };
+        let blocks: Vec<refs::MkvBlock> = frames
+            .iter()
+            .enumerate()
+            .map(|(k, data)| refs::MkvBlock {
+                track: 0,
+                ms: k as i64 * 100,
+                key: true,
+                data: data.clone(),
+                discard_ns: 0,
+            })
+            .collect();
+        refs::matroska("matroska", &[track], &blocks, 1000.0, refs::Sizes::Known)
+    } else {
+        let (format, oti) = if name.starts_with("mjpeg") {
+            (*b"jpeg", None)
+        } else if name.starts_with("mpeg4") {
+            (*b"mp4v", Some(0x20u8))
+        } else {
+            (*b"mp4v", Some(0x61))
+        };
+        let mut raw = vec![0u8; 6];
+        raw.extend(1u16.to_be_bytes());
+        raw.extend([0u8; 16]);
+        raw.extend(size.0.to_be_bytes());
+        raw.extend(size.1.to_be_bytes());
+        raw.extend(0x0048_0000u32.to_be_bytes());
+        raw.extend(0x0048_0000u32.to_be_bytes());
+        raw.extend(0u32.to_be_bytes());
+        raw.extend(1u16.to_be_bytes());
+        raw.extend([0u8; 32]);
+        raw.extend(0x18u16.to_be_bytes());
+        raw.extend((-1i16).to_be_bytes());
+        if let Some(oti) = oti {
+            let config = [4, 13, oti, 0x11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+            let es = [&[3, 21, 0, 1, 0][..], &config, &[6, 1, 2]].concat();
+            raw.extend(mp4_box(b"esds", &[&[0, 0, 0, 0][..], &es].concat()));
+        }
+        let entry = mp4::SampleEntry {
+            format: mp4::FourCc(format),
+            codec: mp4::CodecConfig::Other(mp4::FourCc(format)),
+            video: Some(mp4::VideoParams {
+                width: size.0,
+                height: size.1,
+                pixel_aspect: None,
+            }),
+            audio: None,
+            bitrate: None,
+            raw,
+        };
+        let brand = if name.ends_with(".mov") {
+            mp4::Brand::Mov
+        } else {
+            mp4::Brand::Mp4
+        };
+        let options = mp4::Options { brand, reserve: 0 };
+        let mut w = mp4::Writer::new(Cursor::new(Vec::new()), options).unwrap();
+        let t = w.add_track(mp4::TrackConfig::new(entry, 10)).unwrap();
+        for (k, data) in frames.iter().enumerate() {
+            w.push_sample(t, data, k as i64, k as i64, 1, true).unwrap();
+        }
+        w.finish_faststart().unwrap().into_inner()
+    };
+    let out = dir().join(name);
+    testref::write_atomic(&out, &bytes).unwrap();
+    out
+}
+
+fn ts_packet(stamped: bool, k: usize) -> Vec<u8> {
+    let mut p = if stamped {
+        (k as u32 * 1800).to_be_bytes().to_vec()
+    } else {
+        Vec::new()
+    };
+    if k == 0 {
+        p.extend([
+            0x47, 0x40, 0x00, 0x10, 0x00, 0x00, 0xB0, 0x0D, 0x00, 0x01, 0xC1, 0x00,
+        ]);
+        p.extend([0x00, 0x00, 0x01, 0xF0, 0x00, 0x2A, 0xB1, 0x04, 0xB2]);
+    } else {
+        p.extend([0x47, 0x1F, 0xFF, 0x10]);
+    }
+    p.resize(if stamped { 192 } else { 188 }, 0xFF);
+    p
+}
+
+fn foreign_container(name: &str) -> PathBuf {
+    let ext = name.rsplit_once('.').map_or("", |(_, e)| e);
+    let mut b: Vec<u8> = match ext {
+        "avi" => {
+            let mut b = b"RIFF".to_vec();
+            b.extend(8184u32.to_le_bytes());
+            b.extend_from_slice(b"AVI LIST");
+            b.extend(68u32.to_le_bytes());
+            b.extend_from_slice(b"hdrlavih");
+            b.extend(56u32.to_le_bytes());
+            b.extend(33_333u32.to_le_bytes());
+            b
+        }
+        "ts" | "m2ts" => (0..40).flat_map(|k| ts_packet(ext == "m2ts", k)).collect(),
+        "flv" => b"FLV\x01\x01\x00\x00\x00\x09\x00\x00\x00\x00".to_vec(),
+        "mpg" => {
+            let mut b = vec![0, 0, 1, 0xBA, 0x44, 0, 4, 0, 4, 1, 0x01, 0x89, 0xC3, 0xF8];
+            b.extend([0, 0, 1, 0xBB, 0, 12, 0x80, 0xC4, 0xE1, 0x04, 0xE1, 0xFF]);
+            b.extend([0xE0, 0xE0, 0xE8, 0xBD, 0xE0, 0x20]);
+            b
+        }
+        _ => {
+            let mut b = vec![
+                0x30, 0x26, 0xb2, 0x75, 0x8e, 0x66, 0xcf, 0x11, 0xa6, 0xd9, 0x00, 0xaa, 0x00, 0x62,
+                0xce, 0x6c,
+            ];
+            b.extend(30u64.to_le_bytes());
+            b.extend(0u32.to_le_bytes());
+            b.extend([1, 2]);
+            b
+        }
+    };
+    if b.len() < 8192 {
+        b.resize(8192, 0);
+    }
+    let out = dir().join(name);
+    testref::write_atomic(&out, &b).unwrap();
+    out
+}
+
 #[test]
 fn a_video_codec_no_decoder_reads_is_refused_at_open_by_its_plain_name() {
     let prefs = Prefs::default();
@@ -2588,7 +3122,7 @@ fn a_video_codec_no_decoder_reads_is_refused_at_open_by_its_plain_name() {
         ("mjpeg.mov", "MJPEG"),
         ("mjpeg.mkv", "MJPEG"),
     ] {
-        let path = fixture(name);
+        let path = foreign_video(name);
         let p = probe(&path, &prefs).unwrap();
         assert_eq!(p.video_codec, None, "{name}");
         assert!(!p.video_native(), "{name}");
@@ -2611,7 +3145,7 @@ fn a_container_no_reader_takes_is_refused_by_name_at_probe_and_every_open() {
         ("mpeg2.mpg", "MPEG-PS"),
         ("wmv2.wmv", "ASF"),
     ] {
-        let path = fixture(name);
+        let path = foreign_container(name);
         let e = refused_in_one_line(probe(&path, &prefs), container);
         assert!(e.starts_with("unsupported: "), "{name}: {e}");
         assert!(e.ends_with(" files are not supported"), "{name}: {e}");

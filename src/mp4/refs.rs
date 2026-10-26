@@ -4,79 +4,61 @@ pub const FPS: u32 = 30;
 pub const SECONDS: u32 = 1;
 pub const AUDIO_KBPS: u32 = 64;
 
-pub const FOREIGN: [(&str, &str); 4] = [
-    ("bframes.mp4", "-c:v|libx264|-bf|3|-g|30"),
-    (
-        "hevc.mov",
-        "-c:v|libx265|-x265-params|log-level=none:bframes=4|-tag:v|hvc1",
-    ),
-    (
-        "fragmented.mp4",
-        "-c:v|libx264|-bf|3|-g|30|-movflags|frag_keyframe+empty_moov",
-    ),
-    (
-        "fragmented-base.mp4",
-        "-c:v|libx264|-bf|2|-g|15|-movflags|frag_keyframe+default_base_moof",
-    ),
-];
+pub const BFRAMES: &str = "bframes.mp4";
+pub const BFRAMES_TWIN: &str = "bframes.flv";
+pub const TONE: &str = "tone.m4a";
+pub const TONE_TWIN: &str = "tone.aac";
+pub const HEVC: &str = "hevc.mov";
+pub const HEVC_STREAM: &str = "hevc.hevc";
+pub const HEVC_POCS: &str = "hevc.mov.pocs";
 
-pub const PACKETS: &str = "packet=stream_index,pts,dts,size,flags";
-
-pub fn packets_of(file: &str) -> String {
-    format!("{file}.csv")
-}
-
-pub fn sources() -> Vec<String> {
-    let (w, h) = SIZE;
-    vec![
-        "-f".into(),
-        "lavfi".into(),
-        "-i".into(),
-        format!("testsrc2=size={w}x{h}:rate={FPS}:duration={SECONDS}"),
-        "-f".into(),
-        "lavfi".into(),
-        "-i".into(),
-        format!("sine=frequency=440:sample_rate=48000:duration={SECONDS}"),
-    ]
-}
-
-pub fn encoding(video: &str) -> Vec<String> {
-    let mut args: Vec<String> = video.split('|').map(str::to_string).collect();
-    args.extend(
-        [
-            "-crf",
-            "40",
-            "-c:a",
-            "aac",
-            "-b:a",
-            &format!("{AUDIO_KBPS}k"),
-            "-ac",
-            "2",
-            "-pix_fmt",
-            "yuv420p",
-        ]
-        .map(str::to_string),
-    );
-    args
-}
-
-pub fn parse_packets(csv: &str) -> Vec<Vec<String>> {
-    let mut streams: Vec<Vec<String>> = Vec::new();
-    for line in csv.lines().filter(|l| !l.trim().is_empty()) {
-        let f: Vec<&str> = line.split(',').collect();
-        let Some(s) = f.first().and_then(|s| s.parse::<usize>().ok()) else {
-            continue;
-        };
-        if streams.len() <= s {
-            streams.resize(s + 1, Vec::new());
-        }
-        let key = if f.get(4).is_some_and(|k| k.contains('K')) {
-            "K"
-        } else {
-            "_"
-        };
-        let at = |i: usize| f.get(i).copied().unwrap_or_default();
-        streams[s].push(format!("{},{},{},{key}", at(1), at(2), at(3)));
+pub fn adts_sizes(data: &[u8]) -> Vec<u32> {
+    let mut at = 0;
+    let mut out = Vec::new();
+    while at + 7 <= data.len() && data[at] == 0xFF && data[at + 1] & 0xF0 == 0xF0 {
+        let len = (usize::from(data[at + 3] & 3) << 11)
+            | (usize::from(data[at + 4]) << 3)
+            | usize::from(data[at + 5] >> 5);
+        let head = if data[at + 1] & 1 == 0 { 9 } else { 7 };
+        out.push((len - head) as u32);
+        at += len.max(head);
     }
-    streams
+    out
+}
+
+pub fn pocs(text: &str) -> Vec<i64> {
+    text.split_whitespace()
+        .filter_map(|v| v.parse().ok())
+        .collect()
+}
+
+pub type Packets = Vec<(i64, u32, bool)>;
+
+pub fn flv_packets(data: &[u8]) -> Packets {
+    let be = |at: usize, n: usize| {
+        data.get(at..at + n)
+            .map_or(0, |b| b.iter().fold(0u32, |v, &x| v << 8 | u32::from(x)))
+    };
+    let mut pos = 13;
+    let mut out = Vec::new();
+    while pos + 11 <= data.len() {
+        let size = be(pos + 1, 3) as usize;
+        let dts = i64::from(be(pos + 4, 3) | be(pos + 7, 1) << 24);
+        let body = pos + 11;
+        if data[pos] == 9 && size > 5 && data.get(body + 1) == Some(&1) {
+            let cts = (be(body + 2, 3) << 8) as i32 >> 8;
+            let key = data[body] >> 4 == 1;
+            out.push((dts + i64::from(cts), (size - 5) as u32, key));
+        }
+        pos = body + size + 4;
+    }
+    out
+}
+
+pub fn normalized(mut packets: Packets) -> Packets {
+    let first = packets.iter().map(|p| p.0).min().unwrap_or(0);
+    for p in &mut packets {
+        p.0 -= first;
+    }
+    packets
 }

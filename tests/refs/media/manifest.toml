@@ -1,0 +1,447 @@
+[[ref]]
+name = "tones-aac.mkv"
+file = "tones-aac.mkv"
+sha256 = "4cd8477fdda0f0082aea64e12cfa9fafb87840531b8318cfe9028b22474dea3a"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: testref::Clip, our AAC at 96k, 440 and 1250 Hz"
+
+[[ref]]
+name = "tones-aac.mkv.f32"
+file = ""
+sha256 = "9bd25abad413ca8e909b435cb7ed82bb912303c8df2293805acc2683204260da"
+kind = "bit-exact"
+tool = "*********** Ahead Software MPEG-4 AAC Decoder V2.11.4 ******************"
+command = "faad -q -f 2 -b 4 -o {out} {src}"
+
+[[ref]]
+name = "tones-opus.webm"
+file = "tones-opus.webm"
+sha256 = "6e89429850ff7bf04069804ca0a8acbd2d73dec090fbfe3fd38029fd7caa63fc"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: testref::Clip, our Opus at 96k, 440 and 1250 Hz"
+
+[[ref]]
+name = "tones-aac.mkv.at0.f32"
+file = "tones-aac.mkv.at0.f32"
+sha256 = "47499605de3e4f00f4fc32c182b6c41a6b65e9da3b7874e9712818ea17d4b459"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: faad's decode of {ref:tones-aac.mkv.f32} after its CodecDelay, 256 frames from 10000"
+
+[[ref]]
+name = "tones-opus.webm.at0.f32"
+file = "tones-opus.webm.at0.f32"
+sha256 = "faec3127d1cb7a87eb6997a873a417879e4d1d0647858e0b8e2b3253cb45a048"
+kind = "tolerance"
+tool = "libopus.so.0.11.1 libopus 1.6.1"
+command = "examples/record_refs: libopus's decode of {ref:tones-opus.webm} after its pre-skip, 256 frames from 10000"
+
+[[ref]]
+name = "tones-aac.mkv.at1.f32"
+file = "tones-aac.mkv.at1.f32"
+sha256 = "98417b24eaac6a2be50a04e9e6881079bc3bae48d3307a569caa0d7f83eb4e30"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: faad's decode of {ref:tones-aac.mkv.f32} after its CodecDelay, 256 frames from 25440"
+
+[[ref]]
+name = "tones-opus.webm.at1.f32"
+file = "tones-opus.webm.at1.f32"
+sha256 = "572a7fa7e3e83523b78f76a9a7be580cf4a1f13584125237802a29e7dbbedf54"
+kind = "tolerance"
+tool = "libopus.so.0.11.1 libopus 1.6.1"
+command = "examples/record_refs: libopus's decode of {ref:tones-opus.webm} after its pre-skip, 256 frames from 25440"
+
+[[ref]]
+name = "off-ms-opus.webm"
+file = "off-ms-opus.webm"
+sha256 = "743e5473cc9caa78ef5e5dcf62c737bd483bc784751516431cca959d703913ef"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our Opus at 32k of a 1.0123 s sine, the last block's DiscardPadding to its end"
+
+[[ref]]
+name = "off-ms-opus.mkv"
+file = "off-ms-opus.mkv"
+sha256 = "0ee6655b3d050e8b5d43c7e8fbe059aa5de2ed2db5a421ff68e1bc8510d49929"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our Opus at 32k of a 1.0123 s sine, the last block's DiscardPadding to its end"
+
+[[ref]]
+name = "off-ms-ac3.mkv"
+file = "off-ms-ac3.mkv"
+sha256 = "10a6ed9ef30398ba9435d71bf4f38f6aa6af0829c9242104d925b6a0d0fe4f74"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: silent AC-3 frames from src/media/refs.rs, the last block's DiscardPadding to 1.0123 s"
+
+[[ref]]
+name = "off-ms-mp3.mp3"
+file = ""
+sha256 = "7a3bea5874d8ec4add9b0ce2585133ff1469f3ab4dac33a6e0fbf28627edbd19"
+kind = "bit-exact"
+tool = "LAME 64bits version 4.0 (https://lame.sourceforge.io)"
+command = "lame -r -s 44.1 --resample 44.1 --bitwidth 16 --little-endian -m j --cbr -b 32 -t --quiet {src} {out}"
+
+[[ref]]
+name = "off-ms-mp3.mkv"
+file = "off-ms-mp3.mkv"
+sha256 = "24d0df6597bd71cb6e8fb8704fcd394f0c5150b59cfd6c3c8995c4922b7dcb28"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:off-ms-mp3.mp3}'s frames up to 1.0123 s, the last block's DiscardPadding to its end"
+
+[[ref]]
+name = "off-ms-mp3.mp3.f32"
+file = ""
+sha256 = "60a36e67cebc7e253125feff873f5f1e7e9ebe70fe9cbf18917120c5f8554f17"
+kind = "bit-exact"
+tool = "mpg123 1.33.7"
+command = "mpg123 -q --no-gapless -e f32 -O {out} {ref:off-ms-mp3.mp3}"
+
+[[ref]]
+name = "off-ms-opus.webm.head.f32"
+file = "off-ms-opus.webm.head.f32"
+sha256 = "b489be1b79899030314ec0bdf0e60d9155af320153e91dce9eeb397a1936bc31"
+kind = "tolerance"
+tool = "libopus.so.0.11.1 libopus 1.6.1"
+command = "examples/record_refs: libopus's decode of {ref:off-ms-opus.webm} after its pre-skip and discard, 256 frames from 2000"
+
+[[ref]]
+name = "off-ms-opus.webm.tail.f32"
+file = "off-ms-opus.webm.tail.f32"
+sha256 = "f9a5e754503f0b15888c6ec22c625bfe429db3f5f7ea8201b82203f143f673b9"
+kind = "tolerance"
+tool = "libopus.so.0.11.1 libopus 1.6.1"
+command = "examples/record_refs: libopus's decode of {ref:off-ms-opus.webm} after its pre-skip and discard, 256 frames from 48334"
+
+[[ref]]
+name = "off-ms-opus.mkv.head.f32"
+file = "off-ms-opus.mkv.head.f32"
+sha256 = "b489be1b79899030314ec0bdf0e60d9155af320153e91dce9eeb397a1936bc31"
+kind = "tolerance"
+tool = "libopus.so.0.11.1 libopus 1.6.1"
+command = "examples/record_refs: libopus's decode of {ref:off-ms-opus.mkv} after its pre-skip and discard, 256 frames from 2000"
+
+[[ref]]
+name = "off-ms-opus.mkv.tail.f32"
+file = "off-ms-opus.mkv.tail.f32"
+sha256 = "f9a5e754503f0b15888c6ec22c625bfe429db3f5f7ea8201b82203f143f673b9"
+kind = "tolerance"
+tool = "libopus.so.0.11.1 libopus 1.6.1"
+command = "examples/record_refs: libopus's decode of {ref:off-ms-opus.mkv} after its pre-skip and discard, 256 frames from 48334"
+
+[[ref]]
+name = "off-ms-mp3.mkv.head.f32"
+file = "off-ms-mp3.mkv.head.f32"
+sha256 = "0888007d8f3b2bb697eb0073c71272b61a63e556190010ba014cb98e4d73e11e"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: mpg123's decode of {ref:off-ms-mp3.mp3.f32}, 256 frames from 2000"
+
+[[ref]]
+name = "off-ms-mp3.mkv.tail.f32"
+file = "off-ms-mp3.mkv.tail.f32"
+sha256 = "f65f5debfe1be74f2475aa7e7d615adaaf2b19df19291e92023c983025562fdf"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: mpg123's decode of {ref:off-ms-mp3.mp3.f32}, 256 frames from 44386"
+
+[[ref]]
+name = "vp9-g10.webm"
+file = "vp9-g10.webm"
+sha256 = "12d3a14da66528f3a36c208fc63be0127accb6b7cfc43419f6660ad373c37a72"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --disable-warning-prompt --debug --good --cpu-used=4 --threads=1 --auto-alt-ref=1 --lag-in-frames=16 --end-usage=vbr --target-bitrate=60 --kf-min-dist=10 --kf-max-dist=10 --webm --quiet -o {out} {src}"
+
+[[ref]]
+name = "pyramid-hevc.mp4.yuv"
+file = ""
+sha256 = "f473cb4e801938b05593496dcbf30fab684bd9029dae90df85feb859f6e3192b"
+kind = "bit-exact"
+tool = "x265 [info]: HEVC encoder version 4.3"
+command = "x265 --input {src} --input-res 352x240 --fps 30 --input-csp i420 --input-depth 8 --output-depth 8 --frame-threads 1 --no-wpp --pools none --log-level error --no-info --no-progress --frames 45 --preset ultrafast --keyint 60 --min-keyint 60 --no-scenecut --bframes 4 --b-pyramid --crf 35 --csv pyramid-hevc.mp4.csv --csv-log-level 1 --recon {out} --output pyramid-hevc.mp4.hevc"
+
+[[ref]]
+name = "pyramid-hevc.mp4"
+file = "pyramid-hevc.mp4"
+sha256 = "6b8c607953ab5dfa216810e7baa7124d81023c6016651cdd135bf4033139af80"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: x265's stream and csv POCs from the pyramid-hevc.mp4.yuv run, in our MP4 writer as hvc1"
+
+[[ref]]
+name = "av1-709.mp4.ivf"
+file = ""
+sha256 = "a0d12863576a8ad1eaa8991356f983688a23f20f2886c5d41f534f0456074fdc"
+kind = "bit-exact"
+tool = "SVT-AV1 v4.2.0 (debug)"
+command = "SvtAv1EncApp -i {src} -b {out} --preset 12 --crf 55 --keyint 30 --lp 1 -n 30 --progress 0 --color-primaries 1 --transfer-characteristics 1 --matrix-coefficients 1"
+
+[[ref]]
+name = "av1-709.mp4"
+file = "av1-709.mp4"
+sha256 = "03f3046c1fc4c15c8c68ba223cdcbba59d0c684b48c9f8ded8d58009af321a18"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:av1-709.mp4.ivf}, BT.709 in its sequence header, in our MP4 writer"
+
+[[ref]]
+name = "vp9-709.mp4.webm"
+file = ""
+sha256 = "7d16d03d9269be024532aa0a37f8459674a7d7df38770092bfadcb2db0c45f5d"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --disable-warning-prompt --debug --rt --cpu-used=8 --threads=1 --end-usage=cbr --target-bitrate=100 --kf-max-dist=30 --color-space=bt709 --webm --quiet -o {out} {src}"
+
+[[ref]]
+name = "vp9-709.mp4"
+file = "vp9-709.mp4"
+sha256 = "65bb25f4bd55ff2972e90d666cfb13e0daa48b5b457f2d63ab0a3e159e823807"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:vp9-709.mp4.webm}'s frames in our MP4 writer, vpcC BT.709"
+
+[[ref]]
+name = "vp9-key-480-bt709-tv.webm"
+file = "vp9-key-480-bt709-tv.webm"
+sha256 = "1189877be0d9125f3661ae9579311868b76d4216f6de1303e5510c43897ed128"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --disable-warning-prompt --debug --rt --cpu-used=8 --threads=1 --end-usage=q --cq-level=40 --limit=1 --color-space=bt709 --webm --quiet -o {out} {src}"
+
+[[ref]]
+name = "vp9-key-480-bt709-pc.webm"
+file = "vp9-key-480-bt709-pc.webm"
+sha256 = "82be69c1f86813759c7b0d2fe7bdb4710a04f368b6801cf8b253a50695aeac50"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:vp9-key-480-bt709-tv.webm} with its keyframe header's colour range bit set"
+
+[[ref]]
+name = "vp9-key-1080-bt601-tv.webm"
+file = "vp9-key-1080-bt601-tv.webm"
+sha256 = "e44503997b3046a5fed26c64b8e8a647d967182b0c4cb6737ce2dcd0ee8fc921"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --disable-warning-prompt --debug --rt --cpu-used=8 --threads=1 --end-usage=q --cq-level=40 --limit=1 --color-space=bt601 --webm --quiet -o {out} {src}"
+
+[[ref]]
+name = "vp9-key-1080-bt601-pc.webm"
+file = "vp9-key-1080-bt601-pc.webm"
+sha256 = "85ce72e17743f9eb093d87c112b319674db4d28a222efedf9ff4c39baece595d"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:vp9-key-1080-bt601-tv.webm} with its keyframe header's colour range bit set"
+
+[[ref]]
+name = "av1-8.ivf"
+file = ""
+sha256 = "c62e87e6fd760c3a5443991b488c39813ff85ecfb6bb3cab875a63ab9782d8bb"
+kind = "bit-exact"
+tool = "SVT-AV1 v4.2.0 (debug)"
+command = "SvtAv1EncApp -i {src} -b {out} --preset 12 --crf 55 --keyint 10 --lp 1 -n 10 --progress 0"
+
+[[ref]]
+name = "av1-10.ivf"
+file = ""
+sha256 = "1e4a870cb682cf3ad35e5f20f2818320e9fa042d4b444963202a7434351353f2"
+kind = "bit-exact"
+tool = "SVT-AV1 v4.2.0 (debug)"
+command = "SvtAv1EncApp -i {src} -b {out} --preset 12 --crf 55 --keyint 10 --lp 1 -n 10 --progress 0"
+
+[[ref]]
+name = "av1-8.mp4"
+file = "av1-8.mp4"
+sha256 = "e9fbdc32a3093f50a6781413418586a84ce941af8bca8cc1aee7a2c9c4e965c1"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:av1-8.ivf} in our writer"
+
+[[ref]]
+name = "av1-8.mkv"
+file = "av1-8.mkv"
+sha256 = "94511870651dbe65811989aad0563da968d15ca991aa429b29d498bc3b5aafc7"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:av1-8.ivf} in our writer"
+
+[[ref]]
+name = "av1-8.webm"
+file = "av1-8.webm"
+sha256 = "8eb1bf4b78857a8c88a6303e23975c345ce28bfff9652c570fdb7095b81398c6"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:av1-8.ivf} in our writer"
+
+[[ref]]
+name = "av1-10.mp4"
+file = "av1-10.mp4"
+sha256 = "7234cf2def82ef098b9629e746d2d5315081f1befedcb46681c02030f2666043"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:av1-10.ivf} in our writer"
+
+[[ref]]
+name = "h264-yuv422p10le.mp4.mkv"
+file = ""
+sha256 = "ff40d03e3336788f59cf49020bfe320bad6c4ccdeaebdcba265d0b79070061a9"
+kind = "bit-exact"
+tool = "x264 0.165.3222 b35605a"
+command = "x264 --demuxer y4m --muxer mkv --threads 1 --preset ultrafast --no-scenecut --quiet --no-progress --crf 30 --output-depth 10 --output-csp i422 --profile high422 -o {out} {src}"
+
+[[ref]]
+name = "h264-yuv422p10le.mp4"
+file = "h264-yuv422p10le.mp4"
+sha256 = "143b8d356f74a48c546e5564e341c793dd80a893beb74b6e3afeaf385dd39e25"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:h264-yuv422p10le.mp4.mkv}'s frames at their Matroska times in our MP4 writer"
+
+[[ref]]
+name = "h264-yuv422p10le.mkv"
+file = "h264-yuv422p10le.mkv"
+sha256 = "ff40d03e3336788f59cf49020bfe320bad6c4ccdeaebdcba265d0b79070061a9"
+kind = "fixture"
+tool = "x264 0.165.3222 b35605a"
+command = "x264 --demuxer y4m --muxer mkv --threads 1 --preset ultrafast --no-scenecut --quiet --no-progress --crf 30 --output-depth 10 --output-csp i422 --profile high422 -o {out} {src}"
+
+[[ref]]
+name = "h264-yuv420p10le.mp4.mkv"
+file = ""
+sha256 = "8ca58d7883e88b57bbe31de50c771e74c8115eae6dc894a0664e50d611ddc6d3"
+kind = "bit-exact"
+tool = "x264 0.165.3222 b35605a"
+command = "x264 --demuxer y4m --muxer mkv --threads 1 --preset ultrafast --no-scenecut --quiet --no-progress --crf 30 --output-depth 10 --output-csp i420 --profile high10 -o {out} {src}"
+
+[[ref]]
+name = "h264-yuv420p10le.mp4"
+file = "h264-yuv420p10le.mp4"
+sha256 = "60ec577a242a79017406e4471710821c01fec48dc68572b4fc250ca20b2ba140"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:h264-yuv420p10le.mp4.mkv}'s frames at their Matroska times in our MP4 writer"
+
+[[ref]]
+name = "h264-yuv420p10le.mkv"
+file = "h264-yuv420p10le.mkv"
+sha256 = "8ca58d7883e88b57bbe31de50c771e74c8115eae6dc894a0664e50d611ddc6d3"
+kind = "fixture"
+tool = "x264 0.165.3222 b35605a"
+command = "x264 --demuxer y4m --muxer mkv --threads 1 --preset ultrafast --no-scenecut --quiet --no-progress --crf 30 --output-depth 10 --output-csp i420 --profile high10 -o {out} {src}"
+
+[[ref]]
+name = "h264-interlaced.mp4.mkv"
+file = ""
+sha256 = "11eb06544688269f759248ff2f0ce99be9c59390bc2225fae7d2dcd46c03526a"
+kind = "bit-exact"
+tool = "x264 0.165.3222 b35605a"
+command = "x264 --demuxer y4m --muxer mkv --threads 1 --preset ultrafast --no-scenecut --quiet --no-progress --crf 30 --tff -o {out} {src}"
+
+[[ref]]
+name = "h264-interlaced.mp4"
+file = "h264-interlaced.mp4"
+sha256 = "fbee61b19ebcfe1ad27f7da1be0d5c1d7b5d3aac2f81d16a4266d672cf2e9ed9"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:h264-interlaced.mp4.mkv}'s frames at their Matroska times in our MP4 writer"
+
+[[ref]]
+name = "hevc-10bit-422.stream"
+file = ""
+sha256 = "d6258faa5bfdf5b104094ad76e4dec417c6c506a6ffb068d29b8c58fd820518a"
+kind = "bit-exact"
+tool = "x265 [info]: HEVC encoder version 4.3"
+command = "x265 --input {src} --input-res 64x64 --fps 10 --input-csp i422 --input-depth 10 --output-depth 10 --frame-threads 1 --no-wpp --pools none --log-level error --no-info --no-progress --frames 10 --preset ultrafast --profile main422-10 --crf 35 --output {out}"
+
+[[ref]]
+name = "hevc-10bit-422.mp4"
+file = "hevc-10bit-422.mp4"
+sha256 = "d7c207e3462e701dfe1acc2a3844986bee95cb5b22393408a314ca48da4e1aa4"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:hevc-10bit-422.stream} in our writer"
+
+[[ref]]
+name = "hevc-10bit-422.mkv"
+file = "hevc-10bit-422.mkv"
+sha256 = "a481c8c938502adbb4a2892cc582d0f714a5afda7726eff3f2e14dfbb81eb0c0"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:hevc-10bit-422.stream} in our writer"
+
+[[ref]]
+name = "hevc-main10.stream"
+file = ""
+sha256 = "f5dc50aa53e8f5db1e00102b1938133a83da70718ddd13a5ef1c8c008d9c5141"
+kind = "bit-exact"
+tool = "x265 [info]: HEVC encoder version 4.3"
+command = "x265 --input {src} --input-res 64x64 --fps 10 --input-csp i420 --input-depth 10 --output-depth 10 --frame-threads 1 --no-wpp --pools none --log-level error --no-info --no-progress --frames 10 --preset ultrafast --profile main10 --crf 35 --output {out}"
+
+[[ref]]
+name = "hevc-main10.mp4"
+file = "hevc-main10.mp4"
+sha256 = "38fb24f92916b80161bd90d7a25a3c066dfdf47c0cf63a399e55cb8cb67a9516"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:hevc-main10.stream} in our writer"
+
+[[ref]]
+name = "hevc-main10.mkv"
+file = "hevc-main10.mkv"
+sha256 = "497d89aa31ec4e449b7dc143dad93123a3504c3dd6771365a4953ebbd1708458"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:hevc-main10.stream} in our writer"
+
+[[ref]]
+name = "vp9-444.webm"
+file = "vp9-444.webm"
+sha256 = "78a010ec52e243b3e27e4dd37a7947e248946086852328c628325328b7b0f38d"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --disable-warning-prompt --debug --rt --cpu-used=8 --threads=1 --profile=1 --bit-depth=8 --input-bit-depth=8 --end-usage=q --cq-level=40 --webm --quiet -o {out} {src}"
+
+[[ref]]
+name = "vp9-444.mp4"
+file = "vp9-444.mp4"
+sha256 = "fe13677d5e881b6e915e14249b11d57877ba52535dc64fe210f05ec9e2b28e73"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:vp9-444.webm}'s frames in our MP4 writer"
+
+[[ref]]
+name = "vp9-10bit.webm"
+file = "vp9-10bit.webm"
+sha256 = "4b703d79f124771fdd05996be4b09f54cd7f85a3c03a6c00c33262dac77e6fb4"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --disable-warning-prompt --debug --rt --cpu-used=8 --threads=1 --profile=2 --bit-depth=10 --input-bit-depth=10 --end-usage=q --cq-level=40 --webm --quiet -o {out} {src}"
+
+[[ref]]
+name = "vp9-10bit.mp4"
+file = "vp9-10bit.mp4"
+sha256 = "d092f50e6c49efd84683385005b387573b738116c2a6f8c51358c6fadab2d157"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:vp9-10bit.webm}'s frames in our MP4 writer"
+
+[[ref]]
+name = "vp9-profile2-g10.webm"
+file = "vp9-profile2-g10.webm"
+sha256 = "57cd41c4717695d1d05a77e9af6c98967f3b457f9ac7e9f297d0af7e8c50b22c"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --disable-warning-prompt --debug --good --cpu-used=8 --threads=1 --profile=2 --bit-depth=10 --input-bit-depth=10 --kf-min-dist=10 --kf-max-dist=10 --auto-alt-ref=0 --lag-in-frames=0 --end-usage=q --cq-level=55 --webm --quiet -o {out} {src}"
+
+[[ref]]
+name = "bare-sine.mp3"
+file = "bare-sine.mp3"
+sha256 = "b10daed85edc4c5b1244af6eb74ab0758916b57227ad6617f6ac276a80b8805c"
+kind = "fixture"
+tool = "LAME 64bits version 4.0 (https://lame.sourceforge.io)"
+command = "lame -r -s 44.1 --resample 44.1 --bitwidth 16 --little-endian -m j --cbr -b 64 -t --quiet {src} {out}"

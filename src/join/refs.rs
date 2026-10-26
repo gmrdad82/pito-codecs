@@ -1,42 +1,28 @@
 pub const JOIN: &str = "join";
 
-pub const SMALL: &str = "testsrc2=s=160x120:r=30:d=0.2";
-pub const GPU_FLOOR: &str = "testsrc2=s=352x240:r=30:d=0.2";
+pub const SMALL: (u32, u32) = (160, 120);
+pub const GPU_FLOOR: (u32, u32) = (352, 240);
+pub const FPS: u32 = 30;
+pub const FRAMES: u64 = 6;
 
-pub const X264: [&str; 6] = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "30"];
-pub const X265: [&str; 8] = [
-    "-c:v",
-    "libx265",
-    "-preset",
-    "ultrafast",
-    "-crf",
-    "30",
-    "-x265-params",
-    "log-level=error",
-];
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Made {
+    X264 { chroma: u8, bits: u8 },
+    X265 { chroma: u8 },
+    Mpeg4,
+}
 
-pub const JOIN_CLIPS: [(&str, &str, &[&str]); 5] = [
+pub const JOIN_CLIPS: [(&str, (u32, u32), Made); 5] = [
     (
         "h264-422-10.mp4",
         SMALL,
-        &["-pix_fmt", "yuv422p10le", "-profile:v", "high422"],
+        Made::X264 {
+            chroma: 2,
+            bits: 10,
+        },
     ),
-    (
-        "h264-444.mp4",
-        SMALL,
-        &["-pix_fmt", "yuv444p", "-profile:v", "high444"],
-    ),
-    ("hevc-422.mp4", SMALL, &["-pix_fmt", "yuv422p"]),
-    ("hevc.mp4", GPU_FLOOR, &["-pix_fmt", "yuv420p"]),
-    ("mpeg4.mp4", SMALL, &["-c:v", "mpeg4", "-q:v", "5"]),
+    ("h264-444.mp4", SMALL, Made::X264 { chroma: 3, bits: 8 }),
+    ("hevc-422.mp4", SMALL, Made::X265 { chroma: 2 }),
+    ("hevc.mp4", GPU_FLOOR, Made::X265 { chroma: 1 }),
+    ("mpeg4.mp4", SMALL, Made::Mpeg4),
 ];
-
-pub fn encoder(name: &str) -> &'static [&'static str] {
-    if name.starts_with("hevc") {
-        &X265
-    } else if name.starts_with("mpeg4") {
-        &[]
-    } else {
-        &X264
-    }
-}

@@ -536,12 +536,18 @@ fn audio_only_wavs_probe_as_audio() {
     }
 }
 
-type Shape = (PathBuf, &'static str, &'static str, &'static str, &'static str);
+type Shape = (
+    PathBuf,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+);
 
 #[test]
 fn probe_json_and_text_name_the_video_variant() {
     let r = Refs::open(refs::AREA);
-    let [deep, wide, interlaced] = refs::PROBE_SHAPES.map(|(file, _)| r.path(file));
+    let [deep, wide, interlaced] = refs::PROBE_SHAPES.map(|(file, ..)| r.path(file));
     let plain = Clip::new((352, 240), (30, 1), 15)
         .video_only()
         .make(refs::AREA, "cli-high.mp4");
@@ -997,11 +1003,16 @@ fn ogg_and_webm_vorbis_extract_to_wav_and_convert_to_opus() {
             .max()
             .unwrap();
         assert!(worst <= 1, "{ext}: worst 16-bit difference {worst}");
-        let theirs = r.i16s(&refs::vorbis_slice_name(file));
+        let theirs = r.i16s(&refs::vorbis_slice_name());
         assert_eq!(theirs.len() as u64, (end - start) * 2, "{ext}");
         let slice = &ours[start as usize * 2..end as usize * 2];
         let d = testref::diff(slice, &theirs);
-        testref::assert_within(&format!("{ext} against ffmpeg's decode"), &d, 1.0, 1.0);
+        testref::assert_within(
+            &format!("{ext} against libvorbisfile's decode"),
+            &d,
+            1.0,
+            1.0,
+        );
         let opus = out.join(format!("{ext}.opus"));
         ok(&run(&[src.to_str().unwrap(), opus.to_str().unwrap()]));
         let ogg = pito_codecs::opus::ogg::OggOpus::parse(&fs::read(&opus).unwrap()).unwrap();
@@ -1403,7 +1414,11 @@ fn two_rate_tracks() -> PathBuf {
         .iter()
         .map(|&k| merged.tracks[k].sample_rate())
         .collect();
-    assert_eq!(rates, [48_000, 44_100], "the second track keeps its own rate");
+    assert_eq!(
+        rates,
+        [48_000, 44_100],
+        "the second track keeps its own rate"
+    );
     to
 }
 

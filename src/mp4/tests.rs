@@ -5,50 +5,140 @@ use crate::testref::Refs;
 #[path = "refs.rs"]
 mod refs;
 
+fn decode_order<S: ByteSource>(m: &Reader<S>, track: usize) -> Vec<(u32, bool)> {
+    m.tracks[track]
+        .samples
+        .iter()
+        .map(|s| (s.size, s.keyframe))
+        .collect()
+}
+
+fn presented_ms<S: ByteSource>(m: &Reader<S>, track: usize) -> Vec<i64> {
+    let t = &m.tracks[track];
+    let ms: Vec<i64> = (0..t.samples.len())
+        .map(|k| (t.seconds(t.presentation(k).unwrap()) * 1000.0).round() as i64)
+        .collect();
+    let first = ms.iter().copied().min().unwrap_or(0);
+    ms.into_iter().map(|v| v - first).collect()
+}
+
+fn rising_dts<S: ByteSource>(m: &Reader<S>, track: usize) -> bool {
+    let s = &m.tracks[track].samples;
+    s.windows(2).all(|w| w[1].dts > w[0].dts) && s.iter().all(|x| x.duration > 0)
+}
+
 #[test]
-fn reader_matches_ffprobe_packets() {
+fn an_mp4_of_x264s_frames_shows_them_at_x264s_own_flv_times() {
     let r = Refs::open(refs::AREA);
-    for (file, _) in refs::FOREIGN {
-        let path = r.path(file);
-        let csv = String::from_utf8(r.bytes(&refs::packets_of(file))).unwrap();
-        let listed = refs::parse_packets(&csv);
-        let m = Reader::open(&path).unwrap();
-        assert_eq!(m.quicktime, file.ends_with(".mov"));
-        assert_eq!(m.fragmented, file.starts_with("fragmented"));
-        assert_eq!(listed.len(), m.tracks.len(), "{file}");
-        for (i, t) in m.tracks.iter().enumerate() {
-            let ours: Vec<String> = (0..t.samples.len())
-                .map(|k| {
-                    let p = m.packet(i, k).unwrap();
-                    let key = if p.keyframe { "K" } else { "_" };
-                    format!("{},{},{},{key}", p.pts, p.dts, p.data.len())
-                })
-                .collect();
-            assert_eq!(ours, listed[i], "{file} track {i}");
-        }
-        let v = m.video().unwrap();
-        assert!(matches!(
-            m.tracks[v].codec(),
-            Some(crate::media::Codec::H264 | crate::media::Codec::Hevc)
-        ));
-        assert_eq!(
-            (m.tracks[v].width, m.tracks[v].height),
-            refs::SIZE,
-            "{file}"
-        );
-        assert!((m.tracks[v].fps() - f64::from(refs::FPS)).abs() < 0.01);
-        let a = m.audio()[0];
-        assert_eq!(
-            (m.tracks[a].channels(), m.tracks[a].sample_rate()),
-            (2, 48_000)
-        );
-        let kbps = refs::AUDIO_KBPS * 1000;
+    let m = Reader::new(r.bytes(refs::BFRAMES)).unwrap();
+    assert!(!m.quicktime && !m.fragmented);
+    let v = m.video().unwrap();
+    assert_eq!(m.tracks[v].codec(), Some(crate::media::Codec::H264));
+    assert_eq!((m.tracks[v].width, m.tracks[v].height), refs::SIZE);
+    assert!((m.tracks[v].fps() - f64::from(refs::FPS)).abs() < 0.01);
+    assert!(rising_dts(&m, v));
+    assert!(
+        m.tracks[v].samples.iter().any(|s| s.pts != s.dts),
+        "x264 wrote no reordered frames"
+    );
+    let twin = refs::normalized(refs::flv_packets(&r.bytes(refs::BFRAMES_TWIN)));
+    assert_eq!(
+        twin.len() as u32,
+        refs::FPS * refs::SECONDS,
+        "the twin lost frames"
+    );
+    let sizes: Vec<(u32, bool)> = twin.iter().map(|p| (p.1, p.2)).collect();
+    assert_eq!(decode_order(&m, v), sizes);
+    let shown: Vec<i64> = twin.iter().map(|p| p.0).collect();
+    let ms = presented_ms(&m, v);
+    assert_eq!(ms.len(), shown.len());
+    for (k, (a, b)) in ms.iter().zip(&shown).enumerate() {
         assert!(
-            (kbps * 5 / 6..kbps * 7 / 6).contains(&m.tracks[a].bitrate()),
-            "{file}: {}",
-            m.tracks[a].bitrate()
+            (a - b).abs() <= 1,
+            "frame {k}: {a} ms against x264's {b} ms"
         );
     }
+}
+
+#[test]
+fn faacs_m4a_matches_its_own_adts_twin_frame_for_frame() {
+    let r = Refs::open(refs::AREA);
+    let m = Reader::new(r.bytes(refs::TONE)).unwrap();
+    let a = m.audio()[0];
+    assert_eq!(m.tracks[a].codec(), Some(crate::media::Codec::Aac));
+    assert_eq!(
+        (m.tracks[a].channels(), m.tracks[a].sample_rate()),
+        (2, 48_000)
+    );
+    assert!(rising_dts(&m, a));
+    let sizes: Vec<u32> = m.tracks[a].samples.iter().map(|s| s.size).collect();
+    let adts = refs::adts_sizes(&r.bytes(refs::TONE_TWIN));
+    assert!(!adts.is_empty());
+    assert_eq!(sizes, adts);
+    let kbps = refs::AUDIO_KBPS * 1000;
+    assert!(
+        (kbps * 5 / 6..kbps * 7 / 6).contains(&m.tracks[a].bitrate()),
+        "{}",
+        m.tracks[a].bitrate()
+    );
+}
+
+#[test]
+fn an_hevc_mov_shows_its_frames_in_x265s_picture_order() {
+    let r = Refs::open(refs::AREA);
+    let m = Reader::new(r.bytes(refs::HEVC)).unwrap();
+    assert!(m.quicktime && !m.fragmented);
+    let v = m.video().unwrap();
+    assert_eq!(m.tracks[v].codec(), Some(crate::media::Codec::Hevc));
+    assert_eq!((m.tracks[v].width, m.tracks[v].height), refs::SIZE);
+    assert!(rising_dts(&m, v));
+    let pocs = refs::pocs(&String::from_utf8(r.bytes(refs::HEVC_POCS)).unwrap());
+    assert_eq!(pocs.len(), m.tracks[v].samples.len());
+    assert!(pocs.iter().enumerate().any(|(k, &p)| p != k as i64));
+    let step = 1000.0 / f64::from(refs::FPS);
+    let want: Vec<i64> = pocs
+        .iter()
+        .map(|&p| (p as f64 * step).round() as i64)
+        .collect();
+    assert_eq!(presented_ms(&m, v), want);
+}
+
+#[test]
+fn a_fragmented_file_reads_back_every_packet_it_was_given() {
+    let r = Refs::open(refs::AREA);
+    let src = Reader::new(r.bytes(refs::BFRAMES)).unwrap();
+    let v = src.video().unwrap();
+    let mut w = FragmentedWriter::new(std::io::Cursor::new(Vec::new()), 0.3);
+    let t = w
+        .add_track(TrackConfig::from_track(&src.tracks[v]).unwrap())
+        .unwrap();
+    let given: Vec<crate::media::Packet> = (0..src.tracks[v].samples.len())
+        .map(|k| src.packet(v, k).unwrap())
+        .collect();
+    for p in &given {
+        w.push(t, p).unwrap();
+    }
+    let bytes = w.finish().unwrap().into_inner();
+    let back = Reader::new(bytes).unwrap();
+    assert!(back.fragmented);
+    let bv = back.video().unwrap();
+    let got: Vec<(i64, i64, usize, bool)> = (0..back.tracks[bv].samples.len())
+        .map(|k| {
+            let p = back.packet(bv, k).unwrap();
+            (p.pts - p.dts, p.dts, p.data.len(), p.keyframe)
+        })
+        .collect();
+    let first = given.first().map_or(0, |p| p.dts);
+    let back_first = got.first().map_or(0, |g| g.1);
+    let want: Vec<(i64, i64, usize, bool)> = given
+        .iter()
+        .map(|p| (p.pts - p.dts, p.dts - first, p.data.len(), p.keyframe))
+        .collect();
+    let got: Vec<(i64, i64, usize, bool)> = got
+        .into_iter()
+        .map(|(c, d, n, k)| (c, d - back_first, n, k))
+        .collect();
+    assert_eq!(got, want);
 }
 
 #[cfg(all(
