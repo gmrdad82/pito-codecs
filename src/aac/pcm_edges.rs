@@ -20,7 +20,7 @@ fn impulse(channels: u16, at: usize) -> AudioBuffer {
 }
 
 #[test]
-fn stereo_downmix_matches_ffmpeg_float_rematrix() {
+fn stereo_downmix_matches_the_bs775_rematrix() {
     let table: [(u16, Vec<[f32; 2]>); 5] = [
         (3, vec![[1.0, 0.0], [0.0, 1.0], [K, K]]),
         (4, vec![[1.0, 0.0], [0.0, 1.0], [K, K], [0.5, 0.5]]),
@@ -93,7 +93,7 @@ fn full_scale_surround_sums_past_one_and_is_left_unclipped() {
 }
 
 #[test]
-fn surround_to_mono_weighs_channels_as_ffmpeg_ac_1_does() {
+fn surround_to_mono_weighs_channels_by_the_bs775_table() {
     let sum = 2.0 + 2.0 * K;
     let want = [K / sum, K / sum, 1.0 / sum, 0.0, 0.5 / sum, 0.5 / sum];
     for (c, w) in want.iter().enumerate() {

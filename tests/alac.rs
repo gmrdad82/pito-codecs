@@ -9,136 +9,16 @@ use std::path::{Path, PathBuf};
 
 use pito_codecs::alac::{Config, Decoder, entry_cookie};
 use pito_codecs::media::{AudioBuffer, Prefs, audio_pcm_range, probe};
-use refs::pcm::{fnv, source};
+use refs::pcm::fnv;
+use refs::{FIXTURES, Fixture, in_alac_order, named};
 use testref::Refs;
 
-struct Fixture {
-    name: &'static str,
-    channels: usize,
-    depth: u32,
-    rate: u32,
-    frames: usize,
-    salt: u64,
-    hash: u64,
-}
-
-const fn fixture(
-    name: &'static str,
-    channels: usize,
-    depth: u32,
-    rate: u32,
-    frames: usize,
-    salt: u64,
-    hash: u64,
-) -> Fixture {
-    Fixture {
-        name,
-        channels,
-        depth,
-        rate,
-        frames,
-        salt,
-        hash,
-    }
-}
-
-const FIXTURES: &[Fixture] = &[
-    fixture(
-        "s16-mono.m4a",
-        1,
-        16,
-        44_100,
-        5097,
-        1,
-        0x38fe_2ad8_37cb_f5bf,
-    ),
-    fixture(
-        "s16-stereo.m4a",
-        2,
-        16,
-        44_100,
-        5097,
-        4,
-        0xfaf2_b693_2497_8db4,
-    ),
-    fixture(
-        "s24-stereo.mov",
-        2,
-        24,
-        48_000,
-        5097,
-        3,
-        0xd4e8_8479_0573_c49b,
-    ),
-    fixture(
-        "s24-stereo-96k.mov",
-        2,
-        24,
-        96_000,
-        5097,
-        4,
-        0xfc82_224f_f7b5_6653,
-    ),
-    fixture(
-        "s24-mono-96k.m4a",
-        1,
-        24,
-        96_000,
-        5097,
-        5,
-        0x819b_20c9_6df9_ec7a,
-    ),
-    fixture(
-        "s16-stereo.mkv",
-        2,
-        16,
-        48_000,
-        5097,
-        6,
-        0x24d4_c6d2_e649_9652,
-    ),
-    fixture(
-        "s24-stereo-order8.mkv",
-        2,
-        24,
-        48_000,
-        5097,
-        7,
-        0xc445_2612_2ddd_f212,
-    ),
-    fixture(
-        "s16-stereo-order4.m4a",
-        2,
-        16,
-        44_100,
-        5097,
-        8,
-        0xa7b4_ec3e_9b75_6457,
-    ),
-    fixture("s16-5.1.m4a", 6, 16, 48_000, 1501, 9, 0xc488_8270_2336_762b),
-    fixture(
-        "s24-mono-verbatim.mov",
-        1,
-        24,
-        44_100,
-        2000,
-        10,
-        0xe111_114e_9b0b_5ba7,
-    ),
-];
-
-fn named(name: &str) -> &'static Fixture {
-    FIXTURES.iter().find(|f| f.name == name).unwrap()
-}
-
 fn path(f: &Fixture) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/alac")
-        .join(f.name)
+    Refs::open(refs::AREA).path(f.name)
 }
 
 fn want(f: &Fixture) -> Vec<i32> {
-    let w = source(f.channels, f.depth, f.frames, f.salt);
+    let w = f.source();
     assert_eq!(fnv(&w), f.hash, "{}: the PCM generator changed", f.name);
     w
 }
@@ -185,28 +65,9 @@ fn decode_all(path: &Path) -> (Config, Vec<i32>) {
     (*d.config(), out)
 }
 
-const ALAC_ORDER: [&[usize]; 8] = [
-    &[0],
-    &[0, 1],
-    &[2, 0, 1],
-    &[2, 0, 1, 3],
-    &[2, 0, 1, 3, 4],
-    &[2, 0, 1, 4, 5, 3],
-    &[2, 0, 1, 4, 5, 6, 3],
-    &[2, 6, 7, 0, 1, 4, 5, 3],
-];
-
-fn in_alac_order(samples: &[i32], channels: usize) -> Vec<i32> {
-    let order = ALAC_ORDER[channels - 1];
-    samples
-        .chunks_exact(channels)
-        .flat_map(|f| order.iter().map(move |&c| f[c]))
-        .collect()
-}
-
 #[test]
 fn every_fixture_decodes_bit_exact() {
-    for f in FIXTURES {
+    for f in &FIXTURES {
         let want = want(f);
         let (config, got) = decode_all(&path(f));
         assert_eq!(config.bit_depth as u32, f.depth, "{}", f.name);
@@ -216,6 +77,23 @@ fn every_fixture_decodes_bit_exact() {
         assert!(
             got == in_alac_order(&want, f.channels),
             "{} is not bit-exact",
+            f.name
+        );
+    }
+}
+
+#[test]
+fn every_tracked_fixture_is_our_writer_output_for_its_table_row() {
+    for f in &FIXTURES {
+        let (cookie, pkts) = packets(&path(f));
+        let made = refs::encode(&want(f), f.channels, f.depth, &f.opts);
+        assert_eq!(pkts, made, "{}: the packets are not the writer's", f.name);
+        let c = Config::parse(&cookie).unwrap();
+        assert_eq!(c.max_frame_bytes, refs::max_frame(&made), "{}", f.name);
+        assert_eq!(
+            cookie[cookie.len() - 24..],
+            refs::cookie(f.channels, f.depth, f.rate, refs::max_frame(&made))[..],
+            "{}",
             f.name
         );
     }
@@ -276,7 +154,7 @@ fn the_fixtures_cover_matrixing_shifted_bytes_escapes_and_every_predictor() {
             .map(|p| head(p))
             .collect()
     };
-    for f in FIXTURES {
+    for f in &FIXTURES {
         let h = heads(f.name);
         assert!(h.last().unwrap().partial, "{}: no partial frame", f.name);
     }
@@ -318,7 +196,7 @@ fn the_fixtures_cover_matrixing_shifted_bytes_escapes_and_every_predictor() {
 #[test]
 fn the_media_front_hears_every_fixture_bit_exact_in_wave_order_and_seeks_to_the_sample() {
     let prefs = Prefs::default();
-    for f in FIXTURES {
+    for f in &FIXTURES {
         let p = path(f);
         let want = as_f32(&want(f), f.depth);
         let ch = f.channels as u16;
@@ -363,7 +241,7 @@ fn surround_downmixes_from_wave_order() {
 #[test]
 fn probe_names_alac_with_the_cookie_rate_and_calls_it_native() {
     let prefs = Prefs::default();
-    for f in FIXTURES {
+    for f in &FIXTURES {
         let p = probe(&path(f), &prefs).unwrap();
         assert_eq!(p.audio.len(), 1, "{}", f.name);
         let a = &p.audio[0];
@@ -532,51 +410,105 @@ fn a_damaged_alac_file_never_panics() {
         let _ = audio_pcm_range(&damaged, 0, 0.0, f64::INFINITY, f.rate, 2, &prefs);
     }
 }
+
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        self.0 >> 33
+    }
+}
+
+fn round_trip(wave: &[i32], channels: usize, depth: u32, o: &refs::Options) -> Vec<i32> {
+    let packets = refs::encode(wave, channels, depth, o);
+    let cookie = refs::cookie(channels, depth, 48_000, refs::max_frame(&packets));
+    let mut d = Decoder::new(&cookie).unwrap();
+    let mut out = Vec::new();
+    for p in &packets {
+        out.extend_from_slice(d.decode(p).unwrap());
+    }
+    out
+}
+
 #[test]
-fn longer_streams_from_ffmpeg_decode_bit_exact() {
-    let r = Refs::open(refs::AREA);
-    for (k, case) in refs::CASES.iter().enumerate() {
-        let want = refs::source(k);
-        assert_eq!(want.len(), refs::frames(k) * case.channels, "{}", case.name);
-        let path = r.path(&case.file());
-        let (config, got) = decode_all(&path);
-        assert_eq!(config.bit_depth as u32, case.depth, "{}", case.name);
-        assert_eq!(config.channels as usize, case.channels, "{}", case.name);
-        assert_eq!(config.sample_rate, case.rate, "{}", case.name);
-        let (_, pkts) = packets(&path);
-        assert!(pkts.len() >= 2, "{}: {} packets", case.name, pkts.len());
-        assert!(got == want, "{} is not bit-exact", case.name);
-        let whole = audio_pcm_range(
-            &path,
-            0,
-            0.0,
-            f64::INFINITY,
-            case.rate,
-            case.channels as u16,
-            &Prefs::default(),
-        )
-        .unwrap();
-        assert_eq!(whole.samples.len(), want.len(), "{}", case.name);
-        assert!(
-            whole.samples == as_f32(&want, case.depth),
-            "{}: the media front is not bit-exact",
-            case.name
-        );
+fn the_writer_round_trips_every_order_mix_shift_and_layout_bit_exact() {
+    let mut rng = Lcg(0x5eed);
+    for channels in 1..=8usize {
+        for depth in [16u32, 20, 24, 32] {
+            for order in [0usize, 1, 2, 4, 8, 12, 30, 31] {
+                let frames = 900 + (rng.next() % 4000) as usize;
+                let wave = refs::pcm::source(channels, depth.min(24), frames, rng.next());
+                let wave: Vec<i32> = if depth == 32 {
+                    wave.iter()
+                        .map(|&s| s.wrapping_shl(8) | (s & 0xff))
+                        .collect()
+                } else if depth == 20 {
+                    wave.iter().map(|&s| s >> 4).collect()
+                } else {
+                    wave
+                };
+                let mix_res = (rng.next() % 5) as i8;
+                let shift = depth >= 24 && (depth == 32 || rng.next().is_multiple_of(2));
+                let verbatim = rng.next().is_multiple_of(9);
+                let o = refs::Options {
+                    order,
+                    mix_res,
+                    shift,
+                    verbatim,
+                };
+                let what = format!("{channels} ch {depth} bit {o:?}, {frames} frames");
+                let got = round_trip(&wave, channels, depth, &o);
+                assert_eq!(got.len(), wave.len(), "{what}");
+                assert!(got == in_alac_order(&wave, channels), "{what}");
+            }
+        }
     }
 }
 
 #[test]
-fn the_raw_input_packs_each_sample_in_its_width() {
-    assert_eq!(refs::raw(&[1, -2], 16), vec![1, 0, 0xfe, 0xff]);
-    assert_eq!(
-        refs::raw(&[-1, 0x123456], 24),
-        vec![0xff, 0xff, 0xff, 0x56, 0x34, 0x12]
-    );
-    for (k, case) in refs::CASES.iter().enumerate() {
-        let width = if case.depth == 16 { 2 } else { 3 };
-        assert_eq!(
-            refs::raw_source(k).len(),
-            refs::frames(k) * case.channels * width
-        );
+fn the_writer_codes_silence_runs_and_full_scale_steps() {
+    let n = 5000;
+    let mut wave = vec![0i32; n * 2];
+    for (i, s) in wave.iter_mut().enumerate().skip(4000) {
+        *s = if (i / 37) % 2 == 0 { 32_767 } else { -32_768 };
     }
+    for order in [0, 4, 8, 31] {
+        let o = refs::opts(order, 2, false);
+        assert!(round_trip(&wave, 2, 16, &o) == wave, "order {order}");
+    }
+    let mono: Vec<i32> = (0..n as i32).map(|i| (i % 3) - 1).collect();
+    assert!(round_trip(&mono, 1, 16, &refs::opts(2, 0, false)) == mono);
+}
+
+#[test]
+fn the_cookie_and_entries_carry_the_rate_depth_and_channels() {
+    let c = Config::parse(&refs::cookie(6, 24, 96_000, 1234)).unwrap();
+    assert_eq!(
+        (
+            c.channels,
+            c.bit_depth,
+            c.sample_rate,
+            c.frame_length,
+            c.max_frame_bytes
+        ),
+        (6, 24, 96_000, 4096, 1234)
+    );
+    assert!(c.check().is_ok());
+    let cookie = refs::cookie(2, 16, 44_100, 99);
+    for entry in [refs::Entry::Iso, refs::Entry::QtWave, refs::Entry::QtV2] {
+        let e = refs::sample_entry(entry, 2, 16, 44_100, &cookie);
+        let found = pito_codecs::alac::find_cookie(&e[28..])
+            .or_else(|| pito_codecs::alac::find_cookie(&e[44..]))
+            .or_else(|| pito_codecs::alac::find_cookie(&e[64..]))
+            .unwrap_or_else(|| panic!("{entry:?}: no cookie"));
+        assert_eq!(&found[12..], &cookie[..], "{entry:?}");
+    }
+    assert_eq!(
+        refs::in_alac_order(&[1, 2, 3, 4, 5, 6], 6),
+        [3, 1, 2, 5, 6, 4]
+    );
 }

@@ -22,17 +22,6 @@ pub mod window {
         out.extend_from_slice(tail(samples, channels));
         out
     }
-
-    pub fn body_filter() -> String {
-        format!("asetnsamples=n={RUN}:p=0,aselect=not(mod(n\\,{EVERY}))")
-    }
-
-    pub fn window_filter() -> String {
-        format!(
-            "asplit[body][tail];[body]{}[b];[tail]areverse,asetpts=N/SR/TB,atrim=end_sample={RUN},areverse[t];[b][t]concat=n=2:v=0:a=1",
-            body_filter()
-        )
-    }
 }
 
 pub const AREA: &str = "aac";
@@ -42,11 +31,11 @@ pub const SECONDS: f32 = 0.5;
 pub const STREAMS: [(u16, &str, u32); 2] = [(2, "stereo", 128), (6, "5.1", 320)];
 
 pub fn stream(channels: u16) -> String {
-    format!("ff{channels}.aac")
+    format!("faac{channels}.aac")
 }
 
 pub fn decoded(channels: u16) -> String {
-    format!("ff{channels}.f32")
+    format!("faac{channels}.f32")
 }
 
 pub fn signal(rate: u32, channels: u16, seconds: f32) -> Vec<f32> {
@@ -67,11 +56,4 @@ pub fn signal(rate: u32, channels: u16, seconds: f32) -> Vec<f32> {
         }
     }
     out
-}
-
-pub fn signal_bytes(channels: u16) -> Vec<u8> {
-    signal(RATE, channels, SECONDS)
-        .iter()
-        .flat_map(|s| s.to_le_bytes())
-        .collect()
 }

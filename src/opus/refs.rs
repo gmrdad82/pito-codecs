@@ -22,17 +22,6 @@ pub mod window {
         out.extend_from_slice(tail(samples, channels));
         out
     }
-
-    pub fn body_filter() -> String {
-        format!("asetnsamples=n={RUN}:p=0,aselect=not(mod(n\\,{EVERY}))")
-    }
-
-    pub fn window_filter() -> String {
-        format!(
-            "asplit[body][tail];[body]{}[b];[tail]areverse,asetpts=N/SR/TB,atrim=end_sample={RUN},areverse[t];[b][t]concat=n=2:v=0:a=1",
-            body_filter()
-        )
-    }
 }
 
 use pito_codecs::media::AudioBuffer;
@@ -42,33 +31,41 @@ pub const AREA: &str = "opus";
 pub const SECONDS: f32 = 0.5;
 pub const SPEECH_SECONDS: f32 = 1.0;
 
-pub const MUSIC: &str = "aevalsrc=0.3*sin(2*PI*220*t)+0.2*sin(2*PI*277.2*t+sin(2*PI*5*t))+0.15*sin(2*PI*329.6*t)*sin(2*PI*0.5*t)+0.05*sin(2*PI*3520*t)+0.08*(random(0)-0.5)*gt(mod(t\\,0.5)\\,0.45)|0.25*sin(2*PI*330*t)+0.2*sin(2*PI*440*t+0.3*sin(2*PI*3*t))+0.05*sin(2*PI*7040*t)+0.05*(random(1)-0.5):s=48000:d=0.5";
-pub const SPEECH: &str = "aevalsrc=(0.4*sin(2*PI*(120+20*sin(2*PI*3*t))*t)+0.2*sin(2*PI*(240+40*sin(2*PI*3*t))*t)+0.1*sin(2*PI*900*t)+0.05*(random(0)-0.5))*(0.6+0.4*sin(2*PI*4*t))*gt(sin(2*PI*1.3*t)\\,-0.6):s=48000:d=0.5";
+pub struct Libopus {
+    pub name: &'static str,
+    pub music: bool,
+    pub channels: u16,
+    pub bitrate: i32,
+    pub cbr: bool,
+    pub voip: bool,
+    pub celt: bool,
+}
 
-pub type Libopus = (&'static str, &'static str, &'static [&'static str], bool);
+const fn libopus(
+    name: &'static str,
+    music: bool,
+    channels: u16,
+    bitrate: i32,
+    cbr: bool,
+    voip: bool,
+    celt: bool,
+) -> Libopus {
+    Libopus {
+        name,
+        music,
+        channels,
+        bitrate,
+        cbr,
+        voip,
+        celt,
+    }
+}
 
 pub const LIBOPUS: [Libopus; 4] = [
-    ("music_160k", MUSIC, &["-b:a", "160k", "-vbr", "off"], true),
-    (
-        "speech_16k_voip",
-        SPEECH,
-        &["-ac", "1", "-b:a", "16k", "-application", "voip"],
-        false,
-    ),
-    ("music_32k_hybrid", MUSIC, &["-b:a", "32k"], false),
-    (
-        "music_51_256k",
-        MUSIC,
-        &[
-            "-af",
-            "pan=5.1|c0=c0|c1=c1|c2=0.5*c0+0.5*c1|c3=0.1*c0|c4=0.8*c0|c5=0.8*c1",
-            "-b:a",
-            "256k",
-            "-mapping_family",
-            "1",
-        ],
-        true,
-    ),
+    libopus("music_160k", true, 2, 160_000, true, false, true),
+    libopus("speech_16k_voip", false, 1, 16_000, false, true, false),
+    libopus("music_32k_hybrid", true, 2, 32_000, false, false, false),
+    libopus("music_51_256k", true, 6, 256_000, false, false, true),
 ];
 
 pub const OURS: [(u16, u32); 3] = [(2, 128_000), (1, 64_000), (2, 64_000)];

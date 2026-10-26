@@ -1,0 +1,47 @@
+[[ref]]
+name = "faac2.aac"
+file = "faac2.aac"
+sha256 = "3449bd556751de2a0c3aa68b6b5605430ed9c96faf1f47e7934076fecf2f756a"
+kind = "fixture"
+tool = "FAAC 2.1.0"
+command = "faac -v0 --pns 0 -b 128 -o {out} {src}"
+
+[[ref]]
+name = "faac2.aac.faad"
+file = ""
+sha256 = "410fa00ea77d4a3a1ba59c796af3c922625015f05372195bc6e1f8ad43391bbd"
+kind = "bit-exact"
+tool = "*********** Ahead Software MPEG-4 AAC Decoder V2.11.4 ******************"
+command = "faad -q -f 2 -b 4 -o {out} {ref:faac2.aac}"
+
+[[ref]]
+name = "faac2.f32"
+file = "faac2.f32"
+sha256 = "eec97337be74dd859d9c5f173dd977b1ec4ad95443fc6695826964fe3c205e97"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/aac/refs.rs window of faac2.aac.faad"
+
+[[ref]]
+name = "faac6.aac"
+file = "faac6.aac"
+sha256 = "d1858910b5f944522e8ebffe1994fb8da70464659692e12bb5e758f4a4ceb3b3"
+kind = "fixture"
+tool = "FAAC 2.1.0"
+command = "faac -v0 --pns 0 -b 320 -o {out} {src}"
+
+[[ref]]
+name = "faac6.aac.faad"
+file = ""
+sha256 = "0c53f37bae8ddad8211e9dea49dfa43f4ead34c8b9d07100efb470b10c21a065"
+kind = "bit-exact"
+tool = "*********** Ahead Software MPEG-4 AAC Decoder V2.11.4 ******************"
+command = "faad -q -f 2 -b 4 -o {out} {ref:faac6.aac}"
+
+[[ref]]
+name = "faac6.f32"
+file = "faac6.f32"
+sha256 = "1df736850b7ac1b8ec158473d6027663582ec04500711eecb8e98ea08d115860"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/aac/refs.rs window of faac6.aac.faad"

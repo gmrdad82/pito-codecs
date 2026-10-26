@@ -68,7 +68,7 @@ line = "mpg123 1.33.7"
 
 [faac]
 version = "faac --version"
-find = "FAAC"
+find = "FAAC 2"
 line = "FAAC 2.1.0"
 
 [faad]
