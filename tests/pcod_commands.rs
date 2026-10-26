@@ -237,7 +237,9 @@ fn media() -> &'static Media {
             wav,
             frames,
             mp4: clip(30).make(refs::AREA, "commands-tone.mp4"),
-            silent: clip(30).video_only().make(refs::AREA, "commands-silent.mp4"),
+            silent: clip(30)
+                .video_only()
+                .make(refs::AREA, "commands-silent.mp4"),
         }
     })
 }
@@ -247,7 +249,7 @@ fn probe_names_every_container_family_in_text_and_json() {
     let m = media();
     let r = Refs::open(refs::AREA);
     let mut cases: Vec<(PathBuf, &str, &str, &str)> = vec![(m.wav.clone(), "WAV", "null", "pcm")];
-    for (file, _, container, codec) in refs::TONES {
+    for (file, container, codec) in refs::TONES {
         cases.push((r.path(file), container, "null", codec));
     }
     let m4a = clip(30).audio_only().make(refs::AREA, "commands-tone.m4a");

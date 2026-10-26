@@ -1,0 +1,63 @@
+[[ref]]
+name = "bframes.mp4.mkv"
+file = ""
+sha256 = "65bf7a7aab6f2a5c5957b1fb5aa54e37daea19907c1ae846a6e1890bdf0e5011"
+kind = "bit-exact"
+tool = "x264 0.165.3222 b35605a"
+command = "x264 --demuxer y4m --muxer mkv --threads 1 --preset ultrafast --no-scenecut --quiet --no-progress --bframes 3 --keyint 30 --crf 40 -o {out} {src}"
+
+[[ref]]
+name = "bframes.mp4"
+file = "bframes.mp4"
+sha256 = "ae1a7e162a059e62f7995d9153b85ee80492b0192ec3a90ef1805656d1452636"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:bframes.mp4.mkv}'s frames at their Matroska times in our MP4 writer"
+
+[[ref]]
+name = "bframes.flv"
+file = "bframes.flv"
+sha256 = "2d54c3b12411938c474ae9a7c64cdf3544b757642aaab6e03e510602ac852014"
+kind = "fixture"
+tool = "x264 0.165.3222 b35605a"
+command = "x264 --demuxer y4m --muxer flv --threads 1 --preset ultrafast --no-scenecut --quiet --no-progress --bframes 3 --keyint 30 --crf 40 -o {out} {src}"
+
+[[ref]]
+name = "tone.m4a"
+file = "tone.m4a"
+sha256 = "670d2e894f0e7924053d42f52cd5282f15c2a8f56e3cb73bfd976ec43ed68c46"
+kind = "fixture"
+tool = "FAAC 2.1.0"
+command = "faac -P -R 48000 -B 16 -C 2 -b 64 -o {out} {src}"
+
+[[ref]]
+name = "tone.aac"
+file = "tone.aac"
+sha256 = "225b840e8a4454037b56df6a508beba9c15135771a4eba92b00ae189db55d4ba"
+kind = "fixture"
+tool = "FAAC 2.1.0"
+command = "faac -P -R 48000 -B 16 -C 2 -b 64 -o {out} {src}"
+
+[[ref]]
+name = "hevc.hevc"
+file = ""
+sha256 = "07302cd5005884ad84eda9f07df16b0bd2c5dfd4aa610815dd4907eb1353d03f"
+kind = "bit-exact"
+tool = "x265 [info]: HEVC encoder version 4.3"
+command = "x265 --input {src} --input-res 160x120 --fps 30 --input-csp i420 --frames 30 --preset ultrafast --bframes 4 --keyint 30 --no-scenecut --crf 40 --frame-threads 1 --no-wpp --pools none --log-level error --no-info --no-progress --csv hevc.hevc.csv --csv-log-level 1 --output {out}"
+
+[[ref]]
+name = "hevc.mov"
+file = "hevc.mov"
+sha256 = "f03610ee44dfaa6831105850ffe4a1b04ec17e2f2910ecaa200738c99bb051e0"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:hevc.hevc} in our MOV writer, its times from the x265 csv's POCs"
+
+[[ref]]
+name = "hevc.mov.pocs"
+file = "hevc.mov.pocs"
+sha256 = "72b796b8f30c7e3c5ec2896d7b2d53fb79e45d5607aa2a674845bc6cee553d6d"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the POC of each frame of {ref:hevc.hevc} in decode order, from its x265 csv"

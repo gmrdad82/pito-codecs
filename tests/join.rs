@@ -189,7 +189,12 @@ fn remuxed(parts: &[(&Path, bool)], name: &str) -> PathBuf {
         let mut lanes = Vec::new();
         for (from, video) in parts {
             let r = mp4::Reader::open(from).unwrap();
-            let k = if *video { r.video() } else { r.audio().first().copied() }.unwrap();
+            let k = if *video {
+                r.video()
+            } else {
+                r.audio().first().copied()
+            }
+            .unwrap();
             let t = &r.tracks[k];
             let cfg = mp4::TrackConfig {
                 media_start: t.edits.first().map(|e| e.media_time).filter(|m| *m > 0),
@@ -276,7 +281,9 @@ impl Clips {
 
     fn slower(&self) -> &'static PathBuf {
         static AT: OnceLock<PathBuf> = OnceLock::new();
-        once(&AT, || made(Clip::new((352, 240), (25, 1), 25), "js-25.mp4"))
+        once(&AT, || {
+            made(Clip::new((352, 240), (25, 1), 25), "js-25.mp4")
+        })
     }
 
     fn silent(&self) -> &'static PathBuf {
@@ -796,9 +803,12 @@ fn a_join_refuses_bad_clips_and_outputs_by_name_and_leaves_nothing() {
     );
     let inside = folder.join("inside.mp4");
     std::fs::copy(c.plain(), &inside).unwrap();
-    let e = join(&[c.plain().clone(), inside.clone()], &inside, opts(), |_| {
-        true
-    })
+    let e = join(
+        &[c.plain().clone(), inside.clone()],
+        &inside,
+        opts(),
+        |_| true,
+    )
     .unwrap_err()
     .to_string();
     assert_eq!(
