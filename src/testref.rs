@@ -204,7 +204,11 @@ pub enum Probe {
         find: String,
         upto: String,
     },
-    Library { path: String, call: String, int: bool },
+    Library {
+        path: String,
+        call: String,
+        int: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,10 +340,9 @@ impl Tools {
     }
 
     pub fn pin(&self, name: &str) -> Result<&Pin, String> {
-        self.pins
-            .iter()
-            .find(|p| p.name == name)
-            .ok_or_else(|| format!("{name} is not pinned in tests/refs/{TOOLS}; add its table first"))
+        self.pins.iter().find(|p| p.name == name).ok_or_else(|| {
+            format!("{name} is not pinned in tests/refs/{TOOLS}; add its table first")
+        })
     }
 }
 
@@ -442,7 +445,7 @@ impl Refs {
             .and_then(|t| Manifest::parse(&t))
             .unwrap_or_else(|e| {
                 panic!(
-                    "{}: {e}; record it with `{}` where ffmpeg exists",
+                    "{}: {e}; record it with `{}` where the tools pinned in tests/refs/TOOLS.toml exist",
                     path.display(),
                     rerecord(area)
                 )
@@ -477,7 +480,7 @@ impl Refs {
         let got = sha256(&bytes);
         assert!(
             got == e.sha256,
-            "{}: sha256 {got}, the manifest records {}; rerun `{}` where ffmpeg exists",
+            "{}: sha256 {got}, the manifest records {}; rerun `{}` where the tools pinned in tests/refs/TOOLS.toml exist",
             path.display(),
             e.sha256,
             rerecord(&self.area)

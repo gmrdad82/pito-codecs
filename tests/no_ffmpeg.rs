@@ -117,7 +117,9 @@ pub fn names_in_manifest(text: &str) -> Vec<usize> {
 
 fn offenders_in(root: &Path) -> Vec<String> {
     let mut files = Vec::new();
-    for d in ["src", "tests", "examples", "benches", "fuzz", "bin", "render"] {
+    for d in [
+        "src", "tests", "examples", "benches", "fuzz", "bin", "render",
+    ] {
         walk(&root.join(d), &mut files);
     }
     let mut found = Vec::new();

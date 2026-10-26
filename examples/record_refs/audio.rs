@@ -53,6 +53,7 @@ pub fn made(
         args: words(what),
         take: Take::Keep,
         lib: None,
+        settle: None,
     }
 }
 

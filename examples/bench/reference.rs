@@ -632,7 +632,10 @@ pub mod tests {
         let ok = r.check_inputs(&dir);
         let unhashed = one_input("").check_inputs(&dir).unwrap_err().to_string();
         let _ = fs::remove_dir_all(&dir);
-        assert!(missing.ends_with(&format!("a.mp4 is missing; {REMAKE}")), "{missing}");
+        assert!(
+            missing.ends_with(&format!("a.mp4 is missing; {REMAKE}")),
+            "{missing}"
+        );
         assert!(
             short.ends_with(&format!(
                 "is 2 bytes, the reference was measured on 3; {REMAKE}"
@@ -688,8 +691,14 @@ pub mod tests {
         hashed.hash_inputs(&dir).unwrap();
         let _ = fs::remove_dir_all(&dir);
         assert!(first.is_ok());
-        assert!(cache.starts_with("a.mp4\t3\t") && cache.trim_end().ends_with(ABC), "{cache}");
-        assert!(cached.contains(&format!("has sha256 {}", "0".repeat(64))), "{cached}");
+        assert!(
+            cache.starts_with("a.mp4\t3\t") && cache.trim_end().ends_with(ABC),
+            "{cache}"
+        );
+        assert!(
+            cached.contains(&format!("has sha256 {}", "0".repeat(64))),
+            "{cached}"
+        );
         assert!(touched.is_ok());
         assert_eq!(hashed.inputs["a.mp4"].sha256, ABC);
     }
@@ -733,7 +742,10 @@ pub mod tests {
         ] {
             let text = text.replace("\"raw-1080.yuv\" = { bytes = 3 }", bad);
             let err = Reference::parse(&text).unwrap_err();
-            assert!(err.ends_with("bad input") || err.ends_with("bad value"), "{bad}: {err}");
+            assert!(
+                err.ends_with("bad input") || err.ends_with("bad value"),
+                "{bad}: {err}"
+            );
         }
     }
 
@@ -751,7 +763,10 @@ pub mod tests {
             if to.contains('"') {
                 assert!(err.ends_with("bad case field"), "{to}: {err}");
             } else {
-                assert_eq!(err, "case first-frame.h264.1440.cpu needs a value above 0", "{to}");
+                assert_eq!(
+                    err, "case first-frame.h264.1440.cpu needs a value above 0",
+                    "{to}"
+                );
             }
         }
     }
@@ -766,7 +781,10 @@ pub mod tests {
             ("runs = [85.2]", "runs = [-1.0]"),
         ] {
             let err = Reference::parse(&base.replace(from, to)).unwrap_err();
-            assert_eq!(err, "case first-frame.h264.1440.cpu needs runs above 0", "{to}");
+            assert_eq!(
+                err, "case first-frame.h264.1440.cpu needs runs above 0",
+                "{to}"
+            );
         }
     }
 
@@ -774,9 +792,17 @@ pub mod tests {
     fn duplicate_tables_and_keys_are_refused() {
         let base = sample().render();
         let twice = format!("{base}\n[cases.\"first-frame.h264.1440.cpu\"]\nunit = \"ms\"\n");
-        assert!(Reference::parse(&twice).unwrap_err().ends_with("duplicate table"));
+        assert!(
+            Reference::parse(&twice)
+                .unwrap_err()
+                .ends_with("duplicate table")
+        );
         let inputs = format!("{base}\n[inputs]\n\"b.mp4\" = 4\n");
-        assert!(Reference::parse(&inputs).unwrap_err().ends_with("duplicate table"));
+        assert!(
+            Reference::parse(&inputs)
+                .unwrap_err()
+                .ends_with("duplicate table")
+        );
         for (from, to) in [
             ("value = 85.2\n", "value = 85.2\nvalue = 90.0\n"),
             ("runs = 3\n", "runs = 3\nruns = 4\n"),
@@ -798,7 +824,10 @@ pub mod tests {
             .replace("format = 1", "format=1")
             .replace("unit = \"ms\"", "unit=\"ms\"")
             .replace("value = 85.2", "value   =   85.2")
-            .replace("\"raw-1080.yuv\" = { bytes = 3 }", "\"raw-1080.yuv\"={bytes=3}");
+            .replace(
+                "\"raw-1080.yuv\" = { bytes = 3 }",
+                "\"raw-1080.yuv\"={bytes=3}",
+            );
         assert_eq!(Reference::parse(&tight).unwrap(), sample());
         let bare = base.replace("os = ", "o s = ");
         assert!(Reference::parse(&bare).unwrap_err().ends_with("bad key"));
@@ -809,7 +838,10 @@ pub mod tests {
         let r = sample();
         assert!(r.same_ffmpeg(&r.ffmpeg, &r.configuration).is_ok());
         let other = "ffmpeg version 9.1 Copyright (c) 2000-2026 the FFmpeg developers";
-        let err = r.same_ffmpeg(other, &r.configuration).unwrap_err().to_string();
+        let err = r
+            .same_ffmpeg(other, &r.configuration)
+            .unwrap_err()
+            .to_string();
         assert_eq!(
             err,
             format!(

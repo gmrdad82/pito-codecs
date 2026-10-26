@@ -493,12 +493,7 @@ fn encode_cpu(frames: &[Frame], w: u32, h: u32) -> Res<(f64, Vec<Vec<u8>>)> {
     Ok((t.elapsed().as_secs_f64(), out))
 }
 
-fn encode_gpu(
-    frames: &[Frame],
-    w: u32,
-    h: u32,
-    codec: Codec,
-) -> Res<(f64, Vec<Vec<u8>>, String)> {
+fn encode_gpu(frames: &[Frame], w: u32, h: u32, codec: Codec) -> Res<(f64, Vec<Vec<u8>>, String)> {
     let t = Instant::now();
     let mut enc = HwEncoder::new(
         codec,
@@ -1186,13 +1181,7 @@ impl Bench {
                 }
                 Ok(m)
             })();
-            self.add(
-                id,
-                "audio",
-                "AAC DECODE, 48 KHZ STEREO",
-                true,
-                m,
-            );
+            self.add(id, "audio", "AAC DECODE, 48 KHZ STEREO", true, m);
         }
         let id = "audio.aac.encode";
         if self.want(&[id]) {
@@ -1252,13 +1241,7 @@ impl Bench {
                 }
                 Ok(m)
             })();
-            self.add(
-                id,
-                "audio",
-                "AAC ENCODE, 128 KBPS STEREO",
-                true,
-                m,
-            );
+            self.add(id, "audio", "AAC ENCODE, 128 KBPS STEREO", true, m);
         }
         let id = "audio.r128";
         if self.want(&[id]) {
@@ -1322,13 +1305,7 @@ impl Bench {
                 m.ffmpeg = repeat(runs, || Ok(seconds / ffmpeg_run(&args, true)?.0))?;
                 Ok(m)
             })();
-            self.add(
-                id,
-                "audio",
-                "EBU R128 LOUDNESS, 48 KHZ STEREO",
-                true,
-                m,
-            );
+            self.add(id, "audio", "EBU R128 LOUDNESS, 48 KHZ STEREO", true, m);
         }
     }
 
@@ -2433,7 +2410,12 @@ mod tests {
             }
         }
         for h in [1080, 1440] {
-            for k in ["h264.cpu.medium", "h264.cpu.veryfast", "h264.gpu", "hevc.gpu"] {
+            for k in [
+                "h264.cpu.medium",
+                "h264.cpu.veryfast",
+                "h264.gpu",
+                "hevc.gpu",
+            ] {
                 ids.push(format!("encode.{h}.{k}"));
             }
             for k in ["copy", "reencode"] {
@@ -2562,12 +2544,15 @@ mod tests {
     #[test]
     fn a_case_with_no_reference_is_reported_missing_not_measured() {
         let mut r = reference::tests::sample();
-        r.cases
-            .get_mut("decode.h264.1080.cpu-1t")
-            .unwrap()
-            .unit = "ms".into();
+        r.cases.get_mut("decode.h264.1080.cpu-1t").unwrap().unit = "ms".into();
         let mut b = bench_with(r);
-        b.add("scale.1440to1080", "pipeline", "SCALE", true, ours(&[900.0]));
+        b.add(
+            "scale.1440to1080",
+            "pipeline",
+            "SCALE",
+            true,
+            ours(&[900.0]),
+        );
         b.add(
             "decode.h264.1080.cpu-1t",
             "decode",
@@ -2786,11 +2771,19 @@ mod tests {
         r.cpu = "Apple M4".into();
         r.gpu = "Apple M4".into();
         r.os = "Darwin 25.1.0".into();
-        assert!(docs::ffmpeg_names(&r).0.starts_with("APPLE M4, APPLE M4 (VIDEOTOOLBOX), FFMPEG"));
+        assert!(
+            docs::ffmpeg_names(&r)
+                .0
+                .starts_with("APPLE M4, APPLE M4 (VIDEOTOOLBOX), FFMPEG")
+        );
         r.os = "Windows 11".into();
         assert!(docs::ffmpeg_names(&r).0.contains(" (MEDIA FOUNDATION), "));
         r.os = "FreeBSD 15".into();
-        assert!(docs::ffmpeg_names(&r).0.starts_with("APPLE M4, APPLE M4, FFMPEG"));
+        assert!(
+            docs::ffmpeg_names(&r)
+                .0
+                .starts_with("APPLE M4, APPLE M4, FFMPEG")
+        );
     }
 
     #[test]
@@ -2799,9 +2792,7 @@ mod tests {
         let r = reference::tests::sample();
         let results = s.0.join("results.json");
         let old = "ffmpeg version 9.0.0 Copyright (c) 2000-2026 the FFmpeg developers";
-        let doc = |ffmpeg: &str| {
-            serde_json::json!({"date": "2026-10-15", "commit": "abc", "machine": {"ffmpeg": ffmpeg}, "rows": []})
-        };
+        let doc = |ffmpeg: &str| serde_json::json!({"date": "2026-10-15", "commit": "abc", "machine": {"ffmpeg": ffmpeg}, "rows": []});
         fs::write(&results, doc(old).to_string()).unwrap();
         let err = docs::charts(&results, &s.0.join("charts"), &r)
             .unwrap_err()
@@ -2836,8 +2827,22 @@ mod tests {
     #[test]
     fn every_run_argument_is_read() {
         let given = strings(&[
-            "--runs", "5", "--only", "decode", "--only", "audio", "--out", "o", "--images", "i",
-            "--fixtures", "f", "--reference", "r.toml", "--charts-only", "--no-charts",
+            "--runs",
+            "5",
+            "--only",
+            "decode",
+            "--only",
+            "audio",
+            "--out",
+            "o",
+            "--images",
+            "i",
+            "--fixtures",
+            "f",
+            "--reference",
+            "r.toml",
+            "--charts-only",
+            "--no-charts",
             "--record-ffmpeg",
         ]);
         let want = Opts {
@@ -2869,12 +2874,21 @@ mod tests {
     fn bad_run_arguments_are_refused_in_one_line() {
         for (given, want) in [
             (vec!["--runs"], "--runs needs a value"),
-            (vec!["--runs", "many"], "--runs takes a whole number, not many"),
+            (
+                vec!["--runs", "many"],
+                "--runs takes a whole number, not many",
+            ),
             (vec!["--reference"], "--reference needs a value"),
             (vec!["--only"], "--only needs a value"),
             (vec!["--out"], "--out needs a value"),
-            (vec!["--fast"], "unknown --fast; bench --help gives the usage"),
-            (vec!["decode"], "unknown decode; bench --help gives the usage"),
+            (
+                vec!["--fast"],
+                "unknown --fast; bench --help gives the usage",
+            ),
+            (
+                vec!["decode"],
+                "unknown decode; bench --help gives the usage",
+            ),
             (
                 vec!["--record-ffmpeg", "--hash-inputs"],
                 "--record-ffmpeg and --hash-inputs don't go together",
@@ -2918,7 +2932,12 @@ mod tests {
         }
         assert_eq!(parse_args(&strings(&["--help"])).unwrap(), Mode::Help);
         assert_eq!(parse_args(&strings(&["-h", "x"])).unwrap(), Mode::Help);
-        for flag in ["--record-ffmpeg", "--hash-inputs", "owner's call", "never runs ffmpeg"] {
+        for flag in [
+            "--record-ffmpeg",
+            "--hash-inputs",
+            "owner's call",
+            "never runs ffmpeg",
+        ] {
             assert!(USAGE.contains(flag), "{flag}");
         }
     }
@@ -2956,7 +2975,10 @@ mod tests {
         assert!(absent.starts_with(&path.display().to_string()), "{absent}");
         fs::write(&path, "format = 1\nbroken\n").unwrap();
         let broken = record_base(true, &path, VERSION).unwrap_err().to_string();
-        assert_eq!(broken, format!("{}: line 2: not key = value", path.display()));
+        assert_eq!(
+            broken,
+            format!("{}: line 2: not key = value", path.display())
+        );
         let mut r = reference::tests::sample();
         fs::write(&path, r.render()).unwrap();
         let other = record_base(true, &path, VERSION).unwrap_err().to_string();
@@ -3061,8 +3083,8 @@ mod tests {
         r.inputs.clear();
         let path = s.0.join("out/ffmpeg-reference.toml");
         let skipped = strings(&["scale.1440to720", "audio.r128"]);
-        let line = write_reference(r.clone(), m, "2026-10-25".into(), 3, &a, &path, &skipped)
-            .unwrap();
+        let line =
+            write_reference(r.clone(), m, "2026-10-25".into(), 3, &a, &path, &skipped).unwrap();
         assert_eq!(
             line,
             format!(
@@ -3222,9 +3244,13 @@ mod tests {
             .to_string();
         assert_eq!(short, "our H.264 decoder gave 3 frames of 2");
         let small = pattern(64, 48, 3);
-        let sized = psnr_of(Codec::H264, &packets, &small).unwrap_err().to_string();
+        let sized = psnr_of(Codec::H264, &packets, &small)
+            .unwrap_err()
+            .to_string();
         assert_eq!(sized, "a decoded 128x96 plane against a raw 64x48 one");
-        let vp9 = psnr_of(Codec::Vp9, &packets, &frames).unwrap_err().to_string();
+        let vp9 = psnr_of(Codec::Vp9, &packets, &frames)
+            .unwrap_err()
+            .to_string();
         assert!(vp9.ends_with("quality"), "{vp9}");
         assert!(psnr_of(Codec::Hevc, &[vec![0, 0, 0, 1, 0x40]], &frames).is_err());
     }

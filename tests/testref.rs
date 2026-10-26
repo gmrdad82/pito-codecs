@@ -475,7 +475,10 @@ fn a_broken_pin_file_is_refused_with_its_reason() {
             "[x]\nversion = \"x\"\nlibrary = \"/l.so\"\nline = \"1\"\n",
             "needs one of version or library",
         ),
-        ("[x]\nlibrary = \"/l.so\"\nline = \"1\"\n", "a library needs call"),
+        (
+            "[x]\nlibrary = \"/l.so\"\nline = \"1\"\n",
+            "a library needs call",
+        ),
         (
             "[x]\nlibrary = \"/l.so\"\ncall = \"v\"\nupto = \" \"\nline = \"1\"\n",
             "find and upto go with version",
@@ -490,8 +493,14 @@ fn a_broken_pin_file_is_refused_with_its_reason() {
         ),
         ("[x]\nversion = \"  \"\nline = \"1\"\n", "version is empty"),
         ("line = \"1\"\n", "line 1: 'line' comes before any [tool]"),
-        ("[x]\nline = \"1\"\nline = \"2\"\n", "line 3: 'line' given twice"),
-        ("[a b]\nline = \"1\"\n", "line 1: '[a b]' is not a [tool] header"),
+        (
+            "[x]\nline = \"1\"\nline = \"2\"\n",
+            "line 3: 'line' given twice",
+        ),
+        (
+            "[a b]\nline = \"1\"\n",
+            "line 1: '[a b]' is not a [tool] header",
+        ),
     ];
     for (text, want) in cases {
         let err = Tools::parse(text).unwrap_err();

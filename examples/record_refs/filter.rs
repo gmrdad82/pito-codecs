@@ -1,5 +1,5 @@
 use crate::testref;
-use crate::{Def, OURS, sha, tool, words};
+use crate::{Def, MP4_CLOCK, OURS, mp4_clock_zeroed, sha, tool, words};
 
 #[allow(dead_code)]
 #[path = "../../src/filter/refs.rs"]
@@ -60,7 +60,7 @@ fn edges() -> Vec<Def> {
         let made = if f.hevc {
             Def::digest(front::AREA, f.out(), f.tool(), all, sha)
         } else {
-            Def::fixture(front::AREA, f.out(), f.tool(), all)
+            Def::fixture(front::AREA, f.out(), f.tool(), all).settled(MP4_CLOCK, mp4_clock_zeroed)
         };
         defs.push(made.from(|| Ok(front::source_bytes())));
         if f.hevc {

@@ -460,6 +460,7 @@ fn pinned(
         args: words(what),
         take: Take::Digest(sha),
         lib: Some(lib),
+        settle: None,
     }
 }
 

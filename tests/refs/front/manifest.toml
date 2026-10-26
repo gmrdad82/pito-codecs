@@ -57,15 +57,15 @@ command = "examples/record_refs: examples/record_refs/filter.rs hevc_mp4(\"hevc-
 [[ref]]
 name = "h264-untagged.mp4"
 file = "h264-untagged.mp4"
-sha256 = "e93f9af3036d33d3f3b406fc0732326713e5420aa4f2d62c91e0113721fdad82"
+sha256 = "5ab58315b97b4eae5da621091125da86fafde4da6b456206cb40d272aa61ead9"
 kind = "fixture"
 tool = "x264 0.165.3222 b35605a"
-command = "x264 --demuxer raw --input-csp i420 --input-res 352x240 --fps 10 --frames 65 --preset ultrafast --crf 51 --keyint 5 --min-keyint 5 --scenecut 0 --bframes 0 --threads 1 --quiet --muxer mp4 -o {out} {src}"
+command = "x264 --demuxer raw --input-csp i420 --input-res 352x240 --fps 10 --frames 65 --preset ultrafast --crf 51 --keyint 5 --min-keyint 5 --scenecut 0 --bframes 0 --threads 1 --quiet --muxer mp4 -o {out} {src}; examples/record_refs: mp4_clock_zeroed (mvhd, tkhd and mdhd times set to 0)"
 
 [[ref]]
 name = "h264-anamorphic-full.mp4"
 file = "h264-anamorphic-full.mp4"
-sha256 = "739bae2f81fc92936a8061b3bf9a9ed77f9b3b3e282d83c7e6b4e1888c9ec119"
+sha256 = "278d875f7c9ef1baf51620bbf68956cc8c738756be8d9c6daa65a495c865b1e2"
 kind = "fixture"
 tool = "x264 0.165.3222 b35605a"
-command = "x264 --demuxer raw --input-csp i420 --input-res 352x240 --fps 10 --frames 65 --preset ultrafast --crf 51 --keyint 5 --min-keyint 5 --scenecut 0 --bframes 0 --threads 1 --quiet --sar 8:9 --colorprim bt709 --transfer bt709 --colormatrix bt709 --range pc --input-range pc --muxer mp4 -o {out} {src}"
+command = "x264 --demuxer raw --input-csp i420 --input-res 352x240 --fps 10 --frames 65 --preset ultrafast --crf 51 --keyint 5 --min-keyint 5 --scenecut 0 --bframes 0 --threads 1 --quiet --sar 8:9 --colorprim bt709 --transfer bt709 --colormatrix bt709 --range pc --input-range pc --muxer mp4 -o {out} {src}; examples/record_refs: mp4_clock_zeroed (mvhd, tkhd and mdhd times set to 0)"

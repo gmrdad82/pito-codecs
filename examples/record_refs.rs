@@ -40,9 +40,12 @@ pub struct Def {
     pub args: Vec<String>,
     pub take: Take,
     pub lib: Option<&'static str>,
+    pub settle: Option<Settle>,
 }
 
 pub type Make = Box<dyn Fn(&Path) -> Result<(), String>>;
+
+pub type Settle = (&'static str, fn(&mut [u8]) -> Result<(), String>);
 
 pub enum Take {
     Keep,
@@ -67,6 +70,7 @@ impl Def {
             args,
             take: Take::Keep,
             lib: None,
+            settle: None,
         }
     }
 
@@ -104,6 +108,7 @@ impl Def {
             args,
             take: Take::Digest(f),
             lib: None,
+            settle: None,
         }
     }
 
@@ -123,26 +128,84 @@ impl Def {
         self
     }
 
+    pub fn settled(mut self, what: &'static str, f: fn(&mut [u8]) -> Result<(), String>) -> Def {
+        self.settle = Some((what, f));
+        self
+    }
+
     pub fn from(mut self, make: impl Fn() -> Result<Vec<u8>, String> + 'static) -> Def {
         self.make = Some(Box::new(move |at| testref::write_atomic(at, &make()?)));
         self
     }
 }
 
+pub const MP4_CLOCK: &str = "mp4_clock_zeroed (mvhd, tkhd and mdhd times set to 0)";
+
+pub fn mp4_clock_zeroed(bytes: &mut [u8]) -> Result<(), String> {
+    let mut found = 0;
+    zero_clocks(bytes, &mut found)?;
+    if found == 0 {
+        return Err("no mvhd, tkhd or mdhd box to settle".into());
+    }
+    Ok(())
+}
+
+fn zero_clocks(data: &mut [u8], found: &mut usize) -> Result<(), String> {
+    let mut at = 0;
+    while at + 8 <= data.len() {
+        let small = u32::from_be_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
+        let kind = [data[at + 4], data[at + 5], data[at + 6], data[at + 7]];
+        let (head, size) = match small {
+            0 => (8, data.len() - at),
+            1 => {
+                let wide = data
+                    .get(at + 8..at + 16)
+                    .ok_or("a box cut inside its size")?;
+                let mut b = [0; 8];
+                b.copy_from_slice(wide);
+                let size = usize::try_from(u64::from_be_bytes(b)).map_err(|e| e.to_string())?;
+                (16, size)
+            }
+            n => (8, n as usize),
+        };
+        if size < head || at + size > data.len() {
+            return Err(format!(
+                "box {} at {at} runs past its parent",
+                String::from_utf8_lossy(&kind)
+            ));
+        }
+        let body = &mut data[at + head..at + size];
+        match &kind {
+            b"moov" | b"trak" | b"mdia" => zero_clocks(body, found)?,
+            b"mvhd" | b"tkhd" | b"mdhd" => {
+                let wide = match body.first() {
+                    Some(0) => 4,
+                    Some(1) => 8,
+                    _ => {
+                        return Err(format!(
+                            "{} with no version",
+                            String::from_utf8_lossy(&kind)
+                        ));
+                    }
+                };
+                let times = body
+                    .get_mut(4..4 + 2 * wide)
+                    .ok_or_else(|| format!("{} cut short", String::from_utf8_lossy(&kind)))?;
+                times.fill(0);
+                *found += 1;
+            }
+            _ => {}
+        }
+        at += size;
+    }
+    Ok(())
+}
+
 pub fn sha(bytes: &[u8]) -> Result<String, String> {
     Ok(testref::sha256(bytes))
 }
 
-pub const FFMPEG: &str = "ffmpeg";
 pub const OURS: &str = "";
-
-pub fn ff(args: &[&str]) -> Vec<String> {
-    ["-hide_banner", "-nostats", "-loglevel", "error", "-y"]
-        .iter()
-        .chain(args)
-        .map(|s| s.to_string())
-        .collect()
-}
 
 pub fn words(text: &str) -> Vec<String> {
     vec![text.to_string()]
@@ -171,7 +234,10 @@ pub fn lib_version(name: &str) -> Result<String, String> {
 
 fn pins() -> Result<&'static Tools, String> {
     static TOOLS: OnceLock<Result<Tools, String>> = OnceLock::new();
-    TOOLS.get_or_init(Tools::load).as_ref().map_err(Clone::clone)
+    TOOLS
+        .get_or_init(Tools::load)
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 #[cfg(target_os = "linux")]
@@ -202,7 +268,10 @@ fn call_version(path: &str, _call: &str, _int: bool) -> Result<String, String> {
 
 fn command_version(pin: &Pin) -> Result<String, String> {
     let Probe::Command { run, find, upto } = &pin.probe else {
-        return Err(format!("{} is pinned as a library, not a command", pin.name));
+        return Err(format!(
+            "{} is pinned as a library, not a command",
+            pin.name
+        ));
     };
     let o = Command::new(&run[0])
         .args(&run[1..])
@@ -232,9 +301,7 @@ fn checked(area: &str, defs: &[&Def]) -> Result<BTreeMap<&'static str, String>, 
         let line = if lib {
             lib_version(name)
         } else {
-            pins()
-                .and_then(|t| t.pin(name))
-                .and_then(command_version)
+            pins().and_then(|t| t.pin(name)).and_then(command_version)
         };
         lines.insert(name, line.map_err(|e| format!("{area} refused: {e}"))?);
     }
@@ -319,6 +386,12 @@ fn record(area: &str, defs: &[&Def]) -> Result<(), Box<dyn Error>> {
             }
             pinned[d.tool].clone()
         };
+        if let Some((_, settle)) = &d.settle {
+            let mut bytes = std::fs::read(&out)
+                .map_err(|e| format!("{label}: no output at {}: {e}", out.display()))?;
+            settle(&mut bytes).map_err(|e| format!("{label}: {e}"))?;
+            testref::write_atomic(&out, &bytes).map_err(|e| format!("{label}: {e}"))?;
+        }
         tools.insert(tool.clone());
         let bytes = std::fs::read(&out)
             .map_err(|e| format!("{label}: no output at {}: {e}", out.display()))?;
@@ -337,11 +410,14 @@ fn record(area: &str, defs: &[&Def]) -> Result<(), Box<dyn Error>> {
                 .into());
             }
         };
-        let command = if d.tool.is_empty() {
+        let mut command = if d.tool.is_empty() {
             format!("examples/record_refs: {}", d.args.join(" "))
         } else {
             format!("{} {}", d.tool, d.args.join(" "))
         };
+        if let Some((what, _)) = &d.settle {
+            command.push_str(&format!("; examples/record_refs: {what}"));
+        }
         entries.push(Entry {
             name: d.name.clone(),
             file: d.file.clone(),
