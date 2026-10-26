@@ -433,7 +433,6 @@ fn pace(session: &VTCompressionSession, codec: Codec, config: &EncoderConfig) ->
         Rate::Bitrate(kbps) => {
             let bps = CFNumber::new_i32(bits_per_second(kbps));
             require(set(session, average, bps.as_ref()), "the bitrate")?;
-            rate_limit(session, kbps);
         }
         Rate::Vbr { kbps, max_kbps } => {
             let bps = CFNumber::new_i32(bits_per_second(kbps));

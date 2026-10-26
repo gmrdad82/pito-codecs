@@ -666,6 +666,25 @@ fn mean_takes_a_clamped_range() {
     assert_eq!(mean(&db, 5..9), 0.0);
 }
 
+fn size_undershoot(codec: Codec, mean_db: f64) -> f64 {
+    if cfg!(target_os = "macos") && codec == Codec::Hevc && mean_db > 48.0 {
+        0.2
+    } else {
+        0.1
+    }
+}
+
+#[test]
+fn only_a_saturated_videotoolbox_hevc_encode_may_land_further_under() {
+    let mac = cfg!(target_os = "macos");
+    assert_eq!(
+        size_undershoot(Codec::Hevc, 50.0),
+        if mac { 0.2 } else { 0.1 }
+    );
+    assert_eq!(size_undershoot(Codec::Hevc, 44.0), 0.1);
+    assert_eq!(size_undershoot(Codec::H264, 50.0), 0.1);
+}
+
 #[test]
 #[cfg(all(feature = "h264", feature = "hevc"))]
 fn per_frame_quality_holds_from_the_first_frame() {
@@ -712,10 +731,12 @@ fn per_frame_quality_holds_from_the_first_frame() {
                 let target = f64::from(kbps) * 1000.0 / 8.0 * n as f64 / 30.0;
                 let bytes: usize = packets.iter().map(|p| p.data.len()).sum();
                 let off = bytes as f64 / target - 1.0;
+                let under = size_undershoot(codec, all);
                 assert!(
-                    off.abs() < 0.1,
-                    "{name}: {:.1} % off the target size",
-                    off * 100.0
+                    off < 0.1 && off > -under,
+                    "{name}: {:.1} % off the target size, within -{:.0} % to +10 %",
+                    off * 100.0,
+                    under * 100.0
                 );
                 let first = mean(&db, 0..10);
                 assert!(

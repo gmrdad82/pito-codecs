@@ -11,8 +11,9 @@ pub fn sad(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u32 
 }
 
 pub fn satd(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u32 {
-    check(a, sa, b, sb, w, h);
-    if w < 8 || h < 8 {
+    let n = if w < 8 || h < 8 { 4 } else { 8 };
+    check(a, sa, b, sb, w.next_multiple_of(n), h.next_multiple_of(n));
+    if n == 4 {
         #[cfg(target_arch = "x86_64")]
         if crate::media::isa::avx2() {
             return unsafe { satd4_avx2(a, sa, b, sb, w, h) };
@@ -334,7 +335,7 @@ unsafe fn satd8_avx2(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usiz
         let mut r = [_mm256_setzero_si256(); 8];
         for by in (0..h).step_by(8) {
             let mut bx = 0;
-            while bx + 16 <= w {
+            while bx + 8 < w {
                 for i in 0..8 {
                     let p = _mm256_cvtepu8_epi16(_mm_loadu_si128(
                         pa.add((by + i) * sa + bx) as *const __m128i

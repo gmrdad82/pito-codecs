@@ -236,6 +236,74 @@ fn distortion_kernels_match_scalar() {
     }
 }
 
+fn satd_scalar(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u32 {
+    if w < 8 || h < 8 {
+        dist::satd4_scalar(a, sa, b, sb, w, h)
+    } else {
+        dist::satd8_scalar(a, sa, b, sb, w, h)
+    }
+}
+
+#[test]
+fn distortion_kernels_match_scalar_at_every_size_an_edge_clips_to() {
+    let mut rng = Rng(91);
+    let a = texture(&mut rng, 80, 72);
+    let b = texture(&mut rng, 96, 72);
+    let bright = vec![255u8; 80 * 72];
+    let checker: Vec<u8> = (0..96 * 72)
+        .map(|i| if (i % 96 + i / 96) % 2 == 0 { 0 } else { 255 })
+        .collect();
+    for h in 1..=64usize {
+        for w in 1..=64usize {
+            let n = if w < 8 || h < 8 { 4 } else { 8 };
+            let (tw, th) = (w.next_multiple_of(n), h.next_multiple_of(n));
+            for (a, b) in [(&a, &b), (&bright, &checker)] {
+                let (ox, oy) = (rng.below(80 - tw + 1), rng.below(72 - th + 1));
+                let (pa, pb) = (&a[oy * 80 + ox..], &b[rng.below(96 - tw + 1)..]);
+                assert_eq!(
+                    dist::sad(pa, 80, pb, 96, w, h),
+                    dist::sad_scalar(pa, 80, pb, 96, w, h),
+                    "sad {w}x{h}"
+                );
+                assert_eq!(
+                    dist::sse(pa, 80, pb, 96, w, h),
+                    dist::sse_scalar(pa, 80, pb, 96, w, h),
+                    "sse {w}x{h}"
+                );
+                assert_eq!(
+                    dist::satd(pa, 80, pb, 96, w, h),
+                    satd_scalar(pa, 80, pb, 96, w, h),
+                    "satd {w}x{h}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn satd_counts_every_tile_a_clipped_block_covers() {
+    let a = vec![0u8; 64 * 32];
+    let mut b = vec![0u8; 64 * 32];
+    for y in 0..32 {
+        for x in 24..32 {
+            b[y * 64 + x] = 9;
+        }
+    }
+    let tile = dist::satd(&a[24..], 64, &b[24..], 64, 8, 8);
+    assert!(tile > 0);
+    assert_eq!(dist::satd(&a, 64, &b, 64, 28, 32), 4 * tile);
+    assert_eq!(dist::satd(&a, 64, &b, 64, 24, 32), 0);
+    let (a12, b12) = (&a[16..], &b[16..]);
+    assert_eq!(dist::satd(a12, 64, b12, 64, 12, 16), 2 * tile);
+}
+
+#[test]
+#[should_panic]
+fn satd_refuses_slices_shorter_than_the_tiles_it_reads() {
+    let (a, b) = (vec![0u8; 64 * 15 + 12], vec![0u8; 64 * 16]);
+    dist::satd(&a, 64, &b, 64, 12, 16);
+}
+
 #[test]
 fn motion_search_finds_a_subpel_shift() {
     let (w, h) = (192usize, 128usize);
