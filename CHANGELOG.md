@@ -1,5 +1,23 @@
 # Changelog
 
+## v3.0.0 — 2026-10-26
+
+### Changed
+
+- pito-codecs never runs ffmpeg or ffprobe: not in the library, not in pcod, not in the tests, the bench or the build. The route that handed work to a user's own ffmpeg is gone, which is why this is a major release.
+- Tests check against references recorded once from the reference tools themselves (x264, x265, libvpx, aom, SVT-AV1, rav1e, dav1d, FLAC, LAME, libopus, libvorbis, faac/faad, a52dec, libjpeg-turbo, libwebp and ImageMagick), pinned by version and checked by sha256.
+- The README speed charts compare against one recorded ffmpeg run, named with its version and date.
+
+### Fixed
+
+- Smart-cut output from x264 and HEVC sources with more than one sample entry decodes correctly, with each entry's own parameter sets.
+- MP4 decoding stops at the end of the edit list, so a trimmed remux no longer shows extra frames.
+- A seek that falls exactly between two frames picks the earlier one, the same everywhere.
+- QuickTime 24-bit and float PCM read every frame, whatever the sample table's layout.
+- MKV duration is right for video with B-frames.
+- A PNG whose transparency table is longer than its palette is read as libpng reads it.
+- Opus decoding from the middle of a stream starts from a longer pre-roll, so its first samples match a whole decode.
+- An MP4 with a single video sample gets a duration, so it can be joined.
 ## v2.1.0 — 2026-10-23
 
 ### Added
