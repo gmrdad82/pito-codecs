@@ -1,51 +1,11 @@
 use std::path::PathBuf;
-use std::process::Command;
 
 use crate::opus::ogg::{OggOpus, Writer};
 use crate::opus::{Mode, Packet};
+use crate::testref::Refs;
 
-fn dir() -> PathBuf {
-    let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp/test-opus");
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
-
-pub(crate) fn libopus() -> bool {
-    Command::new("ffmpeg")
-        .args(["-hide_banner", "-encoders"])
-        .output()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("libopus"))
-}
-
-fn run(args: &[&str]) {
-    let st = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-y"])
-        .args(args)
-        .status()
-        .unwrap();
-    assert!(st.success(), "ffmpeg {args:?}");
-}
-
-fn libopus_decode(path: &PathBuf) -> Vec<f32> {
-    let out = Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-c:a",
-            "libopus",
-            "-i",
-        ])
-        .arg(path)
-        .args(["-f", "f32le", "-"])
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    out.stdout
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
-}
+#[path = "refs.rs"]
+pub(crate) mod refs;
 
 fn snr_db(reference: &[f32], ours: &[f32]) -> f64 {
     let (mut s, mut n) = (0f64, 0f64);
@@ -56,84 +16,52 @@ fn snr_db(reference: &[f32], ours: &[f32]) -> f64 {
     10.0 * (s / n.max(1e-20)).log10()
 }
 
-const MUSIC: &str = "aevalsrc=0.3*sin(2*PI*220*t)+0.2*sin(2*PI*277.2*t+sin(2*PI*5*t))+0.15*sin(2*PI*329.6*t)*sin(2*PI*0.5*t)+0.05*sin(2*PI*3520*t)+0.08*(random(0)-0.5)*gt(mod(t\\,0.5)\\,0.45)|0.25*sin(2*PI*330*t)+0.2*sin(2*PI*440*t+0.3*sin(2*PI*3*t))+0.05*sin(2*PI*7040*t)+0.05*(random(1)-0.5):s=48000:d=3";
-const SPEECH: &str = "aevalsrc=(0.4*sin(2*PI*(120+20*sin(2*PI*3*t))*t)+0.2*sin(2*PI*(240+40*sin(2*PI*3*t))*t)+0.1*sin(2*PI*900*t)+0.05*(random(0)-0.5))*(0.6+0.4*sin(2*PI*4*t))*gt(sin(2*PI*1.3*t)\\,-0.6):s=48000:d=3";
+fn level_db(whole: &[f32], reference: &[f32], ours: &[f32]) -> f64 {
+    let s: f64 = whole.iter().map(|a| (*a as f64).powi(2)).sum::<f64>() / whole.len().max(1) as f64;
+    let e: f64 = reference
+        .iter()
+        .zip(ours)
+        .map(|(a, b)| (*a as f64 - *b as f64).powi(2))
+        .sum::<f64>()
+        / reference.len().max(1) as f64;
+    10.0 * (s / e.max(1e-20)).log10()
+}
 
 #[test]
 fn decode_matches_libopus() {
-    if !libopus() {
-        eprintln!("ffmpeg with libopus not found; skipping");
-        return;
-    }
-    let cases: [(&str, &str, &[&str], bool); 4] = [
-        ("music_160k", MUSIC, &["-b:a", "160k", "-vbr", "off"], true),
-        (
-            "speech_16k_voip",
-            SPEECH,
-            &["-ac", "1", "-b:a", "16k", "-application", "voip"],
-            false,
-        ),
-        ("music_32k_hybrid", MUSIC, &["-b:a", "32k"], false),
-        (
-            "music_51_256k",
-            MUSIC,
-            &[
-                "-af",
-                "pan=5.1|c0=c0|c1=c1|c2=0.5*c0+0.5*c1|c3=0.1*c0|c4=0.8*c0|c5=0.8*c1",
-                "-b:a",
-                "256k",
-                "-mapping_family",
-                "1",
-            ],
-            true,
-        ),
-    ];
-    for (name, source, args, celt) in cases {
-        let path = dir().join(format!("{name}.opus"));
-        let mut all = vec!["-f", "lavfi", "-i", source, "-c:a", "libopus"];
-        all.extend_from_slice(args);
-        let p = path.to_str().unwrap();
-        all.push(p);
-        run(&all);
-        let file = OggOpus::parse(&std::fs::read(&path).unwrap()).unwrap();
+    let r = Refs::open(refs::AREA);
+    for (name, _, _, celt) in refs::LIBOPUS {
+        let file = refs::stream(name);
+        let file = OggOpus::parse(&r.bytes(&file)).unwrap();
         let modes: Vec<Mode> = (0..file.packets.len())
             .filter_map(|i| Packet::parse(file.packet(i)).ok().map(|p| p.toc.mode))
             .collect();
         assert_eq!(modes.iter().all(|m| *m == Mode::CeltOnly), celt, "{name}");
         let ours = file.decode().unwrap();
-        let reference = libopus_decode(&path);
+        let channels = file.head.channels;
         let mut ours = ours.samples;
-        if file.head.channels == 6 {
+        if channels == 6 {
             for f in ours.chunks_exact_mut(6) {
                 let v = [f[0], f[2], f[1], f[5], f[3], f[4]];
                 f.copy_from_slice(&v);
             }
         }
+        let ours = refs::window::window(&ours, channels);
+        let reference = r.f32s(&refs::decoded(&refs::stream(name)));
         assert_eq!(ours.len(), reference.len(), "{name}: length");
+        let floor = if celt { 50.0 } else { 10.0 };
         let snr = snr_db(&reference, &ours);
-        eprintln!("{name}: {snr:.1} dB against libopus");
-        assert!(snr >= if celt { 50.0 } else { 10.0 }, "{name}: {snr:.1} dB");
+        assert!(snr >= floor, "{name}: {snr:.1} dB");
+        let at = |v: &[f32]| v.len() - refs::window::tail(v, channels).len();
+        let tail = level_db(&reference, &reference[at(&reference)..], &ours[at(&ours)..]);
+        assert!(tail >= floor, "{name}: last run {tail:.1} dB");
     }
 }
 
 #[test]
 fn ogg_rewrite_decodes_the_same() {
-    if !libopus() {
-        return;
-    }
-    let src = dir().join("rewrap_src.opus");
-    run(&[
-        "-f",
-        "lavfi",
-        "-i",
-        MUSIC,
-        "-c:a",
-        "libopus",
-        "-b:a",
-        "96k",
-        src.to_str().unwrap(),
-    ]);
-    let file = OggOpus::parse(&std::fs::read(&src).unwrap()).unwrap();
+    let r = Refs::open(refs::AREA);
+    let file = OggOpus::parse(&r.bytes(&refs::stream("music_32k_hybrid"))).unwrap();
     let mut w = Writer::new(Vec::new(), 7, &file.head, "pito-codecs").unwrap();
     let mut granule = 0i64;
     let end = file.end_granule().unwrap();
@@ -141,81 +69,16 @@ fn ogg_rewrite_decodes_the_same() {
         granule += crate::opus::packet::packet_samples_48k(file.packet(i)).unwrap() as i64;
         w.push(file.packet(i), granule.min(end)).unwrap();
     }
-    let dst = dir().join("rewrap_dst.opus");
-    std::fs::write(&dst, w.finish().unwrap()).unwrap();
-    let again = OggOpus::parse(&std::fs::read(&dst).unwrap()).unwrap();
+    let again = OggOpus::parse(&w.finish().unwrap()).unwrap();
     assert!(again.warnings.is_empty(), "{:?}", again.warnings);
     assert_eq!(again.samples(), file.samples());
-    assert_eq!(libopus_decode(&dst), libopus_decode(&src));
-}
-
-#[test]
-#[ignore]
-fn decode_speed() {
-    if !libopus() {
-        eprintln!("ffmpeg with libopus not found; skipping");
-        return;
+    assert_eq!(again.packets.len(), file.packets.len());
+    for i in 0..file.packets.len() {
+        assert_eq!(again.packet(i), file.packet(i), "packet {i}");
     }
-    let src = dir().join("speed.opus");
-    for (name, args) in [
-        ("celt 128k stereo", &["-b:a", "128k"][..]),
-        (
-            "silk 16k mono",
-            &["-ac", "1", "-b:a", "16k", "-application", "voip"][..],
-        ),
-    ] {
-        let mut all = vec![
-            "-f",
-            "lavfi",
-            "-i",
-            "aevalsrc=0.3*sin(2*PI*220*t)+0.2*sin(2*PI*277.2*t+sin(2*PI*5*t))+0.05*(random(0)-0.5)|0.25*sin(2*PI*330*t)+0.05*(random(1)-0.5):s=48000:d=120",
-            "-c:a",
-            "libopus",
-        ];
-        all.extend_from_slice(args);
-        all.push(src.to_str().unwrap());
-        run(&all);
-        let data = std::fs::read(&src).unwrap();
-        let mut ours = f64::MAX;
-        let mut out = None;
-        for _ in 0..3 {
-            let t = std::time::Instant::now();
-            out = Some(crate::opus::ogg::decode(&data).unwrap());
-            ours = ours.min(t.elapsed().as_secs_f64());
-        }
-        let out = out.unwrap();
-        let mut theirs = f64::MAX;
-        for _ in 0..3 {
-            let o = Command::new("ffmpeg")
-                .args([
-                    "-hide_banner",
-                    "-benchmark",
-                    "-threads",
-                    "1",
-                    "-c:a",
-                    "libopus",
-                    "-i",
-                ])
-                .arg(&src)
-                .args(["-f", "null", "-"])
-                .output()
-                .unwrap();
-            let text = String::from_utf8_lossy(&o.stderr);
-            let rtime = text
-                .split("rtime=")
-                .nth(1)
-                .and_then(|r| r.split('s').next())
-                .and_then(|r| r.parse::<f64>().ok())
-                .unwrap();
-            theirs = theirs.min(rtime);
-        }
-        let secs = out.frames() as f64 / 48000.0;
-        eprintln!(
-            "{name}: ours {:.0}x real time, ffmpeg libopus {:.0}x",
-            secs / ours,
-            secs / theirs
-        );
-    }
+    let (a, b) = (again.decode().unwrap(), file.decode().unwrap());
+    assert!(!a.samples.is_empty());
+    assert!(a.samples == b.samples);
 }
 
 fn vectors() -> Option<PathBuf> {
@@ -363,4 +226,26 @@ fn rfc8251_vectors() {
         }
     }
     assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
+fn the_window_tells_a_late_end_granule() {
+    let pcm = refs::signal(refs::SECONDS, 2);
+    let late = refs::signal(refs::SECONDS + 0.02, 2);
+    assert_eq!(&late[..pcm.len()], &pcm[..]);
+    let (want, got) = (
+        refs::window::window(&pcm, 2),
+        refs::window::window(&late, 2),
+    );
+    let at = |v: &[f32]| v.len() - refs::window::tail(v, 2).len();
+    assert!(level_db(&want, &want[at(&want)..], &got[at(&got)..]) < 10.0);
+    assert!(level_db(&want, &want[at(&want)..], &want[at(&want)..]) > 150.0);
+}
+
+#[test]
+fn the_signal_steps_down_inside_the_clip() {
+    let pcm = refs::signal(refs::SECONDS, 1);
+    let rms = |v: &[f32]| (v.iter().map(|x| x * x).sum::<f32>() / v.len() as f32).sqrt();
+    assert!(pcm.len() >= 12_000);
+    assert!(rms(&pcm[9_000..12_000]) < 0.4 * rms(&pcm[..9_000]));
 }

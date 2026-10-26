@@ -1,61 +1,13 @@
 use super::*;
-use std::path::PathBuf;
-use std::process::Command;
+use crate::testref::{Refs, assert_within, diff};
 
-fn dir() -> PathBuf {
-    let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp/test-aac");
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
-
-fn ffmpeg() -> bool {
-    Command::new("ffmpeg")
-        .arg("-version")
-        .output()
-        .is_ok_and(|o| o.status.success())
-}
+#[path = "refs.rs"]
+mod refs;
 
 fn signal(rate: u32, channels: u16, seconds: f32) -> AudioBuffer {
-    let n = (rate as f32 * seconds) as usize;
     let mut a = AudioBuffer::new(rate, channels);
-    let mut seed = 0x1234_5678u32;
-    for i in 0..n {
-        let t = i as f32 / rate as f32;
-        for c in 0..channels {
-            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            let noise = (seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5;
-            let f = 220.0 * (c as f32 + 1.0);
-            let s = 0.3 * (std::f32::consts::TAU * f * t).sin()
-                + 0.15 * (std::f32::consts::TAU * 1000.0 * t).sin()
-                + 0.05 * (std::f32::consts::TAU * 5000.0 * t).sin()
-                + 0.02 * noise;
-            a.samples.push(s);
-        }
-    }
+    a.samples = refs::signal(rate, channels, seconds);
     a
-}
-
-fn write_f32(path: &PathBuf, a: &AudioBuffer) {
-    let bytes: Vec<u8> = a.samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-    std::fs::write(path, bytes).unwrap();
-}
-
-fn ffmpeg_decode(path: &PathBuf) -> Vec<f32> {
-    let out = Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
-        .arg(path)
-        .args(["-f", "f32le", "-"])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    out.stdout
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .collect()
 }
 
 fn decode_adts(data: &[u8]) -> AudioBuffer {
@@ -70,43 +22,20 @@ fn decode_adts(data: &[u8]) -> AudioBuffer {
 
 #[test]
 fn decode_matches_ffmpeg_in_wave_channel_order() {
-    if !ffmpeg() {
-        return;
-    }
-    for (channels, layout, kbps) in [(2u16, "stereo", 128), (6, "5.1", 320)] {
-        let raw = dir().join(format!("in{channels}.f32"));
-        write_f32(&raw, &signal(48_000, channels, 2.0));
-        let aac = dir().join(format!("ff{channels}.aac"));
-        let st = Command::new("ffmpeg")
-            .args([
-                "-v",
-                "error",
-                "-y",
-                "-f",
-                "f32le",
-                "-ar",
-                "48000",
-                "-ch_layout",
-                layout,
-                "-i",
-            ])
-            .arg(&raw)
-            .args(["-c:a", "aac", "-aac_pns", "0", "-b:a", &format!("{kbps}k")])
-            .arg(&aac)
-            .status()
-            .unwrap();
-        assert!(st.success());
-        let reference = ffmpeg_decode(&aac);
-        let ours = decode_adts(&std::fs::read(&aac).unwrap());
-        assert_eq!(ours.channels, channels);
-        assert_eq!(ours.samples.len(), reference.len());
-        let worst = ours
-            .samples
-            .iter()
-            .zip(&reference)
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max);
-        assert!(worst < 1e-3, "{layout}: max error {worst}");
+    let r = Refs::open(refs::AREA);
+    for (channels, layout, _) in refs::STREAMS {
+        let bytes = r.bytes(&refs::stream(channels));
+        let ours = decode_adts(&bytes);
+        assert_eq!(ours.channels, channels, "{layout}");
+        let frames = split_adts(&bytes).unwrap().len();
+        assert_eq!(
+            ours.samples.len(),
+            frames * 1024 * channels as usize,
+            "{layout}"
+        );
+        let reference = r.f32s(&refs::decoded(channels));
+        let got = refs::window::window(&ours.samples, channels as usize);
+        assert_within(layout, &diff(&got, &reference), 1e-3, 1e-3);
     }
 }
 
@@ -206,4 +135,19 @@ fn speech_resample_keeps_the_band_and_drops_aliases() {
     }
     streamed.samples.extend(r.flush().samples);
     assert_eq!(streamed.samples, resample(&input, 44_100).samples);
+}
+
+#[test]
+fn the_window_tells_a_lost_or_extra_frame() {
+    let full = refs::signal(refs::RATE, 2, refs::SECONDS);
+    let want = refs::window::window(&full, 2);
+    let lost = refs::window::window(&full[..full.len() - 1024 * 2], 2);
+    let mut padded = full.clone();
+    padded.extend(std::iter::repeat_n(0.0, 1024 * 2));
+    let extra = refs::window::window(&padded, 2);
+    let short = refs::window::window(&full[..full.len() - 2], 2);
+    for (what, got) in [("lost", lost), ("extra", extra), ("short", short)] {
+        assert!(!diff(&got, &want).within(1e-3, 1e-3), "{what}");
+    }
+    assert_eq!(refs::window::tail(&full, 2), &full[full.len() - 64..]);
 }
