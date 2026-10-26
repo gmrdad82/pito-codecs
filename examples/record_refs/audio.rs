@@ -612,6 +612,7 @@ fn flac_defs() -> Vec<Def> {
     defs
 }
 
+#[cfg(target_os = "linux")]
 pub fn lib_path(name: &str) -> Result<String, String> {
     match &crate::pins()?.pin(name)?.probe {
         testref::Probe::Library { path, .. } => Ok(path.clone()),

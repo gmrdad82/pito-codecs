@@ -1,4 +1,4 @@
-use crate::audio::{Bytes, cut, f32_bytes, lib_path, mux};
+use crate::audio::{Bytes, cut, f32_bytes, mux};
 use crate::testref::{self, Kind};
 use crate::{Def, OURS, Take, sha, words};
 use std::path::Path;
@@ -11,17 +11,6 @@ mod refs;
 mod s16;
 
 use refs::{AREA, Case, End};
-
-const ORDER: [&[usize]; 8] = [
-    &[0],
-    &[0, 1],
-    &[0, 2, 1],
-    &[0, 1, 2, 3],
-    &[0, 2, 1, 3, 4],
-    &[0, 2, 1, 5, 3, 4],
-    &[0, 2, 1, 6, 5, 3, 4],
-    &[0, 2, 1, 7, 5, 6, 3, 4],
-];
 
 pub struct Encoded {
     pub headers: [Vec<u8>; 3],
@@ -57,9 +46,21 @@ fn source(c: &Case) -> Vec<Vec<f32>> {
 
 #[cfg(target_os = "linux")]
 mod lib {
-    use super::{Encoded, lib_path};
+    use super::Encoded;
+    use crate::audio::lib_path;
     use libloading::{Library, Symbol};
     use std::ffi::{CString, c_char, c_float, c_int, c_long, c_void};
+
+    const ORDER: [&[usize]; 8] = [
+        &[0],
+        &[0, 1],
+        &[0, 2, 1],
+        &[0, 1, 2, 3],
+        &[0, 2, 1, 3, 4],
+        &[0, 2, 1, 5, 3, 4],
+        &[0, 2, 1, 6, 5, 3, 4],
+        &[0, 2, 1, 7, 5, 6, 3, 4],
+    ];
 
     #[repr(C)]
     struct Packet {
@@ -235,7 +236,7 @@ mod lib {
                 return Err("libvorbisfile gave no stream info".into());
             }
             let channels = *vi.add(1) as usize;
-            let order = super::ORDER.get(channels.wrapping_sub(1)).copied();
+            let order = ORDER.get(channels.wrapping_sub(1)).copied();
             let mut out = Vec::new();
             let mut section: c_int = 0;
             loop {
