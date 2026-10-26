@@ -246,6 +246,10 @@ fn magick_webp(
     .from(move || Ok(frames()))
 }
 
+fn lossy(q: &str) -> [&str; 4] {
+    ["-define", "webp:lossless=false", "-quality", q]
+}
+
 fn still(name: &str, size: (u32, u32), ops: &[&str], img: impl Fn() -> Vec<u8> + 'static) -> Def {
     let mut a = vec!["-define", "webp:exact=true"];
     a.extend_from_slice(ops);
@@ -317,7 +321,8 @@ fn webp_defs() -> Vec<Def> {
         webp::ANIM,
         webp::ANIM_SIZE,
         &[
-            "-delay",
+            "-set",
+            "delay",
             &delay,
             "-loop",
             "0",
@@ -357,7 +362,7 @@ fn webp_defs() -> Vec<Def> {
         let q = case.quality.to_string();
         let (pic, size, name) = (case.pic, case.size, case.name);
         let lw = case.libwebp();
-        defs.push(still(&lw, size, &["-quality", &q], move || {
+        defs.push(still(&lw, size, &lossy(&q), move || {
             webp::picture(pic, size.0, size.1).data
         }));
         let file = lw.clone();
@@ -374,7 +379,7 @@ fn webp_defs() -> Vec<Def> {
     }
     let q = webp::ALPHA_QUALITY.to_string();
     let lw = format!("lw-{}", webp::LOSSY_ALPHA);
-    defs.push(still(&lw, webp::ALPHA_SIZE, &["-quality", &q], || {
+    defs.push(still(&lw, webp::ALPHA_SIZE, &lossy(&q), || {
         webp::alpha_image().data
     }));
     let file = lw.clone();

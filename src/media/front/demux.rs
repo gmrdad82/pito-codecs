@@ -369,6 +369,42 @@ impl Demux {
         }
     }
 
+    pub fn read_decodable(&self, track: usize, i: usize, buf: &mut Vec<u8>) -> Result<()> {
+        self.read_into(track, i, buf)?;
+        let Demux::Mp4(r) = self else {
+            return Ok(());
+        };
+        let Some(t) = r.tracks.get(track).filter(|t| t.entries.len() > 1) else {
+            return Ok(());
+        };
+        let Some(s) = t.samples.get(i).filter(|s| s.keyframe) else {
+            return Ok(());
+        };
+        let own = t.entries.get(s.entry as usize).map(|e| &e.codec);
+        let (n, sets): (u8, Vec<&[u8]>) = match (t.config(), own) {
+            (Some(CodecConfig::Avc(first)), Some(CodecConfig::Avc(c))) => (
+                first.length_size,
+                c.sps.iter().chain(&c.pps).map(Vec::as_slice).collect(),
+            ),
+            (Some(CodecConfig::Hevc(first)), Some(CodecConfig::Hevc(c))) => (
+                first.length_size,
+                c.arrays
+                    .iter()
+                    .flat_map(|a| a.nalus.iter().map(Vec::as_slice))
+                    .collect(),
+            ),
+            _ => return Ok(()),
+        };
+        let n = usize::from(n.clamp(1, 4));
+        let mut head = Vec::new();
+        for nal in sets {
+            head.extend_from_slice(&(nal.len() as u64).to_be_bytes()[8 - n..]);
+            head.extend_from_slice(nal);
+        }
+        buf.splice(0..0, head);
+        Ok(())
+    }
+
     pub fn seconds(&self, track: usize, ticks: i64) -> f64 {
         match self {
             Demux::Mp4(r) => r.tracks.get(track).map_or(0.0, |t| t.seconds(ticks)),
@@ -383,12 +419,12 @@ impl Demux {
         let (key, pts) = match self {
             Demux::Mp4(r) => {
                 let t = mp4_track(r, track)?;
-                let at = t.sample_at(t.ticks(from)).unwrap_or(0);
+                let at = t.sample_at(t.shown_at(from)).unwrap_or(0);
                 (t.keyframe_before(at), t.presentation(at).unwrap_or(shift))
             }
             Demux::Mkv(r) => {
                 let t = mkv_track(r.indexed_for(track)?, track)?;
-                let at = t.sample_at(t.ticks(from)).unwrap_or(0);
+                let at = t.sample_at(t.shown_at(from)).unwrap_or(0);
                 (
                     t.keyframe_before(at),
                     t.samples.get(at).map_or(shift, |s| s.pts),

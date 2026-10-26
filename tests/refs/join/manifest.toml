@@ -1,7 +1,7 @@
 [[ref]]
 name = "h264-422-10.mp4.mkv"
 file = ""
-sha256 = "17f88f2121f03a62afa05e59c5893ccd854f33fc97e14422f7df061596bed35e"
+sha256 = "5a7721b26bb4b69dcd8ade036d0feee8cf8bd9b96b61f14bdfd1dbe61a4b0c64"
 kind = "bit-exact"
 tool = "x264 0.165.3222 b35605a"
 command = "x264 --demuxer y4m --muxer mkv --threads 1 --preset ultrafast --no-scenecut --quiet --no-progress --crf 30 --output-csp i422 --output-depth 10 --profile high422 -o {out} {src}"
@@ -9,7 +9,7 @@ command = "x264 --demuxer y4m --muxer mkv --threads 1 --preset ultrafast --no-sc
 [[ref]]
 name = "h264-422-10.mp4"
 file = "h264-422-10.mp4"
-sha256 = "70e70a78f75bc42aa846c70ce88a6f87467987fefd08876b25f8a6244db9f3a2"
+sha256 = "833b41bdff938b1d62a7569e3aadc429207588495feb4cf43a815481849f5548"
 kind = "fixture"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: {ref:h264-422-10.mp4.mkv}'s frames at their Matroska times in our MP4 writer"
@@ -17,7 +17,7 @@ command = "examples/record_refs: {ref:h264-422-10.mp4.mkv}'s frames at their Mat
 [[ref]]
 name = "h264-444.mp4.mkv"
 file = ""
-sha256 = "4470125921704ee7664ec7f05367c9986742a6ca09a1c0c9645a4301fd115642"
+sha256 = "d59c18a59238dfccb74a7abd943149517f57a80caec255656a1121832383bb6e"
 kind = "bit-exact"
 tool = "x264 0.165.3222 b35605a"
 command = "x264 --demuxer y4m --muxer mkv --threads 1 --preset ultrafast --no-scenecut --quiet --no-progress --crf 30 --output-csp i444 --output-depth 8 --profile high444 -o {out} {src}"
@@ -25,7 +25,7 @@ command = "x264 --demuxer y4m --muxer mkv --threads 1 --preset ultrafast --no-sc
 [[ref]]
 name = "h264-444.mp4"
 file = "h264-444.mp4"
-sha256 = "5bae5d28a906b605af97ff7f0b66efef3834759f5a8ca8f6a06c0032c152c26b"
+sha256 = "ca3916f46b67ae4106a4fb3742bf5b5c647432bab525ea14d07fa703b464fcab"
 kind = "fixture"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: {ref:h264-444.mp4.mkv}'s frames at their Matroska times in our MP4 writer"
@@ -33,7 +33,7 @@ command = "examples/record_refs: {ref:h264-444.mp4.mkv}'s frames at their Matros
 [[ref]]
 name = "hevc-422.mp4.hevc"
 file = ""
-sha256 = "7d3c79e49defca968c0b0000eb55f795615da31f1f32210963340564472e1a22"
+sha256 = "1557fbd5bb11c8fa7fc43d5fe9c40a3b047bbeeb5f4005083849f9663cad6572"
 kind = "bit-exact"
 tool = "x265 [info]: HEVC encoder version 4.3"
 command = "x265 --input {src} --input-res 160x120 --fps 30 --input-csp i422 --frames 6 --preset ultrafast --bframes 0 --crf 30 --frame-threads 1 --no-wpp --pools none --log-level error --no-info --no-progress --output {out}"
@@ -41,7 +41,7 @@ command = "x265 --input {src} --input-res 160x120 --fps 30 --input-csp i422 --fr
 [[ref]]
 name = "hevc-422.mp4"
 file = "hevc-422.mp4"
-sha256 = "f2c3bb5bd868380952b79899ad983a386cf853c229335819f74d565e80e8f60d"
+sha256 = "076d5748fc6acae50a35369414384cb2e3d79dfc33e55d41d8c6dcbf2438d8cd"
 kind = "fixture"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: {ref:hevc-422.mp4.hevc} in our MP4 writer as hvc1"
@@ -49,7 +49,7 @@ command = "examples/record_refs: {ref:hevc-422.mp4.hevc} in our MP4 writer as hv
 [[ref]]
 name = "hevc.mp4.hevc"
 file = ""
-sha256 = "d74dc6ab8b499aa214a61089a94e2d78b9fdba05753e6c4f6405fb09ca54bcca"
+sha256 = "9840af5e9344def7a553895286ea93252aae54d39efe3899a66d32b1694a3386"
 kind = "bit-exact"
 tool = "x265 [info]: HEVC encoder version 4.3"
 command = "x265 --input {src} --input-res 352x240 --fps 30 --input-csp i420 --frames 6 --preset ultrafast --bframes 0 --crf 30 --frame-threads 1 --no-wpp --pools none --log-level error --no-info --no-progress --output {out}"
@@ -57,7 +57,7 @@ command = "x265 --input {src} --input-res 352x240 --fps 30 --input-csp i420 --fr
 [[ref]]
 name = "hevc.mp4"
 file = "hevc.mp4"
-sha256 = "c14fb1edebb43b2bd496eabccf584fc43bea0aa74054fe30d95898fc0b216135"
+sha256 = "f95e13a9f6da440c24fa86155565c9460147bf2d2dc3d9c8080edcb144f63223"
 kind = "fixture"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: {ref:hevc.mp4.hevc} in our MP4 writer as hvc1"

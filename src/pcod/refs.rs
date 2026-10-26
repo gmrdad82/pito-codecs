@@ -76,7 +76,7 @@ pub fn ticks_gif() -> Result<Vec<u8>, String> {
     encode(&frames, &GIF_DELAYS, gif_options()).map_err(|e| e.to_string())
 }
 
-pub const WEBP_SIZE: (u32, u32) = (256, 144);
+pub const WEBP_SIZE: (u32, u32) = (640, 360);
 pub const WEBP_INPUTS: [&str; 3] = ["ui", "pattern", "mandelbrot"];
 
 pub fn webp_size_name(input: &str) -> String {

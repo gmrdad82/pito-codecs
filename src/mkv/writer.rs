@@ -291,8 +291,27 @@ fn track_entry(t: &TrackConfig, number: u64) -> Vec<u8> {
 
 struct WTrack {
     cfg: TrackConfig,
-    last_ns: Option<i64>,
-    delta_ns: i64,
+    recent: Vec<i64>,
+    step_ns: Option<i64>,
+    top_ns: Option<i64>,
+}
+
+const RECENT: usize = 16;
+
+impl WTrack {
+    fn estimate(&mut self, pts_ns: i64) {
+        for &r in &self.recent {
+            let gap = pts_ns.abs_diff(r) as i64;
+            if gap > 0 {
+                self.step_ns = Some(self.step_ns.map_or(gap, |s| s.min(gap)));
+            }
+        }
+        if self.recent.len() == RECENT {
+            self.recent.remove(0);
+        }
+        self.recent.push(pts_ns);
+        self.top_ns = Some(self.top_ns.map_or(pts_ns, |t| t.max(pts_ns)));
+    }
 }
 
 struct Layout {
@@ -365,8 +384,9 @@ impl<W: Write + Seek> Writer<W> {
         self.has_video |= cfg.kind == TrackKind::Video;
         self.tracks.push(WTrack {
             cfg,
-            last_ns: None,
-            delta_ns: 0,
+            recent: Vec::new(),
+            step_ns: None,
+            top_ns: None,
         });
         Ok(self.tracks.len() - 1)
     }
@@ -493,16 +513,10 @@ impl<W: Write + Seek> Writer<W> {
             )));
         }
         let duration_ns = duration.map(|d| t.cfg.nanos(d as i64));
-        if let Some(last) = t.last_ns
-            && pts_ns > last
-        {
-            t.delta_ns = pts_ns.saturating_sub(last);
+        match duration_ns.or(t.cfg.default_duration.map(|d| d as i64)) {
+            Some(length) => self.end_ns = self.end_ns.max(pts_ns.saturating_add(length)),
+            None => t.estimate(pts_ns),
         }
-        t.last_ns = Some(t.last_ns.map_or(pts_ns, |l| l.max(pts_ns)));
-        let length = duration_ns
-            .or(t.cfg.default_duration.map(|d| d as i64))
-            .unwrap_or(t.delta_ns);
-        self.end_ns = self.end_ns.max(pts_ns.saturating_add(length));
         let video = t.cfg.kind == TrackKind::Video;
         let explicit = duration_ns.filter(|&d| Some(d as u64) != t.cfg.default_duration);
         let start_new = match self.cluster_ts {
@@ -650,7 +664,11 @@ impl<W: Write + Seek> Writer<W> {
         void(&mut out, rest);
         self.w.seek(SeekFrom::Start(l.segment_start))?;
         self.w.write_all(&out)?;
-        let duration = self.end_ns.max(0) as f64 / SCALE as f64;
+        let estimated = self
+            .tracks
+            .iter()
+            .filter_map(|t| Some(t.top_ns?.saturating_add(t.step_ns.unwrap_or(0))));
+        let duration = estimated.fold(self.end_ns, i64::max).max(0) as f64 / SCALE as f64;
         self.w.seek(SeekFrom::Start(l.duration))?;
         self.w.write_all(&duration.to_be_bytes())?;
         let mut size = Vec::new();

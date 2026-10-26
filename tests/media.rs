@@ -1912,7 +1912,8 @@ fn three_hundred_short_cuts_join_without_drift_on_every_route() {
             .samples;
         assert_eq!(pcm.len() as u64, total * 1600 * 2, "{name}");
         let rms = (pcm.iter().map(|&s| s as f64 * s as f64).sum::<f64>() / pcm.len() as f64).sqrt();
-        assert!((rms - 0.0625).abs() < 0.004, "{name}: {rms}");
+        let tone = 0.125 / std::f64::consts::SQRT_2;
+        assert!((rms - tone).abs() < 0.004, "{name}: {rms} against {tone}");
     }
 }
 
@@ -2303,15 +2304,19 @@ fn bursts(i: u64, _: u16, rate: u32) -> f32 {
     }
 }
 
-fn late_start(ext: &str) -> PathBuf {
-    let base = Clip {
+fn late_base(ext: &str) -> PathBuf {
+    Clip {
         gop: 48,
         b_frames: 2,
         sounds: vec![Sound::Fn(bursts)],
         channels: 1,
         ..Clip::new((352, 240), (24_000, 1_001), 959)
     }
-    .make(AREA, &format!("late-base.{ext}"));
+    .make(AREA, &format!("late-base.{ext}"))
+}
+
+fn late_start(ext: &str) -> PathBuf {
+    let base = late_base(ext);
     let name = format!("late-start.{ext}");
     if ext == "mkv" {
         return rebuild_mkv(&base, &name, &[], 0, LATE);
@@ -2405,10 +2410,18 @@ fn a_file_that_starts_late_counts_every_time_from_its_start() {
         assert!(d < 6.0, "{ext}: {d}");
 
         let ours = audio_pcm_range(&path, 0, 30.0, 35.0, 48_000, 1, &prefs).unwrap();
-        let lead = ((30.0 - (LATE[1] - LATE[0])) * 48_000.0).round() as u64;
-        let theirs: Vec<f32> = (lead..lead + 240_000)
-            .map(|i| bursts(i, 0, 48_000))
-            .collect();
+        let lead = LATE[1] - LATE[0];
+        let theirs = audio_pcm_range(
+            &late_base(ext),
+            0,
+            30.0 - lead,
+            35.0 - lead,
+            48_000,
+            1,
+            &prefs,
+        )
+        .unwrap()
+        .samples;
         assert_eq!(ours.frames(), 240_000, "{ext}");
         let (lag, w) = (-24i64..=24)
             .map(|lag| {
@@ -2423,7 +2436,7 @@ fn a_file_that_starts_late_counts_every_time_from_its_start() {
             })
             .min_by(|x, y| x.1.total_cmp(&y.1))
             .unwrap();
-        assert!(w < 0.05, "{ext}: {w} at a lag of {lag} samples");
+        assert!(w < 0.01, "{ext}: {w} at a lag of {lag} samples");
         let head = audio_pcm_range(&path, 0, 0.0, 1.0, 48_000, 1, &prefs).unwrap();
         let o = onset(&head.samples, 48_000);
         assert!((o - 0.25).abs() < 0.01, "{ext}: {o}");

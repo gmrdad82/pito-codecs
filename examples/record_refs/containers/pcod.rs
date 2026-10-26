@@ -6,6 +6,8 @@ use pito_codecs::mp4;
 #[path = "../../../src/pcod/refs.rs"]
 mod refs;
 
+use crate::media::refs as media_refs;
+
 use refs::AREA;
 
 fn tone(i: u64, _: u16, rate: u32) -> f32 {
@@ -286,25 +288,48 @@ fn vorbis_packets() -> Result<Vec<(Vec<u8>, i64)>, String> {
 }
 
 fn vorbis_webm() -> Result<Vec<u8>, String> {
-    use pito_codecs::media::TimeBase;
-    use pito_codecs::mkv;
+    use media_refs::{MkvBlock, MkvTrack, Sizes};
     let packets = vorbis_packets()?;
     let headers: Vec<Vec<u8>> = packets.iter().take(3).map(|p| p.0.clone()).collect();
-    let rate = refs::VORBIS_RATE;
-    let mut cfg = mkv::TrackConfig::new(mkv::TrackKind::Audio, "A_VORBIS", TimeBase::new(1, rate));
-    cfg.codec_private = mux::xiph_private(&headers);
-    cfg.sample_rate = rate;
-    cfg.channels = 2;
-    let mut w = mkv::Writer::new(std::io::Cursor::new(Vec::new()), mkv::Options::webm());
-    let t = w.add_track(cfg).map_err(text)?;
-    let mut done = 0i64;
+    let dec = pito_codecs::vorbis::Decoder::from_headers(&headers[0], &headers[1], &headers[2])
+        .map_err(text)?;
+    let rate = f64::from(refs::VORBIS_RATE);
+    let mut blocks = Vec::new();
+    let (mut decoded, mut prev, mut done) = (0i64, None, 0i64);
     for (data, granule) in &packets[3..] {
-        let length = (granule - done).max(0) as u32;
-        w.push_sample(t, data, done, (length > 0).then_some(length), true)
-            .map_err(text)?;
+        let n = dec.blocksize(data).map_err(|e| format!("{e:?}"))? as i64;
+        if let Some(p) = prev {
+            decoded += p / 4 + n / 4;
+        }
+        prev = Some(n);
+        blocks.push(MkvBlock {
+            track: 0,
+            ms: (done as f64 * 1000.0 / rate).round() as i64,
+            key: true,
+            data: data.clone(),
+            discard_ns: 0,
+        });
         done = done.max(*granule);
     }
-    Ok(w.finish().map_err(text)?.into_inner())
+    let extra = decoded - done;
+    if let Some(last) = blocks.last_mut() {
+        last.discard_ns = (extra.max(0) as f64 * 1e9 / rate).round() as i64;
+    }
+    let track = MkvTrack {
+        codec: "A_VORBIS",
+        private: mux::xiph_private(&headers),
+        rate,
+        channels: 2,
+        ..MkvTrack::default()
+    };
+    let ms = done as f64 * 1000.0 / rate;
+    Ok(media_refs::matroska(
+        "webm",
+        &[track],
+        &blocks,
+        ms,
+        Sizes::Known,
+    ))
 }
 
 fn vorbisfile_slice() -> Result<Vec<u8>, String> {
@@ -383,7 +408,7 @@ fn vorbis(defs: &mut Vec<Def>) {
             AREA,
             refs::VORBIS_FILES[1].into(),
             OURS,
-            words("the same libvorbisenc packets in our WebM writer, each block lasting to its granule"),
+            words("the same libvorbisenc packets in examples/record_refs WebM, the last block's DiscardPadding ending the decode at the final granule"),
         )
         .from(vorbis_webm)
         .library("libvorbisenc"),
@@ -469,30 +494,6 @@ fn smoke(defs: &mut Vec<Def>) {
     );
 }
 
-fn webp_lossless(input: &str) -> Result<Vec<u8>, String> {
-    use std::ffi::c_int;
-    let img = refs::webp_input(input)?;
-    let lib = library("libwebp")?;
-    let encode = *unsafe {
-        lib.get::<unsafe extern "C" fn(*const u8, c_int, c_int, c_int, *mut *mut u8) -> usize>(
-            b"WebPEncodeLosslessRGBA",
-        )
-    }
-    .map_err(|e| format!("libwebp: {e}"))?;
-    let free = *unsafe { lib.get::<unsafe extern "C" fn(*mut u8)>(b"WebPFree") }
-        .map_err(|e| format!("libwebp: {e}"))?;
-    let mut out: *mut u8 = std::ptr::null_mut();
-    let (w, h) = (img.width as c_int, img.height as c_int);
-    let n = unsafe { encode(img.data.as_ptr(), w, h, w * 4, &mut out) };
-    if !out.is_null() {
-        unsafe { free(out) };
-    }
-    if n == 0 {
-        return Err(format!("WebPEncodeLosslessRGBA failed on {input}"));
-    }
-    Ok(format!("{n}\n").into_bytes())
-}
-
 pub fn defs() -> Vec<Def> {
     let mut defs = Vec::new();
     tones(&mut defs);
@@ -506,13 +507,33 @@ pub fn defs() -> Vec<Def> {
         refs::ticks_gif,
     ));
     for input in refs::WEBP_INPUTS {
-        let what = format!(
-            "the byte count of libwebp's WebPEncodeLosslessRGBA of the {input} picture from src/pcod/refs.rs"
+        let webp = format!("images-{input}.webp");
+        defs.push(
+            Def::digest(
+                AREA,
+                webp.clone(),
+                "magick",
+                tool(
+                    "magick",
+                    &[
+                        "png:{src}",
+                        "-quality",
+                        "75",
+                        "-define",
+                        "webp:lossless=true",
+                        "-define",
+                        "webp:method=6",
+                        "webp:{out}",
+                    ],
+                ),
+                sha,
+            )
+            .from(move || refs::webp_png(input)),
         );
+        let what = format!("the byte count of {{ref:{webp}}}");
         defs.push(
             Def::exact(AREA, refs::webp_size_name(input), OURS, words(&what))
-                .from(move || webp_lossless(input))
-                .library("libwebp"),
+                .from(move || Ok(format!("{}\n", mux::read(AREA, &webp)?.len()).into_bytes())),
         );
     }
     defs

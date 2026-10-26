@@ -25,6 +25,32 @@ fn ours<S: ByteSource>(r: &Reader<S>) -> Vec<Vec<(i64, u32, bool)>> {
         .collect()
 }
 
+fn in_ms<S: ByteSource>(r: &Reader<S>) -> Vec<Vec<(i64, u32, bool)>> {
+    r.tracks
+        .iter()
+        .map(|t| {
+            let (num, den) = (f64::from(t.time_base.num), f64::from(t.time_base.den));
+            t.samples
+                .iter()
+                .map(|s| {
+                    let ms = (s.pts as f64 * num * 1000.0 / den).round() as i64;
+                    (ms, s.size, s.keyframe)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn span_seconds<S: ByteSource>(r: &Reader<S>) -> f64 {
+    let t = &r.tracks[r.video().unwrap()];
+    let mut pts: Vec<i64> = t.samples.iter().map(|s| s.pts).collect();
+    pts.sort_unstable();
+    pts.dedup();
+    let step = pts.windows(2).map(|w| w[1] - w[0]).min().unwrap_or(0);
+    let end = pts.last().copied().unwrap_or(0) + step;
+    end as f64 * f64::from(t.time_base.num) / f64::from(t.time_base.den)
+}
+
 fn timed<S: ByteSource>(r: &Reader<S>) -> Packets {
     let t = &r.tracks[r.video().unwrap()];
     refs::normalized(
@@ -229,11 +255,16 @@ mod decoded {
             }
             w.finish().unwrap();
             let back = Reader::open(&out).unwrap();
-            assert_eq!(ours(&back), ours(&r), "{file}");
+            assert_eq!(in_ms(&back), in_ms(&r), "{file}");
             same_packets(&timed(&back), &twin(&refs_dir, other), file);
             assert_eq!(back.is_webm(), webm);
             assert!(!back.cues.is_empty());
-            assert!((back.duration_seconds() - r.duration_seconds()).abs() < 0.05);
+            let span = span_seconds(&r);
+            let d = back.duration_seconds();
+            assert!(
+                (d - span).abs() < 0.002,
+                "{file}: {d} s against the source's {span} s"
+            );
             let want = frames(&src);
             let got = frames(&out);
             assert_eq!(got.len(), want.len(), "{file}");

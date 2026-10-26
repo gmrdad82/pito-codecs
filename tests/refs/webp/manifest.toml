@@ -97,10 +97,10 @@ command = "examples/record_refs: libwebp WebPDecodeRGBA of ll_odd.webp"
 [[ref]]
 name = "anim_ll.webp"
 file = "anim_ll.webp"
-sha256 = "b3c76ccb4026dc593b7a851f1c724a9e5a749533e67fe7ca377923707ef262b6"
+sha256 = "c1be7bc50b9f43815eb3591f8651b3342aa6d72cc51a329e018c27042e557f5d"
 kind = "fixture"
 tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
-command = "magick -size 96x64 -depth 8 rgba:{src} -delay 4 -loop 0 -define webp:lossless=true {out}"
+command = "magick -size 96x64 -depth 8 rgba:{src} -set delay 4 -loop 0 -define webp:lossless=true {out}"
 
 [[ref]]
 name = "anim_ll.rgba"
@@ -148,7 +148,7 @@ file = "lw-pattern.webp"
 sha256 = "149382f4a1f44eb3f3a429a8f845c13b1c99f6cbf2178c4fe4687392278f356c"
 kind = "fixture"
 tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
-command = "magick -size 320x240 -depth 8 rgba:{src} -define webp:exact=true -quality 75 {out}"
+command = "magick -size 320x240 -depth 8 rgba:{src} -define webp:exact=true -define webp:lossless=false -quality 75 {out}"
 
 [[ref]]
 name = "lw-pattern.yuv420p"
@@ -180,7 +180,7 @@ file = "lw-noisy.webp"
 sha256 = "d59388f975a942423e308e3d9eaa708f306a5cc74e5d085aa195707d78f4bdf9"
 kind = "fixture"
 tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
-command = "magick -size 200x120 -depth 8 rgba:{src} -define webp:exact=true -quality 90 {out}"
+command = "magick -size 200x120 -depth 8 rgba:{src} -define webp:exact=true -define webp:lossless=false -quality 90 {out}"
 
 [[ref]]
 name = "lw-noisy.yuv420p"
@@ -212,7 +212,7 @@ file = "lw-pattern5.webp"
 sha256 = "da26539ccc4682e3aa14e50d438cf00f82a8b28e5ce031eddf867d6da5c7afc9"
 kind = "fixture"
 tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
-command = "magick -size 127x61 -depth 8 rgba:{src} -define webp:exact=true -quality 20 {out}"
+command = "magick -size 127x61 -depth 8 rgba:{src} -define webp:exact=true -define webp:lossless=false -quality 20 {out}"
 
 [[ref]]
 name = "lw-pattern5.yuv420p"
@@ -241,15 +241,15 @@ command = "examples/record_refs: libwebp WebPDecodeYUVInto of our-pattern5.webp,
 [[ref]]
 name = "lw-square.webp"
 file = "lw-square.webp"
-sha256 = "54f9cfbf735825319cd620f905b86bdf375faac4f7d6e0ce0f9eff7ef88adc34"
+sha256 = "c2460697d33b7c0ed8b42039e66b9f76b05bfb7a190a84d145a20ede35d18da9"
 kind = "fixture"
 tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
-command = "magick -size 64x64 -depth 8 rgba:{src} -define webp:exact=true -quality 100 {out}"
+command = "magick -size 64x64 -depth 8 rgba:{src} -define webp:exact=true -define webp:lossless=false -quality 100 {out}"
 
 [[ref]]
 name = "lw-square.yuv420p"
 file = ""
-sha256 = "30dd52906719fa5f18cc7280ee9061eb7a0e26b73948d52e0bff65c12cb1d22b"
+sha256 = "1e81b1f5a024d31f6d49ea240ccd84ddaae2b2a06d4acf496b4fef7c82f0e45c"
 kind = "bit-exact"
 tool = "libwebp.so.7.2.0 1.6.0"
 command = "examples/record_refs: libwebp WebPDecodeYUVInto of lw-square.webp, then the alpha of WebPDecodeRGBA"
@@ -276,7 +276,7 @@ file = "lw-tiny.webp"
 sha256 = "3cb96742ca659f38f0b9486b5df0ef866620f609931fb7b60b470a72b8fde897"
 kind = "fixture"
 tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
-command = "magick -size 1x1 -depth 8 rgba:{src} -define webp:exact=true -quality 50 {out}"
+command = "magick -size 1x1 -depth 8 rgba:{src} -define webp:exact=true -define webp:lossless=false -quality 50 {out}"
 
 [[ref]]
 name = "lw-tiny.yuv420p"
@@ -308,7 +308,7 @@ file = "lw-cell.webp"
 sha256 = "e0166d5632f20f3b6e83ddd57955a18f307fe6491360679be084c8d5612eb752"
 kind = "fixture"
 tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
-command = "magick -size 97x33 -depth 8 rgba:{src} -define webp:exact=true -quality 5 {out}"
+command = "magick -size 97x33 -depth 8 rgba:{src} -define webp:exact=true -define webp:lossless=false -quality 5 {out}"
 
 [[ref]]
 name = "lw-cell.yuv420p"
@@ -340,7 +340,7 @@ file = "lw-big.webp"
 sha256 = "f892aaaf2207d7e4209796f0eb722b020c4db0409618869faa300f383ea51d18"
 kind = "fixture"
 tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
-command = "magick -size 352x240 -depth 8 rgba:{src} -define webp:exact=true -quality 50 {out}"
+command = "magick -size 352x240 -depth 8 rgba:{src} -define webp:exact=true -define webp:lossless=false -quality 50 {out}"
 
 [[ref]]
 name = "lw-big.yuv420p"
@@ -372,7 +372,7 @@ file = "lw-lossy-alpha.webp"
 sha256 = "747d3e6fee107fa35cd19acbed868c44c5ec58b2269ba1369e4c7a6d85050e3a"
 kind = "fixture"
 tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
-command = "magick -size 320x180 -depth 8 rgba:{src} -define webp:exact=true -quality 85 {out}"
+command = "magick -size 320x180 -depth 8 rgba:{src} -define webp:exact=true -define webp:lossless=false -quality 85 {out}"
 
 [[ref]]
 name = "lw-lossy-alpha.yuva420p"
@@ -481,7 +481,7 @@ command = "examples/record_refs: libwebp WebPDecodeYUVInto of lw-anim-4.webp, th
 [[ref]]
 name = "vpx-a.ivf"
 file = "vpx-a.ivf"
-sha256 = "55937eb595385b84467099af4633367244b54806445f340adcc350f8222d58b0"
+sha256 = "86e321dfb16a51f3ed59a1832e304ea9870660beb2aa3dbafdb66698c7e1a60d"
 kind = "fixture"
 tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
 command = "vpxenc --codec=vp8 --i420 -w 352 -h 240 --fps=1/1 --limit=1 --passes=1 --threads=1 --profile=0 --token-parts=0 --sharpness=0 --min-q=30 --max-q=63 --target-bitrate=50 --ivf --disable-warning-prompt -q -o {out} {src}"
@@ -489,7 +489,7 @@ command = "vpxenc --codec=vp8 --i420 -w 352 -h 240 --fps=1/1 --limit=1 --passes=
 [[ref]]
 name = "vpx-a.yuv"
 file = ""
-sha256 = "b9f93817192e568210f101d33c37673dd50b76465ba61a52930c392c3119b09a"
+sha256 = "416becb58429b173bf6c98f2339a3565b5b59cfa4b4a9ec2294929e5bbb9463e"
 kind = "bit-exact"
 tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
 command = "vpxdec --i420 --rawvideo --limit=1 -o {out} {ref:vpx-a.ivf}"
@@ -497,7 +497,7 @@ command = "vpxdec --i420 --rawvideo --limit=1 -o {out} {ref:vpx-a.ivf}"
 [[ref]]
 name = "vpx-b.ivf"
 file = "vpx-b.ivf"
-sha256 = "c0ef11b80595f2c38bb5799a36f78aabb95bd1daa2203f3778335b854c70f853"
+sha256 = "86b381a2cf2b1e0879f590fac482c7a278c07a3e7735119f6470a6d961b5450d"
 kind = "fixture"
 tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
 command = "vpxenc --codec=vp8 --i420 -w 352 -h 240 --fps=1/1 --limit=1 --passes=1 --threads=1 --profile=0 --token-parts=3 --sharpness=0 --min-q=50 --max-q=63 --target-bitrate=50 --ivf --disable-warning-prompt -q -o {out} {src}"
@@ -505,7 +505,7 @@ command = "vpxenc --codec=vp8 --i420 -w 352 -h 240 --fps=1/1 --limit=1 --passes=
 [[ref]]
 name = "vpx-b.yuv"
 file = ""
-sha256 = "668aa3fe25d408a5e6293b5977f1a956b87679cf6f7abb67591146d09220f2cc"
+sha256 = "b8f5b4811073d91f331cd3efe335e9f7e74096a2933832fd1ce4644f9ae271ac"
 kind = "bit-exact"
 tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
 command = "vpxdec --i420 --rawvideo --limit=1 -o {out} {ref:vpx-b.ivf}"
@@ -513,7 +513,7 @@ command = "vpxdec --i420 --rawvideo --limit=1 -o {out} {ref:vpx-b.ivf}"
 [[ref]]
 name = "vpx-c.ivf"
 file = "vpx-c.ivf"
-sha256 = "8ee7b8684acfbf5147e913c25c992c1532e3e6225034a0a7ce53cbca38464fc3"
+sha256 = "b0af1ba8fd7c0b71bb898ff7e635ee622bd2ea823b397227b71a8d4f186997e2"
 kind = "fixture"
 tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
 command = "vpxenc --codec=vp8 --i420 -w 352 -h 240 --fps=1/1 --limit=1 --passes=1 --threads=1 --profile=0 --token-parts=2 --sharpness=3 --min-q=50 --max-q=63 --target-bitrate=50 --ivf --disable-warning-prompt -q -o {out} {src}"
@@ -521,7 +521,7 @@ command = "vpxenc --codec=vp8 --i420 -w 352 -h 240 --fps=1/1 --limit=1 --passes=
 [[ref]]
 name = "vpx-c.yuv"
 file = ""
-sha256 = "c02dde58b00d750cc8bb05af2c32be43c6b8146a22bd8c6cea6815d07630aa27"
+sha256 = "ff35ed42f5c84e109b68ec58558466d96456febe6ec28ead18bf81d70cdf37a5"
 kind = "bit-exact"
 tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
 command = "vpxdec --i420 --rawvideo --limit=1 -o {out} {ref:vpx-c.ivf}"
@@ -529,7 +529,7 @@ command = "vpxdec --i420 --rawvideo --limit=1 -o {out} {ref:vpx-c.ivf}"
 [[ref]]
 name = "vpx-d.ivf"
 file = "vpx-d.ivf"
-sha256 = "00dc8ab7779ab28e34bb9e8b00915ee5e2f49632d7c341051f522fd58376b94e"
+sha256 = "5e001feaaee1cc198220ef5fac12406e385b2cd306a5b2ad834a98d2fffd2c74"
 kind = "fixture"
 tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
 command = "vpxenc --codec=vp8 --i420 -w 352 -h 240 --fps=1/1 --limit=1 --passes=1 --threads=1 --profile=1 --token-parts=0 --sharpness=0 --min-q=50 --max-q=63 --target-bitrate=50 --ivf --disable-warning-prompt -q -o {out} {src}"
@@ -537,7 +537,7 @@ command = "vpxenc --codec=vp8 --i420 -w 352 -h 240 --fps=1/1 --limit=1 --passes=
 [[ref]]
 name = "vpx-d.yuv"
 file = ""
-sha256 = "8a3f3175d67d4f32431fe260fe6581ee5415188498ab08ba55add20cb23b2470"
+sha256 = "4bd31f691eda3b652b83c3c8dae9ceb1f583997d8a3c737d0f1f5315b4ea5dd8"
 kind = "bit-exact"
 tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
 command = "vpxdec --i420 --rawvideo --limit=1 -o {out} {ref:vpx-d.ivf}"
@@ -545,7 +545,7 @@ command = "vpxdec --i420 --rawvideo --limit=1 -o {out} {ref:vpx-d.ivf}"
 [[ref]]
 name = "vpx-e.ivf"
 file = "vpx-e.ivf"
-sha256 = "21d6c075cb4f5fa5fb66bab2421db8f3205cc0bf876b7eac54fa7f6ba2919db6"
+sha256 = "94f84ef5d93ff5e372783cb46328e94112f49f6ce10476a217d3f2fdf43d6068"
 kind = "fixture"
 tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
 command = "vpxenc --codec=vp8 --i420 -w 320 -h 240 --fps=1/1 --limit=1 --passes=1 --threads=1 --profile=1 --token-parts=3 --sharpness=6 --min-q=40 --max-q=63 --target-bitrate=50 --ivf --disable-warning-prompt -q -o {out} {src}"
@@ -553,7 +553,7 @@ command = "vpxenc --codec=vp8 --i420 -w 320 -h 240 --fps=1/1 --limit=1 --passes=
 [[ref]]
 name = "vpx-e.yuv"
 file = ""
-sha256 = "d5c4238de7ea6a900055db75694f1221bcab71f8eb26402f54e041c93a6bf689"
+sha256 = "1c90086a01eade8905676c6c6fdc433af64de23947fe146128c2dfc9f0c5abb8"
 kind = "bit-exact"
 tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
 command = "vpxdec --i420 --rawvideo --limit=1 -o {out} {ref:vpx-e.ivf}"
@@ -561,7 +561,7 @@ command = "vpxdec --i420 --rawvideo --limit=1 -o {out} {ref:vpx-e.ivf}"
 [[ref]]
 name = "vpx-f.ivf"
 file = "vpx-f.ivf"
-sha256 = "41daf4204ec777a3516e9417bd99cf4aaae4630bf9b9f92b9ea6c7f429db1a6b"
+sha256 = "503fc2c8660808d18c047cc89ab649a97bf1fdc00fc54dde6a44e6fe43e67a9b"
 kind = "fixture"
 tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
 command = "vpxenc --codec=vp8 --i420 -w 98 -h 62 --fps=1/1 --limit=1 --passes=1 --threads=1 --profile=3 --token-parts=1 --sharpness=2 --min-q=60 --max-q=63 --target-bitrate=50 --ivf --disable-warning-prompt -q -o {out} {src}"
@@ -569,7 +569,7 @@ command = "vpxenc --codec=vp8 --i420 -w 98 -h 62 --fps=1/1 --limit=1 --passes=1 
 [[ref]]
 name = "vpx-f.yuv"
 file = ""
-sha256 = "8648d044854945522ba559894f02581fc0f57069466d51e1c2f4912a8c1693c4"
+sha256 = "51442a907bb1d32d536b61c8081ab78770ab5420348cd5fc3d9d903f849a26f9"
 kind = "bit-exact"
 tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
 command = "vpxdec --i420 --rawvideo --limit=1 -o {out} {ref:vpx-f.ivf}"

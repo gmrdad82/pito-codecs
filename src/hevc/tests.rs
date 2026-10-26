@@ -137,7 +137,13 @@ fn hvcc_carries_the_x265_parameter_sets_and_drives_length_prefixed_decode() {
         let f = refs::find(name).unwrap();
         let data = stream(&r, f);
         let ours = Hvcc::parse(&Hvcc::from_annexb(&data).unwrap().to_bytes()).unwrap();
-        let (profile, depth) = if f.ten_bit { (2, 10) } else { (1, 8) };
+        let intra = f.params.split(':').any(|p| p == "keyint=1");
+        let (profile, depth) = match (intra, f.ten_bit) {
+            (true, true) => (4, 10),
+            (true, false) => (4, 8),
+            (false, true) => (2, 10),
+            (false, false) => (1, 8),
+        };
         assert_eq!(
             (
                 ours.profile_idc(),

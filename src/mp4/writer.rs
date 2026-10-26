@@ -616,6 +616,11 @@ impl<W: Write + Seek> Writer<W> {
             .ok_or_else(|| Error::Invalid(format!("no track {track}")))
     }
 
+    pub fn set_frame_duration(&mut self, track: usize, ticks: u32) -> Result<()> {
+        self.track(track)?.last_duration = ticks;
+        Ok(())
+    }
+
     pub fn push(&mut self, track: usize, packet: &Packet) -> Result<()> {
         self.flush_pending(track, Some(packet.dts))?;
         let t = self.track(track)?;

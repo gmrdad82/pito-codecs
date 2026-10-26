@@ -62,7 +62,8 @@ fn edges() -> Vec<Def> {
         } else {
             Def::fixture(front::AREA, f.out(), f.tool(), all).settled(MP4_CLOCK, mp4_clock_zeroed)
         };
-        defs.push(made.from(|| Ok(front::source_bytes())));
+        let size = f.size();
+        defs.push(made.from(move || Ok(front::source_bytes_at(size))));
         if f.hevc {
             let stream = f.stream();
             defs.push(
@@ -173,7 +174,7 @@ fn hevc_mp4(stream: &[u8]) -> Result<Vec<u8>, String> {
     }
     let at = testref::scratch(front::AREA).join("hevc-mux.mp4");
     let text = |e: pito_codecs::media::Error| e.to_string();
-    let (w, h) = front::SMALL;
+    let (w, h) = front::HEVC_SMALL;
     let entry = mp4::SampleEntry::hevc(
         mp4::HevcConfig::parse(&config).map_err(text)?,
         w as u16,

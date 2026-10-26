@@ -426,6 +426,37 @@ fn ten_minutes_of_silent_aac_in_a_small_file_read_every_sample() {
 }
 
 #[test]
+fn a_lone_sample_lasts_the_frame_duration_its_track_was_given() {
+    use crate::media::Packet;
+    let asc = [0x11, 0x90];
+    let frame = vec![0x21, 0x10, 0x04, 0x60, 0x8c, 0x1c];
+    let packet = |i: i64| Packet {
+        data: frame.clone(),
+        pts: i * 1024,
+        dts: i * 1024,
+        keyframe: true,
+    };
+    let durations = |n: i64, given: u32| {
+        let mut w = Writer::new(std::io::Cursor::new(Vec::new()), Options::default()).unwrap();
+        let entry = SampleEntry::aac(asc.to_vec(), 2, 48_000, 128_000);
+        let t = w.add_track(TrackConfig::new(entry, 48_000)).unwrap();
+        w.set_frame_duration(t, given).unwrap();
+        assert!(w.set_frame_duration(t + 1, given).is_err());
+        for i in 0..n {
+            w.push(t, &packet(i)).unwrap();
+        }
+        let r = Reader::new(w.finish().unwrap().into_inner()).unwrap();
+        r.tracks[0]
+            .samples
+            .iter()
+            .map(|s| s.duration)
+            .collect::<Vec<u32>>()
+    };
+    assert_eq!(durations(1, 1024), [1024]);
+    assert_eq!(durations(3, 7), [1024, 1024, 1024]);
+}
+
+#[test]
 fn an_av1c_record_reads_and_writes_back_byte_for_byte() {
     let raw = [
         0x81, 0x01, 0x4c, 0x00, 0x0a, 0x0c, 0x02, 0x00, 0x00, 0x0d, 0x26, 0x27, 0xfb, 0x38, 0x05,

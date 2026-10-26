@@ -480,10 +480,10 @@ fn the_edge_source_is_the_one_recorded() {
 }
 
 #[test]
-fn the_small_h264_clip_is_tagged_bt709_tv_with_no_aspect_and_decodes_whole() {
+fn the_small_h264_clip_is_tagged_bt709_tv_with_square_pixels_and_decodes_whole() {
     let src = h264_small();
     let look = source_look(&src, Codec::H264, "h264-small");
-    assert_eq!(look, Some(((0, 0), Color::BT709)));
+    assert_eq!(look, Some(((1, 1), Color::BT709)));
     assert_eq!(decodes_clean(&src), refs::FRAMES);
 }
 

@@ -1,7 +1,7 @@
 [[ref]]
 name = "baseline.h264"
 file = "baseline.h264"
-sha256 = "52de698d1280f6702a40970eca7c4ae7c1cc95c5a536f2e3fc33e98c2cd48c0a"
+sha256 = "da7318e9fb42977072b45b9cfc88a5f453d641ae7a3381dfacc7eb0617248c87"
 kind = "fixture"
 tool = "x264 0.165.3222 b35605a"
 command = "x264 --quiet --no-progress --demuxer y4m --threads 1 --frames 10 --profile baseline --keyint 5 --slices 2 --dump-yuv baseline.recon.yuv -o {out} {src}"
@@ -9,7 +9,7 @@ command = "x264 --quiet --no-progress --demuxer y4m --threads 1 --frames 10 --pr
 [[ref]]
 name = "baseline.yuv"
 file = ""
-sha256 = "57fbdc16da6882b26e97fd0710a7a789510a3f75d0985912c8d00323be9e057f"
+sha256 = "5a978004cf205415f059349e9fa14714e1d7578b1c5165c48520fca71a11ef00"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --dump-yuv reconstruction x264 wrote while making {ref:baseline.h264}"
@@ -17,7 +17,7 @@ command = "examples/record_refs: the --dump-yuv reconstruction x264 wrote while 
 [[ref]]
 name = "main_cabac_b.h264"
 file = "main_cabac_b.h264"
-sha256 = "393732d73154a8e8b3eb8bf141b582d2ff9b2d2e469b1e9fe4369dadb70848b4"
+sha256 = "02a7e8fda4ef4762cdb10e754d1b45271a59c6f0103b47336032fabf450b0422"
 kind = "fixture"
 tool = "x264 0.165.3222 b35605a"
 command = "x264 --quiet --no-progress --demuxer y4m --threads 1 --frames 10 --profile main --bframes 3 --ref 3 --dump-yuv main_cabac_b.recon.yuv -o {out} {src}"
@@ -25,7 +25,7 @@ command = "x264 --quiet --no-progress --demuxer y4m --threads 1 --frames 10 --pr
 [[ref]]
 name = "main_cabac_b.yuv"
 file = ""
-sha256 = "26de41d8fce36338419179303fcdc969f89616511b4cf7f24306cb9ca139e043"
+sha256 = "9f7179ab822f155adc7cbe0586f3d7447cf78f3863cb720335cbf927cc5b33a7"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --dump-yuv reconstruction x264 wrote while making {ref:main_cabac_b.h264}"
@@ -33,7 +33,7 @@ command = "examples/record_refs: the --dump-yuv reconstruction x264 wrote while 
 [[ref]]
 name = "high_bpyramid.h264"
 file = "high_bpyramid.h264"
-sha256 = "f023c2b5acbdb941883b21ed87749140825f9aa45425f7796b24d3f46f649022"
+sha256 = "87fca1959bfda8784fc64073861f07d62617831c9e5f573effefe3529e5bd300"
 kind = "fixture"
 tool = "x264 0.165.3222 b35605a"
 command = "x264 --quiet --no-progress --demuxer y4m --threads 1 --frames 10 --profile high --bframes 3 --keyint 10 --b-pyramid normal --weightp 2 --direct temporal --ref 4 --dump-yuv high_bpyramid.recon.yuv -o {out} {src}"
@@ -41,7 +41,7 @@ command = "x264 --quiet --no-progress --demuxer y4m --threads 1 --frames 10 --pr
 [[ref]]
 name = "high_bpyramid.yuv"
 file = ""
-sha256 = "30e626031246eaef7302bbfaa7acc10106357147bff64bb5b052b93f14bbaa45"
+sha256 = "25379e94ff635e93d66808405de5fbbad27595ab1b32e3ea6e7b0259ea92b21e"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --dump-yuv reconstruction x264 wrote while making {ref:high_bpyramid.h264}"
@@ -49,7 +49,7 @@ command = "examples/record_refs: the --dump-yuv reconstruction x264 wrote while 
 [[ref]]
 name = "high_crop_slices.h264"
 file = "high_crop_slices.h264"
-sha256 = "fd6d2583757d7bb39e33244bc1ac826bec1fd684a53992f8e89b9bcd63be4c93"
+sha256 = "8765a8d171337e165fead58a9ee7834a1381a4c0d6ae9328e5f85f2222aae06d"
 kind = "fixture"
 tool = "x264 0.165.3222 b35605a"
 command = "x264 --quiet --no-progress --demuxer y4m --threads 1 --frames 8 --profile high --bframes 2 --slices 4 --cqm jvt --dump-yuv high_crop_slices.recon.yuv -o {out} {src}"
@@ -57,7 +57,7 @@ command = "x264 --quiet --no-progress --demuxer y4m --threads 1 --frames 8 --pro
 [[ref]]
 name = "high_crop_slices.yuv"
 file = ""
-sha256 = "c44c3c763ac247f393280a77a31696a4233489fa9de20310cc01766b60f98c1b"
+sha256 = "6da5d2d112e7128e7a88af29d226fc4c300a95c4b795f0d0162ee9053fb901fc"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --dump-yuv reconstruction x264 wrote while making {ref:high_crop_slices.h264}"

@@ -631,6 +631,8 @@ mod libopus {
     const SET_BITRATE: c_int = 4002;
     const SET_VBR: c_int = 4006;
     const GET_LOOKAHEAD: c_int = 4027;
+    const SET_FORCE_MODE: c_int = 11002;
+    const MODE_HYBRID: c_int = 1001;
     const VOIP: c_int = 2048;
     const AUDIO: c_int = 2049;
     const MAX_FRAME: usize = 5760;
@@ -673,6 +675,7 @@ mod libopus {
             bitrate: i32,
             cbr: bool,
             voip: bool,
+            hybrid: bool,
         ) -> Result<Stream, String> {
             let ch = usize::from(channels);
             let app = if voip { VOIP } else { AUDIO };
@@ -724,6 +727,9 @@ mod libopus {
                 let ctl: Symbol<Ctl> = sym(&self.lib, &format!("{prefix}encoder_ctl"))?;
                 check("bitrate", unsafe { ctl(enc, SET_BITRATE, bitrate) })?;
                 check("vbr", unsafe { ctl(enc, SET_VBR, c_int::from(!cbr)) })?;
+                if hybrid {
+                    check("mode", unsafe { ctl(enc, SET_FORCE_MODE, MODE_HYBRID) })?;
+                }
                 let mut lookahead: c_int = 0;
                 check("lookahead", unsafe {
                     ctl(enc, GET_LOOKAHEAD, &mut lookahead as *mut c_int)
@@ -857,6 +863,7 @@ mod libopus {
             _: i32,
             _: bool,
             _: bool,
+            _: bool,
         ) -> Result<Stream, String> {
             Err("libopus loads only on Linux".into())
         }
@@ -952,10 +959,15 @@ fn opus_defs() -> Vec<Def> {
     let mut defs = Vec::new();
     for c in &opus::LIBOPUS {
         let what = format!(
-            "libopus {} bit/s, {}, {}, 20 ms frames, our Ogg writer",
+            "libopus {} bit/s, {}, {}{}, 20 ms frames, our Ogg writer",
             c.bitrate,
             if c.cbr { "CBR" } else { "VBR" },
-            if c.voip { "VoIP" } else { "audio" }
+            if c.voip { "VoIP" } else { "audio" },
+            if c.music && !c.celt {
+                ", hybrid forced"
+            } else {
+                ""
+            }
         );
         let mut d = fixture(area, opus::stream(c.name), &what, move |_| {
             let pcm = if c.music {
@@ -963,7 +975,14 @@ fn opus_defs() -> Vec<Def> {
             } else {
                 opus_speech()
             };
-            let s = libopus::Opus::open()?.encode(&pcm, c.channels, c.bitrate, c.cbr, c.voip)?;
+            let s = libopus::Opus::open()?.encode(
+                &pcm,
+                c.channels,
+                c.bitrate,
+                c.cbr,
+                c.voip,
+                c.music && !c.celt,
+            )?;
             let head = pito_codecs::opus::OpusHead {
                 channels: usize::from(c.channels),
                 pre_skip: s.pre_skip,

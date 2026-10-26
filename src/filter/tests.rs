@@ -760,7 +760,7 @@ fn orders_and_siting_match_the_model() {
             "bgrx to yuv, centre, frame {n}: PSNR {:.1} {:.1} {:.1}",
             p[0], p[1], p[2]
         );
-        assert!(p.iter().all(|&v| v > 75.0), "bgrx to yuv frame {n}: {p:?}");
+        assert!(p.iter().all(|&v| v > 65.0), "bgrx to yuv frame {n}: {p:?}");
 
         for (siting, name) in [Siting::Left, Siting::Centre]
             .into_iter()

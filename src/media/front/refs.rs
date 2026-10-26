@@ -1,5 +1,6 @@
 pub const AREA: &str = "front";
 pub const SMALL: (u32, u32) = (352, 240);
+pub const HEVC_SMALL: (u32, u32) = (384, 240);
 pub const BIG: (u32, u32) = (1920, 1080);
 pub const FPS: u32 = 10;
 pub const GOP: u32 = 5;
@@ -74,6 +75,10 @@ impl Fixture {
         format!("{}.{ext}", self.name.trim_end_matches(".mp4"))
     }
 
+    pub fn size(&self) -> (u32, u32) {
+        if self.hevc { HEVC_SMALL } else { SMALL }
+    }
+
     pub fn out(&self) -> String {
         if self.hevc {
             self.stream()
@@ -84,9 +89,13 @@ impl Fixture {
 }
 
 pub fn source_bytes() -> Vec<u8> {
+    source_bytes_at(SMALL)
+}
+
+pub fn source_bytes_at((w, h): (u32, u32)) -> Vec<u8> {
     let mut out = Vec::new();
     for n in 0..FRAMES {
-        let f = crate::testref::yuv_frame(SMALL.0, SMALL.1, n, 0);
+        let f = crate::testref::yuv_frame(w, h, n, 0);
         for p in &f.planes {
             for row in p.data.chunks(p.stride.max(1)).take(p.height) {
                 out.extend_from_slice(&row[..p.width.min(row.len())]);
@@ -97,7 +106,8 @@ pub fn source_bytes() -> Vec<u8> {
 }
 
 pub fn args(f: &Fixture) -> Vec<String> {
-    let size = format!("{}x{}", SMALL.0, SMALL.1);
+    let (w, h) = f.size();
+    let size = format!("{w}x{h}");
     let gop = GOP.to_string();
     let fps = FPS.to_string();
     let mut a: Vec<String> = if f.hevc {

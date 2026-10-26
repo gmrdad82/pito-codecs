@@ -547,7 +547,7 @@ impl Sound {
     pub fn pre_roll(&self) -> f64 {
         match self {
             #[cfg(feature = "opus")]
-            Sound::Opus(_) => 0.08,
+            Sound::Opus(_) => 0.2,
             #[cfg(feature = "ac3")]
             Sound::Ac3(d) => 1536.0 / d.rate().max(1) as f64,
             #[cfg(feature = "mp3")]

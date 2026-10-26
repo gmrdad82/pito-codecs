@@ -1,7 +1,7 @@
 [[ref]]
 name = "bframes.mp4.mkv"
 file = ""
-sha256 = "65bf7a7aab6f2a5c5957b1fb5aa54e37daea19907c1ae846a6e1890bdf0e5011"
+sha256 = "c11e5adaf19b19991baa598252f3c40b9b8247e64f535d679286c0c8b4faa763"
 kind = "bit-exact"
 tool = "x264 0.165.3222 b35605a"
 command = "x264 --demuxer y4m --muxer mkv --threads 1 --preset ultrafast --no-scenecut --quiet --no-progress --bframes 3 --keyint 30 --crf 40 -o {out} {src}"
@@ -9,7 +9,7 @@ command = "x264 --demuxer y4m --muxer mkv --threads 1 --preset ultrafast --no-sc
 [[ref]]
 name = "bframes.mp4"
 file = "bframes.mp4"
-sha256 = "ae1a7e162a059e62f7995d9153b85ee80492b0192ec3a90ef1805656d1452636"
+sha256 = "2120e7bbdd6c06c302bb1d1bffd32f66f3ae0af8ef7b5666d00730dfd55aa20c"
 kind = "fixture"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: {ref:bframes.mp4.mkv}'s frames at their Matroska times in our MP4 writer"
@@ -17,7 +17,7 @@ command = "examples/record_refs: {ref:bframes.mp4.mkv}'s frames at their Matrosk
 [[ref]]
 name = "bframes.flv"
 file = "bframes.flv"
-sha256 = "2d54c3b12411938c474ae9a7c64cdf3544b757642aaab6e03e510602ac852014"
+sha256 = "e9f584a964873a471d649544deeeb6aa700804de0e616a4ab8c9786f3c489b0e"
 kind = "fixture"
 tool = "x264 0.165.3222 b35605a"
 command = "x264 --demuxer y4m --muxer flv --threads 1 --preset ultrafast --no-scenecut --quiet --no-progress --bframes 3 --keyint 30 --crf 40 -o {out} {src}"
@@ -25,23 +25,23 @@ command = "x264 --demuxer y4m --muxer flv --threads 1 --preset ultrafast --no-sc
 [[ref]]
 name = "tone.m4a"
 file = "tone.m4a"
-sha256 = "670d2e894f0e7924053d42f52cd5282f15c2a8f56e3cb73bfd976ec43ed68c46"
+sha256 = "e5b1f02010e123fe92e77deae7ca271bd952c419e01795cec6e77c56cb2e1050"
 kind = "fixture"
 tool = "FAAC 2.1.0"
-command = "faac -P -R 48000 -B 16 -C 2 -b 64 -o {out} {src}"
+command = "faac -P -R 48000 -B 16 -C 2 -q 70 -c 3500 -o {out} {src}"
 
 [[ref]]
 name = "tone.aac"
 file = "tone.aac"
-sha256 = "225b840e8a4454037b56df6a508beba9c15135771a4eba92b00ae189db55d4ba"
+sha256 = "6823cb94c0c8d1e7acb769866f0e809f7bf9fd8fc451d9c2b0ab22f36960d262"
 kind = "fixture"
 tool = "FAAC 2.1.0"
-command = "faac -P -R 48000 -B 16 -C 2 -b 64 -o {out} {src}"
+command = "faac -P -R 48000 -B 16 -C 2 -q 70 -c 3500 -o {out} {src}"
 
 [[ref]]
 name = "hevc.hevc"
 file = ""
-sha256 = "07302cd5005884ad84eda9f07df16b0bd2c5dfd4aa610815dd4907eb1353d03f"
+sha256 = "25de1670856d99bd07a4d03157138d96d66ebc78e1a47cbd7c3a5709cb8644c7"
 kind = "bit-exact"
 tool = "x265 [info]: HEVC encoder version 4.3"
 command = "x265 --input {src} --input-res 160x120 --fps 30 --input-csp i420 --frames 30 --preset ultrafast --bframes 4 --keyint 30 --no-scenecut --crf 40 --frame-threads 1 --no-wpp --pools none --log-level error --no-info --no-progress --csv hevc.hevc.csv --csv-log-level 1 --output {out}"
@@ -49,7 +49,7 @@ command = "x265 --input {src} --input-res 160x120 --fps 30 --input-csp i420 --fr
 [[ref]]
 name = "hevc.mov"
 file = "hevc.mov"
-sha256 = "f03610ee44dfaa6831105850ffe4a1b04ec17e2f2910ecaa200738c99bb051e0"
+sha256 = "f390b484f16fa09db67f2490719db01e8319d5aba6cb615f7aef470284f98c20"
 kind = "fixture"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: {ref:hevc.hevc} in our MOV writer, its times from the x265 csv's POCs"

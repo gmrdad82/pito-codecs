@@ -137,7 +137,6 @@ fn mp4_defs() -> Vec<Def> {
     let frames = u64::from(mp4refs::FPS * mp4refs::SECONDS);
     let size = mp4refs::SIZE;
     let bframes = ["--bframes", "3", "--keyint", "30", "--crf", "40"];
-    let kbps = mp4refs::AUDIO_KBPS.to_string();
     let faac = |file: &str| {
         Def::fixture(
             area,
@@ -146,7 +145,8 @@ fn mp4_defs() -> Vec<Def> {
             tool(
                 "faac",
                 &[
-                    "-P", "-R", "48000", "-B", "16", "-C", "2", "-b", &kbps, "-o", "{out}", "{src}",
+                    "-P", "-R", "48000", "-B", "16", "-C", "2", "-q", "70", "-c", "3500", "-o",
+                    "{out}", "{src}",
                 ],
             ),
         )

@@ -421,7 +421,7 @@ impl Stills {
                     return Ok(vec![native::still_mkv(r, cur, dec, first, height)?]);
                 }
                 cur.seek(r, v, first + start)?;
-                let targets: Vec<i64> = batch.iter().map(|at| t.ticks(*at)).collect();
+                let targets: Vec<i64> = batch.iter().map(|at| t.shown_at(*at)).collect();
                 let mut src = native::Packets::Mkv {
                     r,
                     cur,

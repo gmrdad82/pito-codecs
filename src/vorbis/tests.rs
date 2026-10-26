@@ -1006,7 +1006,12 @@ fn libvorbis_headers_parse_to_what_libvorbisenc_reports() {
             c.name
         );
         let flags: Vec<bool> = setup.modes.iter().map(|m| m.mode_blockflag).collect();
-        assert_eq!(flags, [false, true], "{}: short and long modes", c.name);
+        let modes: &[bool] = if ident.blocksize_0 == ident.blocksize_1 {
+            &[false]
+        } else {
+            &[false, true]
+        };
+        assert_eq!(flags, modes, "{}: short and long modes", c.name);
         if c.name == "stereo_44k_q3" {
             assert_eq!((ident.blocksize_0, ident.blocksize_1), (8, 11));
             assert!(setup.residues.iter().all(|r| r.residue_type == 2));

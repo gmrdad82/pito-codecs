@@ -55,6 +55,7 @@ pub struct Track {
     pub samples: Vec<Sample>,
     pub edits: Vec<Edit>,
     pub edit_offset: i64,
+    pub edit_end: Option<i64>,
     sync_index: Vec<u32>,
     pts_order: Vec<u32>,
 }
@@ -141,6 +142,10 @@ impl Track {
 
     pub fn ticks(&self, seconds: f64) -> i64 {
         (seconds * self.timescale as f64).round() as i64
+    }
+
+    pub fn shown_at(&self, seconds: f64) -> i64 {
+        (seconds * self.timescale as f64 - 0.5).ceil() as i64
     }
 
     pub fn duration_seconds(&self) -> f64 {
@@ -615,6 +620,7 @@ fn parse_trak(
         samples: Vec::new(),
         edits: Vec::new(),
         edit_offset: 0,
+        edit_end: None,
         sync_index: Vec::new(),
         pts_order: Vec::new(),
     };
@@ -707,6 +713,11 @@ fn parse_trak(
         } else {
             t.edit_offset =
                 rescale(empty, movie_timescale, t.timescale).saturating_sub(e.media_time);
+            let shown = t.edits.iter().filter(|e| e.media_time != -1).count();
+            if shown == 1 && e.segment_duration > 0 {
+                let end = empty + e.segment_duration as i128;
+                t.edit_end = Some(rescale(end, movie_timescale, t.timescale));
+            }
             break;
         }
     }
@@ -930,10 +941,10 @@ fn parse_stbl(
     if let Some(p) = pcm {
         let a = t.entry().and_then(|e| e.audio.clone()).unwrap_or_default();
         let frame_bytes = |frames: u64| -> u64 {
-            if a.qt_version == 1 && a.bytes_per_frame > 0 && a.samples_per_packet > 0 {
-                frames / a.samples_per_packet as u64 * a.bytes_per_frame as u64
-            } else if const_size > 1 {
+            if const_size > 1 {
                 frames * const_size as u64
+            } else if a.qt_version == 1 && a.bytes_per_frame > 0 && a.samples_per_packet > 0 {
+                frames / a.samples_per_packet as u64 * a.bytes_per_frame as u64
             } else {
                 frames * p.bytes_per_frame() as u64
             }

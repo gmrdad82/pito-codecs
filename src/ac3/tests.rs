@@ -293,7 +293,7 @@ fn malformed_frames_fail_cleanly() {
                     p.extend_from_slice(f);
                 }
                 if d.decode_into(&p, &mut buf).is_ok() {
-                    assert_eq!(buf.len() % channels as usize, 0);
+                    assert_eq!(buf.len() % usize::from(d.channels()), 0, "{name}");
                 }
             }
         }

@@ -9,7 +9,7 @@ command = "examples/record_refs: src/hevc/refs.rs scaling_list_text()"
 [[ref]]
 name = "intra_main10.hevc"
 file = "intra_main10.hevc"
-sha256 = "95d50d3df6dc3fb7ae062a8399921088029f4322aad576383922f7cfafb6c7c3"
+sha256 = "1b6c8c45455913f040487f422f2979e398c7607a138cd923c294f7d74bf14bba"
 kind = "fixture"
 tool = "x265 [info]: HEVC encoder version 4.3"
 command = "x265 --log-level error --y4m --input {src} --frames 3 --frame-threads 1 --output-depth 10 --recon-depth 10 --recon intra_main10.recon.y4m --output {out} --keyint 1"
@@ -17,7 +17,7 @@ command = "x265 --log-level error --y4m --input {src} --frames 3 --frame-threads
 [[ref]]
 name = "intra_main10.yuv"
 file = ""
-sha256 = "71abec0884e105a58fa04fc1a5d053708986b639719f5a5fc59bb18b921e4916"
+sha256 = "b1f10d3fda9502dc01e5f5c5e68c829d6ab7a62a2b277fd37b6fa904724a7629"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:intra_main10.hevc}"
@@ -25,7 +25,7 @@ command = "examples/record_refs: the --recon reconstruction x265 wrote while mak
 [[ref]]
 name = "medium.hevc"
 file = "medium.hevc"
-sha256 = "7e28c33724d743ed2522a7bdffef6a2972c95539c317d3b08f9169da4855fec1"
+sha256 = "7e63b35d68952f9755fcbfc4fea42488d266d71c05502b10d9787a84635e68ea"
 kind = "fixture"
 tool = "x265 [info]: HEVC encoder version 4.3"
 command = "x265 --log-level error --y4m --input {src} --frames 10 --frame-threads 1 --output-depth 8 --recon-depth 8 --recon medium.recon.y4m --output {out} --preset medium"
@@ -33,7 +33,7 @@ command = "x265 --log-level error --y4m --input {src} --frames 10 --frame-thread
 [[ref]]
 name = "medium.yuv"
 file = ""
-sha256 = "fa25c49a0dc1e466b4ff8ade4912bc08c5ba5630fd6ff409c34188d9ae6c3b78"
+sha256 = "a104a551b4fb1c1c9caa35057ce05979e2e86627fa29bd5a24249b6ec1ec3c78"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:medium.hevc}"
@@ -41,7 +41,7 @@ command = "examples/record_refs: the --recon reconstruction x265 wrote while mak
 [[ref]]
 name = "slow_main10.hevc"
 file = "slow_main10.hevc"
-sha256 = "9c5c579143122274a08f608c5a9ec076290f07617b7bae525c6da516c1b9e4e2"
+sha256 = "00aafed948d4b89d0aef2ab1803f5a543066134157d43c9b0723e1f835e992fe"
 kind = "fixture"
 tool = "x265 [info]: HEVC encoder version 4.3"
 command = "x265 --log-level error --y4m --input {src} --frames 6 --frame-threads 1 --output-depth 10 --recon-depth 10 --recon slow_main10.recon.y4m --output {out} --preset slow"
@@ -49,7 +49,7 @@ command = "x265 --log-level error --y4m --input {src} --frames 6 --frame-threads
 [[ref]]
 name = "slow_main10.yuv"
 file = ""
-sha256 = "5ace42a5ec769ea52017fa4e23ad031cb6bc3c77614bb98a37d93072f9eca314"
+sha256 = "881f0e049f029b325743a69efb4e815f608b181bf5f40960f8e816e2001140e6"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:slow_main10.hevc}"
@@ -57,7 +57,7 @@ command = "examples/record_refs: the --recon reconstruction x265 wrote while mak
 [[ref]]
 name = "bframes.hevc"
 file = "bframes.hevc"
-sha256 = "fd18bea1901e6ac22185e9105343d7dc28ed9b594d2dba4610b77359b177660a"
+sha256 = "4b1f62f336c2ae2f5721690ae118e5935352bae6ed6d828bf137c281ae299ccd"
 kind = "fixture"
 tool = "x265 [info]: HEVC encoder version 4.3"
 command = "x265 --log-level error --y4m --input {src} --frames 12 --frame-threads 1 --output-depth 8 --recon-depth 8 --recon bframes.recon.y4m --output {out} --bframes 8 --b-pyramid --ref 4"
@@ -65,7 +65,7 @@ command = "x265 --log-level error --y4m --input {src} --frames 12 --frame-thread
 [[ref]]
 name = "bframes.yuv"
 file = ""
-sha256 = "ba4196282ac4b99ab262f57f3d434de54fac3286b0aaf18732e0dd6132bc4e73"
+sha256 = "bbafb7ec04216cc5be52591ea23ff7acaf0063517ab0eff17df7f5337c367e71"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:bframes.hevc}"
@@ -73,7 +73,7 @@ command = "examples/record_refs: the --recon reconstruction x265 wrote while mak
 [[ref]]
 name = "weightp_main10.hevc"
 file = "weightp_main10.hevc"
-sha256 = "0af5ae9d48c883ec0d6ba644b0a722b8040907a27d4df1bd18ae848b72685364"
+sha256 = "12581bf104af9d2a38e6bd14a8ea56b33f003b487e49c330f2844038b22b0e58"
 kind = "fixture"
 tool = "x265 [info]: HEVC encoder version 4.3"
 command = "x265 --log-level error --y4m --input {src} --frames 12 --frame-threads 1 --output-depth 10 --recon-depth 10 --recon weightp_main10.recon.y4m --output {out} --weightp --weightb"
@@ -81,7 +81,7 @@ command = "x265 --log-level error --y4m --input {src} --frames 12 --frame-thread
 [[ref]]
 name = "weightp_main10.yuv"
 file = ""
-sha256 = "402b590c0ea93cfab314e5cb287e0755a4374f4c31ff308b1635cd7bea13d92a"
+sha256 = "afd77e99b268360038bfce1ed6a96f145bdfa2fbe80b302261b52f074a38c2d2"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:weightp_main10.hevc}"
@@ -89,7 +89,7 @@ command = "examples/record_refs: the --recon reconstruction x265 wrote while mak
 [[ref]]
 name = "open_gop.hevc"
 file = "open_gop.hevc"
-sha256 = "0bd479acf06f237471e5bf4f5cfdbd0d2d49b8d6ea0f23a105130262a942e9fc"
+sha256 = "213b3d7100320fb462fa00a20a3b9cb908261cc280ee27eda80e22e3de11e229"
 kind = "fixture"
 tool = "x265 [info]: HEVC encoder version 4.3"
 command = "x265 --log-level error --y4m --input {src} --frames 20 --frame-threads 1 --output-depth 8 --recon-depth 8 --recon open_gop.recon.y4m --output {out} --keyint 8 --min-keyint 8 --open-gop --bframes 3"
@@ -97,7 +97,7 @@ command = "x265 --log-level error --y4m --input {src} --frames 20 --frame-thread
 [[ref]]
 name = "open_gop.yuv"
 file = ""
-sha256 = "c6bf970e6217efd1caf4d05ec7efe1d854a40c7d310a67fc62331cfb0bf34314"
+sha256 = "c1eec277f39f9fd1d9a0a9093bca2d7091d1cab076d407af6abd4f7331177d7f"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:open_gop.hevc}"
@@ -105,7 +105,7 @@ command = "examples/record_refs: the --recon reconstruction x265 wrote while mak
 [[ref]]
 name = "tools.hevc"
 file = "tools.hevc"
-sha256 = "29d5434057fa61cf680f2fb127c37667190b0745b9c46714319b482716f1ee8b"
+sha256 = "deea88afa7d485591c4407828744328562e286a5aa8a1a145644ac17ab99fb42"
 kind = "fixture"
 tool = "x265 [info]: HEVC encoder version 4.3"
 command = "x265 --log-level error --y4m --input {src} --frames 6 --frame-threads 1 --output-depth 8 --recon-depth 8 --recon tools.recon.y4m --output {out} --slices 4 --scaling-list default --tskip --rect --amp"
@@ -113,7 +113,7 @@ command = "x265 --log-level error --y4m --input {src} --frames 6 --frame-threads
 [[ref]]
 name = "tools.yuv"
 file = ""
-sha256 = "73080c6bbb217061f2923574b1db54c2290e12760f3e077c93792c84b6572bb8"
+sha256 = "7bb369c4adbefb98af1545c973ab0101a2e9878893975797ebb9a62372010d2f"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:tools.hevc}"
@@ -121,7 +121,7 @@ command = "examples/record_refs: the --recon reconstruction x265 wrote while mak
 [[ref]]
 name = "lossless.hevc"
 file = "lossless.hevc"
-sha256 = "5ad9c9474445e5cc5ee85cf34f6e1a4e1fbb5ab34be45fe03731a9a164ebe4bc"
+sha256 = "691e69893d86c9bd84bae1031441ac1baded012be249c7ccd5b8f013b8668378"
 kind = "fixture"
 tool = "x265 [info]: HEVC encoder version 4.3"
 command = "x265 --log-level error --y4m --input {src} --frames 4 --frame-threads 1 --output-depth 8 --recon-depth 8 --recon lossless.recon.y4m --output {out} --lossless"
@@ -129,7 +129,7 @@ command = "x265 --log-level error --y4m --input {src} --frames 4 --frame-threads
 [[ref]]
 name = "lossless.yuv"
 file = ""
-sha256 = "25a27042226dd16d13f568571d22a7b97b4c6c872feea6ad783ffafd82ab2274"
+sha256 = "f7723c040d9452cb0ea6253eb134c07f42467a0c0f5b2e2f8a575fbd7acffdf3"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:lossless.hevc}"
@@ -137,7 +137,7 @@ command = "examples/record_refs: the --recon reconstruction x265 wrote while mak
 [[ref]]
 name = "odd_350x238.hevc"
 file = "odd_350x238.hevc"
-sha256 = "befa3da73ca9e7f8bc24e0c9a1f8142c2def7e147c1f3d27d4c6ad374b3bffd6"
+sha256 = "481578d77910a89ccecd25b35aab08a67a76dec74c98dfc050d8ac122d7a3a57"
 kind = "fixture"
 tool = "x265 [info]: HEVC encoder version 4.3"
 command = "x265 --log-level error --y4m --input {src} --frames 2 --frame-threads 1 --output-depth 8 --recon-depth 8 --recon odd_350x238.recon.y4m --output {out} --preset veryfast"
@@ -145,7 +145,7 @@ command = "x265 --log-level error --y4m --input {src} --frames 2 --frame-threads
 [[ref]]
 name = "odd_350x238.yuv"
 file = ""
-sha256 = "8163428edb45fd36b1cb168f239b53e0bd0be25163e46d291c88a5d58d1b7457"
+sha256 = "38800fae9af00f7bbb144f6fbc3733ace4aa4b28a5efa2c4fc762194e69e849e"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:odd_350x238.hevc}"
@@ -153,7 +153,7 @@ command = "examples/record_refs: the --recon reconstruction x265 wrote while mak
 [[ref]]
 name = "wpp_crop_66x70.hevc"
 file = "wpp_crop_66x70.hevc"
-sha256 = "5e2fa0b96b45df39804d598a7dd32629432ea5d53f4f2e89c040bbae9d8fc3b1"
+sha256 = "09d136cab568f453652f572c2f3c9f182dd6a88be175988a36d49feaef7fc41c"
 kind = "fixture"
 tool = "x265 [info]: HEVC encoder version 4.3"
 command = "x265 --log-level error --y4m --input {src} --frames 10 --frame-threads 1 --output-depth 8 --recon-depth 8 --recon wpp_crop_66x70.recon.y4m --output {out} --ctu 16 --bframes 3"
@@ -161,7 +161,7 @@ command = "x265 --log-level error --y4m --input {src} --frames 10 --frame-thread
 [[ref]]
 name = "wpp_crop_66x70.yuv"
 file = ""
-sha256 = "5f77274088e6057307454e935d9eff9f68069e129868c2e4e09896e24eea69f9"
+sha256 = "be6bd3c45921e3b86ec17b184f8145146f8e12ae8fe0e31cca56c3c5549779d4"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:wpp_crop_66x70.hevc}"
@@ -169,7 +169,7 @@ command = "examples/record_refs: the --recon reconstruction x265 wrote while mak
 [[ref]]
 name = "wpp_slices_main10.hevc"
 file = "wpp_slices_main10.hevc"
-sha256 = "3cd3b89a7769857d45b016321e3b957947dbc322ba394eee754bee85dfa582f5"
+sha256 = "fb8e25645afb901bc887e6c9477c5fd74c8a4a52b2d24ad1a4a7ae455ebe640d"
 kind = "fixture"
 tool = "x265 [info]: HEVC encoder version 4.3"
 command = "x265 --log-level error --y4m --input {src} --frames 8 --frame-threads 1 --output-depth 10 --recon-depth 10 --recon wpp_slices_main10.recon.y4m --output {out} --ctu 16 --slices 3"
@@ -177,7 +177,7 @@ command = "x265 --log-level error --y4m --input {src} --frames 8 --frame-threads
 [[ref]]
 name = "wpp_slices_main10.yuv"
 file = ""
-sha256 = "af2dc80e248cc9d7711c618e420e63747b596f5f2e372160638913c7fa4ae8dd"
+sha256 = "78ac94f5059a0f68e481a471bc57611d5573dae34d9856e02e84f1bc72cf6246"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:wpp_slices_main10.hevc}"
@@ -185,7 +185,7 @@ command = "examples/record_refs: the --recon reconstruction x265 wrote while mak
 [[ref]]
 name = "long_b_runs.hevc"
 file = "long_b_runs.hevc"
-sha256 = "9a8ee17f102c23790cd746d788d663b88c21f1b0c1edafa0aa4860af78d165f0"
+sha256 = "a137af4a85f9066a20273ee916ff6da8842cd97fb1f973653ec1c5087f3821d1"
 kind = "fixture"
 tool = "x265 [info]: HEVC encoder version 4.3"
 command = "x265 --log-level error --y4m --input {src} --frames 18 --frame-threads 1 --output-depth 8 --recon-depth 8 --recon long_b_runs.recon.y4m --output {out} --bframes 16 --b-pyramid --b-adapt 0 --ref 6"
@@ -193,7 +193,7 @@ command = "x265 --log-level error --y4m --input {src} --frames 18 --frame-thread
 [[ref]]
 name = "long_b_runs.yuv"
 file = ""
-sha256 = "851c6770732f75aa53c98d1f437936429052030ec34cdbdf2939c01f457df3ca"
+sha256 = "ad850749969561ddf6dfa99cbc8c70b5c4448200000aab7735c7478cfa9b2288"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:long_b_runs.hevc}"
@@ -201,7 +201,7 @@ command = "examples/record_refs: the --recon reconstruction x265 wrote while mak
 [[ref]]
 name = "pyramid_weightb_main10.hevc"
 file = "pyramid_weightb_main10.hevc"
-sha256 = "251bd90ba716f397696e903e838a1288e0acde7c57669d0f90e56e7c177f5cfe"
+sha256 = "8315d2fc086898e0b7fcecea9723e15d0fc355de702ffc92261f0f218410c79d"
 kind = "fixture"
 tool = "x265 [info]: HEVC encoder version 4.3"
 command = "x265 --log-level error --y4m --input {src} --frames 12 --frame-threads 1 --output-depth 10 --recon-depth 10 --recon pyramid_weightb_main10.recon.y4m --output {out} --bframes 8 --b-pyramid --ref 5 --weightp --weightb"
@@ -209,7 +209,7 @@ command = "x265 --log-level error --y4m --input {src} --frames 12 --frame-thread
 [[ref]]
 name = "pyramid_weightb_main10.yuv"
 file = ""
-sha256 = "70d1584b33aa3bf98cbf9474b3afb89e26ecdcad71e54649078abf82e15a0b5b"
+sha256 = "d27e802adfc7dbeb4f0bbba857dd45861a6b1ff569dcb1020d3b2dcfc6e7d934"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:pyramid_weightb_main10.hevc}"
@@ -217,7 +217,7 @@ command = "examples/record_refs: the --recon reconstruction x265 wrote while mak
 [[ref]]
 name = "weightp_8bit.hevc"
 file = "weightp_8bit.hevc"
-sha256 = "3248cbc5e133b7d38f036ce07d03637d41f5a70cf281bbb2c6182b5d6a437aab"
+sha256 = "71f0382c92e04da9f632936f370be7e33fdce833ad382ce6457244d8620a92b4"
 kind = "fixture"
 tool = "x265 [info]: HEVC encoder version 4.3"
 command = "x265 --log-level error --y4m --input {src} --frames 10 --frame-threads 1 --output-depth 8 --recon-depth 8 --recon weightp_8bit.recon.y4m --output {out} --bframes 2 --weightp --weightb"
@@ -225,7 +225,7 @@ command = "x265 --log-level error --y4m --input {src} --frames 10 --frame-thread
 [[ref]]
 name = "weightp_8bit.yuv"
 file = ""
-sha256 = "82df849a9a9953484de0116455f3180de9e8ca3667dc2d1d270fe95402e26b7b"
+sha256 = "b42bc08a7d4b2b64ed90588636a7408390a60daf7098fca52c562ea3ba520e6d"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:weightp_8bit.hevc}"
@@ -233,7 +233,7 @@ command = "examples/record_refs: the --recon reconstruction x265 wrote while mak
 [[ref]]
 name = "scaling_tskip_main10.hevc"
 file = "scaling_tskip_main10.hevc"
-sha256 = "71e25feb1af0c80a08eef272325f7f9737f3d64b5ff2942530caaf0293d0efaa"
+sha256 = "22f436a1d93bc2b3d1fe40345ea8ed7b2588c26ed403a34237dd5f6d7884decf"
 kind = "fixture"
 tool = "x265 [info]: HEVC encoder version 4.3"
 command = "x265 --log-level error --y4m --input {src} --frames 6 --frame-threads 1 --output-depth 10 --recon-depth 10 --recon scaling_tskip_main10.recon.y4m --output {out} --scaling-list default --tskip --rdoq-level 0"
@@ -241,7 +241,7 @@ command = "x265 --log-level error --y4m --input {src} --frames 6 --frame-threads
 [[ref]]
 name = "scaling_tskip_main10.yuv"
 file = ""
-sha256 = "30aab8ef6c7ba17b24a86cf90f8fe60522b4836e6afbd179a73bc5d69fa7b974"
+sha256 = "b14aa6b3f8aafa4425b6cb85c0efd257fa39e04d082d7d7fb2c6e10a78ae3248"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:scaling_tskip_main10.hevc}"
@@ -249,7 +249,7 @@ command = "examples/record_refs: the --recon reconstruction x265 wrote while mak
 [[ref]]
 name = "cu_qp_chroma_offsets.hevc"
 file = "cu_qp_chroma_offsets.hevc"
-sha256 = "d81454f7fda621a347a86cc47ef324d067bc9d453aebac255e36d5efed7fd191"
+sha256 = "e3104b12d4281a020f68c52f074f6a1696555799a3b66764b20768e8bfd7c057"
 kind = "fixture"
 tool = "x265 [info]: HEVC encoder version 4.3"
 command = "x265 --log-level error --y4m --input {src} --frames 6 --frame-threads 1 --output-depth 8 --recon-depth 8 --recon cu_qp_chroma_offsets.recon.y4m --output {out} --ctu 16 --aq-mode 3 --qg-size 8 --cbqpoffs -4 --crqpoffs 5"
@@ -257,7 +257,7 @@ command = "x265 --log-level error --y4m --input {src} --frames 6 --frame-threads
 [[ref]]
 name = "cu_qp_chroma_offsets.yuv"
 file = ""
-sha256 = "cc58e0a586617c59f035fa9fd6e719a438f885bfac111ada39edd3cce832688a"
+sha256 = "e0a9085e49d104da89f914d8a2183090c7103b143bc97f4798e18b4f41ff15ca"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:cu_qp_chroma_offsets.hevc}"
@@ -265,7 +265,7 @@ command = "examples/record_refs: the --recon reconstruction x265 wrote while mak
 [[ref]]
 name = "intra_tools.hevc"
 file = "intra_tools.hevc"
-sha256 = "54888b929f66a703ddc7738f591e4ee4e92b322b79028d3bd7bd81f6769d00f8"
+sha256 = "8976c8321a9f5a8eac5fb830c8ab7caabdf559c952a3e2f8ee8bd24c1c2c7aea"
 kind = "fixture"
 tool = "x265 [info]: HEVC encoder version 4.3"
 command = "x265 --log-level error --y4m --input {src} --frames 6 --frame-threads 1 --output-depth 8 --recon-depth 8 --recon intra_tools.recon.y4m --output {out} --constrained-intra --no-signhide --no-temporal-mvp --no-strong-intra-smoothing --max-merge 1 --no-sao --deblock -6,6 --amp --rect --tu-intra-depth 4 --tu-inter-depth 4"
@@ -273,7 +273,7 @@ command = "x265 --log-level error --y4m --input {src} --frames 6 --frame-threads
 [[ref]]
 name = "intra_tools.yuv"
 file = ""
-sha256 = "a790ca82ce00700188eb6e5df63d22c57fd89bd4a88e596dd4af067f749e2dba"
+sha256 = "51c96c1616b5466fe22b86fccd643318580427eb8b52a0daf9c16bda537d4c4e"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:intra_tools.hevc}"
@@ -281,7 +281,7 @@ command = "examples/record_refs: the --recon reconstruction x265 wrote while mak
 [[ref]]
 name = "cu_lossless.hevc"
 file = "cu_lossless.hevc"
-sha256 = "f59466e9385c0ab5ba10953de24aff8db5af6137d20247a5750be3f1c53abf59"
+sha256 = "e53ec59c898a343a934c757b3cf08ede3ac262e6b64f252a0218668a55aca0ba"
 kind = "fixture"
 tool = "x265 [info]: HEVC encoder version 4.3"
 command = "x265 --log-level error --y4m --input {src} --frames 4 --frame-threads 1 --output-depth 8 --recon-depth 8 --recon cu_lossless.recon.y4m --output {out} --cu-lossless"
@@ -289,7 +289,7 @@ command = "x265 --log-level error --y4m --input {src} --frames 4 --frame-threads
 [[ref]]
 name = "cu_lossless.yuv"
 file = ""
-sha256 = "2b65b52caca40edf98083d530b71470f2fafaea4932156ea9a524ba19a41c7d8"
+sha256 = "b37f770a55a17f4b5cfea921f2a01659b14875f368b6cc36624f926191ce6778"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:cu_lossless.hevc}"
@@ -297,7 +297,7 @@ command = "examples/record_refs: the --recon reconstruction x265 wrote while mak
 [[ref]]
 name = "one_ctb_no_deblock.hevc"
 file = "one_ctb_no_deblock.hevc"
-sha256 = "ee19f3d7c9a38e8f9a5d28a5aed6e5a25f47daa4c9b6527593e7ee5139bae9bb"
+sha256 = "2f156b3c6712242ed27e2e4e9643094890b7785e6ffb1caf0a2880e88c4bc206"
 kind = "fixture"
 tool = "x265 [info]: HEVC encoder version 4.3"
 command = "x265 --log-level error --y4m --input {src} --frames 4 --frame-threads 1 --output-depth 8 --recon-depth 8 --recon one_ctb_no_deblock.recon.y4m --output {out} --ctu 64 --no-deblock"
@@ -305,7 +305,7 @@ command = "x265 --log-level error --y4m --input {src} --frames 4 --frame-threads
 [[ref]]
 name = "one_ctb_no_deblock.yuv"
 file = ""
-sha256 = "31780a51f692dcab3e17b2171dde6dda89b6e893cc7bd5db8946eed3da2a49d9"
+sha256 = "e3507f48c707bc8503080188aa4d597edf1cafdfe965982bc76a720f01318420"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:one_ctb_no_deblock.hevc}"
@@ -313,7 +313,7 @@ command = "examples/record_refs: the --recon reconstruction x265 wrote while mak
 [[ref]]
 name = "scaling_list_file.hevc"
 file = "scaling_list_file.hevc"
-sha256 = "7adcd793f87d6e4e1fd5d5381d90d5e8194d702dd4da7332cd8b6691ad6a0ce2"
+sha256 = "40fee16553790daedf6cbd9759ba886be5447eaa12b6567271d40f3aa1a73209"
 kind = "fixture"
 tool = "x265 [info]: HEVC encoder version 4.3"
 command = "x265 --log-level error --y4m --input {src} --frames 6 --frame-threads 1 --output-depth 8 --recon-depth 8 --recon scaling_list_file.recon.y4m --output {out} --scaling-list scaling_list.txt --rdoq-level 0"
@@ -321,7 +321,7 @@ command = "x265 --log-level error --y4m --input {src} --frames 6 --frame-threads
 [[ref]]
 name = "scaling_list_file.yuv"
 file = ""
-sha256 = "43911902d970619ecbf9c3043851831f518dfb95f0908288cba9e59f9429169e"
+sha256 = "69b3bf09651389c53b06cb15a59390909d5995484cc0f491bf1bd8047bec6cd4"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:scaling_list_file.hevc}"
@@ -329,15 +329,15 @@ command = "examples/record_refs: the --recon reconstruction x265 wrote while mak
 [[ref]]
 name = "open_gop_cut.hevc"
 file = "open_gop_cut.hevc"
-sha256 = "10bc3893f1352edd92cdb66f3203fbe3d649e8602825a9cec3eabd5456dcff55"
+sha256 = "336db15986209be0583514dc07657ee0149577fea5a0e72865d95a961b7acf72"
 kind = "fixture"
 tool = "x265 [info]: HEVC encoder version 4.3"
-command = "x265 --log-level error --y4m --input {src} --frames 20 --frame-threads 1 --output-depth 8 --recon-depth 8 --recon open_gop_cut.recon.y4m --output {out} --keyint 8 --min-keyint 8 --open-gop --bframes 3 --repeat-headers"
+command = "x265 --log-level error --y4m --input {src} --frames 20 --frame-threads 1 --output-depth 8 --recon-depth 8 --recon open_gop_cut.recon.y4m --output {out} --keyint 8 --min-keyint 8 --open-gop --bframes 3 --b-adapt 0 --repeat-headers"
 
 [[ref]]
 name = "open_gop_cut.yuv"
 file = ""
-sha256 = "fa259a593a9e9d4419c635bb49f61f81cf0a3752a09a3bc3cb74eb042bb069f2"
+sha256 = "98ca6574cb354724d993ae3510acc6c7aec6c75b7772fa9c9fb278a1bc59d8d2"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:open_gop_cut.hevc}"

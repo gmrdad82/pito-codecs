@@ -303,7 +303,13 @@ fn probe_names_every_container_family_in_text_and_json() {
         assert_eq!(field(&json, "audio_channels"), Some("2"), "{name}: {json}");
         assert_eq!(field(&json, "audio_rate"), Some("48000"), "{name}: {json}");
         let seconds: f64 = field(&json, "seconds").unwrap().parse().unwrap();
-        assert!((0.45..=1.05).contains(&seconds), "{name}: {json}");
+        let tone = refs::TONE_FRAMES as f64 / f64::from(refs::TONE_RATE);
+        let long = if refs::TONES.iter().any(|(f, _, _)| path.ends_with(f)) {
+            tone - 0.01..=tone + 0.06
+        } else {
+            0.45..=1.05
+        };
+        assert!(long.contains(&seconds), "{name}: {json}");
     }
 }
 

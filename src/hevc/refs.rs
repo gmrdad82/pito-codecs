@@ -188,7 +188,7 @@ pub const OPEN_GOP_CUT: X265 = fx(
     AMP,
     false,
     "",
-    "keyint=8:min-keyint=8:open-gop:bframes=3:repeat-headers",
+    "keyint=8:min-keyint=8:open-gop:bframes=3:b-adapt=0:repeat-headers",
 );
 
 pub const HVCC: [&str; 2] = ["medium", "intra_main10"];

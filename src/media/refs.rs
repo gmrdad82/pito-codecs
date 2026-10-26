@@ -192,6 +192,7 @@ pub struct MkvTrack {
     pub bits: u64,
     pub delay_ns: u64,
     pub preroll_ns: u64,
+    pub colour: Option<(u64, u64)>,
 }
 
 #[derive(Clone, Debug)]
@@ -260,13 +261,17 @@ pub fn matroska(
                 parts.push(uint(0x56BB, t.preroll_ns));
             }
             if t.video {
-                parts.push(el(
-                    0xE0,
-                    &cat(&[
-                        uint(0xB0, u64::from(t.size.0)),
-                        uint(0xBA, u64::from(t.size.1)),
-                    ]),
-                ));
+                let mut video = vec![
+                    uint(0xB0, u64::from(t.size.0)),
+                    uint(0xBA, u64::from(t.size.1)),
+                ];
+                if let Some((matrix, range)) = t.colour {
+                    video.push(el(
+                        0x55B0,
+                        &cat(&[uint(0x55B1, matrix), uint(0x55B9, range)]),
+                    ));
+                }
+                parts.push(el(0xE0, &cat(&video)));
             } else {
                 let mut audio = vec![float(0xB5, t.rate), uint(0x9F, t.channels)];
                 if t.bits > 0 {

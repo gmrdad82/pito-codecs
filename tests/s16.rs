@@ -409,7 +409,11 @@ fn a_callback_error_stops_the_stream_and_comes_back_as_is() {
     let mut chunks = 0;
     let frames = decode_s16(&path, &span, &Prefs::default(), |c| {
         chunks += 1;
-        assert!(c.len() <= 48_000, "a chunk of {} samples", c.len());
+        assert!(
+            c.len() <= 2 * 48_000,
+            "a chunk of {} stereo frames",
+            c.len() / 2
+        );
         Ok(())
     })
     .unwrap();
@@ -525,10 +529,18 @@ fn a_corrupt_frame_partway_fails_in_one_line_naming_the_file_and_stream() {
     let mut c = clip().audio_only();
     c.sounds = vec![Sound::Fn(refs::mono_track), Sound::Fn(refs::first_track)];
     let path = c.make(refs::AREA, "two-aac.mka");
+    let r = pito_codecs::mkv::Reader::open(&path).unwrap();
+    let frames = &r.tracks[1].samples;
+    let hits: Vec<(usize, usize)> = frames
+        .iter()
+        .skip(frames.len() / 3)
+        .step_by(7)
+        .take(4)
+        .map(|s| (s.offset as usize, s.size as usize))
+        .collect();
     let bad = damaged(&path, "corrupt.mka", |b| {
-        for k in 4..16 {
-            let at = b.len() * k / 20;
-            b[at..at + 64].fill(0xff);
+        for &(at, n) in &hits {
+            b[at..at + n.min(64)].fill(0xff);
         }
     });
     let span = S16Span {
@@ -623,7 +635,7 @@ fn the_recorder_table_holds_every_file_the_tests_read() {
     let fixtures = refs::fixtures();
     let files: HashSet<&str> = fixtures.iter().map(|f| f.file.as_str()).collect();
     assert_eq!(files.len(), fixtures.len(), "a fixture file name twice");
-    let mut wanted = vec![refs::REFUSED.to_string(), refs::LAW_MOV.to_string()];
+    let mut wanted = vec![refs::REFUSED.to_string()];
     for ext in ["mkv", "mp4"] {
         wanted.push(refs::delayed(ext));
     }

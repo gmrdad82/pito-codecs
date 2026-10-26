@@ -134,6 +134,7 @@ struct Layout {
     info: Info,
     palette: [Entry; 256],
     has_palette: bool,
+    palette_len: usize,
     trns: Option<[u16; 3]>,
 }
 
@@ -187,6 +188,7 @@ impl Decoder {
             info,
             palette: [Entry([0, 0, 0, 255]); 256],
             has_palette: false,
+            palette_len: 0,
             trns: None,
         };
         let mut single: Option<&[u8]> = None;
@@ -236,9 +238,14 @@ impl Decoder {
                         e.0[..3].copy_from_slice(rgb);
                     }
                     layout.has_palette = true;
+                    let usable = match info.color {
+                        Color::Palette => 1usize << info.depth,
+                        _ => 256,
+                    };
+                    layout.palette_len = (len / 3).min(usable);
                 }
                 b"tRNS" => match info.color {
-                    Color::Palette => {
+                    Color::Palette if !body.is_empty() && len <= layout.palette_len => {
                         for (e, a) in layout.palette.iter_mut().zip(body) {
                             e.0[3] = *a;
                         }

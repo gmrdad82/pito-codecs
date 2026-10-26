@@ -33,15 +33,15 @@ command = "examples/record_refs: libopus decode of speech_16k_voip.opus, pre-ski
 [[ref]]
 name = "music_32k_hybrid.opus"
 file = "music_32k_hybrid.opus"
-sha256 = "114cbda942b4bb5491f0aceaf9364ad782c06b683a697525320ca278d02200eb"
+sha256 = "cf531fbdaffe7204fd1df1ad2cccda488e576cb532e6143f9815d30a8ca38714"
 kind = "fixture"
 tool = "libopus.so.0.11.1 libopus 1.6.1"
-command = "examples/record_refs: libopus 32000 bit/s, VBR, audio, 20 ms frames, our Ogg writer"
+command = "examples/record_refs: libopus 32000 bit/s, VBR, audio, hybrid forced, 20 ms frames, our Ogg writer"
 
 [[ref]]
 name = "music_32k_hybrid.opus.f32"
 file = "music_32k_hybrid.opus.f32"
-sha256 = "ec9e68f727aa0aa73c8c8d21ac5ecb4ad1f3388b0e91bdeeaf5b0122e7286bf7"
+sha256 = "216031362fb369a428adcda68b68734e678cfc84b6970243e47a75004c62db55"
 kind = "tolerance"
 tool = "libopus.so.0.11.1 libopus 1.6.1"
 command = "examples/record_refs: libopus decode of music_32k_hybrid.opus, pre-skip and end trimmed, src/opus/refs.rs window"

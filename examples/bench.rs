@@ -2732,7 +2732,7 @@ mod tests {
         assert!(gate.starts_with(concat!("fn", "ffmpeg_run(")));
         assert!(gate.contains(concat!("letexe=", "FFMPEG.get()")));
         let shells: Vec<&str> = src
-            .match_indices(concat!("shell(", "\""))
+            .match_indices(concat!("shell", "(\""))
             .filter_map(|(i, _)| src[i + 7..].split('"').next())
             .collect();
         assert_eq!(shells, ["uname", "date", "git"]);

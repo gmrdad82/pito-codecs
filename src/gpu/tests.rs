@@ -474,7 +474,7 @@ fn bitrate_modes_land_near_their_target() {
         if !has(codec, Direction::Encode) {
             continue;
         }
-        let frames = source_frames(w, h, n, PixelFormat::Yuv420p8);
+        let frames = source_frames_with(w, h, n, PixelFormat::Yuv420p8, 6);
         for rate in [
             Rate::Bitrate(2000),
             Rate::Vbr {
@@ -546,7 +546,7 @@ fn transcodes_on_the_gpu_without_copies() {
     let reference = cpu_decode(Codec::H264, &src);
     let n = refs::FRAMES as usize;
     assert_eq!(reference.len(), n);
-    for (w, h) in [refs::WIDE, refs::FLOOR] {
+    for (w, h) in [refs::WIDE, refs::HEVC_FLOOR] {
         let config = EncoderConfig {
             width: w,
             height: h,
@@ -670,12 +670,13 @@ fn mean_takes_a_clamped_range() {
 #[cfg(all(feature = "h264", feature = "hevc"))]
 fn per_frame_quality_holds_from_the_first_frame() {
     let (w, h, n) = (640, 360, 120);
-    let frames = source_frames_with(w, h, n, PixelFormat::Yuv420p8, 3);
+    let grainy = source_frames_with(w, h, n, PixelFormat::Yuv420p8, 3);
+    let fine = source_frames_with(w, h, n, PixelFormat::Yuv420p8, 1);
     for codec in [Codec::H264, Codec::Hevc] {
         if !has(codec, Direction::Encode) {
             continue;
         }
-        for rate in [Rate::Qp(26), Rate::Bitrate(1500)] {
+        for (rate, frames) in [(Rate::Qp(26), &grainy), (Rate::Bitrate(1500), &fine)] {
             let config = EncoderConfig {
                 width: w,
                 height: h,
@@ -692,13 +693,13 @@ fn per_frame_quality_holds_from_the_first_frame() {
                 ..Default::default()
             };
             let name = format!("{codec:?}-{rate:?}");
-            let (packets, extradata, _) = encode_all(codec, &config, &frames);
+            let (packets, extradata, _) = encode_all(codec, &config, frames);
             let stream = annexb_stream(codec, &packets, &extradata);
             let decoded = cpu_decode(codec, &stream);
             assert_eq!(decoded.len(), n, "{name}: frames decoded");
             let db: Vec<f64> = decoded
                 .iter()
-                .zip(&frames)
+                .zip(frames.iter())
                 .map(|(a, b)| luma_psnr(a, b))
                 .collect();
             let all = mean(&db, 0..n);

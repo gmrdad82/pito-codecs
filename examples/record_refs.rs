@@ -427,7 +427,10 @@ fn record(area: &str, defs: &[&Def]) -> Result<(), Box<dyn Error>> {
             command,
         });
     }
-    let mut total = 0;
+    let count = entries.len();
+    let manifest = Manifest { entries }.render();
+    let about = source(area, &tools);
+    let mut total = (manifest.len() + about.len()) as u64;
     for (file, path) in &kept {
         let size = std::fs::metadata(path)?.len();
         if size > testref::FILE_BUDGET {
@@ -463,15 +466,14 @@ fn record(area: &str, defs: &[&Def]) -> Result<(), Box<dyn Error>> {
     for (file, path) in &kept {
         std::fs::copy(path, dir.join(file))?;
     }
-    let manifest = Manifest { entries };
-    std::fs::write(dir.join(testref::MANIFEST), manifest.render())?;
-    std::fs::write(dir.join(testref::SOURCE), source(area, &tools))?;
+    std::fs::write(dir.join(testref::MANIFEST), manifest)?;
+    std::fs::write(dir.join(testref::SOURCE), about)?;
     let mut say = std::io::stdout();
     use std::io::Write as _;
     writeln!(
         say,
         "{area}: {} references, {} files, {total} bytes",
-        manifest.entries.len(),
+        count,
         kept.len()
     )?;
     Ok(())
@@ -520,9 +522,7 @@ fn tracked_bytes(skip: &str) -> Result<u64, Box<dyn Error>> {
         }
         for f in std::fs::read_dir(&area)? {
             let f = f?.path();
-            let name = f.file_name().map(|n| n.to_string_lossy().into_owned());
-            if f.is_file() && !matches!(name.as_deref(), Some(testref::MANIFEST | testref::SOURCE))
-            {
+            if f.is_file() {
                 total += std::fs::metadata(&f)?.len();
             }
         }

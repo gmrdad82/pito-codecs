@@ -433,7 +433,7 @@ command = "examples/record_refs: libvorbisfile ov_read_float of high_88k.ogg, ch
 [[ref]]
 name = "long_96k.webm"
 file = "long_96k.webm"
-sha256 = "f699f06024331df9717f7a9502673e957f74eb5dbbee8b350af2bebc9a326719"
+sha256 = "982e97beaab89339ad1ec61dad39111660e1fc8d948cf0bc088a8583682085bf"
 kind = "fixture"
 tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
 command = "examples/record_refs: the libvorbisenc packets of long_96k.ogg in our webm writer, DiscardPadding on the last block"
@@ -489,7 +489,7 @@ command = "examples/record_refs: the last 128 frames of high_88k.ogg.vorbisfile.
 [[ref]]
 name = "stereo_44k_q3_copy.mkv"
 file = "stereo_44k_q3_copy.mkv"
-sha256 = "7bb54b3ce215c3dd26d7a62b5d89091a32b4603f1a61a96687378ea0159859b3"
+sha256 = "9aa21fffb4ad612ab2ce1d2cde15010db20bbeee39bf9900477e8912a8d486c0"
 kind = "fixture"
 tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
 command = "examples/record_refs: the libvorbisenc packets of stereo_44k_q3.ogg in our mkv writer, DiscardPadding on the last block"
@@ -513,7 +513,7 @@ command = "examples/record_refs: the last 128 frames of stereo_44k_q3.ogg.vorbis
 [[ref]]
 name = "mono_22k_q0.webm"
 file = "mono_22k_q0.webm"
-sha256 = "02d7a2a0f9f464c2fb85ef473975367bfc43daac6e42c42fb54e467ecc72469f"
+sha256 = "94a8b67476a2cae0aaccdc70e10a746cd5bf57f03b0a49c349c35aaca16e49e0"
 kind = "fixture"
 tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
 command = "examples/record_refs: the libvorbisenc packets of mono_22k_q0.ogg in our webm writer, DiscardPadding on the last block"
@@ -537,7 +537,7 @@ command = "examples/record_refs: the last 256 frames of mono_22k_q0.ogg.vorbisfi
 [[ref]]
 name = "surround_22k_q1.mkv"
 file = "surround_22k_q1.mkv"
-sha256 = "1a5bf0c8c20745b0b7c2f098c47b1334ab979b834a9c37217f4158843eb35975"
+sha256 = "87b8f0b6e8fd44395678419bf870b42d37d2ccb7baa93d2b49358c2fbab8c38f"
 kind = "fixture"
 tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
 command = "examples/record_refs: the libvorbisenc packets of surround_22k_q1.ogg in our mkv writer, DiscardPadding on the last block"
@@ -609,7 +609,7 @@ command = "examples/record_refs: the first 42 frames of surround_22k_q1.ogg.vorb
 [[ref]]
 name = "cut_short.webm"
 file = ""
-sha256 = "0de94e45530d0144b323bffc0b3f500c0754cbc15417b25bf2fea1a24e98aa96"
+sha256 = "e386e28e806f88f14c9cb2958486b6bd53fe7f9a0dbc1b537079fbb89887bdb9"
 kind = "bit-exact"
 tool = "pito-codecs 2.1.0"
 command = "examples/record_refs: src/vorbis/refs.rs cut_short(long_96k.webm)"

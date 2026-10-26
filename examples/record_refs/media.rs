@@ -1,7 +1,7 @@
 use crate::{Def, OURS, sha, tool, words};
 
 #[path = "../../src/media/refs.rs"]
-mod refs;
+pub(crate) mod refs;
 
 use crate::containers::mux::{self, Csp, Timed};
 use crate::testref::{Sound, pcm};
@@ -126,20 +126,20 @@ fn audio_blocks(
     packets: &[Vec<u8>],
     frame: usize,
     rate: u32,
-    shift: usize,
+    skip: usize,
     keep: usize,
 ) -> Vec<MkvBlock> {
     let total = packets.len() * frame;
-    let left = total.saturating_sub(shift + keep);
+    let left = total.saturating_sub(skip + keep);
     packets
         .iter()
         .enumerate()
         .map(|(k, data)| {
-            let at = (k * frame) as i64 - shift as i64;
+            let at = (k * frame) as i64;
             let last = k + 1 == packets.len();
             MkvBlock {
                 track: 0,
-                ms: (at.max(0) as f64 * 1000.0 / f64::from(rate)).round() as i64,
+                ms: (at as f64 * 1000.0 / f64::from(rate)).round() as i64,
                 key: true,
                 data: data.clone(),
                 discard_ns: if last {
@@ -787,37 +787,63 @@ fn vp9_mp4(webm: &str, format: (u8, u8, u8), space: u8) -> Result<Vec<u8>, Strin
     .vp9_mp4(config)
 }
 
-fn with_range(src: &[u8], full: bool) -> Result<Vec<u8>, String> {
-    let path = mux::work(AREA, "range-probe.webm");
-    std::fs::write(&path, src).map_err(text)?;
-    let r = pito_codecs::mkv::Reader::open(&path).map_err(text)?;
-    let at = r.tracks[0].samples.first().ok_or("no VP9 frame")?.offset as usize;
-    let mut bytes = src.to_vec();
-    if bytes.get(at + 1..at + 4) != Some(&[0x49, 0x83, 0x42]) {
-        return Err(format!("no VP9 keyframe sync code at {at}"));
+fn keyed_webm(ivf: &[u8], size: (u32, u32), space: &str, full: bool) -> Result<Vec<u8>, String> {
+    let mut frames = mux::ivf(ivf)?;
+    let first = frames.first_mut().ok_or("vpxenc wrote no frame")?;
+    if first.get(1..4) != Some(&[0x49, 0x83, 0x42]) {
+        return Err("no VP9 keyframe sync code".into());
     }
     if full {
-        bytes[at + 4] |= 0x10;
-    } else {
-        bytes[at + 4] &= !0x10;
+        first[4] |= 0x10;
     }
-    Ok(bytes)
+    let matrix = if space == "bt709" { 1 } else { 5 };
+    let track = MkvTrack {
+        video: true,
+        codec: "V_VP9",
+        size,
+        colour: Some((matrix, if full { 2 } else { 1 })),
+        ..MkvTrack::default()
+    };
+    let blocks: Vec<MkvBlock> = frames
+        .into_iter()
+        .enumerate()
+        .map(|(k, data)| MkvBlock {
+            track: 0,
+            ms: k as i64 * 100,
+            key: k == 0,
+            data,
+            discard_ns: 0,
+        })
+        .collect();
+    let ms = blocks.len() as f64 * 100.0;
+    Ok(refs::matroska("webm", &[track], &blocks, ms, Sizes::Known))
 }
 
 fn vp9_keys(defs: &mut Vec<Def>) {
     for ((w, h), space, _, range, _) in refs::VP9_KEYS {
         let file = refs::vp9_key(h, space, range);
-        if range == "pc" {
-            let tv = refs::vp9_key(h, space, "tv");
-            let what = format!("{{ref:{tv}}} with its keyframe header's colour range bit set");
-            defs.push(ours(&file, &what, move || {
-                with_range(&mux::read(AREA, &tv)?, true)
-            }));
+        let ivf = format!("{}.ivf", refs::vp9_key(h, space, "tv"));
+        let full = range == "pc";
+        let what = format!(
+            "{{ref:{ivf}}} in examples/record_refs WebM, Colour tagged {space} {range}{}",
+            if full {
+                ", its keyframe header's colour range bit set"
+            } else {
+                ""
+            }
+        );
+        let from = ivf.clone();
+        defs.push(ours(&file, &what, move || {
+            keyed_webm(&mux::read(AREA, &from)?, (w, h), space, full)
+        }));
+        if full {
             continue;
         }
         let color = format!("--color-space={space}");
-        defs.push(
-            Def::fixture(
+        let file = ivf;
+        defs.insert(
+            defs.len() - 1,
+            Def::digest(
                 AREA,
                 file,
                 "vpxenc",
@@ -834,13 +860,14 @@ fn vp9_keys(defs: &mut Vec<Def>) {
                         "--cq-level=40",
                         "--limit=1",
                         &color,
-                        "--webm",
+                        "--ivf",
                         "--quiet",
                         "-o",
                         "{out}",
                         "{src}",
                     ],
                 ),
+                sha,
             )
             .from(move || {
                 Ok(mux::y4m(

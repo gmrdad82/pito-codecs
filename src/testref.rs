@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 mod sha256;
 
 pub const FILE_BUDGET: u64 = 64 * 1024;
-pub const TOTAL_BUDGET: u64 = 2 * 1024 * 1024;
+pub const TOTAL_BUDGET: u64 = 9 * 256 * 1024;
 pub const MANIFEST: &str = "manifest.toml";
 pub const SOURCE: &str = "SOURCE";
 
@@ -152,7 +152,8 @@ impl Manifest {
             fields[slot] = Some(unquote(value.trim()).map_err(at)?);
         }
         if let Some(fields) = open {
-            close(fields, &mut entries)?;
+            let end = text.lines().count() + 1;
+            close(fields, &mut entries).map_err(|m| format!("line {end}: {m}"))?;
         }
         Ok(Manifest { entries })
     }
@@ -723,7 +724,7 @@ pub fn rgb_noisy(w: u32, h: u32, n: u64, x: u32, y: u32, amp: u8) -> [u8; 3] {
 pub fn yuv_of(p: [u8; 3]) -> [u8; 3] {
     let [r, g, b] = p.map(i32::from);
     let y = ((47 * r + 157 * g + 16 * b + 128) >> 8) + 16;
-    let u = ((-26 * r - 87 * g + 112 * b + 128) >> 8) + 128;
+    let u = ((-26 * r - 86 * g + 112 * b + 128) >> 8) + 128;
     let v = ((112 * r - 102 * g - 10 * b + 128) >> 8) + 128;
     [y, u, v].map(|c| c.clamp(0, 255) as u8)
 }

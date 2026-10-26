@@ -110,6 +110,8 @@ impl Clip {
             .to_ascii_lowercase();
         let (w, h) = self.size;
         let frame_tb = TimeBase::new(self.fps.1, self.fps.0);
+        let frame_ns = (1_000_000_000 * u64::from(self.fps.1) + u64::from(self.fps.0) / 2)
+            / u64::from(self.fps.0.max(1));
         let mut venc = match self.video {
             None => None,
             Some(VideoCodec::H264) => Some(Venc::H264(Box::new(
@@ -188,19 +190,27 @@ impl Clip {
                     .0
                     .checked_mul(64)
                     .ok_or("the frame rate is out of range")?;
-                Some(
-                    m.add_track(mp4::TrackConfig::new(entry, scale))
-                        .map_err(text)?,
-                )
+                let track = m
+                    .add_track(mp4::TrackConfig::new(entry, scale))
+                    .map_err(text)?;
+                let one = u32::try_from(step).map_err(text)?;
+                m.set_frame_duration(track, one).map_err(text)?;
+                Some(track)
             }
             (Sink::Mkv(m), Some(Venc::H264(e))) => Some(
-                m.add_track(mkv::TrackConfig::h264(e.avcc(), w, h, frame_tb))
-                    .map_err(text)?,
+                m.add_track(mkv::TrackConfig {
+                    default_duration: Some(frame_ns),
+                    ..mkv::TrackConfig::h264(e.avcc(), w, h, frame_tb)
+                })
+                .map_err(text)?,
             ),
             #[cfg(feature = "vp9")]
             (Sink::Mkv(m), Some(Venc::Vp9(_))) => Some(
-                m.add_track(mkv::TrackConfig::vp9(w, h, frame_tb))
-                    .map_err(text)?,
+                m.add_track(mkv::TrackConfig {
+                    default_duration: Some(frame_ns),
+                    ..mkv::TrackConfig::vp9(w, h, frame_tb)
+                })
+                .map_err(text)?,
             ),
             #[cfg(feature = "vp9")]
             (Sink::Mp4(_), Some(Venc::Vp9(_))) => {

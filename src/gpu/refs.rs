@@ -5,6 +5,7 @@ pub const RATE: u32 = 25;
 
 pub const FLOOR: (u32, u32) = (352, 240);
 pub const WIDE: (u32, u32) = (426, 240);
+pub const HEVC_FLOOR: (u32, u32) = (384, 240);
 
 pub struct Stream {
     pub name: &'static str,
