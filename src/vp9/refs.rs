@@ -1,4 +1,4 @@
-use pito_codecs::media::Frame;
+use pito_codecs::media::{Frame, PixelFormat, TimeBase};
 use pito_codecs::vp9::{Encoder, EncoderConfig, Rate};
 
 pub const AREA: &str = "vp9";
@@ -8,8 +8,7 @@ pub struct Libvpx {
     pub size: (u32, u32),
     pub frames: u64,
     pub amp: u8,
-    pub pix_fmt: &'static str,
-    pub two_pass: bool,
+    pub csp: &'static str,
     pub args: &'static [&'static str],
 }
 
@@ -17,8 +16,7 @@ const fn fx(
     name: &'static str,
     size: (u32, u32),
     frames: u64,
-    pix_fmt: &'static str,
-    two_pass: bool,
+    csp: &'static str,
     args: &'static [&'static str],
 ) -> Libvpx {
     Libvpx {
@@ -26,8 +24,7 @@ const fn fx(
         size,
         frames,
         amp: 6,
-        pix_fmt,
-        two_pass,
+        csp,
         args,
     }
 }
@@ -40,97 +37,95 @@ pub const CONFORMANCE: [Libvpx; 8] = [
         "good",
         GPU_FLOOR,
         14,
-        "yuv420p",
-        false,
-        &["-b:v", "300k", "-frame-parallel", "0"],
+        "420jpeg",
+        &["--target-bitrate=300", "--frame-parallel=0", "--passes=1"],
     ),
     fx(
         "altref_10bit",
         GPU_FLOOR,
         12,
-        "yuv420p10le",
-        true,
+        "420p10",
         &[
-            "-b:v",
-            "300k",
-            "-profile:v",
-            "2",
-            "-auto-alt-ref",
-            "1",
-            "-lag-in-frames",
-            "16",
-            "-frame-parallel",
-            "0",
+            "--target-bitrate=300",
+            "--profile=2",
+            "--bit-depth=10",
+            "--input-bit-depth=10",
+            "--auto-alt-ref=1",
+            "--lag-in-frames=16",
+            "--frame-parallel=0",
+            "--passes=2",
         ],
     ),
     fx(
         "tiles_512x240",
         (512, 240),
         4,
-        "yuv420p",
-        false,
+        "420jpeg",
         &[
-            "-b:v",
-            "600k",
-            "-tile-columns",
-            "1",
-            "-tile-rows",
-            "1",
-            "-speed",
-            "4",
-            "-frame-parallel",
-            "0",
+            "--target-bitrate=600",
+            "--tile-columns=1",
+            "--tile-rows=1",
+            "--cpu-used=4",
+            "--frame-parallel=0",
+            "--passes=1",
         ],
     ),
     fx(
         "profile1_444",
         QCIF,
         6,
-        "yuv444p",
-        false,
-        &["-b:v", "300k", "-profile:v", "1", "-frame-parallel", "0"],
+        "444",
+        &[
+            "--target-bitrate=300",
+            "--profile=1",
+            "--frame-parallel=0",
+            "--passes=1",
+        ],
     ),
     fx(
         "profile3_422_12bit",
         QCIF,
         4,
-        "yuv422p12le",
-        false,
-        &["-b:v", "300k", "-profile:v", "3", "-frame-parallel", "0"],
+        "422p12",
+        &[
+            "--target-bitrate=300",
+            "--profile=3",
+            "--bit-depth=12",
+            "--input-bit-depth=12",
+            "--frame-parallel=0",
+            "--passes=1",
+        ],
     ),
     fx(
         "lossless",
         (64, 64),
         4,
-        "yuv420p",
-        false,
-        &["-lossless", "1", "-frame-parallel", "0"],
+        "420jpeg",
+        &["--lossless=1", "--frame-parallel=0", "--passes=1"],
     ),
     fx(
         "odd_aq",
         (173, 125),
         8,
-        "yuv420p",
-        false,
-        &["-b:v", "300k", "-aq-mode", "3", "-frame-parallel", "0"],
+        "420jpeg",
+        &[
+            "--target-bitrate=300",
+            "--aq-mode=3",
+            "--frame-parallel=0",
+            "--passes=1",
+        ],
     ),
     fx(
-        "realtime_layers",
+        "realtime_resilient",
         QCIF,
         10,
-        "yuv420p",
-        false,
+        "420jpeg",
         &[
-            "-b:v",
-            "300k",
-            "-speed",
-            "8",
-            "-deadline",
-            "realtime",
-            "-error-resilient",
-            "1",
-            "-ts-parameters",
-            "ts_number_layers=2:ts_target_bitrate=150,300:ts_rate_decimator=2,1:ts_periodicity=2:ts_layer_id=0,1:ts_layering_mode=2",
+            "--target-bitrate=300",
+            "--rt",
+            "--cpu-used=8",
+            "--error-resilient=1",
+            "--passes=1",
         ],
     ),
 ];
@@ -142,6 +137,8 @@ pub const ALPHA: [(&str, u32, u32); 3] = [
 ];
 
 pub const ALPHA_FRAMES: u64 = 6;
+
+pub const ALPHA_ARGS: &[&str] = &["--target-bitrate=100", "--kf-max-dist=4", "--passes=1"];
 
 pub struct Ours {
     pub name: &'static str,
@@ -179,6 +176,10 @@ pub fn ours() -> [Ours; 2] {
     ]
 }
 
+pub const EDGES: [(u32, u32); 5] = [(1080, 1920), (1080, 1080), (200, 120), (66, 66), (8, 8)];
+
+pub const EDGE_FRAMES: u32 = 3;
+
 pub fn find(name: &str) -> Result<&'static Libvpx, String> {
     CONFORMANCE
         .iter()
@@ -186,35 +187,53 @@ pub fn find(name: &str) -> Result<&'static Libvpx, String> {
         .ok_or_else(|| format!("no libvpx stream named {name}"))
 }
 
-fn chroma(pix_fmt: &str, (w, h): (u32, u32)) -> (u32, u32, u32, u32) {
-    match pix_fmt.get(..6) {
-        Some("yuv420") => (w.div_ceil(2), h.div_ceil(2), 2, 2),
-        Some("yuv422") => (w.div_ceil(2), h, 2, 1),
+pub fn stream(name: &str) -> String {
+    format!("{name}.ivf")
+}
+
+pub fn decoded(name: &str) -> String {
+    format!("{name}.yuv")
+}
+
+pub fn alpha_stream(name: &str) -> String {
+    format!("{name}.alpha.ivf")
+}
+
+pub fn alpha_decoded(name: &str) -> String {
+    format!("{name}.alpha")
+}
+
+pub fn edge(w: u32, h: u32) -> String {
+    format!("edge-{w}x{h}")
+}
+
+pub fn chroma(csp: &str, (w, h): (u32, u32)) -> (u32, u32, u32, u32) {
+    match csp.get(..3) {
+        Some("420") => (w.div_ceil(2), h.div_ceil(2), 2, 2),
+        Some("422") => (w.div_ceil(2), h, 2, 1),
         _ => (w, h, 1, 1),
     }
 }
 
-fn depth(pix_fmt: &str) -> u32 {
-    if pix_fmt.ends_with("12le") {
-        12
-    } else if pix_fmt.ends_with("10le") {
-        10
-    } else {
-        8
+pub fn depth(csp: &str) -> u32 {
+    match csp.split_once('p').map(|(_, d)| d) {
+        Some("10") => 10,
+        Some("12") => 12,
+        _ => 8,
     }
 }
 
 pub fn frame_bytes(f: &Libvpx) -> usize {
     let (w, h) = (f.size.0 as usize, f.size.1 as usize);
-    let (cw, ch, _, _) = chroma(f.pix_fmt, f.size);
-    let bps = if depth(f.pix_fmt) > 8 { 2 } else { 1 };
+    let (cw, ch, _, _) = chroma(f.csp, f.size);
+    let bps = if depth(f.csp) > 8 { 2 } else { 1 };
     (w * h + 2 * cw as usize * ch as usize) * bps
 }
 
 pub fn source_bytes(f: &Libvpx) -> Vec<u8> {
     let (w, h) = f.size;
-    let (cw, ch, sx, sy) = chroma(f.pix_fmt, f.size);
-    let bits = depth(f.pix_fmt);
+    let (cw, ch, sx, sy) = chroma(f.csp, f.size);
+    let bits = depth(f.csp);
     let mut out = Vec::with_capacity(frame_bytes(f) * f.frames as usize);
     for n in 0..f.frames {
         let px = |x: u32, y: u32| {
@@ -284,6 +303,40 @@ pub fn alpha_source(name: &str) -> Result<Vec<u8>, String> {
     Ok(alpha_rgba(*w, *h, ALPHA_FRAMES))
 }
 
+pub fn split_rgba(rgba: &[u8], w: u32, h: u32) -> (Vec<u8>, Vec<u8>) {
+    let (w, h) = (w as usize, h as usize);
+    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+    let (mut colour, mut alpha) = (Vec::new(), Vec::new());
+    for frame in rgba.chunks_exact(w * h * 4) {
+        let at = |x: usize, y: usize| {
+            let o = (y.min(h - 1) * w + x.min(w - 1)) * 4;
+            (
+                crate::testref::yuv_of([frame[o], frame[o + 1], frame[o + 2]]),
+                frame[o + 3],
+            )
+        };
+        for y in 0..h {
+            for x in 0..w {
+                colour.push(at(x, y).0[0]);
+                alpha.push(at(x, y).1);
+            }
+        }
+        for k in 1..3 {
+            for y in 0..ch {
+                for x in 0..cw {
+                    let sum: u32 = [(0, 0), (1, 0), (0, 1), (1, 1)]
+                        .iter()
+                        .map(|&(dx, dy)| u32::from(at(2 * x + dx, 2 * y + dy).0[k]))
+                        .sum();
+                    colour.push(((sum + 2) / 4) as u8);
+                }
+            }
+        }
+        alpha.resize(alpha.len() + 2 * cw * ch, 128);
+    }
+    (colour, alpha)
+}
+
 pub fn ours_source(o: &Ours) -> Vec<Frame> {
     (0..o.frames)
         .map(|n| crate::testref::yuv_frame(o.size.0, o.size.1, n, 6))
@@ -310,6 +363,25 @@ pub fn ivf(w: u32, h: u32, packets: &[Vec<u8>]) -> Vec<u8> {
     o
 }
 
+pub fn ivf_frames(data: &[u8]) -> Vec<&[u8]> {
+    let mut out = Vec::new();
+    if data.len() < 32 || &data[..4] != b"DKIF" {
+        return out;
+    }
+    let mut pos = u16::from_le_bytes([data[6], data[7]]) as usize;
+    while pos + 12 <= data.len() {
+        let size =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        pos += 12;
+        if pos + size > data.len() {
+            break;
+        }
+        out.push(&data[pos..pos + size]);
+        pos += size;
+    }
+    out
+}
+
 pub fn encode_ours_with(o: &Ours, mut each: impl FnMut(&Encoder)) -> Result<Vec<u8>, String> {
     let mut enc = Encoder::new(o.config.clone()).map_err(|e| e.to_string())?;
     let mut packets = Vec::new();
@@ -328,4 +400,44 @@ pub fn encode_ours(name: &str) -> Result<Vec<u8>, String> {
         .find(|o| o.name == name)
         .ok_or_else(|| format!("no encoder setting named {name}"))?;
     encode_ours_with(&o, |_| {})
+}
+
+pub fn moving(w: u32, h: u32, i: u32) -> Frame {
+    let mut f = Frame::new(PixelFormat::Yuv420p8, w, h, i as i64, TimeBase::new(1, 25));
+    let (dx, dy) = (3 * i as i64, 2 * i as i64);
+    for (p, plane) in f.planes.iter_mut().enumerate() {
+        let s = if p == 0 { 1 } else { 2 };
+        for y in 0..plane.height {
+            for x in 0..plane.width {
+                let gx = (x as i64 * s - dx) as f64;
+                let gy = (y as i64 * s - dy) as f64;
+                let wave = 50.0 * ((gx / 23.0).sin() + (gy / 17.0 + gx / 41.0).cos());
+                let base = 128.0 + wave + if p == 0 { 0.0 } else { 20.0 * p as f64 - 30.0 };
+                plane.data[y * plane.stride + x] = base.clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    f
+}
+
+pub fn edge_config(w: u32, h: u32, threads: usize) -> EncoderConfig {
+    EncoderConfig {
+        width: w,
+        height: h,
+        rate: Rate::Q(60),
+        gop: 30,
+        threads,
+        ..EncoderConfig::default()
+    }
+}
+
+pub fn edge_ivf(w: u32, h: u32) -> Result<Vec<u8>, String> {
+    let mut enc = Encoder::new(edge_config(w, h, 1)).map_err(|e| e.to_string())?;
+    let mut packets = Vec::new();
+    for i in 0..EDGE_FRAMES {
+        for p in enc.encode(&moving(w, h, i)).map_err(|e| e.to_string())? {
+            packets.push(p.data);
+        }
+    }
+    Ok(ivf(w, h, &packets))
 }

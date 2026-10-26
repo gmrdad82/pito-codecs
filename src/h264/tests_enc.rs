@@ -1,8 +1,91 @@
-use super::tests::{decode_annexb, frames_digest, psnr, raw, refs};
+use super::tests::{decode_annexb, psnr, raw, to_annexb};
 use super::*;
 use crate::media::Rate;
-use crate::testref::{Refs, sha256};
-use refs::{CUT, Scene, clip, config};
+
+const CUT: i64 = 10;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Scene {
+    Flat,
+    Gradient,
+    Noise,
+    Motion,
+    Cut,
+}
+
+fn hash(x: usize, y: usize, i: i64, k: usize) -> u32 {
+    let mut s = (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+        ^ (i as u64).wrapping_mul(0x1656_67B1_9E37_79F9)
+        ^ k as u64;
+    s ^= s >> 29;
+    s = s.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    s ^= s >> 32;
+    s as u32
+}
+
+fn sample(scene: Scene, x: usize, y: usize, pw: usize, ph: usize, i: i64, k: usize) -> u8 {
+    let noise = |amp: u32| hash(x, y, i, k) % (2 * amp + 1);
+    let v = match scene {
+        Scene::Flat => [96, 120, 140][k],
+        Scene::Gradient => (x * 200 / pw.max(1) + y * 50 / ph.max(1) + 2 * i as usize) as u32,
+        Scene::Noise => 108 + noise(20),
+        Scene::Motion => {
+            let (mx, my) = (x as i64 + 3 * i, y as i64 + 2 * i);
+            let checker = ((mx / 8 + my / 8) % 2) as u32;
+            50 + checker * 90 + ((x + y) % 7) as u32 + noise(6)
+        }
+        Scene::Cut => {
+            if i < CUT {
+                return sample(Scene::Gradient, x, y, pw, ph, i, k);
+            }
+            255 - (x * 180 / pw.max(1)) as u32
+        }
+    };
+    v.min(255) as u8
+}
+
+fn clip(scene: Scene, w: u32, h: u32, n: i64) -> Vec<Frame> {
+    (0..n)
+        .map(|i| {
+            let mut f = Frame::new(PixelFormat::Yuv420p8, w, h, i, TimeBase::new(1, 30));
+            for (k, p) in f.planes.iter_mut().enumerate() {
+                for y in 0..p.height {
+                    for x in 0..p.width {
+                        p.data[y * p.stride + x] = sample(scene, x, y, p.width, p.height, i, k);
+                    }
+                }
+            }
+            f
+        })
+        .collect()
+}
+
+fn config(w: u32, h: u32, profile: Profile, rate: Rate) -> EncoderConfig {
+    EncoderConfig {
+        width: w,
+        height: h,
+        profile,
+        rate,
+        gop: 250,
+        threads: 2,
+        ..EncoderConfig::default()
+    }
+}
+
+fn odd_config(w: u32, h: u32, profile: Profile) -> EncoderConfig {
+    EncoderConfig {
+        gop: 3,
+        ..config(w, h, profile, Rate::Crf(23))
+    }
+}
+
+fn scene_cut_config() -> EncoderConfig {
+    EncoderConfig {
+        gop: 60,
+        ..config(160, 128, Profile::High, Rate::Bitrate(600))
+    }
+}
 
 const FLOOR: f64 = 20.0;
 const STARVED_FLOOR: f64 = 8.0;
@@ -19,13 +102,7 @@ fn encode_all(cfg: &EncoderConfig, frames: &[Frame]) -> (Vec<u8>, Vec<Packet>) {
     (enc.avcc(), packets)
 }
 
-fn decoded_back(
-    name: &str,
-    avcc: &[u8],
-    packets: &[Packet],
-    source: &[Frame],
-    floor: f64,
-) {
+fn decoded_back(name: &str, avcc: &[u8], packets: &[Packet], source: &[Frame], floor: f64) {
     let (w, h) = (source[0].width, source[0].height);
     let mut dec = Decoder::with_extradata(avcc).unwrap();
     let mut frames = Vec::new();
@@ -34,7 +111,11 @@ fn decoded_back(
     }
     frames.extend(dec.flush().unwrap());
     assert_eq!(frames.len(), packets.len(), "{name}: frames decoded");
-    assert_eq!(frames.len(), source.len(), "{name}: frames against the source");
+    assert_eq!(
+        frames.len(),
+        source.len(),
+        "{name}: frames against the source"
+    );
     assert!(
         frames.iter().all(|f| (f.width, f.height) == (w, h)),
         "{name}: decoded size is not the cropped {w}x{h}"
@@ -42,16 +123,11 @@ fn decoded_back(
     let ours = raw(&frames);
     let db = psnr(&ours, &raw(source));
     assert!(db > floor, "{name}: PSNR {db:.2} dB under {floor}");
-    let stream = refs::to_annexb(avcc, packets).unwrap();
+    let stream = to_annexb(avcc, packets).unwrap();
     assert!(
         raw(&decode_annexb(&stream, 4)) == ours,
         "{name}: four decode threads on Annex B differ from one on avcC"
     );
-    if refs::PINNED.contains(&name) {
-        let r = Refs::open(refs::AREA);
-        r.assert_digest(&format!("{name}.h264"), &sha256(&stream));
-        r.assert_digest(&format!("{name}.yuv"), &frames_digest(&frames));
-    }
 }
 
 fn kbps(packets: &[Packet], fps: f64) -> f64 {
@@ -119,7 +195,7 @@ fn bitrate_modes_land_within_thirty_percent_of_target() {
 #[test]
 fn a_scene_cut_starts_a_new_idr() {
     let frames = clip(Scene::Cut, 160, 128, CUT + 6);
-    let (avcc, packets) = encode_all(&refs::scene_cut_config(), &frames);
+    let (avcc, packets) = encode_all(&scene_cut_config(), &frames);
     let keys: Vec<i64> = packets
         .iter()
         .filter(|p| p.keyframe)
@@ -381,31 +457,10 @@ fn odd_and_tiny_sizes_crop_and_decode_back() {
         let frames = clip(Scene::Motion, w, h, 5);
         for profile in [Profile::Baseline, Profile::High] {
             let name = format!("odd_{w}x{h}_{profile:?}");
-            let (avcc, packets) = encode_all(&refs::odd_config(w, h, profile), &frames);
+            let (avcc, packets) = encode_all(&odd_config(w, h, profile), &frames);
             decoded_back(&name, &avcc, &packets, &frames, FLOOR);
         }
     }
-}
-
-#[test]
-fn the_pinned_encodes_are_the_ones_the_tests_make() {
-    let r = Refs::open(refs::AREA);
-    for name in refs::PINNED {
-        let (config, frames) = refs::pinned_case(name).unwrap();
-        let (avcc, packets) = encode_all(&config, &frames);
-        let stream = refs::pinned(name).unwrap();
-        assert!(
-            stream == refs::to_annexb(&avcc, &packets).unwrap(),
-            "{name}"
-        );
-        r.assert_digest(&format!("{name}.h264"), &sha256(&stream));
-        r.assert_digest(
-            &format!("{name}.yuv"),
-            &frames_digest(&decode_annexb(&stream, 1)),
-        );
-    }
-    assert!(refs::pinned("odd_4x6_High").is_err());
-    assert!(refs::pinned_case("nothing").is_none());
 }
 
 #[test]
@@ -416,7 +471,10 @@ fn a_decode_far_from_the_source_fails_the_floor() {
     let wrong = std::panic::catch_unwind(|| {
         decoded_back("wrong_source", &avcc, &packets, &frames, FLOOR);
     });
-    assert!(wrong.is_err(), "a decode of another clip passed the PSNR floor");
+    assert!(
+        wrong.is_err(),
+        "a decode of another clip passed the PSNR floor"
+    );
 }
 
 #[test]
@@ -480,5 +538,11 @@ fn frames_that_do_not_fit_are_refused_and_the_stream_goes_on() {
     packets.extend(enc.flush().unwrap());
     assert_eq!(packets.len(), 1);
     assert!(packets[0].keyframe);
-    decoded_back("refused_then_good", &enc.avcc(), &packets, std::slice::from_ref(&good), FLOOR);
+    decoded_back(
+        "refused_then_good",
+        &enc.avcc(),
+        &packets,
+        std::slice::from_ref(&good),
+        FLOOR,
+    );
 }

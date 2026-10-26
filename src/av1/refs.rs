@@ -15,7 +15,7 @@ pub struct Stream {
     pub source: Source,
     pub size: (u32, u32),
     pub frames: u64,
-    pub pix_fmt: &'static str,
+    pub bits: u32,
     pub encoder: &'static str,
     pub args: &'static [&'static str],
 }
@@ -23,95 +23,101 @@ pub struct Stream {
 const SMALL: (u32, u32) = (128, 96);
 
 const INTER: &[&str] = &[
-    "-cpu-used",
-    "2",
-    "-crf",
-    "36",
-    "-lag-in-frames",
-    "8",
-    "-auto-alt-ref",
-    "1",
-    "-aom-params",
-    "enable-masked-comp=1:enable-interinter-wedge=1:enable-diff-wtd-comp=1:\
-     enable-dist-wtd-comp=1:enable-interintra-comp=1:enable-interintra-wedge=1:\
-     enable-smooth-interintra=1:enable-onesided-comp=1:enable-obmc=1:\
-     enable-dual-filter=1:enable-global-motion=1:enable-warped-motion=1:\
-     enable-intra-edge-filter=1:enable-filter-intra=1:enable-cdef=1",
+    "--cpu-used=2",
+    "--end-usage=q",
+    "--cq-level=36",
+    "--lag-in-frames=8",
+    "--auto-alt-ref=1",
+    "--enable-masked-comp=1",
+    "--enable-interinter-wedge=1",
+    "--enable-diff-wtd-comp=1",
+    "--enable-dist-wtd-comp=1",
+    "--enable-interintra-comp=1",
+    "--enable-interintra-wedge=1",
+    "--enable-smooth-interintra=1",
+    "--enable-onesided-comp=1",
+    "--enable-obmc=1",
+    "--enable-dual-filter=1",
+    "--enable-global-motion=1",
+    "--enable-warped-motion=1",
+    "--enable-intra-edge-filter=1",
+    "--enable-filter-intra=1",
+    "--enable-cdef=1",
 ];
 
 const PALETTE: &[&str] = &[
-    "-cpu-used",
-    "1",
-    "-crf",
-    "30",
-    "-g",
-    "1",
-    "-aom-params",
-    "tune-content=screen:enable-palette=1:enable-intrabc=1:enable-cfl-intra=1",
+    "--cpu-used=1",
+    "--end-usage=q",
+    "--cq-level=30",
+    "--kf-max-dist=1",
+    "--tune-content=screen",
+    "--enable-palette=1",
+    "--enable-intrabc=1",
+    "--enable-cfl-intra=1",
 ];
 
 const SVT_SCREEN: &[&str] = &[
-    "-preset",
-    "4",
-    "-crf",
-    "40",
-    "-g",
-    "8",
-    "-svtav1-params",
-    "scm=1",
+    "--preset", "4", "--crf", "40", "--keyint", "8", "--scm", "1",
 ];
 
 const PALETTE_INTER: &[&str] = &[
-    "-cpu-used",
-    "2",
-    "-crf",
-    "34",
-    "-aom-params",
-    "tune-content=screen:enable-palette=1:enable-intra-edge-filter=1:enable-filter-intra=1",
+    "--cpu-used=2",
+    "--end-usage=q",
+    "--cq-level=34",
+    "--tune-content=screen",
+    "--enable-palette=1",
+    "--enable-intra-edge-filter=1",
+    "--enable-filter-intra=1",
 ];
 
-const RAV1E: &[&str] = &["-speed", "6", "-qp", "120", "-tiles", "2"];
+const RAV1E: &[&str] = &["--speed", "6", "--quantizer", "120", "--tiles", "2"];
 
-const LOSSLESS: &[&str] = &["-cpu-used", "6", "-aom-params", "lossless=1"];
+const LOSSLESS: &[&str] = &["--cpu-used=6", "--lossless=1"];
 
 const SUPERRES: &[&str] = &[
-    "-preset",
+    "--preset",
     "6",
-    "-crf",
+    "--crf",
     "40",
-    "-svtav1-params",
-    "superres-mode=1:superres-denom=12:superres-kf-denom=12:enable-restoration=1",
+    "--superres-mode",
+    "1",
+    "--superres-denom",
+    "12",
+    "--superres-kf-denom",
+    "12",
+    "--enable-restoration",
+    "1",
 ];
 
 const RESIZE: &[&str] = &[
-    "-preset",
+    "--preset",
     "6",
-    "-crf",
+    "--crf",
     "40",
-    "-svtav1-params",
-    "resize-mode=1:resize-denom=12:resize-kf-denom=8",
+    "--resize-mode",
+    "1",
+    "--resize-denom",
+    "12",
+    "--resize-kf-denom",
+    "8",
 ];
 
 const GRAIN: &[&str] = &[
-    "-cpu-used",
-    "8",
-    "-tiles",
-    "2x1",
-    "-denoise-noise-level",
-    "20",
-    "-auto-alt-ref",
-    "1",
-    "-lag-in-frames",
-    "8",
-    "-crf",
-    "32",
+    "--cpu-used=8",
+    "--tile-columns=1",
+    "--tile-rows=0",
+    "--denoise-noise-level=20",
+    "--auto-alt-ref=1",
+    "--lag-in-frames=8",
+    "--end-usage=q",
+    "--cq-level=32",
 ];
 
 const fn stream(
     name: &'static str,
     source: Source,
     frames: u64,
-    pix_fmt: &'static str,
+    bits: u32,
     encoder: &'static str,
     args: &'static [&'static str],
 ) -> Stream {
@@ -120,16 +126,17 @@ const fn stream(
         source,
         size: SMALL,
         frames,
-        pix_fmt,
+        bits,
         encoder,
         args,
     }
 }
 
-const AOM: &str = "libaom-av1";
-const SVT: &str = "libsvtav1";
-const P8: &str = "yuv420p";
-const P10: &str = "yuv420p10le";
+pub const AOM: &str = "aomenc";
+pub const SVT: &str = "SvtAv1EncApp";
+pub const RAV1E_TOOL: &str = "rav1e";
+const P8: u32 = 8;
+const P10: u32 = 10;
 
 pub static BIT_EXACT: [Stream; 16] = [
     Stream {
@@ -137,7 +144,7 @@ pub static BIT_EXACT: [Stream; 16] = [
         source: Source::Noisy(8),
         size: (352, 240),
         frames: 8,
-        pix_fmt: P10,
+        bits: P10,
         encoder: AOM,
         args: GRAIN,
     },
@@ -147,8 +154,8 @@ pub static BIT_EXACT: [Stream; 16] = [
     stream("screen_10", Source::Screen, 2, P10, AOM, PALETTE),
     stream("lossless_8", Source::Motion, 2, P8, AOM, LOSSLESS),
     stream("lossless_10", Source::Motion, 2, P10, AOM, LOSSLESS),
-    stream("rav1e_8", Source::Motion, 6, P8, "librav1e", RAV1E),
-    stream("rav1e_10", Source::Motion, 6, P10, "librav1e", RAV1E),
+    stream("rav1e_8", Source::Motion, 6, P8, RAV1E_TOOL, RAV1E),
+    stream("rav1e_10", Source::Motion, 6, P10, RAV1E_TOOL, RAV1E),
     stream("superres_10", Source::Motion, 6, P10, SVT, SUPERRES),
     stream("superres_8", Source::Motion, 4, P8, SVT, SUPERRES),
     stream("resize_8", Source::Motion, 6, P8, SVT, RESIZE),
@@ -167,9 +174,14 @@ pub static BIT_EXACT: [Stream; 16] = [
         source: Source::Noisy(6),
         size: (352, 240),
         frames: 16,
-        pix_fmt: P8,
+        bits: P8,
         encoder: AOM,
-        args: &["-cpu-used", "8", "-crf", "40", "-tile-columns", "1"],
+        args: &[
+            "--cpu-used=8",
+            "--end-usage=q",
+            "--cq-level=40",
+            "--tile-columns=1",
+        ],
     },
 ];
 
@@ -179,18 +191,18 @@ pub static PARSER: [Stream; 2] = [
         source: Source::Motion,
         size: (64, 64),
         frames: 3,
-        pix_fmt: P8,
+        bits: P8,
         encoder: AOM,
-        args: &["-cpu-used", "8"],
+        args: &["--cpu-used=8"],
     },
     Stream {
         name: "corrupt",
         source: Source::Motion,
         size: (352, 240),
         frames: 8,
-        pix_fmt: P8,
+        bits: P8,
         encoder: AOM,
-        args: &["-cpu-used", "8", "-tile-columns", "1"],
+        args: &["--cpu-used=8", "--tile-columns=1"],
     },
 ];
 

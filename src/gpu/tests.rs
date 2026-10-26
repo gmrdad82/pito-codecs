@@ -220,25 +220,20 @@ fn refs_name_each_stream_once_and_size_sources_to_their_frames() {
     let mut files = Vec::new();
     for s in &refs::STREAMS {
         assert_eq!(
-            s.muxer(),
-            if s.hevc { "hevc" } else { "h264" },
+            (s.tool(), s.extension()),
+            if s.hevc {
+                ("x265", "hevc")
+            } else {
+                ("x264", "h264")
+            },
             "{}",
             s.name
         );
-        let encoder = s
-            .args
-            .iter()
-            .position(|a| *a == "-c:v")
-            .map(|i| s.args[i + 1]);
-        let want = if s.hevc { "libx265" } else { "libx264" };
-        assert_eq!(encoder, Some(want), "{}: encoder", s.name);
-        let fmt = s
-            .args
-            .iter()
-            .position(|a| *a == "-pix_fmt")
-            .map(|i| s.args[i + 1]);
-        assert_eq!(fmt, Some(s.pix_fmt()), "{}: pix_fmt", s.name);
-        assert_eq!(s.pix_fmt() == "yuv420p10le", s.ten, "{}: depth", s.name);
+        assert!(
+            s.args.iter().all(|a| !a.contains("depth")),
+            "{}: the recorder sets the depth from ten",
+            s.name
+        );
         assert!(!s.ten || s.hevc, "{}: 10-bit is HEVC only", s.name);
         for &size in s.sizes {
             assert!(
@@ -247,7 +242,7 @@ fn refs_name_each_stream_once_and_size_sources_to_their_frames() {
                 s.name
             );
             let file = s.file(size);
-            assert!(file.ends_with(s.muxer()), "{file}");
+            assert!(file.ends_with(s.extension()), "{file}");
             assert!(!files.contains(&file), "{file} twice");
             files.push(file);
         }

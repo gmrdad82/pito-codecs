@@ -1,0 +1,159 @@
+[[ref]]
+name = "h264-baseline-352x240.h264"
+file = "h264-baseline-352x240.h264"
+sha256 = "3c5640611970debdceb75fb19e0ebf0dd49c588289e9d40f6407088003662d8c"
+kind = "fixture"
+tool = "x264 0.165.3222 b35605a"
+command = "x264 --quiet --no-progress --demuxer y4m --threads 1 --frames 8 --profile baseline --dump-yuv h264-baseline-352x240.h264.recon.yuv -o {out} {src}"
+
+[[ref]]
+name = "h264-baseline-352x240.h264.yuv"
+file = ""
+sha256 = "95f5ed3ba53795aaf0533c78cd1a1b74080626a1abfe6e08489d3ec53b13f99c"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the --dump-yuv reconstruction x264 wrote while making {ref:h264-baseline-352x240.h264}"
+
+[[ref]]
+name = "h264-baseline-426x240.h264"
+file = "h264-baseline-426x240.h264"
+sha256 = "3268e596d6975f1a2357f6e34b98476704f3b52cee90e7150a73b8038f34242f"
+kind = "fixture"
+tool = "x264 0.165.3222 b35605a"
+command = "x264 --quiet --no-progress --demuxer y4m --threads 1 --frames 8 --profile baseline --dump-yuv h264-baseline-426x240.h264.recon.yuv -o {out} {src}"
+
+[[ref]]
+name = "h264-baseline-426x240.h264.yuv"
+file = ""
+sha256 = "faeca99f044273535c957711973017a67230a2c50d7436d2f049c7537d36f80b"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the --dump-yuv reconstruction x264 wrote while making {ref:h264-baseline-426x240.h264}"
+
+[[ref]]
+name = "h264-main-cabac-352x240.h264"
+file = "h264-main-cabac-352x240.h264"
+sha256 = "523aa29d1495ae0ce6dbaab51b7d873eb8c0fef45ea4bc52c2f41eef26c4287e"
+kind = "fixture"
+tool = "x264 0.165.3222 b35605a"
+command = "x264 --quiet --no-progress --demuxer y4m --threads 1 --frames 8 --profile main --bframes 0 --dump-yuv h264-main-cabac-352x240.h264.recon.yuv -o {out} {src}"
+
+[[ref]]
+name = "h264-main-cabac-352x240.h264.yuv"
+file = ""
+sha256 = "935ef1b23d11d9004bec6c1617c99f64a94c432b9c83cf8fa6371979609c4e3a"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the --dump-yuv reconstruction x264 wrote while making {ref:h264-main-cabac-352x240.h264}"
+
+[[ref]]
+name = "h264-main-cabac-426x240.h264"
+file = "h264-main-cabac-426x240.h264"
+sha256 = "bfd185b602c9d723c22523e6620d8fe73a4c8f68b87c3da45c589d1b512d157b"
+kind = "fixture"
+tool = "x264 0.165.3222 b35605a"
+command = "x264 --quiet --no-progress --demuxer y4m --threads 1 --frames 8 --profile main --bframes 0 --dump-yuv h264-main-cabac-426x240.h264.recon.yuv -o {out} {src}"
+
+[[ref]]
+name = "h264-main-cabac-426x240.h264.yuv"
+file = ""
+sha256 = "30bc58b8f77757b4865b109013fb468c1223d56cbe9548ded09b11c1bb89b5d1"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the --dump-yuv reconstruction x264 wrote while making {ref:h264-main-cabac-426x240.h264}"
+
+[[ref]]
+name = "h264-high-bframes-352x240.h264"
+file = "h264-high-bframes-352x240.h264"
+sha256 = "234f76219338c70a8a768bdbd324208a9f758666fe567b4e5975fcd152edeacb"
+kind = "fixture"
+tool = "x264 0.165.3222 b35605a"
+command = "x264 --quiet --no-progress --demuxer y4m --threads 1 --frames 8 --profile high --bframes 3 --ref 4 --dump-yuv h264-high-bframes-352x240.h264.recon.yuv -o {out} {src}"
+
+[[ref]]
+name = "h264-high-bframes-352x240.h264.yuv"
+file = ""
+sha256 = "402ad77bc76dcd1a15109810ed5f741afada44360157b8f17246ed923a73e10c"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the --dump-yuv reconstruction x264 wrote while making {ref:h264-high-bframes-352x240.h264}"
+
+[[ref]]
+name = "h264-high-bframes-426x240.h264"
+file = "h264-high-bframes-426x240.h264"
+sha256 = "07b5f19a01bb311f971cc0898d9eaa62c87743d768ce6dd628d118b650a22708"
+kind = "fixture"
+tool = "x264 0.165.3222 b35605a"
+command = "x264 --quiet --no-progress --demuxer y4m --threads 1 --frames 8 --profile high --bframes 3 --ref 4 --dump-yuv h264-high-bframes-426x240.h264.recon.yuv -o {out} {src}"
+
+[[ref]]
+name = "h264-high-bframes-426x240.h264.yuv"
+file = ""
+sha256 = "af5e1a5895beeedc8e2829774b673b90e1cdc2f30fc1e4360903eebf243cc94a"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the --dump-yuv reconstruction x264 wrote while making {ref:h264-high-bframes-426x240.h264}"
+
+[[ref]]
+name = "hevc-main-352x240.hevc"
+file = "hevc-main-352x240.hevc"
+sha256 = "37a591e106ad3e4fafc2da12d01b576061c81dda5bf052f1035feef15358d6b1"
+kind = "fixture"
+tool = "x265 [info]: HEVC encoder version 4.3"
+command = "x265 --log-level error --y4m --input {src} --frames 8 --frame-threads 1 --output-depth 8 --recon-depth 8 --recon hevc-main-352x240.hevc.recon.y4m --output {out} --bframes 4"
+
+[[ref]]
+name = "hevc-main-352x240.hevc.yuv"
+file = ""
+sha256 = "db931655ac6596ccb977e9beaa54a54164a0bfb513137ee0231d15c35e356270"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:hevc-main-352x240.hevc}"
+
+[[ref]]
+name = "hevc-main-426x240.hevc"
+file = "hevc-main-426x240.hevc"
+sha256 = "c6ece2b1f01a9dbf32f2f34258a7b8d5524cc6f4148a8d2e225979f639440da6"
+kind = "fixture"
+tool = "x265 [info]: HEVC encoder version 4.3"
+command = "x265 --log-level error --y4m --input {src} --frames 8 --frame-threads 1 --output-depth 8 --recon-depth 8 --recon hevc-main-426x240.hevc.recon.y4m --output {out} --bframes 4"
+
+[[ref]]
+name = "hevc-main-426x240.hevc.yuv"
+file = ""
+sha256 = "6905d97e87faddbbca4cd98d87975b534f7b036a83619ee7ec692663af171d5f"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:hevc-main-426x240.hevc}"
+
+[[ref]]
+name = "hevc-main10-352x240.hevc"
+file = "hevc-main10-352x240.hevc"
+sha256 = "66642f4a61c9683854e3c638e719ccf8318114951d9d936f832e785efbb3b2f7"
+kind = "fixture"
+tool = "x265 [info]: HEVC encoder version 4.3"
+command = "x265 --log-level error --y4m --input {src} --frames 8 --frame-threads 1 --output-depth 10 --recon-depth 10 --recon hevc-main10-352x240.hevc.recon.y4m --output {out}"
+
+[[ref]]
+name = "hevc-main10-352x240.hevc.yuv"
+file = ""
+sha256 = "b10f0123f18b720c414a1393a2094dcd3efff35d230abb99a6fc659e6d461d51"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:hevc-main10-352x240.hevc}"
+
+[[ref]]
+name = "hevc-main10-426x240.hevc"
+file = "hevc-main10-426x240.hevc"
+sha256 = "667207a5123caa2fd284e05d99423d698021f4ff8ddb0304fa22812a6e93ff65"
+kind = "fixture"
+tool = "x265 [info]: HEVC encoder version 4.3"
+command = "x265 --log-level error --y4m --input {src} --frames 8 --frame-threads 1 --output-depth 10 --recon-depth 10 --recon hevc-main10-426x240.hevc.recon.y4m --output {out}"
+
+[[ref]]
+name = "hevc-main10-426x240.hevc.yuv"
+file = ""
+sha256 = "03a71c8a378c92ab96997b82a2386306fed1aac6e657ee2956baa6a28abf4daf"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the --recon reconstruction x265 wrote while making {ref:hevc-main10-426x240.hevc}"

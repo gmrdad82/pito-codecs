@@ -44,7 +44,7 @@ fn exact(name: &str, tiles: Tiles, segments: Vec<Segment>) {
     }
 }
 
-fn deblocked_like_ffmpeg(name: &str) {
+fn deblocked_as_pinned(name: &str) {
     let r = Refs::open(AREA);
     let stream = refs_synth::stream(name).unwrap();
     r.assert_digest(&file(name), &sha256(&stream));
@@ -63,7 +63,7 @@ fn pcm_long_term_refs_list_modification() {
 
 #[test]
 fn pcm_deblocked_single_tile() {
-    deblocked_like_ffmpeg("pcm_dbk");
+    deblocked_as_pinned("pcm_dbk");
 }
 
 #[test]
@@ -86,29 +86,80 @@ fn tiles_uniform_exact() {
 
 #[test]
 fn tiles_explicit_filter_across() {
-    deblocked_like_ffmpeg("tiles_across");
+    deblocked_as_pinned("tiles_across");
 }
 
 #[test]
 fn tiles_explicit_no_filter_across() {
-    deblocked_like_ffmpeg("tiles_no_across");
+    deblocked_as_pinned("tiles_no_across");
 }
 
 #[test]
 fn tiles_slices_and_dependent_segments() {
-    deblocked_like_ffmpeg("tiles_slices");
+    deblocked_as_pinned("tiles_slices");
 }
 
 #[test]
 fn slices_without_tiles() {
-    deblocked_like_ffmpeg("slices");
+    deblocked_as_pinned("slices");
 }
 
 #[test]
 fn row_aligned_slices_decode_in_parallel() {
-    deblocked_like_ffmpeg("row_slices");
+    deblocked_as_pinned("row_slices");
 }
 
+fn seams(sizes: &[usize], end: usize) -> Vec<usize> {
+    sizes
+        .iter()
+        .scan(0, |at, n| {
+            *at += n * CTB;
+            Some(*at)
+        })
+        .filter(|&at| at < end)
+        .collect()
+}
+
+#[test]
+fn a_tile_seam_is_deblocked_only_when_the_pps_lets_the_filter_across() {
+    let (cols, rows) = (vec![2, 3, 1], vec![3, 1]);
+    let decode = |across: bool| {
+        let tiles = Some((cols.clone(), rows.clone(), false, across));
+        decode_all(&sequence(&tiles, false, whole(WC * HC)).0, 1)
+    };
+    let (on, off) = (decode(true), decode(false));
+    assert_eq!(on.len(), off.len());
+    let (xs, ys) = (seams(&cols, W), seams(&rows, H));
+    assert_eq!((xs.as_slice(), ys.as_slice()), (&[32, 80][..], &[48][..]));
+    let mut inside = 0;
+    for (i, (a, b)) in on.iter().zip(&off).enumerate() {
+        for (k, (pa, pb)) in a.planes.iter().zip(&b.planes).enumerate() {
+            let (sub, band) = if k == 0 { (1, 5) } else { (2, 3) };
+            let near = |at: usize, lines: &[usize]| {
+                lines
+                    .iter()
+                    .any(|&s| at + band > s / sub && at < s / sub + band)
+            };
+            for y in 0..pa.height {
+                for x in 0..pa.width {
+                    let (va, vb) = (pa.data[y * pa.stride + x], pb.data[y * pb.stride + x]);
+                    if near(x, &xs) || near(y, &ys) {
+                        inside += usize::from(va != vb);
+                    } else {
+                        assert_eq!(
+                            va, vb,
+                            "picture {i} plane {k} at {x},{y}, away from every seam"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        inside > 0,
+        "filtering across the tile seams changed no sample"
+    );
+}
 #[test]
 fn every_deblocked_case_has_a_stream_and_unknown_ones_are_refused() {
     for name in DEBLOCKED {

@@ -7,7 +7,6 @@ pub struct X265 {
     pub amp: u8,
     pub fade: u64,
     pub ten_bit: bool,
-    pub recon: bool,
     pub preset: &'static str,
     pub params: &'static str,
 }
@@ -28,7 +27,6 @@ const fn fx(
         amp,
         fade: 0,
         ten_bit,
-        recon: false,
         preset,
         params,
     }
@@ -36,10 +34,6 @@ const fn fx(
 
 const fn faded(f: X265, fade: u64) -> X265 {
     X265 { fade, amp: 0, ..f }
-}
-
-const fn recon(f: X265) -> X265 {
-    X265 { recon: true, ..f }
 }
 
 const QCIF: (u32, u32) = (176, 144);
@@ -59,18 +53,10 @@ pub const CONFORMANCE: [X265; 9] = [
         AMP,
         false,
         "",
-        "bframes=8:b-pyramid=1:ref=4",
+        "bframes=8:b-pyramid:ref=4",
     ),
     faded(
-        fx(
-            "weightp_main10",
-            QCIF,
-            12,
-            AMP,
-            true,
-            "",
-            "weightp=1:weightb=1",
-        ),
+        fx("weightp_main10", QCIF, 12, AMP, true, "", "weightp:weightb"),
         10,
     ),
     fx(
@@ -80,7 +66,7 @@ pub const CONFORMANCE: [X265; 9] = [
         AMP,
         false,
         "",
-        "keyint=8:min-keyint=8:open-gop=1:bframes=3",
+        "keyint=8:min-keyint=8:open-gop:bframes=3",
     ),
     fx(
         "tools",
@@ -89,9 +75,9 @@ pub const CONFORMANCE: [X265; 9] = [
         AMP,
         false,
         "",
-        "slices=4:scaling-list=default:tskip=1:rect=1:amp=1",
+        "slices=4:scaling-list=default:tskip:rect:amp",
     ),
-    fx("lossless", (64, 64), 4, 4, false, "", "lossless=1"),
+    fx("lossless", (64, 64), 4, 4, false, "", "lossless"),
     fx("odd_350x238", (350, 238), 2, 4, false, "veryfast", ""),
 ];
 
@@ -121,7 +107,7 @@ pub const FEATURES: [X265; 11] = [
         AMP,
         false,
         "",
-        "bframes=16:b-pyramid=1:b-adapt=0:ref=6",
+        "bframes=16:b-pyramid:b-adapt=0:ref=6",
     ),
     faded(
         fx(
@@ -131,7 +117,7 @@ pub const FEATURES: [X265; 11] = [
             AMP,
             true,
             "",
-            "bframes=8:b-pyramid=1:ref=5:weightp=1:weightb=1",
+            "bframes=8:b-pyramid:ref=5:weightp:weightb",
         ),
         10,
     ),
@@ -143,7 +129,7 @@ pub const FEATURES: [X265; 11] = [
             AMP,
             false,
             "",
-            "bframes=2:weightp=1:weightb=1",
+            "bframes=2:weightp:weightb",
         ),
         8,
     ),
@@ -154,9 +140,9 @@ pub const FEATURES: [X265; 11] = [
         AMP,
         true,
         "",
-        "scaling-list=default:tskip=1:rdoq-level=0",
+        "scaling-list=default:tskip:rdoq-level=0",
     ),
-    recon(fx(
+    fx(
         "cu_qp_chroma_offsets",
         SMALL,
         6,
@@ -164,7 +150,7 @@ pub const FEATURES: [X265; 11] = [
         false,
         "",
         "ctu=16:aq-mode=3:qg-size=8:cbqpoffs=-4:crqpoffs=5",
-    )),
+    ),
     fx(
         "intra_tools",
         SMALL,
@@ -172,9 +158,9 @@ pub const FEATURES: [X265; 11] = [
         4,
         false,
         "",
-        "constrained-intra=1:signhide=0:temporal-mvp=0:strong-intra-smoothing=0:max-merge=1:sao=0:deblock=-6,6:amp=1:rect=1:tu-intra-depth=4:tu-inter-depth=4",
+        "constrained-intra:no-signhide:no-temporal-mvp:no-strong-intra-smoothing:max-merge=1:no-sao:deblock=-6,6:amp:rect:tu-intra-depth=4:tu-inter-depth=4",
     ),
-    fx("cu_lossless", SMALL, 4, AMP, false, "", "cu-lossless=1"),
+    fx("cu_lossless", SMALL, 4, AMP, false, "", "cu-lossless"),
     fx(
         "one_ctb_no_deblock",
         (64, 64),
@@ -182,7 +168,7 @@ pub const FEATURES: [X265; 11] = [
         AMP,
         false,
         "",
-        "ctu=64:no-deblock=1",
+        "ctu=64:no-deblock",
     ),
     fx(
         "scaling_list_file",
@@ -202,7 +188,7 @@ pub const OPEN_GOP_CUT: X265 = fx(
     AMP,
     false,
     "",
-    "keyint=8:min-keyint=8:open-gop=1:bframes=3:repeat-headers=1",
+    "keyint=8:min-keyint=8:open-gop:bframes=3:repeat-headers",
 );
 
 pub const HVCC: [&str; 2] = ["medium", "intra_main10"];
@@ -220,8 +206,12 @@ pub fn find(name: &str) -> Result<&'static X265, String> {
         .ok_or_else(|| format!("no x265 stream named {name}"))
 }
 
-pub fn pix_fmt(ten_bit: bool) -> &'static str {
-    if ten_bit { "yuv420p10le" } else { "yuv420p" }
+pub fn stream(name: &str) -> String {
+    format!("{name}.hevc")
+}
+
+pub fn recon(name: &str) -> String {
+    format!("{name}.yuv")
 }
 
 pub fn source_bytes(f: &X265) -> Vec<u8> {

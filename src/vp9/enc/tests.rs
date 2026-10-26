@@ -42,21 +42,20 @@ fn psnr(a: &[u8], b: &[u8]) -> f64 {
 }
 
 #[test]
-fn ffmpeg_decodes_our_stream_bit_exact() {
+fn vpxdec_decodes_our_stream_bit_exact() {
     let r = Refs::open(refs::AREA);
     for o in refs::ours() {
         let mut recon = Vec::new();
-        let ivf = refs::encode_ours_with(&o, |enc| recon.extend(crop(enc.recon().unwrap())))
-            .unwrap();
+        let ivf =
+            refs::encode_ours_with(&o, |enc| recon.extend(crop(enc.recon().unwrap()))).unwrap();
         let name = o.name;
-        r.assert_digest(&format!("{name}.ivf"), &sha256(&ivf));
+        r.assert_digest(&refs::stream(name), &sha256(&ivf));
         assert!(
             refs::encode_ours(name).unwrap() == ivf,
             "{name}: encode_ours is not this encode"
         );
         let ours = sha256(&recon);
-        r.assert_digest(&format!("{name}.yuv"), &ours);
-        r.assert_digest(&format!("{name}.libvpx.yuv"), &ours);
+        r.assert_digest(&refs::decoded(name), &ours);
         let p = psnr(&raw(&refs::ours_source(&o)), &recon);
         eprintln!("{name}: {} bytes, PSNR {p:.2} dB", ivf.len());
         assert!(p > o.min_psnr, "{name}: PSNR {p:.2}");
@@ -110,8 +109,7 @@ fn bench_encoder() {
             .chunks_exact(fsize)
             .enumerate()
             .map(|(i, d)| {
-                let mut f =
-                    Frame::new(PixelFormat::Yuv420p8, w, h, i as i64, TimeBase::new(1, 30));
+                let mut f = Frame::new(PixelFormat::Yuv420p8, w, h, i as i64, TimeBase::new(1, 30));
                 let y = (w * h) as usize;
                 f.planes[0].data.copy_from_slice(&d[..y]);
                 f.planes[1].data.copy_from_slice(&d[y..y + y / 4]);
@@ -183,24 +181,6 @@ fn bench_encoder() {
     );
 }
 
-fn moving(w: u32, h: u32, i: u32) -> Frame {
-    let mut f = Frame::new(PixelFormat::Yuv420p8, w, h, i as i64, TimeBase::new(1, 25));
-    let (dx, dy) = (3 * i as i64, 2 * i as i64);
-    for (p, plane) in f.planes.iter_mut().enumerate() {
-        let s = if p == 0 { 1 } else { 2 };
-        for y in 0..plane.height {
-            for x in 0..plane.width {
-                let gx = (x as i64 * s - dx) as f64;
-                let gy = (y as i64 * s - dy) as f64;
-                let wave = 50.0 * ((gx / 23.0).sin() + (gy / 17.0 + gx / 41.0).cos());
-                let base = 128.0 + wave + if p == 0 { 0.0 } else { 20.0 * p as f64 - 30.0 };
-                plane.data[y * plane.stride + x] = base.clamp(0.0, 255.0) as u8;
-            }
-        }
-    }
-    f
-}
-
 fn edge_strips(s: &Frame, d: &Frame) -> Vec<(String, Vec<u8>, Vec<u8>)> {
     let mut out = Vec::new();
     for p in 0..3 {
@@ -235,16 +215,8 @@ fn edge_strips(s: &Frame, d: &Frame) -> Vec<(String, Vec<u8>, Vec<u8>)> {
 }
 
 fn edge_encode(w: u32, h: u32, frames: u32, threads: usize) -> (Vec<Frame>, Vec<Packet>) {
-    let mut enc = Encoder::new(EncoderConfig {
-        width: w,
-        height: h,
-        rate: Rate::Q(60),
-        gop: 30,
-        threads,
-        ..EncoderConfig::default()
-    })
-    .unwrap();
-    let src: Vec<Frame> = (0..frames).map(|i| moving(w, h, i)).collect();
+    let mut enc = Encoder::new(refs::edge_config(w, h, threads)).unwrap();
+    let src: Vec<Frame> = (0..frames).map(|i| refs::moving(w, h, i)).collect();
     let mut packets = Vec::new();
     for (i, f) in src.iter().enumerate() {
         let out = enc
@@ -301,19 +273,11 @@ fn sizes_off_the_superblock_grid_encode_and_decode_back() {
 #[test]
 fn edge_encode_matches_our_reconstruction() {
     for (w, h) in [(1080, 200), (66, 66), (200, 120)] {
-        let mut enc = Encoder::new(EncoderConfig {
-            width: w,
-            height: h,
-            rate: Rate::Q(60),
-            gop: 30,
-            threads: 1,
-            ..EncoderConfig::default()
-        })
-        .unwrap();
+        let mut enc = Encoder::new(refs::edge_config(w, h, 1)).unwrap();
         let mut dec = crate::vp9::Decoder::new();
         let (mut recon, mut got) = (Vec::new(), Vec::new());
         for i in 0..3 {
-            for p in enc.encode(&moving(w, h, i)).unwrap() {
+            for p in enc.encode(&refs::moving(w, h, i)).unwrap() {
                 got.extend(dec.decode(&p).unwrap());
             }
             recon.extend(crop(enc.recon().unwrap()));
@@ -324,6 +288,32 @@ fn edge_encode_matches_our_reconstruction() {
             raw(&got) == recon,
             "{w}x{h}: our decoder differs from the reconstruction"
         );
+    }
+}
+
+#[test]
+fn vpxdec_decodes_sizes_off_the_superblock_grid_like_ours() {
+    let r = Refs::open(refs::AREA);
+    for (w, h) in refs::EDGES {
+        let name = refs::edge(w, h);
+        let (src, packets) = edge_encode(w, h, refs::EDGE_FRAMES, 1);
+        let data: Vec<Vec<u8>> = packets.iter().map(|p| p.data.clone()).collect();
+        let file = refs::ivf(w, h, &data);
+        assert!(
+            refs::edge_ivf(w, h).unwrap() == file,
+            "{name}: edge_ivf is not this encode"
+        );
+        r.assert_digest(&refs::stream(&name), &sha256(&file));
+        let mut dec = crate::vp9::Decoder::new();
+        let mut out = Vec::new();
+        for p in &packets {
+            out.extend(dec.decode(p).unwrap_or_else(|e| panic!("{name}: {e}")));
+        }
+        out.extend(dec.flush().unwrap());
+        assert_eq!(out.len(), src.len(), "{name}");
+        r.assert_digest(&refs::decoded(&name), &sha256(&raw(&out)));
+        let p = psnr(&raw(&src), &raw(&out));
+        assert!(p > 30.0, "{name}: PSNR {p:.2}");
     }
 }
 
@@ -341,13 +331,13 @@ fn a_block_that_fails_in_a_worker_fails_the_frame_and_the_encoder() {
         })
         .unwrap();
         for i in 0..fail_frame {
-            enc.encode(&moving(w, h, i)).unwrap();
+            enc.encode(&refs::moving(w, h, i)).unwrap();
         }
         for ws in &mut enc.workers {
             ws.fail_at = Some(at);
         }
         let e = enc
-            .encode(&moving(w, h, fail_frame))
+            .encode(&refs::moving(w, h, fail_frame))
             .expect_err("a failed block still produced a frame")
             .to_string();
         assert_eq!(
@@ -366,7 +356,7 @@ fn a_block_that_fails_in_a_worker_fails_the_frame_and_the_encoder() {
             ws.fail_at = None;
         }
         let again = enc
-            .encode(&moving(w, h, fail_frame + 1))
+            .encode(&refs::moving(w, h, fail_frame + 1))
             .expect_err("a broken encoder encoded")
             .to_string();
         assert!(again.contains("an earlier frame failed"), "{again}");
