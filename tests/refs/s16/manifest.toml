@@ -1,0 +1,455 @@
+[[ref]]
+name = "delayed-short.mkv"
+file = "delayed-short.mkv"
+sha256 = "45d31703b2b302a0a959c3000b2c7afd02f27635f166d447f222f2765bb9c19c"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: aac, aac"
+
+[[ref]]
+name = "delayed-short.mp4"
+file = "delayed-short.mp4"
+sha256 = "6d4050edc64c355fd9af81a6e175cc28371d83ed2370341a5c59c27a23167901"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: aac, aac"
+
+[[ref]]
+name = "mixed.mkv"
+file = "mixed.mkv"
+sha256 = "c4ccae30b42bfb44753fb6219f5dc5ee4e829f668a650d80a29d554184184c73"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: aac, opus, pcm_s24le"
+
+[[ref]]
+name = "mixed.mp4.t2.flac"
+file = ""
+sha256 = "6d8274e97e999ac249942b9ecbd39822df8d142bb5f6a3ca3a452640835e3f78"
+kind = "bit-exact"
+tool = "flac 1.5.0"
+command = "flac --silent --force-raw-format --endian=little --sign=signed --channels=1 --bps=24 --sample-rate=8000 -o {out} {src}"
+
+[[ref]]
+name = "mixed.mp4"
+file = "mixed.mp4"
+sha256 = "4f6314f8c07e7ee4f34f3e4d9569e19efeb4d5cce3073c9b33d9d021809cbe95"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: aac, opus, flac"
+
+[[ref]]
+name = "five-one-flac.mkv.t0.flac"
+file = ""
+sha256 = "187aebca2a784082c1805d388d0dfe19651d335da8715664d0f5b752eac6f3df"
+kind = "bit-exact"
+tool = "flac 1.5.0"
+command = "flac --silent --force-raw-format --endian=little --sign=signed --channels=6 --bps=16 --sample-rate=8000 -o {out} {src}"
+
+[[ref]]
+name = "five-one-flac.mkv"
+file = "five-one-flac.mkv"
+sha256 = "a3da3bafccc281a6fe72c45eb4f882e83cfa478a082b56039ea98060ae1f1424"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: flac"
+
+[[ref]]
+name = "five-one-aac.mp4"
+file = "five-one-aac.mp4"
+sha256 = "10b935857c9a5fb4f4c59c2e14a4f9b9b703729c0d4ea7dacaa1e97802f86e0c"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: aac"
+
+[[ref]]
+name = "refused-wmav2.mkv"
+file = "refused-wmav2.mkv"
+sha256 = "8ef36c7e932837d949e5c55c35d10f4da984f899cf91d07babff421eef2c19d6"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: wmav2"
+
+[[ref]]
+name = "survey-aac.mkv"
+file = "survey-aac.mkv"
+sha256 = "48b4ade00c2ab96046e922edad05696dbbc94eaf79b6a348931c6a83f85099ab"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: aac"
+
+[[ref]]
+name = "survey-aac.mp4"
+file = "survey-aac.mp4"
+sha256 = "0552e6cf4463c9229862a982939fb7bb9b04b8295d93a110bfe2fe109225b2f8"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: aac"
+
+[[ref]]
+name = "survey-aac.mov"
+file = "survey-aac.mov"
+sha256 = "53c550d6b5ec208727c2623f3544155fe4b37c03726882527c6a3fe98e42bd73"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: aac"
+
+[[ref]]
+name = "survey-aac.3gp"
+file = "survey-aac.3gp"
+sha256 = "6cd88d0e8adf0435065137623551d269cb0ab7772a56b86635c6673e7ed0f12f"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: aac"
+
+[[ref]]
+name = "survey-opus.mkv"
+file = "survey-opus.mkv"
+sha256 = "e1c7556fd3cf885346a9cf8ba64fe5a12bcb9820a19247d6475238756c3346f5"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: opus"
+
+[[ref]]
+name = "survey-opus.mp4"
+file = "survey-opus.mp4"
+sha256 = "d47fe32f1f9507597a4657e987813ba3ba76f314cf33a5b7cb1d63c1b949d5e9"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: opus"
+
+[[ref]]
+name = "survey-mp3.mkv.t0.mp3"
+file = ""
+sha256 = "5e9d612fe58486e594299a422e68726cedc4e410d37ad1dfecbeb33beba860c3"
+kind = "bit-exact"
+tool = "LAME 64bits version 4.0 (https://lame.sourceforge.io)"
+command = "lame --quiet -b 256 {src} {out}"
+
+[[ref]]
+name = "survey-mp3.mkv"
+file = "survey-mp3.mkv"
+sha256 = "1e24be4535c2dd8bff1481d6afa4b8a040c4bf60c052be5ad50f5274bcd107fe"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: mp3"
+
+[[ref]]
+name = "survey-mp3.mp4.t0.mp3"
+file = ""
+sha256 = "5e9d612fe58486e594299a422e68726cedc4e410d37ad1dfecbeb33beba860c3"
+kind = "bit-exact"
+tool = "LAME 64bits version 4.0 (https://lame.sourceforge.io)"
+command = "lame --quiet -b 256 {src} {out}"
+
+[[ref]]
+name = "survey-mp3.mp4"
+file = "survey-mp3.mp4"
+sha256 = "620b891c5b063dc9a913b5159294caee3a76a19ffaef39711059e32d18ecce3d"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: mp3"
+
+[[ref]]
+name = "survey-vorbis.mkv"
+file = "survey-vorbis.mkv"
+sha256 = "a73c8155253d9b26a2fff30ea3c6d3f3aeebfcb5c90c1206b5ff0699d8cfa2c6"
+kind = "fixture"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: vorbis"
+
+[[ref]]
+name = "survey-ac3.mkv"
+file = "survey-ac3.mkv"
+sha256 = "9da726f5a55d9751cc9cf6ba26031f3b59da3534440e4c2f74049e9f85d84f51"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: ac3"
+
+[[ref]]
+name = "survey-ac3.mp4"
+file = "survey-ac3.mp4"
+sha256 = "76518694df6076406ee31f73862c46656594269f4b02ce698c7eff3f08a8991a"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: ac3"
+
+[[ref]]
+name = "survey-flac24.mkv.t0.flac"
+file = ""
+sha256 = "25813cf4f086ac04f584b64b4f4aa8d965e7d977dcc0e187222e7d812934cd3c"
+kind = "bit-exact"
+tool = "flac 1.5.0"
+command = "flac --silent --force-raw-format --endian=little --sign=signed --channels=2 --bps=24 --sample-rate=8000 -o {out} {src}"
+
+[[ref]]
+name = "survey-flac24.mkv"
+file = "survey-flac24.mkv"
+sha256 = "d6f2a2e40b7d8df8232d5a78e5897a9446e186f2ef3f5173578826974243aba2"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: flac"
+
+[[ref]]
+name = "survey-flac24.mp4.t0.flac"
+file = ""
+sha256 = "25813cf4f086ac04f584b64b4f4aa8d965e7d977dcc0e187222e7d812934cd3c"
+kind = "bit-exact"
+tool = "flac 1.5.0"
+command = "flac --silent --force-raw-format --endian=little --sign=signed --channels=2 --bps=24 --sample-rate=8000 -o {out} {src}"
+
+[[ref]]
+name = "survey-flac24.mp4"
+file = "survey-flac24.mp4"
+sha256 = "9b93d98ddbb1fcb784de62e4801400ee1174443f4a0738d03a339340d8a88244"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: flac"
+
+[[ref]]
+name = "survey-flac32.mp4.t0.flac"
+file = ""
+sha256 = "cc46dfb6012d8be3660a2a70726669156f049afa3fe5e6dcdd67b6539c4a14a8"
+kind = "bit-exact"
+tool = "flac 1.5.0"
+command = "flac --silent --force-raw-format --endian=little --sign=signed --channels=2 --bps=32 --sample-rate=8000 -o {out} {src}"
+
+[[ref]]
+name = "survey-flac32.mp4"
+file = "survey-flac32.mp4"
+sha256 = "33f1f8e3462067720953e99b3b1857c9eae83a1bf9149f0a862d777a3c54ebc8"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: flac"
+
+[[ref]]
+name = "survey-alac.mkv"
+file = "survey-alac.mkv"
+sha256 = "e8a15b6eb9e6cca027bddc5e9d84723c14e5b00b58f352304c790d612a50919c"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: alac"
+
+[[ref]]
+name = "survey-alac.mp4"
+file = "survey-alac.mp4"
+sha256 = "eb7f304f36ed76189461a31c399e865eab9129ceb834f680ffd947bb07cd44ef"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: alac"
+
+[[ref]]
+name = "survey-pcm_s16le.mp4"
+file = "survey-pcm_s16le.mp4"
+sha256 = "db3fa85fecf20246a64fa2261d74a51ad273c72b5eb033bdf91892de2b5c647a"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_s16le"
+
+[[ref]]
+name = "survey-pcm_s16be.mp4"
+file = "survey-pcm_s16be.mp4"
+sha256 = "3d59547c56f9ac34b3b2c9a14bb626f9caf388f2a238cd351991e571defbd7e5"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_s16be"
+
+[[ref]]
+name = "survey-pcm_s24le.mp4"
+file = "survey-pcm_s24le.mp4"
+sha256 = "288865971fbc8384a3809e303c54d6acb70a08050564373f0351f9daf665172d"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_s24le"
+
+[[ref]]
+name = "survey-pcm_s24be.mp4"
+file = "survey-pcm_s24be.mp4"
+sha256 = "508caca229865f736c995a47141ec845f395e9e58a09904ab31479a9b9cac696"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_s24be"
+
+[[ref]]
+name = "survey-pcm_s32le.mp4"
+file = "survey-pcm_s32le.mp4"
+sha256 = "a37a4ce812b29eab2d15735950512cedbf6321cdeee8e1a12877ec6bd1a9ad0e"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_s32le"
+
+[[ref]]
+name = "survey-pcm_s32be.mp4"
+file = "survey-pcm_s32be.mp4"
+sha256 = "fdf20e692372f0faefbf95a4d6c2cc5a079a97b4c43b1c80fb4210761bdfef07"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_s32be"
+
+[[ref]]
+name = "survey-pcm_f32le.mp4"
+file = "survey-pcm_f32le.mp4"
+sha256 = "42e77fc296cbf7261fbf3869da8b1746b2ff95c322dcf3fc359d9eec956f72ae"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_f32le"
+
+[[ref]]
+name = "survey-pcm_f32be.mp4"
+file = "survey-pcm_f32be.mp4"
+sha256 = "6ab936b0c306f3c458f922f5fdc2b4123ce04b2980b8f1a304499189dc570ed4"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_f32be"
+
+[[ref]]
+name = "survey-pcm_s16le.mkv"
+file = "survey-pcm_s16le.mkv"
+sha256 = "3ec5eb003d0f5489fa5a5d4332c4b8f14919257747ea1e156624d741e2bb5ea7"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_s16le"
+
+[[ref]]
+name = "survey-pcm_s16be.mkv"
+file = "survey-pcm_s16be.mkv"
+sha256 = "df7c4c02a37a338e8b3bcf99361153c6f027c6a5ac0191c23df886bea056013d"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_s16be"
+
+[[ref]]
+name = "survey-pcm_s24le.mkv"
+file = "survey-pcm_s24le.mkv"
+sha256 = "210b1a478be0721058dddc7f4642010df6a06ee9eade794f2648c0ef55d0af6a"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_s24le"
+
+[[ref]]
+name = "survey-pcm_s24be.mkv"
+file = "survey-pcm_s24be.mkv"
+sha256 = "a84afb0c4d17a976e2f168eeb88b8710ac198237e3aeb25d1af49cb973371a7d"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_s24be"
+
+[[ref]]
+name = "survey-pcm_s32le.mkv"
+file = "survey-pcm_s32le.mkv"
+sha256 = "2d3825b125278e776cbd72b04a0cfc554ae8dc42458ca37336c8680cf4c6fa23"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_s32le"
+
+[[ref]]
+name = "survey-pcm_s32be.mkv"
+file = "survey-pcm_s32be.mkv"
+sha256 = "ea82ef02d535fd32a69fb642cb69e3787777311a5928f1de70c20504e7df45a0"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_s32be"
+
+[[ref]]
+name = "survey-pcm_f32le.mkv"
+file = "survey-pcm_f32le.mkv"
+sha256 = "0f887826f3c0143ef9155c057b85003c6e0943c2f7a606e392c13a117455eb6d"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_f32le"
+
+[[ref]]
+name = "survey-pcm_alaw.mkv"
+file = "survey-pcm_alaw.mkv"
+sha256 = "b2f15ea2bf6ade0aefc4066db02d66ded92c2c360426fa9f9e010929936ceb03"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_alaw"
+
+[[ref]]
+name = "survey-pcm_mulaw.mkv"
+file = "survey-pcm_mulaw.mkv"
+sha256 = "5aabc092afcd2174632302e01fcee2d204c3c2186ba824dd310bb55ebc6ed4ae"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_mulaw"
+
+[[ref]]
+name = "survey-pcm_s16le.mov"
+file = "survey-pcm_s16le.mov"
+sha256 = "6251f160496e92d3ab6d295d8fd6f23f8b684101775b017130dd38b80d5a9734"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_s16le"
+
+[[ref]]
+name = "survey-pcm_s16be.mov"
+file = "survey-pcm_s16be.mov"
+sha256 = "a8d7c810881f0095a08b3d9ecb188b7e179f688de2f22fbde3e3705b0d91f77b"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_s16be"
+
+[[ref]]
+name = "survey-pcm_s24le.mov"
+file = "survey-pcm_s24le.mov"
+sha256 = "f84c8708da6a1d49d00e4252174de0ea78f4fa9d9cf758aefdf0daa21bfd0733"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_s24le"
+
+[[ref]]
+name = "survey-pcm_s24be.mov"
+file = "survey-pcm_s24be.mov"
+sha256 = "1699011baa5309bd26c283060ca7b5c01bf54aacb0889751c535e187986227eb"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_s24be"
+
+[[ref]]
+name = "survey-pcm_s32le.mov"
+file = "survey-pcm_s32le.mov"
+sha256 = "bf1a262e0f150880401bfa498e5f99e2ba19633267a3553f5d891109cc65130d"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_s32le"
+
+[[ref]]
+name = "survey-pcm_s32be.mov"
+file = "survey-pcm_s32be.mov"
+sha256 = "23f82171d9bab4e352d8ddaf7c447aa92e1fbc2fb46f11f1d2291d4ce4d2b23a"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_s32be"
+
+[[ref]]
+name = "survey-pcm_f32le.mov"
+file = "survey-pcm_f32le.mov"
+sha256 = "c0904920ffa723aa6698b790af3512cbbcd1ea1ad25f0f0f293c99a79866240d"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_f32le"
+
+[[ref]]
+name = "survey-pcm_f32be.mov"
+file = "survey-pcm_f32be.mov"
+sha256 = "8520dde675b7832a67e8ee36b5c649f202f3bf3e35bf2df7987c8cde2b0c0907"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_f32be"
+
+[[ref]]
+name = "survey-pcm_alaw.mov"
+file = "survey-pcm_alaw.mov"
+sha256 = "d3304812fd3de08d94eb38109d84f0dcfa7009a2501764f360aea7245f115204"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_alaw"
+
+[[ref]]
+name = "survey-pcm_mulaw.mov"
+file = "survey-pcm_mulaw.mov"
+sha256 = "e6e13e9760fd9c7075ac54af51ba656dd0c349834b937f30f73028df7e7d869b"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our encoders, lame and flac where named, in our muxers: pcm_mulaw"

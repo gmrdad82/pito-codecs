@@ -1,0 +1,4 @@
+sample_rate=48000
+channels=8
+bit_rate=384000
+TAG:TITLE=c71_48k_q0

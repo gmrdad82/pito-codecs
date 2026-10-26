@@ -25,6 +25,10 @@ pub(super) fn without_dither_flags(data: &[u8]) -> (Vec<u8>, usize) {
     let mut buf = Vec::new();
     for f in frames(data) {
         d.decode_into(f, &mut buf).unwrap();
+        assert!(
+            d.holes().is_empty(),
+            "an AC-3 frame left E-AC-3 dither holes"
+        );
         for m in d.marks() {
             let bit = off * 8 + m;
             patched[bit / 8] &= !(0x80 >> (bit % 8));
@@ -50,75 +54,13 @@ pub(super) fn ours(data: &[u8], dither: bool) -> (Vec<f32>, u16) {
     (out, d.channels())
 }
 
-fn crc16(data: &[u8]) -> u16 {
-    let mut crc = 0u16;
-    for &b in data {
-        crc ^= (b as u16) << 8;
-        for _ in 0..8 {
-            crc = if crc & 0x8000 != 0 {
-                (crc << 1) ^ 0x8005
-            } else {
-                crc << 1
-            };
-        }
-    }
-    crc
-}
-
-pub(super) fn with_dither_flags(data: &[u8]) -> Vec<u8> {
-    let i = info(data).unwrap();
-    let mut d = Decoder::new(i.rate, i.channels);
-    let nfchans = header::parse(data).unwrap().nfchans;
-    let mut out = Vec::new();
-    let mut buf = Vec::new();
-    for f in frames(data) {
-        d.decode_into(f, &mut buf).unwrap();
-        let holes = d.holes();
-        let (flag, rest) = holes.split_first().unwrap();
-        let (end, blocks) = rest.split_last().unwrap();
-        let total = f.len() * 8;
-        assert!(
-            end + blocks.len() * nfchans + 16 <= total,
-            "no room for dither flags"
-        );
-        let bit = |i: usize| f[i / 8] >> (7 - i % 8) & 1;
-        let mut bits: Vec<u8> = Vec::with_capacity(total);
-        let mut next = blocks.iter().peekable();
-        for i in 0..total {
-            while next.peek() == Some(&&i) {
-                bits.extend(std::iter::repeat_n(0, nfchans));
-                next.next();
-            }
-            bits.push(if i == *flag { 1 } else { bit(i) });
-        }
-        bits.truncate(total);
-        let mut frame: Vec<u8> = bits
-            .chunks(8)
-            .map(|c| c.iter().fold(0u8, |a, &b| a << 1 | b))
-            .collect();
-        let n = frame.len();
-        let crc = crc16(&frame[2..n - 2]);
-        frame[n - 2..].copy_from_slice(&crc.to_be_bytes());
-        out.extend(frame);
-    }
-    out
-}
-
-pub(super) fn plain(c: &refs::Case, data: &[u8]) -> (Vec<u8>, usize) {
-    if c.codec == "ac3" {
-        without_dither_flags(data)
-    } else {
-        (with_dither_flags(data), 0)
-    }
-}
-
 pub(super) fn pinned_plain(r: &Refs, c: &refs::Case) -> (Vec<u8>, usize) {
-    let (bytes, cleared) = plain(c, &r.bytes(&c.stream()));
+    let (bytes, cleared) = without_dither_flags(&r.bytes(&c.stream()));
     r.assert_digest(&c.plain(), &testref::sha256(&bytes));
     (bytes, cleared)
 }
 
-pub(super) fn against_ffmpeg(r: &Refs, c: &refs::Case, got: &[f32], channels: u16) -> Diff {
+pub(super) fn against_a52dec(r: &Refs, c: &refs::Case, got: &[f32], channels: u16) -> Diff {
     diff(
         &refs::window::window(got, channels as usize),
         &r.f32s(&c.decoded()),
@@ -130,19 +72,7 @@ pub(super) fn every_frame(plain: &[u8], channels: u16) -> usize {
 }
 
 #[test]
-#[ignore]
-fn write_plain_streams() {
-    let dir = refs::work_dir();
-    for c in refs::cases() {
-        let Ok(data) = std::fs::read(dir.join(c.stream())) else {
-            continue;
-        };
-        testref::write_atomic(&dir.join(c.plain()), &plain(c, &data).0).unwrap();
-    }
-}
-
-#[test]
-fn the_patch_cases_are_named_once() {
+fn the_cases_are_named_once() {
     let mut names: Vec<&str> = refs::cases().map(|c| c.name).collect();
     let all = names.len();
     names.sort_unstable();
@@ -150,6 +80,121 @@ fn the_patch_cases_are_named_once() {
     assert_eq!(names.len(), all);
     for name in refs::BOXED {
         assert_eq!(refs::named(name).name, name);
+    }
+    for acmod in 1..8u8 {
+        assert!(
+            refs::cases().any(|c| c.acmod == acmod),
+            "no case codes acmod {acmod}"
+        );
+    }
+    for rate in [32_000, 44_100, 48_000] {
+        assert!(
+            refs::cases().any(|c| c.rate == rate),
+            "no case at {rate} Hz"
+        );
+    }
+    assert!(refs::cases().any(|c| c.coupling));
+    assert!(refs::cases().any(|c| c.short));
+    assert!(refs::cases().any(|c| c.remat));
+    assert!(refs::cases().any(|c| c.lfe));
+}
+
+#[test]
+fn the_tracked_streams_are_the_writers_output() {
+    let r = Refs::open(refs::AREA);
+    for c in refs::cases() {
+        let (made, marks) = refs::stream(c, true).unwrap();
+        assert!(
+            made == r.bytes(&c.stream()),
+            "{}: not the writer's stream",
+            c.name
+        );
+        let plain = refs::plain(c).unwrap();
+        r.assert_digest(&c.plain(), &testref::sha256(&plain));
+        let (patched, cleared) = without_dither_flags(&made);
+        assert_eq!(cleared, marks.len(), "{}", c.name);
+        assert!(
+            patched == plain,
+            "{}: the patch and the writer disagree",
+            c.name
+        );
+    }
+}
+
+#[test]
+fn the_writer_frames_carry_both_crcs_and_their_size() {
+    for c in refs::cases() {
+        let (made, _) = refs::stream(c, true).unwrap();
+        let (_, size) = refs::frame_bytes(c.rate, c.kbps).unwrap();
+        let five = (size / 2 / 2 + size / 2 / 8) * 2;
+        assert_eq!(made.len() % size, 0, "{}", c.name);
+        for f in frames(&made) {
+            assert_eq!(f.len(), size, "{}", c.name);
+            assert_eq!(refs::crc16(&f[2..five]), 0, "{}: crc1", c.name);
+            assert_eq!(refs::crc16(&f[five..]), 0, "{}: crc2", c.name);
+        }
+        let i = info(&made).unwrap();
+        assert_eq!((i.rate, i.channels, i.eac3), (c.rate, c.channels(), false));
+    }
+}
+
+#[test]
+fn the_writer_round_trips_the_source_through_our_decoder() {
+    for name in ["ac3-mono", "ac3-stereo", "ac3-51", "edge-ac3-22"] {
+        let c = refs::named(name);
+        let (made, _) = refs::stream(c, false).unwrap();
+        let (got, ch) = ours(&made, false);
+        let ch = ch as usize;
+        let src = refs::signal(c, refs::SAMPLES);
+        let n = c.channels() as usize;
+        let slots: &[usize] = match c.acmod {
+            7 => &[0, 2, 1, 4, 5],
+            6 => &[0, 1, 4, 5],
+            _ => &[0, 1],
+        };
+        let slot = |k: usize| slots[k];
+        for k in 0..c.nfchans() {
+            let (mut s, mut e) = (0f64, 0f64);
+            for i in 0..refs::SAMPLES {
+                let x = f64::from(src[i * n + k]);
+                let y = f64::from(got[(i + refs::DELAY) * ch + slot(k)]);
+                s += x * x;
+                e += (x - y).powi(2);
+            }
+            let snr = 10.0 * (s / e).log10();
+            assert!(snr > 30.0, "{name} channel {k}: {snr:.1} dB");
+        }
+    }
+}
+
+#[test]
+fn the_mdct_reconstructs_its_input_across_blocks() {
+    let m = refs::Mdct::new();
+    let x: Vec<f64> = (0..1024)
+        .map(|i| ((i as f64 * 0.05).sin() + (i as f64 * 0.31).cos()) * 0.3)
+        .collect();
+    let a = m.inverse(&m.forward(&x[0..512]));
+    let b = m.inverse(&m.forward(&x[256..768]));
+    for n in 0..256 {
+        assert!((a[256 + n] + b[n] - x[256 + n]).abs() < 1e-9, "sample {n}");
+    }
+    for (bap, codes) in [(1u8, 3u32), (2, 5), (3, 7), (4, 11), (5, 15)] {
+        for code in 0..codes {
+            assert_eq!(
+                refs::quantize(bap, refs::level(bap, code)),
+                code,
+                "bap {bap}"
+            );
+        }
+    }
+    for bap in 6..16u8 {
+        for v in [-1.0, -0.5, 0.0, 0.25, 0.99] {
+            let code = refs::quantize(bap, v);
+            assert!(
+                (refs::level(bap, code) - v).abs() < 1.0 / 16.0,
+                "bap {bap} {v}"
+            );
+        }
     }
 }
 
@@ -168,37 +213,18 @@ fn the_patches_change_only_what_they_name() {
         .sum();
     assert_eq!(flipped as usize, n);
     assert_eq!(without_dither_flags(&cleared).1, 0);
-    let e = refs::named("eac3-stereo");
-    let data = r.bytes(&e.stream());
-    let flagged = with_dither_flags(&data);
-    assert_eq!(flagged.len(), data.len());
-    assert_eq!(frames(&flagged).len(), frames(&data).len());
 }
 
 #[test]
-fn ac3_matches_ffmpeg() {
+fn ac3_matches_a52dec() {
     let r = Refs::open(refs::AREA);
-    for name in ["ac3-51", "ac3-stereo", "ac3-mono"] {
-        let c = refs::named(name);
+    for c in &refs::MAIN {
         let (plain, cleared) = pinned_plain(&r, c);
-        assert!(cleared > 0, "{name}: no dither flags to clear");
+        assert!(cleared > 0, "{}: no dither flags to clear", c.name);
         let (got, ch) = ours(&plain, false);
-        assert_eq!(ch, c.channels);
-        assert_eq!(got.len(), every_frame(&plain, ch), "{name}: length");
-        testref::assert_within(name, &against_ffmpeg(&r, c, &got, ch), LIMIT, LIMIT);
-    }
-}
-
-#[test]
-fn eac3_matches_ffmpeg() {
-    let r = Refs::open(refs::AREA);
-    for name in ["eac3-51", "eac3-stereo"] {
-        let c = refs::named(name);
-        let (plain, _) = pinned_plain(&r, c);
-        let (got, ch) = ours(&plain, false);
-        assert_eq!(ch, c.channels);
-        assert_eq!(got.len(), every_frame(&plain, ch), "{name}: length");
-        testref::assert_within(name, &against_ffmpeg(&r, c, &got, ch), LIMIT, LIMIT);
+        assert_eq!(ch, layout(c.channels()));
+        assert_eq!(got.len(), every_frame(&plain, ch), "{}: length", c.name);
+        testref::assert_within(c.name, &against_a52dec(&r, c, &got, ch), LIMIT, LIMIT);
     }
 }
 
@@ -232,9 +258,14 @@ impl Rng {
 fn malformed_frames_fail_cleanly() {
     let r = Refs::open(refs::AREA);
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-    for name in ["ac3-51", "eac3-stereo", "edge-ac3-51-cpl", "edge-eac3-quad"] {
+    for name in [
+        "ac3-51",
+        "ac3-stereo",
+        "edge-ac3-51-cpl",
+        "edge-ac3-50-short",
+    ] {
         let c = refs::named(name);
-        let channels = c.channels;
+        let channels = c.channels();
         let data = r.bytes(&c.stream());
         let good: Vec<Vec<u8>> = frames(&data).into_iter().map(<[u8]>::to_vec).collect();
         assert!(good.len() >= 2, "{name}: {} frames", good.len());
@@ -281,7 +312,7 @@ fn containers_decode_through_the_media_front() {
     let r = Refs::open(refs::AREA);
     for name in refs::BOXED {
         let c = refs::named(name);
-        let (rate, channels) = (c.rate, c.channels);
+        let (rate, channels) = (c.rate, layout(c.channels()));
         let n = channels as usize;
         let (plain, _) = pinned_plain(&r, c);
         let reference = r.f32s(&c.decoded());
@@ -291,7 +322,7 @@ fn containers_decode_through_the_media_front() {
             let p = probe(&path, &Prefs::default()).unwrap();
             assert_eq!(p.audio.len(), 2, "{file}");
             assert!(p.audio.iter().all(|a| a.native()), "{file}: {:?}", p.audio);
-            assert_eq!(p.audio[0].channels, channels, "{file}");
+            assert_eq!(p.audio[0].channels, c.channels(), "{file}");
             let got = audio_pcm_range(
                 &path,
                 0,
@@ -332,8 +363,8 @@ fn the_window_samples_every_block_of_every_frame() {
 #[test]
 fn the_window_tells_a_lost_or_extra_frame() {
     let c = refs::named("ac3-stereo");
-    let n = c.channels as usize;
-    let full = testref::le_f32(&refs::signal(c.rate, c.channels, refs::SAMPLES + 256));
+    let n = c.channels() as usize;
+    let full = refs::signal(c, refs::SAMPLES + 256);
     let want = refs::window::window(&full, n);
     let lost = refs::window::window(&full[..full.len() - 1536 * n], n);
     let mut padded = full.clone();

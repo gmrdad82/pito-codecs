@@ -1,0 +1,183 @@
+[[ref]]
+name = "joint44.mp3"
+file = "joint44.mp3"
+sha256 = "0dbe3b05b298dca8178af4a0ae6f842ede6bc6bd7633ac358ba2ff63911d5069"
+kind = "fixture"
+tool = "LAME 64bits version 4.0 (https://lame.sourceforge.io)"
+command = "lame --quiet -t -b 192 {src} {out}"
+
+[[ref]]
+name = "joint44.mp3.mpg123"
+file = ""
+sha256 = "29ecf3909a6cb0a0e11080fa72c0db425b80fcc6e9da60458aaf6f0058a09b80"
+kind = "bit-exact"
+tool = "mpg123 1.33.7"
+command = "mpg123 -q -e f32 --no-gapless -O {out} {ref:joint44.mp3}"
+
+[[ref]]
+name = "joint44.mp3.f32"
+file = "joint44.mp3.f32"
+sha256 = "454f51781c219d815eb0e692009b0493608c403edf2cd88ba317108035bfb51a"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/mp3/refs.rs window of joint44.mp3.mpg123"
+
+[[ref]]
+name = "mono48vbr.mp3"
+file = "mono48vbr.mp3"
+sha256 = "6edf506a8ab4f1bdf061851aeda000e48e05328837c224b3c24d1d8bb05c237a"
+kind = "fixture"
+tool = "LAME 64bits version 4.0 (https://lame.sourceforge.io)"
+command = "lame --quiet -t -V 4 {src} {out}"
+
+[[ref]]
+name = "mono48vbr.mp3.mpg123"
+file = ""
+sha256 = "08292b3bcc013a0bc7c981d2a1192784a7cad3b13f52a7665a4fe3fe04e22420"
+kind = "bit-exact"
+tool = "mpg123 1.33.7"
+command = "mpg123 -q -e f32 --no-gapless -O {out} {ref:mono48vbr.mp3}"
+
+[[ref]]
+name = "mono48vbr.mp3.f32"
+file = "mono48vbr.mp3.f32"
+sha256 = "777d62feaba8f0ee948c3384752c1515e63958d9b3c7631ba83b8e108bbcac8e"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/mp3/refs.rs window of mono48vbr.mp3.mpg123"
+
+[[ref]]
+name = "stereo32.mp3"
+file = "stereo32.mp3"
+sha256 = "c021a8172510133c383f4bc0a3f0c10d4ddf58084c7824cafaeeaf106c3e59b2"
+kind = "fixture"
+tool = "LAME 64bits version 4.0 (https://lame.sourceforge.io)"
+command = "lame --quiet -t -b 128 -m s {src} {out}"
+
+[[ref]]
+name = "stereo32.mp3.mpg123"
+file = ""
+sha256 = "fa167177dfffd127b5210944a77d806053ec73425beb690c27b323ac80faf8d9"
+kind = "bit-exact"
+tool = "mpg123 1.33.7"
+command = "mpg123 -q -e f32 --no-gapless -O {out} {ref:stereo32.mp3}"
+
+[[ref]]
+name = "stereo32.mp3.f32"
+file = "stereo32.mp3.f32"
+sha256 = "0b5ce08e7ec4c365d8a56e410d42a05d4faef0fd271132ec7d73055da38aa9c9"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/mp3/refs.rs window of stereo32.mp3.mpg123"
+
+[[ref]]
+name = "lsf22.mp3"
+file = "lsf22.mp3"
+sha256 = "a8dfb39428d150898b8a8c94101a34ff57c1973f48dfab11e499cd01b7004651"
+kind = "fixture"
+tool = "LAME 64bits version 4.0 (https://lame.sourceforge.io)"
+command = "lame --quiet -t -b 48 {src} {out}"
+
+[[ref]]
+name = "lsf22.mp3.mpg123"
+file = ""
+sha256 = "5dabbf8c89e45d38921b89678b12643dc4295a4008b210197405d6b9f2d8a9e7"
+kind = "bit-exact"
+tool = "mpg123 1.33.7"
+command = "mpg123 -q -e f32 --no-gapless -O {out} {ref:lsf22.mp3}"
+
+[[ref]]
+name = "lsf22.mp3.f32"
+file = "lsf22.mp3.f32"
+sha256 = "11435e926092d5fa94d3cfe1025b77b802d14de64b662cd14f492d38b95791aa"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/mp3/refs.rs window of lsf22.mp3.mpg123"
+
+[[ref]]
+name = "gapless44.mp3"
+file = "gapless44.mp3"
+sha256 = "f39b37ca9d6be2d0ac2b9c500decfec5c665da49a37a0b27c4bbce135b5b6c90"
+kind = "fixture"
+tool = "LAME 64bits version 4.0 (https://lame.sourceforge.io)"
+command = "lame --quiet --add-id3v2 --tt pito-codecs -b 192 {src} {out}"
+
+[[ref]]
+name = "gapless44.mp3.mpg123"
+file = ""
+sha256 = "2ed5b8eae9f9e0878f62403d5b65a99b47b521b5a68751b4dd30534a31c5b4aa"
+kind = "bit-exact"
+tool = "mpg123 1.33.7"
+command = "mpg123 -q -e f32 -O {out} {ref:gapless44.mp3}"
+
+[[ref]]
+name = "gapless44.mp3.f32"
+file = "gapless44.mp3.f32"
+sha256 = "90989c64172ecd2429809c03671cd0737c37b0f16d1f9177df4f4e20390b4f03"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/mp3/refs.rs window of gapless44.mp3.mpg123"
+
+[[ref]]
+name = "gapless48mono.mp3"
+file = "gapless48mono.mp3"
+sha256 = "21815eba91c74245c7049c9714c2b56b6b721ae53478b1f6f8189be433f3cf9f"
+kind = "fixture"
+tool = "LAME 64bits version 4.0 (https://lame.sourceforge.io)"
+command = "lame --quiet --add-id3v2 --tt pito-codecs -b 64 {src} {out}"
+
+[[ref]]
+name = "gapless48mono.mp3.mpg123"
+file = ""
+sha256 = "1428324543f61f01fb65c0bedab42025afd24c8c1a0d6dcfc70e1cc2e7df8ab4"
+kind = "bit-exact"
+tool = "mpg123 1.33.7"
+command = "mpg123 -q -e f32 -O {out} {ref:gapless48mono.mp3}"
+
+[[ref]]
+name = "gapless48mono.mp3.f32"
+file = "gapless48mono.mp3.f32"
+sha256 = "ec490d1ab85044bb908311239bb3efcffa2bf1900d66e8906f599a4fca441391"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/mp3/refs.rs window of gapless48mono.mp3.mpg123"
+
+[[ref]]
+name = "delay.mp3"
+file = ""
+sha256 = "0804eba5195cebd8a63be65c6166829920db3fdc4ccf4e1129567e92650edf4c"
+kind = "bit-exact"
+tool = "LAME 64bits version 4.0 (https://lame.sourceforge.io)"
+command = "lame --quiet --add-id3v2 --tt pito-codecs -b 160 {src} {out}"
+
+[[ref]]
+name = "delay.mp3.mpg123"
+file = ""
+sha256 = "399687678aee431cb0b93df5335c311886e5672aee8f5bc879ce27a15fa42458"
+kind = "bit-exact"
+tool = "mpg123 1.33.7"
+command = "mpg123 -q -e f32 -O {out} {ref:delay.mp3}"
+
+[[ref]]
+name = "delay.mp3.f32"
+file = "delay.mp3.f32"
+sha256 = "cf2b3f05e61d5172005d175767d4e74cc00d1ee7d76bdeab9ec770a77147ba20"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/mp3/refs.rs window of delay.mp3.mpg123"
+
+[[ref]]
+name = "delay.mp4"
+file = "delay.mp4"
+sha256 = "53167286bf10d403f0c44208ca2cf45084c32a8c6d26bf7f3e32633cf2f2c1cc"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our mp4 writer: the frames of delay.mp3 after its LAME tag"
+
+[[ref]]
+name = "delay.mkv"
+file = "delay.mkv"
+sha256 = "4f5c2ebe719fca3bd90fcdfd2f78c92db118a5508473a2a51926096849483e7f"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our mkv writer: the frames of delay.mp3 after its LAME tag"

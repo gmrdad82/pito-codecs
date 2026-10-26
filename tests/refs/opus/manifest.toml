@@ -1,0 +1,143 @@
+[[ref]]
+name = "music_160k.opus"
+file = "music_160k.opus"
+sha256 = "d0244e02e46c541d4c792c43c7a938a27450365c45f7d29fc1955ddd8470fe94"
+kind = "fixture"
+tool = "libopus.so.0.11.1 libopus 1.6.1"
+command = "examples/record_refs: libopus 160000 bit/s, CBR, audio, 20 ms frames, our Ogg writer"
+
+[[ref]]
+name = "music_160k.opus.f32"
+file = "music_160k.opus.f32"
+sha256 = "7ec1a11c37ba87c249e24b5a17ff6ed40a3212c551ef350b5e266a0e79c098ba"
+kind = "tolerance"
+tool = "libopus.so.0.11.1 libopus 1.6.1"
+command = "examples/record_refs: libopus decode of music_160k.opus, pre-skip and end trimmed, src/opus/refs.rs window"
+
+[[ref]]
+name = "speech_16k_voip.opus"
+file = "speech_16k_voip.opus"
+sha256 = "6e7f458e2bda288d5b056a50f258d3c1eb010de5a74caf4b180cecf6c3e07b68"
+kind = "fixture"
+tool = "libopus.so.0.11.1 libopus 1.6.1"
+command = "examples/record_refs: libopus 16000 bit/s, VBR, VoIP, 20 ms frames, our Ogg writer"
+
+[[ref]]
+name = "speech_16k_voip.opus.f32"
+file = "speech_16k_voip.opus.f32"
+sha256 = "f9048dfe0ff6b1bfb92bc72e64afe29b869bc4ee16100c7ccbb53bc53ab8f204"
+kind = "tolerance"
+tool = "libopus.so.0.11.1 libopus 1.6.1"
+command = "examples/record_refs: libopus decode of speech_16k_voip.opus, pre-skip and end trimmed, src/opus/refs.rs window"
+
+[[ref]]
+name = "music_32k_hybrid.opus"
+file = "music_32k_hybrid.opus"
+sha256 = "114cbda942b4bb5491f0aceaf9364ad782c06b683a697525320ca278d02200eb"
+kind = "fixture"
+tool = "libopus.so.0.11.1 libopus 1.6.1"
+command = "examples/record_refs: libopus 32000 bit/s, VBR, audio, 20 ms frames, our Ogg writer"
+
+[[ref]]
+name = "music_32k_hybrid.opus.f32"
+file = "music_32k_hybrid.opus.f32"
+sha256 = "ec9e68f727aa0aa73c8c8d21ac5ecb4ad1f3388b0e91bdeeaf5b0122e7286bf7"
+kind = "tolerance"
+tool = "libopus.so.0.11.1 libopus 1.6.1"
+command = "examples/record_refs: libopus decode of music_32k_hybrid.opus, pre-skip and end trimmed, src/opus/refs.rs window"
+
+[[ref]]
+name = "music_51_256k.opus"
+file = "music_51_256k.opus"
+sha256 = "6db47feafa384d5043b7951ff8f451d7472736d15c4b76f4049be25163f6a6f0"
+kind = "fixture"
+tool = "libopus.so.0.11.1 libopus 1.6.1"
+command = "examples/record_refs: libopus 256000 bit/s, VBR, audio, 20 ms frames, our Ogg writer"
+
+[[ref]]
+name = "music_51_256k.opus.f32"
+file = "music_51_256k.opus.f32"
+sha256 = "034b046786dfe60ea7e3ea488ff2084d30e8ed9ef86ffa1d7526f57ef04c0c12"
+kind = "tolerance"
+tool = "libopus.so.0.11.1 libopus 1.6.1"
+command = "examples/record_refs: libopus decode of music_51_256k.opus, pre-skip and end trimmed, src/opus/refs.rs window"
+
+[[ref]]
+name = "enc_2_128000.opus"
+file = ""
+sha256 = "8fb43b9cb0f20e9808023dbe67675d290ec3a23214d226999d108e40960f9044"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/opus/refs.rs encode_ours(2, 128000)"
+
+[[ref]]
+name = "enc_2_128000.opus.f32"
+file = "enc_2_128000.opus.f32"
+sha256 = "d38a7d30bcd94a3d84e0b80388df70a51f5286dc1d468a8df06592b7156ab2af"
+kind = "tolerance"
+tool = "libopus.so.0.11.1 libopus 1.6.1"
+command = "examples/record_refs: libopus decode of enc_2_128000.opus, pre-skip and end trimmed, src/opus/refs.rs window"
+
+[[ref]]
+name = "enc_1_64000.opus"
+file = ""
+sha256 = "532af61b9dd11c00b49529d359037b4058add808d7c57ac631d8507f8f596adb"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/opus/refs.rs encode_ours(1, 64000)"
+
+[[ref]]
+name = "enc_1_64000.opus.f32"
+file = "enc_1_64000.opus.f32"
+sha256 = "e0f2e1e1a51bc97a4d4f81a31315457983706d4da2f2e1a932b37919482e554f"
+kind = "tolerance"
+tool = "libopus.so.0.11.1 libopus 1.6.1"
+command = "examples/record_refs: libopus decode of enc_1_64000.opus, pre-skip and end trimmed, src/opus/refs.rs window"
+
+[[ref]]
+name = "enc_2_64000.opus"
+file = ""
+sha256 = "b0895042975e2b71ed5e66ee6eb8d739fbd371e8c145c67804499f47a2880d97"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/opus/refs.rs encode_ours(2, 64000)"
+
+[[ref]]
+name = "enc_2_64000.opus.f32"
+file = "enc_2_64000.opus.f32"
+sha256 = "78a40a38413e76f799f9eebbf64299f791458dbddb3d54ce1650cf6430033121"
+kind = "tolerance"
+tool = "libopus.so.0.11.1 libopus 1.6.1"
+command = "examples/record_refs: libopus decode of enc_2_64000.opus, pre-skip and end trimmed, src/opus/refs.rs window"
+
+[[ref]]
+name = "silk_1_16000.opus"
+file = ""
+sha256 = "4e836f06f4a169882578fce9622571d7e1c3e8e2bc5042258894d4213d5ea215"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/opus/refs.rs encode_silk(1, 16000)"
+
+[[ref]]
+name = "silk_1_16000.opus.f32"
+file = "silk_1_16000.opus.f32"
+sha256 = "7da5c06e7f4ae2af1346d306466e53b0d5136ab8322ac526325a3d7a3ef5c48d"
+kind = "tolerance"
+tool = "libopus.so.0.11.1 libopus 1.6.1"
+command = "examples/record_refs: libopus decode of silk_1_16000.opus, pre-skip and end trimmed, src/opus/refs.rs window"
+
+[[ref]]
+name = "silk_2_24000.opus"
+file = ""
+sha256 = "05ddc35236d187bcb54faa7caa1251abc9b1ea8f800556e72c82aa80e46aa68b"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/opus/refs.rs encode_silk(2, 24000)"
+
+[[ref]]
+name = "silk_2_24000.opus.f32"
+file = "silk_2_24000.opus.f32"
+sha256 = "2c53287f6a117a6474a382705b847e58428cded1baa220912b784eba957ae7fc"
+kind = "tolerance"
+tool = "libopus.so.0.11.1 libopus 1.6.1"
+command = "examples/record_refs: libopus decode of silk_2_24000.opus, pre-skip and end trimmed, src/opus/refs.rs window"

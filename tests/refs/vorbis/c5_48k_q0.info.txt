@@ -1,0 +1,4 @@
+sample_rate=48000
+channels=5
+bit_rate=240000
+TAG:TITLE=c5_48k_q0

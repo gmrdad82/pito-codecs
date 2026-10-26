@@ -1,0 +1,447 @@
+[[ref]]
+name = "ac3-51.ac3"
+file = "ac3-51.ac3"
+sha256 = "fd782584ef2528539e279f59cae0943fdf06263eb059e60c33846a9fcf8a21ae"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs writer, 448 kbps, acmod 7, LFE true, coupling false, short blocks false, dither flags set"
+
+[[ref]]
+name = "ac3-51.plain"
+file = ""
+sha256 = "7bf04102a096be1cb0d5c23ba03a3fda48bc97c38b00f677e2fc840a22f4e3b6"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs plain(ac3-51): the stream with its dither flags cleared"
+
+[[ref]]
+name = "ac3-51.a52dec.wav"
+file = ""
+sha256 = "2ec40d5bde708453213516be4663a625a1d79ccb4c994f5d85889b5c33c7b86f"
+kind = "bit-exact"
+tool = "a52dec-0.8.0"
+command = "a52dec -r -o wav6 {ref:ac3-51.plain}"
+
+[[ref]]
+name = "ac3-51.f32"
+file = "ac3-51.f32"
+sha256 = "75e1cddef50ee408b324e7600b9d065a12e0748fa1446306a459ff22c86b02a1"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: a52dec's standard output for ac3-51.a52dec.wav, in our channel slots, src/ac3/refs.rs window"
+
+[[ref]]
+name = "ac3-stereo.ac3"
+file = "ac3-stereo.ac3"
+sha256 = "f50755201ea4560cb41882532a8106e8a625c28e07d5fb958a1105287245b9a7"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs writer, 192 kbps, acmod 2, LFE false, coupling false, short blocks false, dither flags set"
+
+[[ref]]
+name = "ac3-stereo.plain"
+file = ""
+sha256 = "3ff9a2cf7ce43fb4ea7fc941f63cca71fe0ae00b2247b489fce2678b432c24bd"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs plain(ac3-stereo): the stream with its dither flags cleared"
+
+[[ref]]
+name = "ac3-stereo.a52dec.wav"
+file = ""
+sha256 = "6f3805e583177ac75975f764fcaae79838a95eee547277b29744b969babab7a4"
+kind = "bit-exact"
+tool = "a52dec-0.8.0"
+command = "a52dec -r -o wav6 {ref:ac3-stereo.plain}"
+
+[[ref]]
+name = "ac3-stereo.f32"
+file = "ac3-stereo.f32"
+sha256 = "6fc811ccba578fc7fe3b16a21a95166f0306e072f757454c2fb47cae02e45d29"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: a52dec's standard output for ac3-stereo.a52dec.wav, in our channel slots, src/ac3/refs.rs window"
+
+[[ref]]
+name = "ac3-mono.ac3"
+file = "ac3-mono.ac3"
+sha256 = "2fadca1552b19ef5707aba09a329b9fd81fac01b872372d2b4ce77dda1c28f0f"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs writer, 96 kbps, acmod 1, LFE false, coupling false, short blocks false, dither flags set"
+
+[[ref]]
+name = "ac3-mono.plain"
+file = ""
+sha256 = "badd709f09dc459d368cca449081237b4b53e3b2883162073f200460a063d00d"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs plain(ac3-mono): the stream with its dither flags cleared"
+
+[[ref]]
+name = "ac3-mono.a52dec.wav"
+file = ""
+sha256 = "9383209ab3784eb03aa56201df4dbd43dbd75d1ac800d5b53fc470878279b89a"
+kind = "bit-exact"
+tool = "a52dec-0.8.0"
+command = "a52dec -r -o wav6 {ref:ac3-mono.plain}"
+
+[[ref]]
+name = "ac3-mono.f32"
+file = "ac3-mono.f32"
+sha256 = "44879302f8eae47720a79c12c26618c5f621c03f7821b6b9f8667ddf7a3cc1a7"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: a52dec's standard output for ac3-mono.a52dec.wav, in our channel slots, src/ac3/refs.rs window"
+
+[[ref]]
+name = "edge-ac3-mono-32k.ac3"
+file = "edge-ac3-mono-32k.ac3"
+sha256 = "06acc589c59369015fb812cb01f6aad7d4139622dd87030d951b005e22a7d4b6"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs writer, 64 kbps, acmod 1, LFE false, coupling false, short blocks false, dither flags set"
+
+[[ref]]
+name = "edge-ac3-mono-32k.plain"
+file = ""
+sha256 = "f8bea1fac7d814e562b541cfe24453f3f022bc65e8f90e7bb18c59c878d13564"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs plain(edge-ac3-mono-32k): the stream with its dither flags cleared"
+
+[[ref]]
+name = "edge-ac3-mono-32k.a52dec.wav"
+file = ""
+sha256 = "ebfa6a8ae162d7358c4871fe93f8fc90eb2734be86d51c5a57e55e75fe092ce4"
+kind = "bit-exact"
+tool = "a52dec-0.8.0"
+command = "a52dec -r -o wav6 {ref:edge-ac3-mono-32k.plain}"
+
+[[ref]]
+name = "edge-ac3-mono-32k.f32"
+file = "edge-ac3-mono-32k.f32"
+sha256 = "2cee6e6277369962c1895ae1966abdd865e05d7a75943a5f4058383aa9a8f427"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: a52dec's standard output for edge-ac3-mono-32k.a52dec.wav, in our channel slots, src/ac3/refs.rs window"
+
+[[ref]]
+name = "edge-ac3-stereo-32k.ac3"
+file = "edge-ac3-stereo-32k.ac3"
+sha256 = "72dac2627f0bb5a8eea6993a80def2d1c2ea3578b6d174520cf69289664285c5"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs writer, 128 kbps, acmod 2, LFE false, coupling false, short blocks false, dither flags set"
+
+[[ref]]
+name = "edge-ac3-stereo-32k.plain"
+file = ""
+sha256 = "05f38abd515f1611fe151846322b4c650a960661b8c3d2da15146ca8d5d6543f"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs plain(edge-ac3-stereo-32k): the stream with its dither flags cleared"
+
+[[ref]]
+name = "edge-ac3-stereo-32k.a52dec.wav"
+file = ""
+sha256 = "92320ae8ca7cfa4a39d0736194bd2a21f39ed7ad3a8c1a965399e13ed4a438e8"
+kind = "bit-exact"
+tool = "a52dec-0.8.0"
+command = "a52dec -r -o wav6 {ref:edge-ac3-stereo-32k.plain}"
+
+[[ref]]
+name = "edge-ac3-stereo-32k.f32"
+file = "edge-ac3-stereo-32k.f32"
+sha256 = "c4ba3d3ce944eef030fb6cd443387e238b671139c7833533d1cc43bebd7d4d35"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: a52dec's standard output for edge-ac3-stereo-32k.a52dec.wav, in our channel slots, src/ac3/refs.rs window"
+
+[[ref]]
+name = "edge-ac3-21.ac3"
+file = "edge-ac3-21.ac3"
+sha256 = "09705cd31aa069d6721384688f51056b73c0119582a7c46f4591e63b00717d40"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs writer, 192 kbps, acmod 2, LFE true, coupling false, short blocks false, dither flags set"
+
+[[ref]]
+name = "edge-ac3-21.plain"
+file = ""
+sha256 = "e299016a385c028b87e0b70c0086eade0f6291bd0e3bf4407282d98bffb93972"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs plain(edge-ac3-21): the stream with its dither flags cleared"
+
+[[ref]]
+name = "edge-ac3-21.a52dec.wav"
+file = ""
+sha256 = "ab3e36d9e7c4dc63adbaaf353a83253e829bff9faae9616d98a104ffd544f623"
+kind = "bit-exact"
+tool = "a52dec-0.8.0"
+command = "a52dec -r -o wav6 {ref:edge-ac3-21.plain}"
+
+[[ref]]
+name = "edge-ac3-21.f32"
+file = "edge-ac3-21.f32"
+sha256 = "8f23ef798c3170781cee770be4f5090e75a4af7f408e3d1a909aa969b020c6ec"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: a52dec's standard output for edge-ac3-21.a52dec.wav, in our channel slots, src/ac3/refs.rs window"
+
+[[ref]]
+name = "edge-ac3-30.ac3"
+file = "edge-ac3-30.ac3"
+sha256 = "15662435a4337a8a17ed55bd57069ed03afb66b9fd91934320569da5f3414202"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs writer, 256 kbps, acmod 3, LFE false, coupling false, short blocks false, dither flags set"
+
+[[ref]]
+name = "edge-ac3-30.plain"
+file = ""
+sha256 = "0feee1d29a3d0b2c34f2a01e05f5d3742212737d7b0ac13122d74231c9a5b9e1"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs plain(edge-ac3-30): the stream with its dither flags cleared"
+
+[[ref]]
+name = "edge-ac3-30.a52dec.wav"
+file = ""
+sha256 = "27c2a3dc4ff992006558c63a2e4a80c2911f0a4c65a08aeb5a886acc16b551a0"
+kind = "bit-exact"
+tool = "a52dec-0.8.0"
+command = "a52dec -r -o wav6 {ref:edge-ac3-30.plain}"
+
+[[ref]]
+name = "edge-ac3-30.f32"
+file = "edge-ac3-30.f32"
+sha256 = "1f861ef36e627bc1f1724d5ae9ef027a46f814458953d9af2f729db643b2fcf8"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: a52dec's standard output for edge-ac3-30.a52dec.wav, in our channel slots, src/ac3/refs.rs window"
+
+[[ref]]
+name = "edge-ac3-21back.ac3"
+file = "edge-ac3-21back.ac3"
+sha256 = "2ed432c44fef6bd1e0ea94528610ed6265a4bf1d240bdfcc699d3c87cb5bed11"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs writer, 256 kbps, acmod 4, LFE false, coupling false, short blocks false, dither flags set"
+
+[[ref]]
+name = "edge-ac3-21back.plain"
+file = ""
+sha256 = "78102ade946d52ac58eb1cfb004e123f9360b3c759b4ed314c7c46bb2db2ea1a"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs plain(edge-ac3-21back): the stream with its dither flags cleared"
+
+[[ref]]
+name = "edge-ac3-21back.a52dec.wav"
+file = ""
+sha256 = "0440577c2025392dd4441e236a1e997e4276358acbde9a225c0bdfca50188c70"
+kind = "bit-exact"
+tool = "a52dec-0.8.0"
+command = "a52dec -r -o wav6 {ref:edge-ac3-21back.plain}"
+
+[[ref]]
+name = "edge-ac3-21back.f32"
+file = "edge-ac3-21back.f32"
+sha256 = "094e11332cbf1a9fc36db16767bd77c5e783534aaf0adbeeccfaf0e48cc70107"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: a52dec's standard output for edge-ac3-21back.a52dec.wav, in our channel slots, src/ac3/refs.rs window"
+
+[[ref]]
+name = "edge-ac3-31.ac3"
+file = "edge-ac3-31.ac3"
+sha256 = "01b45442d6670e9abef2a4fcd01a43a63dcc32fa567d7ab1d30af42b6d68de25"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs writer, 320 kbps, acmod 5, LFE false, coupling false, short blocks false, dither flags set"
+
+[[ref]]
+name = "edge-ac3-31.plain"
+file = ""
+sha256 = "409169a4f06ae017430b012bf6b6ebf507affa0917e3371484c3baba998724a4"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs plain(edge-ac3-31): the stream with its dither flags cleared"
+
+[[ref]]
+name = "edge-ac3-31.a52dec.wav"
+file = ""
+sha256 = "eb6363d6e04b97b9bc63072277e444683a27ff77a72bfe3933209b27c670e616"
+kind = "bit-exact"
+tool = "a52dec-0.8.0"
+command = "a52dec -r -o wav6 {ref:edge-ac3-31.plain}"
+
+[[ref]]
+name = "edge-ac3-31.f32"
+file = "edge-ac3-31.f32"
+sha256 = "9a5c935a541c240f69f52e5710106d38c8d582b282bfda184caaa6bb2aa8b58d"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: a52dec's standard output for edge-ac3-31.a52dec.wav, in our channel slots, src/ac3/refs.rs window"
+
+[[ref]]
+name = "edge-ac3-22.ac3"
+file = "edge-ac3-22.ac3"
+sha256 = "d0091474c22dca6a068374a75ef3dd7b48a5a2180544adb2e13b5993bfa66af2"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs writer, 320 kbps, acmod 6, LFE false, coupling false, short blocks false, dither flags set"
+
+[[ref]]
+name = "edge-ac3-22.plain"
+file = ""
+sha256 = "d934b07b51173a07c03d51c44b43247210118230de43b0a06086cb31d138b39a"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs plain(edge-ac3-22): the stream with its dither flags cleared"
+
+[[ref]]
+name = "edge-ac3-22.a52dec.wav"
+file = ""
+sha256 = "725caf6443df532446a6b07d0a93eed190a3777780d6dd4d83cfa4ab118ed0e5"
+kind = "bit-exact"
+tool = "a52dec-0.8.0"
+command = "a52dec -r -o wav6 {ref:edge-ac3-22.plain}"
+
+[[ref]]
+name = "edge-ac3-22.f32"
+file = "edge-ac3-22.f32"
+sha256 = "fbda4d5ba71497f9e1868f13f29bd4aff0f90591e0fec170c2a61f926aba8f9e"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: a52dec's standard output for edge-ac3-22.a52dec.wav, in our channel slots, src/ac3/refs.rs window"
+
+[[ref]]
+name = "edge-ac3-31-lfe.ac3"
+file = "edge-ac3-31-lfe.ac3"
+sha256 = "22fe263966626ec1e69f9c78d604552c9de35984dd3a3e23cfc2e2223489f24c"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs writer, 384 kbps, acmod 5, LFE true, coupling false, short blocks false, dither flags set"
+
+[[ref]]
+name = "edge-ac3-31-lfe.plain"
+file = ""
+sha256 = "356b9ad0a8d38bf642ccdd103f50e3c5e029ce9931e5d917a881ed24d9c38acc"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs plain(edge-ac3-31-lfe): the stream with its dither flags cleared"
+
+[[ref]]
+name = "edge-ac3-31-lfe.a52dec.wav"
+file = ""
+sha256 = "8354b4f3a042e00c19ee8817b33ed30aefde014aafc47788216119f40ed5399b"
+kind = "bit-exact"
+tool = "a52dec-0.8.0"
+command = "a52dec -r -o wav6 {ref:edge-ac3-31-lfe.plain}"
+
+[[ref]]
+name = "edge-ac3-31-lfe.f32"
+file = "edge-ac3-31-lfe.f32"
+sha256 = "38189d32c97e3b23ab4c228ef8b21bd9d95cfc063ba48946aa43f7e6e29f9845"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: a52dec's standard output for edge-ac3-31-lfe.a52dec.wav, in our channel slots, src/ac3/refs.rs window"
+
+[[ref]]
+name = "edge-ac3-50-short.ac3"
+file = "edge-ac3-50-short.ac3"
+sha256 = "4dda6315beca0657481547b683ee8e467e72d6a77a80d1d5664e4dcb6d132b38"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs writer, 448 kbps, acmod 7, LFE false, coupling false, short blocks true, dither flags set"
+
+[[ref]]
+name = "edge-ac3-50-short.plain"
+file = ""
+sha256 = "d65736be318a7b35b4ed58915ea82a68603d19744d5ae4694166c76c84819f0c"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs plain(edge-ac3-50-short): the stream with its dither flags cleared"
+
+[[ref]]
+name = "edge-ac3-50-short.a52dec.wav"
+file = ""
+sha256 = "98cf2a643279fbe18f9cc17b83f7f3e04a04a8f5089e68a6614470c237135d96"
+kind = "bit-exact"
+tool = "a52dec-0.8.0"
+command = "a52dec -r -o wav6 {ref:edge-ac3-50-short.plain}"
+
+[[ref]]
+name = "edge-ac3-50-short.f32"
+file = "edge-ac3-50-short.f32"
+sha256 = "155359c12eacf76416f5b14321c82aa11f688aee76202b0db5eb34ce3757ede7"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: a52dec's standard output for edge-ac3-50-short.a52dec.wav, in our channel slots, src/ac3/refs.rs window"
+
+[[ref]]
+name = "edge-ac3-51-cpl.ac3"
+file = "edge-ac3-51-cpl.ac3"
+sha256 = "7f70b0b78e3cfdeaaa632a20dc7fc82d436d9b8493cdb71145974923ab30659c"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs writer, 384 kbps, acmod 7, LFE true, coupling true, short blocks false, dither flags set"
+
+[[ref]]
+name = "edge-ac3-51-cpl.plain"
+file = ""
+sha256 = "74d39495950ec8967ff35c68e742727631b512a07c8d568f256d9ce48318dba5"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/ac3/refs.rs plain(edge-ac3-51-cpl): the stream with its dither flags cleared"
+
+[[ref]]
+name = "edge-ac3-51-cpl.a52dec.wav"
+file = ""
+sha256 = "d1d4a2eea3b855d44a4334abfc0f8ddcc777397ca84cd66e59bd5656883367dc"
+kind = "bit-exact"
+tool = "a52dec-0.8.0"
+command = "a52dec -r -o wav6 {ref:edge-ac3-51-cpl.plain}"
+
+[[ref]]
+name = "edge-ac3-51-cpl.f32"
+file = "edge-ac3-51-cpl.f32"
+sha256 = "a55a062c6ad18dfe2cc09989d3e2f7ef5809012d05dece111080ac76b43ab25f"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: a52dec's standard output for edge-ac3-51-cpl.a52dec.wav, in our channel slots, src/ac3/refs.rs window"
+
+[[ref]]
+name = "box-ac3-51.mkv"
+file = "box-ac3-51.mkv"
+sha256 = "609f906962ac91e6a4563bc6734b637bc0c3067ad8368e3628334b3871bf294e"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our mkv writer: ac3-51.plain and a second AAC track from our encoder"
+
+[[ref]]
+name = "box-ac3-51.mp4"
+file = "box-ac3-51.mp4"
+sha256 = "2987edcf754f3541e993ef721a14cc64363752645bb3640c2eda4bba81c1a3f3"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our mp4 writer: ac3-51.plain and a second AAC track from our encoder"
+
+[[ref]]
+name = "box-ac3-stereo.mkv"
+file = "box-ac3-stereo.mkv"
+sha256 = "1049b3a6a2c7343eefab15ed6fb110b1f24b1f5c6f10014df3d4c06ed85189cf"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our mkv writer: ac3-stereo.plain and a second AAC track from our encoder"
+
+[[ref]]
+name = "box-ac3-stereo.mp4"
+file = "box-ac3-stereo.mp4"
+sha256 = "0071ce9a01fe8a4ef6968515757906b3e4b68f0d2cb350d72445437b69721f3d"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our mp4 writer: ac3-stereo.plain and a second AAC track from our encoder"

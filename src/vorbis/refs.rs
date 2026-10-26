@@ -4,15 +4,14 @@ pub const MAX_RMS: f64 = 1e-7;
 pub const EVERY: usize = 384;
 pub const FINE: usize = 127;
 pub const WINDOW: usize = 256;
-pub const SEAM: f64 = 4.0;
+pub const SEAM: f64 = 2.4;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Case {
     pub name: &'static str,
-    pub native: bool,
     pub rate: u32,
     pub channels: u16,
-    pub quality: &'static str,
+    pub quality: f32,
     pub seconds: f64,
     pub clicks: bool,
 }
@@ -26,26 +25,18 @@ impl Case {
         format!("{}.ogg", self.name)
     }
 
-    pub fn probe(&self) -> String {
-        format!("{}.probe.txt", self.name)
+    pub fn info(&self) -> String {
+        format!("{}.info.txt", self.name)
     }
 
     pub fn stride(&self) -> usize {
-        let s = stride(self.frames(), self.channels);
-        if self.clicks { s } else { s.min(FINE) }
+        stride(self.frames(), self.channels).min(FINE)
     }
 }
 
-const fn case(
-    name: &'static str,
-    rate: u32,
-    channels: u16,
-    quality: &'static str,
-    seconds: f64,
-) -> Case {
+const fn case(name: &'static str, rate: u32, channels: u16, quality: f32, seconds: f64) -> Case {
     Case {
         name,
-        native: false,
         rate,
         channels,
         quality,
@@ -54,34 +45,30 @@ const fn case(
     }
 }
 
-pub const CASES: [Case; 11] = [
-    case("mono_22k_q0", 22050, 1, "0", 0.5),
-    case("stereo_44k_q3", 44100, 2, "3", 0.5123),
-    case("stereo_48k_q9", 48000, 2, "9", 0.15),
-    case("stereo_32k_qm1", 32000, 2, "-1", 0.5),
-    case("surround_22k_q1", 22050, 6, "1", 0.3),
-    Case {
-        native: true,
-        ..case("native_stereo_44k", 44100, 2, "", 0.3)
-    },
-    case("c3_44k_q0", 44100, 3, "0", 0.2),
-    case("quad_44k_q0", 44100, 4, "0", 0.2),
-    case("c5_48k_q0", 48000, 5, "0", 0.2),
-    case("c61_48k_q0", 48000, 7, "0", 0.2),
-    case("c71_48k_q0", 48000, 8, "0", 0.2),
+pub const CASES: [Case; 10] = [
+    case("mono_22k_q0", 22050, 1, 0.0, 0.5),
+    case("stereo_44k_q3", 44100, 2, 0.3, 0.5123),
+    case("stereo_48k_q9", 48000, 2, 0.9, 0.15),
+    case("stereo_32k_qm1", 32000, 2, -0.1, 0.5),
+    case("surround_22k_q1", 22050, 6, 0.1, 0.3),
+    case("c3_44k_q0", 44100, 3, 0.0, 0.2),
+    case("quad_44k_q0", 44100, 4, 0.0, 0.2),
+    case("c5_48k_q0", 48000, 5, 0.0, 0.2),
+    case("c61_48k_q0", 48000, 7, 0.0, 0.2),
+    case("c71_48k_q0", 48000, 8, 0.0, 0.2),
 ];
 
 pub const LONG: Case = Case {
     clicks: true,
-    ..case("long_96k", 96000, 2, "-1", 4.2123)
+    ..case("long_96k", 96000, 2, -0.1, 2.6123)
 };
 
 pub const HIGH: Case = Case {
     clicks: true,
-    ..case("high_88k", 88200, 2, "-1", 1.5123)
+    ..case("high_88k", 88200, 2, -0.1, 1.5123)
 };
 
-pub const CLUSTER_MS: &str = "300";
+pub const CLUSTER_SECONDS: f64 = 0.3;
 
 pub fn named(name: &str) -> Case {
     CASES
@@ -238,7 +225,7 @@ pub fn cut_short(full: &std::path::Path) -> Result<Vec<u8>, String> {
     }
     let at = *blocks
         .len()
-        .checked_sub(3)
+        .checked_sub(4)
         .and_then(|k| blocks.get(k))
         .ok_or("too few blocks before the middle cluster")?;
     let header = |body: usize, id: u8| {

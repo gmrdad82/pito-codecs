@@ -34,23 +34,14 @@ fn close(name: &str, ours: &[f32], theirs: &[f32]) {
     testref::assert_within(name, &d, refs::MAX_DIFF, refs::MAX_RMS);
 }
 
-fn like_ffmpeg(r: &Refs, file: &str, c: &Case, ours: &[f32], whole: bool) {
+fn like_libvorbis(r: &Refs, file: &str, c: &Case, ours: &[f32]) {
     let mine = refs::decimate(ours, c.channels, c.stride());
     let theirs = r.f32s(&refs::every(file));
-    if whole {
-        close(
-            &format!("{file}: every {}th frame", c.stride()),
-            &mine,
-            &theirs,
-        );
-    } else {
-        let n = mine.len().min(theirs.len());
-        close(
-            &format!("{file}: every {}th frame", c.stride()),
-            &mine[..n],
-            &theirs[..n],
-        );
-    }
+    close(
+        &format!("{file}: every {}th frame", c.stride()),
+        &mine,
+        &theirs,
+    );
     match refs::end(file) {
         End::Head => {
             let head = r.f32s(&refs::head(file));
@@ -69,16 +60,8 @@ fn like_ffmpeg(r: &Refs, file: &str, c: &Case, ours: &[f32], whole: bool) {
     }
 }
 
-fn expected_frames(c: &Case, ogg: &[u8]) -> usize {
-    if c.native {
-        OggVorbis::parse(ogg).unwrap().samples().unwrap() as usize
-    } else {
-        c.frames()
-    }
-}
-
 #[test]
-fn ogg_vorbis_decodes_to_ffmpegs_samples_with_exact_lengths() {
+fn ogg_vorbis_decodes_to_libvorbisfiles_samples_with_exact_lengths() {
     let r = open();
     for c in &refs::CASES {
         let file = c.ogg();
@@ -88,28 +71,22 @@ fn ogg_vorbis_decodes_to_ffmpegs_samples_with_exact_lengths() {
         let ours = ogg.decode().unwrap();
         assert_eq!(ours.rate, c.rate, "{}", c.name);
         assert_eq!(ours.channels, c.channels, "{}", c.name);
-        assert_eq!(
-            ours.frames(),
-            expected_frames(c, &data),
-            "{}: frames",
-            c.name
-        );
+        assert_eq!(ours.frames(), c.frames(), "{}: frames", c.name);
         assert_eq!(ogg.samples().unwrap() as usize, ours.frames(), "{}", c.name);
         let picked = r.f32s(&refs::every(&file)).len() / c.channels as usize;
         let theirs = picked * c.stride();
-        let long = 1usize << ogg.decoder().unwrap().ident.blocksize_1;
         assert!(
-            theirs.abs_diff(ours.frames()) <= long / 2 + c.stride(),
-            "{}: ffmpeg's Ogg demuxer gives about {theirs} frames, ours {}",
+            theirs >= ours.frames() && theirs - ours.frames() < c.stride(),
+            "{}: libvorbisfile gives about {theirs} frames, ours {}",
             c.name,
             ours.frames()
         );
-        like_ffmpeg(&r, &file, c, &ours.samples, false);
+        like_libvorbis(&r, &file, c, &ours.samples);
     }
 }
 
 #[test]
-fn every_channel_lands_in_ffmpegs_order() {
+fn every_channel_lands_in_wave_order_like_libvorbisfile_reordered() {
     let r = open();
     let mut seen = Vec::new();
     for c in refs::CASES.iter().filter(|c| c.channels >= 3) {
@@ -198,7 +175,14 @@ fn the_table_picks_every_short_block_and_keeps_its_ends_off_the_millisecond() {
         );
         assert_eq!(c.stride() % 2, 1, "{}", c.name);
     }
-    assert!(refs::LONG.stride() > refs::FINE);
+    for c in [refs::LONG, refs::HIGH] {
+        assert!(
+            c.stride() <= refs::FINE,
+            "{}: every {}th frame",
+            c.name,
+            c.stride()
+        );
+    }
     for file in refs::OFF_THE_MILLISECOND {
         let c = made(file).case();
         assert!(
@@ -250,7 +234,7 @@ mod front {
             let data = std::fs::read(&path).unwrap();
             let oga = scratch(&format!("{}.oga", c.name));
             testref::write_atomic(&oga, &data).unwrap();
-            let frames = expected_frames(c, &data);
+            let frames = c.frames();
             for p in [&path, &oga] {
                 let pr = probe(p, &Prefs::default()).unwrap();
                 let a = &pr.audio[0];
@@ -285,7 +269,7 @@ mod front {
     }
 
     #[test]
-    fn webm_vorbis_matches_ffmpeg_sample_for_sample_and_in_length() {
+    fn webm_vorbis_matches_libvorbisfile_sample_for_sample_and_in_length() {
         let r = open();
         for m in refs::MADE.iter().filter(|m| !m.mp4()) {
             let c = m.case();
@@ -294,10 +278,8 @@ mod front {
             assert!(pr.audio[0].native(), "{}", m.file);
             assert!(pr.unsupported().is_empty(), "{}", m.file);
             let ours = whole(&path, c.rate, c.channels);
-            if !m.copied {
-                assert_eq!(ours.frames(), c.frames(), "{}", m.file);
-            }
-            like_ffmpeg(&r, m.file, &c, &ours.samples, true);
+            assert_eq!(ours.frames(), c.frames(), "{}", m.file);
+            like_libvorbis(&r, m.file, &c, &ours.samples);
             if c.channels <= 2 {
                 let pcm = audio_pcm(&path, 0, c.rate, c.channels == 1, &Prefs::default()).unwrap();
                 assert_eq!(pcm.samples, ours.samples, "{}", m.file);
@@ -327,7 +309,7 @@ mod front {
         let path = r.path(refs::LONG_WEBM);
         let ours = whole(&path, c.rate, c.channels);
         assert_eq!(ours.frames(), c.frames());
-        like_ffmpeg(&r, refs::LONG_WEBM, &c, &ours.samples, true);
+        like_libvorbis(&r, refs::LONG_WEBM, &c, &ours.samples);
         let (a, b) = refs::seam_span(&c);
         let ch = c.channels as usize;
         close(
@@ -346,12 +328,12 @@ mod front {
     }
 
     #[test]
-    fn high_rate_matroska_pieces_and_windows_land_on_ffmpegs_samples() {
+    fn high_rate_matroska_pieces_and_windows_land_on_libvorbisfiles_samples() {
         let r = open();
         let windows: [(&str, &[(f64, f64)]); 2] = [
             (
                 refs::LONG_WEBM,
-                &[(3.9, 4.1), (1.2345, 1.5), (0.613, 0.9), (4.0, 4.2)],
+                &[(2.3, 2.5), (1.2345, 1.5), (0.613, 0.9), (2.4, 2.6)],
             ),
             (refs::HIGH_MKV, &[(1.2345, 1.5), (0.613, 0.9), (0.5, 1.5)]),
         ];
@@ -360,7 +342,7 @@ mod front {
             let path = r.path(file);
             let ours = whole(&path, c.rate, c.channels);
             assert_eq!(ours.frames(), c.frames(), "{file}");
-            like_ffmpeg(&r, file, &c, &ours.samples, true);
+            like_libvorbis(&r, file, &c, &ours.samples);
             for &(from, to) in spans {
                 let part = range(&path, &c, from, to);
                 assert_eq!(
@@ -378,7 +360,7 @@ mod front {
     }
 
     #[test]
-    fn matroska_vorbis_off_the_millisecond_ends_on_ffmpegs_last_sample() {
+    fn matroska_vorbis_off_the_millisecond_ends_on_libvorbisfiles_last_sample() {
         let r = open();
         for file in refs::OFF_THE_MILLISECOND {
             let m = made(file);
@@ -386,7 +368,7 @@ mod front {
             let name = format!("{file}{}", if m.copied { " copied" } else { "" });
             let path = r.path(file);
             let ours = whole(&path, c.rate, c.channels);
-            like_ffmpeg(&r, file, &c, &ours.samples, true);
+            like_libvorbis(&r, file, &c, &ours.samples);
             let frames = ours.frames();
             assert!(
                 refs::off_the_millisecond(frames, c.rate),
@@ -432,7 +414,7 @@ mod front {
     }
 
     #[test]
-    fn a_webm_cut_short_ends_on_ffmpegs_last_sample_though_its_header_says_longer() {
+    fn a_webm_cut_short_ends_on_its_last_whole_block_though_its_header_says_longer() {
         let r = open();
         let c = refs::LONG;
         let cut = refs::cut_short(&r.path(refs::LONG_WEBM)).unwrap();
@@ -440,7 +422,7 @@ mod front {
         let path = scratch(refs::CUT_SHORT);
         testref::write_atomic(&path, &cut).unwrap();
         let ours = whole(&path, c.rate, c.channels);
-        like_ffmpeg(&r, refs::CUT_SHORT, &c, &ours.samples, true);
+        like_libvorbis(&r, refs::CUT_SHORT, &c, &ours.samples);
         let frames = ours.frames();
         let rate = c.rate as f64;
         assert!(
@@ -469,7 +451,7 @@ mod front {
         let c = refs::LONG;
         let path = open().path(refs::LONG_WEBM);
         let all = whole(&path, c.rate, c.channels);
-        let (from, to) = (4.15, 4.2);
+        let (from, to) = (2.55, 2.6);
         let part = range(&path, &c, from, to);
         assert_eq!(part.samples.len(), at(&c, to) - at(&c, from));
         close(
@@ -503,16 +485,16 @@ mod front {
             e,
             "invalid data: Vorbis header where an audio packet was expected"
         );
-        let fine = range(&bad, &c, 3.0, 3.2);
+        let fine = range(&bad, &c, 2.3, 2.5);
         close(
             "96k webm past the damage",
             &fine.samples,
-            &all.samples[at(&c, 3.0)..at(&c, 3.2)],
+            &all.samples[at(&c, 2.3)..at(&c, 2.5)],
         );
     }
 
     #[test]
-    fn mp4_vorbis_reads_through_probe_audio_pcm_and_matches_ffmpeg() {
+    fn mp4_vorbis_reads_through_probe_audio_pcm_and_matches_libvorbisfile() {
         let r = open();
         for m in refs::MADE.iter().filter(|m| m.mp4()) {
             let c = m.case();
@@ -535,21 +517,18 @@ mod front {
             let t = &mp4.tracks[0];
             assert_eq!(t.edit_offset, -(primed as i64), "{}", m.file);
             let media_end = t.samples.last().map_or(0, |s| s.pts + s.duration as i64) as usize;
-            assert_eq!(
-                ours.frames(),
-                expected_frames(&c, &ogg).min(media_end) - primed,
-                "{}: the first packet's span is priming",
+            assert!(
+                media_end >= primed + c.frames(),
+                "{}: the packets end at {media_end}, before the edit",
                 m.file
             );
-            let theirs = r.f32s(&refs::every(m.file)).len();
-            let mine = refs::decimate(&ours.samples, c.channels, c.stride()).len();
-            assert!(
-                theirs >= mine,
-                "{}: every {}th frame, ours {mine} samples, ffmpeg {theirs}",
-                m.file,
-                c.stride()
+            assert_eq!(
+                ours.frames(),
+                c.frames(),
+                "{}: the first packet's span is priming and the edit ends on the last sample",
+                m.file
             );
-            like_ffmpeg(&r, m.file, &c, &ours.samples, false);
+            like_libvorbis(&r, m.file, &c, &ours.samples);
             if c.channels <= 2 {
                 let pcm = audio_pcm(&path, 0, c.rate, c.channels == 1, &Prefs::default()).unwrap();
                 assert_eq!(pcm.samples, ours.samples, "{}", m.file);

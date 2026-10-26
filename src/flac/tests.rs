@@ -1310,14 +1310,6 @@ mod front {
 
     fn containers() -> Vec<(&'static Fixture, PathBuf)> {
         let mut out = Vec::new();
-        for (f, exts) in [
-            (&FIXTURES[0], &["flac", "mka", "m4a"][..]),
-            (&FIXTURES[1], &["flac", "mkv", "mp4"][..]),
-        ] {
-            for e in exts {
-                out.push((f, tracked().join(format!("{}.{e}", f.name))));
-            }
-        }
         let r = Refs::open(refs::AREA);
         for (name, exts) in refs::REMUXED {
             let f = FIXTURES.iter().find(|f| f.name == name).unwrap();

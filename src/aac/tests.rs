@@ -21,7 +21,7 @@ fn decode_adts(data: &[u8]) -> AudioBuffer {
 }
 
 #[test]
-fn decode_matches_ffmpeg_in_wave_channel_order() {
+fn decode_matches_faad_in_wave_channel_order() {
     let r = Refs::open(refs::AREA);
     for (channels, layout, _) in refs::STREAMS {
         let bytes = r.bytes(&refs::stream(channels));

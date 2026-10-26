@@ -30,7 +30,8 @@ fn level_db(whole: &[f32], reference: &[f32], ours: &[f32]) -> f64 {
 #[test]
 fn decode_matches_libopus() {
     let r = Refs::open(refs::AREA);
-    for (name, _, _, celt) in refs::LIBOPUS {
+    for c in &refs::LIBOPUS {
+        let (name, celt) = (c.name, c.celt);
         let file = refs::stream(name);
         let file = OggOpus::parse(&r.bytes(&file)).unwrap();
         let modes: Vec<Mode> = (0..file.packets.len())
@@ -39,14 +40,8 @@ fn decode_matches_libopus() {
         assert_eq!(modes.iter().all(|m| *m == Mode::CeltOnly), celt, "{name}");
         let ours = file.decode().unwrap();
         let channels = file.head.channels;
-        let mut ours = ours.samples;
-        if channels == 6 {
-            for f in ours.chunks_exact_mut(6) {
-                let v = [f[0], f[2], f[1], f[5], f[3], f[4]];
-                f.copy_from_slice(&v);
-            }
-        }
-        let ours = refs::window::window(&ours, channels);
+        assert_eq!(channels, usize::from(c.channels), "{name}");
+        let ours = refs::window::window(&ours.samples, channels);
         let reference = r.f32s(&refs::decoded(&refs::stream(name)));
         assert_eq!(ours.len(), reference.len(), "{name}: length");
         let floor = if celt { 50.0 } else { 10.0 };

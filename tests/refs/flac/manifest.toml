@@ -1,0 +1,55 @@
+[[ref]]
+name = "s16_stereo_44k.mka"
+file = "s16_stereo_44k.mka"
+sha256 = "c8a8556a2d1204e1b29f7635b9ee79bcfd4c447b1c056fd04d1f6d3d5896ead3"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our mka writer: the frames of tests/fixtures/flac/s16_stereo_44k.flac"
+
+[[ref]]
+name = "s16_stereo_44k.m4a"
+file = "s16_stereo_44k.m4a"
+sha256 = "0472e6fe3381d418d8accdd3c52184c98cf7cf12d9de86690def58c7cb08e073"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our m4a writer: the frames of tests/fixtures/flac/s16_stereo_44k.flac"
+
+[[ref]]
+name = "s24_mono_96k_exhaustive.mkv"
+file = "s24_mono_96k_exhaustive.mkv"
+sha256 = "4f29f218732dc2a4437659740dcdb680c947920bf62ca237ec7290db9eace130"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our mkv writer: the frames of tests/fixtures/flac/s24_mono_96k_exhaustive.flac"
+
+[[ref]]
+name = "s24_mono_96k_exhaustive.mp4"
+file = "s24_mono_96k_exhaustive.mp4"
+sha256 = "e6f58e3c94dbf3543302b38562442e6fba7550a5b1822441cb28fcb26f2cfb4e"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our mp4 writer: the frames of tests/fixtures/flac/s24_mono_96k_exhaustive.flac"
+
+[[ref]]
+name = "s16_six_channels.mka"
+file = "s16_six_channels.mka"
+sha256 = "9e53439ffa2e83e16c9eeacf020e012f70ba030aa95467bd178027e15341aa03"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our mka writer: the frames of tests/fixtures/flac/s16_six_channels.flac"
+
+[[ref]]
+name = "s16_six_channels.mp4"
+file = "s16_six_channels.mp4"
+sha256 = "d1395854c4daa1dd32f7c7dde912a3bc02fb72351fa5b9f4484f7821d1bbd6eb"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our mp4 writer: the frames of tests/fixtures/flac/s16_six_channels.flac"
+
+[[ref]]
+name = "s16_block577_independent.m4a"
+file = "s16_block577_independent.m4a"
+sha256 = "de4f2fa1f6a280affc6f64c8f90837ad16a723235502be36798cfab43077d52b"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: our m4a writer: the frames of tests/fixtures/flac/s16_block577_independent.flac"
