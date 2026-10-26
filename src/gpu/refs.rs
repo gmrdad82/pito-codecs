@@ -19,91 +19,50 @@ pub static STREAMS: [Stream; 5] = [
         name: "h264-baseline",
         hevc: false,
         ten: false,
-        args: &[
-            "-c:v",
-            "libx264",
-            "-profile:v",
-            "baseline",
-            "-pix_fmt",
-            "yuv420p",
-        ],
+        args: &["--profile", "baseline"],
         sizes: &[FLOOR, WIDE],
     },
     Stream {
         name: "h264-main-cabac",
         hevc: false,
         ten: false,
-        args: &[
-            "-c:v",
-            "libx264",
-            "-profile:v",
-            "main",
-            "-bf",
-            "0",
-            "-pix_fmt",
-            "yuv420p",
-        ],
+        args: &["--profile", "main", "--bframes", "0"],
         sizes: &[FLOOR, WIDE],
     },
     Stream {
         name: "h264-high-bframes",
         hevc: false,
         ten: false,
-        args: &[
-            "-c:v",
-            "libx264",
-            "-profile:v",
-            "high",
-            "-bf",
-            "3",
-            "-refs",
-            "4",
-            "-pix_fmt",
-            "yuv420p",
-        ],
+        args: &["--profile", "high", "--bframes", "3", "--ref", "4"],
         sizes: &[FLOOR, WIDE],
     },
     Stream {
         name: "hevc-main",
         hevc: true,
         ten: false,
-        args: &[
-            "-c:v",
-            "libx265",
-            "-x265-params",
-            "log-level=error:bframes=4",
-            "-pix_fmt",
-            "yuv420p",
-        ],
+        args: &["--bframes", "4"],
         sizes: &[FLOOR, WIDE],
     },
     Stream {
         name: "hevc-main10",
         hevc: true,
         ten: true,
-        args: &[
-            "-c:v",
-            "libx265",
-            "-x265-params",
-            "log-level=error",
-            "-pix_fmt",
-            "yuv420p10le",
-        ],
+        args: &[],
         sizes: &[FLOOR, WIDE],
     },
 ];
 
 impl Stream {
-    pub fn muxer(&self) -> &'static str {
+    pub fn tool(&self) -> &'static str {
+        if self.hevc { "x265" } else { "x264" }
+    }
+
+    pub fn extension(&self) -> &'static str {
         if self.hevc { "hevc" } else { "h264" }
     }
 
-    pub fn pix_fmt(&self) -> &'static str {
-        if self.ten { "yuv420p10le" } else { "yuv420p" }
-    }
-
     pub fn file(&self, size: (u32, u32)) -> String {
-        format!("{}-{}x{}.{}", self.name, size.0, size.1, self.muxer())
+        format!("{}-{}x{}.{}", self.name, size.0, size.1, self.extension())
     }
 }
 

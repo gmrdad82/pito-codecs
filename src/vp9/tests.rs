@@ -7,28 +7,10 @@ use std::time::Instant;
 #[path = "refs.rs"]
 pub(super) mod refs;
 
-use refs::Libvpx;
+use refs::{Libvpx, ivf_frames};
 
 fn stream(r: &Refs, name: &str) -> Vec<u8> {
-    r.bytes(&format!("{name}.ivf"))
-}
-
-fn ivf_frames(data: &[u8]) -> Vec<&[u8]> {
-    let mut out = Vec::new();
-    if data.len() < 32 || &data[..4] != b"DKIF" {
-        return out;
-    }
-    let mut pos = u16::from_le_bytes([data[6], data[7]]) as usize;
-    while pos + 12 <= data.len() {
-        let size = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
-        pos += 12;
-        if pos + size > data.len() {
-            break;
-        }
-        out.push(&data[pos..pos + size]);
-        pos += size;
-    }
-    out
+    r.bytes(&refs::stream(name))
 }
 
 fn packet(data: &[u8], i: usize) -> Packet {
@@ -73,7 +55,7 @@ fn decode_pictures(dec: &mut Decoder, chunks: &[&[u8]]) -> Vec<Picture> {
 }
 
 fn is_420(f: &Libvpx) -> bool {
-    matches!(f.pix_fmt, "yuv420p" | "yuv420p10le")
+    f.csp.starts_with("420")
 }
 
 fn check(r: &Refs, f: &Libvpx, threads: usize, data: &[u8]) {
@@ -83,7 +65,7 @@ fn check(r: &Refs, f: &Libvpx, threads: usize, data: &[u8]) {
     let mut d = Digest::new();
     let count = if is_420(f) {
         let frames = decode_frames(&mut dec, &chunks);
-        let format = if f.pix_fmt.ends_with("le") {
+        let format = if refs::depth(f.csp) > 8 {
             PixelFormat::Yuv420p10
         } else {
             PixelFormat::Yuv420p8
@@ -110,11 +92,11 @@ fn check(r: &Refs, f: &Libvpx, threads: usize, data: &[u8]) {
         pictures.len()
     };
     assert_eq!(count as u64, f.frames, "{name}: frame count");
-    r.assert_digest(&format!("{}.yuv", f.name), &d.hex());
+    r.assert_digest(&refs::decoded(f.name), &d.hex());
 }
 
 #[test]
-fn bit_exact_against_ffmpeg() {
+fn bit_exact_against_vpxdec() {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
@@ -253,7 +235,7 @@ fn on_the_gpu_floor(f: &Libvpx) -> bool {
 
 #[cfg(all(feature = "gpu", target_os = "linux"))]
 #[test]
-fn vaapi_matches_ffmpeg() {
+fn vaapi_matches_vpxdec() {
     use crate::gpu::{Backend, Direction, HwDecoder, available};
     use crate::media::Codec;
     if !available().contains(&(Codec::Vp9, Direction::Decode, Backend::VaApi)) {
@@ -281,7 +263,7 @@ fn vaapi_matches_ffmpeg() {
         for fr in &frames {
             d.frame(fr);
         }
-        r.assert_digest(&format!("{}.yuv", f.name), &d.hex());
+        r.assert_digest(&refs::decoded(f.name), &d.hex());
         eprintln!(
             "{} on VA-API: {} frames bit-exact, {:.0} fps with read-back",
             f.name,
@@ -334,13 +316,7 @@ fn the_libvpx_sources_are_what_the_recorder_feeds_libvpx() {
             f.name
         );
         assert_eq!(refs::source(f.name).unwrap(), bytes, "{}", f.name);
-        let bits = if f.pix_fmt.ends_with("12le") {
-            12
-        } else if f.pix_fmt.ends_with("10le") {
-            10
-        } else {
-            8
-        };
+        let bits = refs::depth(f.csp);
         if bits > 8 {
             assert!(
                 bytes
@@ -363,10 +339,75 @@ fn the_libvpx_sources_are_what_the_recorder_feeds_libvpx() {
 fn the_alpha_sources_are_rgba_frames() {
     for (name, w, h) in refs::ALPHA {
         let bytes = refs::alpha_source(name).unwrap();
-        assert_eq!(bytes.len(), (w * h * 4) as usize * refs::ALPHA_FRAMES as usize);
+        assert_eq!(
+            bytes.len(),
+            (w * h * 4) as usize * refs::ALPHA_FRAMES as usize
+        );
         assert_eq!(bytes, refs::alpha_rgba(w, h, refs::ALPHA_FRAMES));
         assert!(bytes.chunks_exact(4).any(|p| p[3] == 0));
         assert!(bytes.chunks_exact(4).any(|p| p[3] == 255));
     }
     assert!(refs::alpha_source("nothing").is_err());
+}
+
+#[test]
+fn colourspaces_name_their_depth_and_chroma() {
+    assert_eq!(
+        ["420jpeg", "420p10", "444", "422p12"].map(refs::depth),
+        [8, 10, 8, 12]
+    );
+    assert_eq!(refs::chroma("420jpeg", (5, 3)), (3, 2, 2, 2));
+    assert_eq!(refs::chroma("422p12", (5, 3)), (3, 3, 2, 1));
+    assert_eq!(refs::chroma("444", (5, 3)), (5, 3, 1, 1));
+    assert_eq!(
+        (refs::stream("a"), refs::decoded("a")),
+        ("a.ivf".into(), "a.yuv".into())
+    );
+    assert_eq!(
+        (refs::alpha_stream("a"), refs::alpha_decoded("a")),
+        ("a.alpha.ivf".into(), "a.alpha".into())
+    );
+    assert_eq!(refs::edge(66, 8), "edge-66x8");
+}
+
+#[test]
+fn rgba_splits_into_a_colour_and_an_alpha_picture() {
+    let (w, h) = (3u32, 3u32);
+    let mut rgba = Vec::new();
+    for i in 0..9u8 {
+        rgba.extend_from_slice(&[200, 10, 10, i * 20]);
+    }
+    rgba.extend_from_slice(&rgba.clone());
+    let (colour, alpha) = refs::split_rgba(&rgba, w, h);
+    let frame = 9 + 2 * 4;
+    assert_eq!((colour.len(), alpha.len()), (2 * frame, 2 * frame));
+    let [y, u, v] = crate::testref::yuv_of([200, 10, 10]);
+    assert!(colour[..9].iter().all(|&s| s == y));
+    assert!(colour[9..13].iter().all(|&s| s == u));
+    assert!(colour[13..17].iter().all(|&s| s == v));
+    assert_eq!(&alpha[..9], &[0, 20, 40, 60, 80, 100, 120, 140, 160]);
+    assert!(alpha[9..17].iter().all(|&s| s == 128));
+    assert_eq!(colour[..frame], colour[frame..]);
+}
+
+#[test]
+fn ivf_round_trips_its_frames_and_refuses_what_is_not_ivf() {
+    let packets = vec![vec![1, 2, 3], vec![], vec![9; 40]];
+    let file = refs::ivf(64, 48, &packets);
+    let back: Vec<Vec<u8>> = ivf_frames(&file).into_iter().map(<[u8]>::to_vec).collect();
+    assert_eq!(back, packets);
+    assert!(ivf_frames(b"RIFF").is_empty());
+    assert_eq!(ivf_frames(&file[..file.len() - 1]).len(), 2);
+}
+
+#[test]
+fn the_off_grid_encodes_are_the_moving_picture_at_one_thread() {
+    for (w, h) in [(8, 8), (66, 66)] {
+        let file = refs::edge_ivf(w, h).unwrap();
+        let frames = ivf_frames(&file);
+        assert_eq!(frames.len() as u32, refs::EDGE_FRAMES, "{w}x{h}");
+        assert!(is_keyframe(frames[0]) && !is_keyframe(frames[1]), "{w}x{h}");
+        assert_eq!(refs::edge_config(w, h, 1).threads, 1);
+    }
+    assert!(refs::edge_ivf(0, 8).is_err());
 }

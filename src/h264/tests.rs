@@ -8,6 +8,116 @@ pub(super) mod refs;
 
 pub(super) use refs::raw;
 
+const CRF18: (u32, u32, u64) = (352, 240, 30);
+
+const COLOURS: [Color; 4] = [
+    Color::BT709,
+    Color {
+        primaries: 6,
+        transfer: 6,
+        matrix: 6,
+        full_range: false,
+    },
+    Color {
+        primaries: 1,
+        transfer: 1,
+        matrix: 1,
+        full_range: true,
+    },
+    Color {
+        primaries: 5,
+        transfer: 6,
+        matrix: 5,
+        full_range: true,
+    },
+];
+
+pub(super) fn encode(
+    config: EncoderConfig,
+    frames: &[Frame],
+) -> std::result::Result<(Vec<u8>, Vec<Packet>), String> {
+    let mut enc = Encoder::new(config).map_err(|e| e.to_string())?;
+    let mut packets = Vec::new();
+    for f in frames {
+        packets.extend(enc.encode(f).map_err(|e| e.to_string())?);
+    }
+    packets.extend(enc.flush().map_err(|e| e.to_string())?);
+    Ok((enc.avcc(), packets))
+}
+
+fn crf18_config(threads: usize) -> EncoderConfig {
+    EncoderConfig {
+        width: CRF18.0,
+        height: CRF18.1,
+        fps: (30, 1),
+        rate: crate::media::Rate::Crf(18),
+        gop: 15,
+        b_frames: 2,
+        threads,
+        ..EncoderConfig::default()
+    }
+}
+
+fn colour_frames() -> Vec<Frame> {
+    (0..6u8)
+        .map(|i| {
+            let mut f = Frame::new(
+                PixelFormat::Yuv420p8,
+                64,
+                48,
+                i64::from(i),
+                TimeBase::new(1, 30),
+            );
+            f.planes[0].data.fill(16 + i * 30);
+            f
+        })
+        .collect()
+}
+
+fn colour_config(n: usize) -> EncoderConfig {
+    EncoderConfig {
+        width: 64,
+        height: 48,
+        gop: 4,
+        color: COLOURS[n],
+        ..EncoderConfig::default()
+    }
+}
+
+pub(super) fn to_annexb(avcc: &[u8], packets: &[Packet]) -> std::result::Result<Vec<u8>, String> {
+    let short = || "avcC or a packet ends early".to_string();
+    let mut out = Vec::new();
+    let mut pos = 6;
+    for k in 0..2 {
+        let count = if k == 0 {
+            *avcc.get(5).ok_or_else(short)? & 0x1f
+        } else {
+            *avcc.get(pos - 1).ok_or_else(short)?
+        };
+        for _ in 0..count {
+            let len = avcc
+                .get(pos..pos + 2)
+                .map(|b| u16::from_be_bytes([b[0], b[1]]) as usize)
+                .ok_or_else(short)?;
+            out.extend_from_slice(&[0, 0, 0, 1]);
+            out.extend_from_slice(avcc.get(pos + 2..pos + 2 + len).ok_or_else(short)?);
+            pos += 2 + len;
+        }
+        pos += 1;
+    }
+    for p in packets {
+        let mut i = 0;
+        while i + 4 <= p.data.len() {
+            let b = &p.data[i..i + 4];
+            let len = u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize;
+            out.extend_from_slice(&[0, 0, 0, 1]);
+            out.extend_from_slice(p.data.get(i + 4..i + 4 + len).ok_or_else(short)?);
+            i += 4 + len;
+        }
+    }
+    Ok(out)
+}
+
 pub(super) fn decode_annexb(data: &[u8], threads: usize) -> Vec<Frame> {
     let mut dec = Decoder::with_threads(threads);
     let mut frames = Vec::new();
@@ -59,10 +169,10 @@ pub(super) fn frames_digest(frames: &[Frame]) -> String {
 }
 
 #[test]
-fn decode_is_bit_exact_with_ffmpeg() {
+fn decode_is_bit_exact_with_the_x264_reconstruction() {
     let r = Refs::open(refs::AREA);
     for s in &refs::X264_STREAMS {
-        let data = r.bytes(&format!("{}.h264", s.name));
+        let data = r.bytes(&refs::stream(s.name));
         for threads in [1, 4] {
             let what = format!("{} with {threads} threads", s.name);
             let frames = decode_annexb(&data, threads);
@@ -73,7 +183,7 @@ fn decode_is_bit_exact_with_ffmpeg() {
                 s.size.0,
                 s.size.1
             );
-            r.assert_digest(&format!("{}.yuv", s.name), &frames_digest(&frames));
+            r.assert_digest(&refs::recon(s.name), &frames_digest(&frames));
         }
     }
 }
@@ -99,14 +209,13 @@ pub(super) fn psnr(a: &[u8], b: &[u8]) -> f64 {
 }
 
 #[test]
-fn crf_18_encode_plays_in_ffmpeg_and_decodes_back() {
-    let r = Refs::open(refs::AREA);
-    let (w, h, _) = refs::CRF18;
-    let frames = refs::crf18_source();
-    let config = refs::crf18_config(0);
-    let (avcc, packets) = refs::encode(config.clone(), &frames).unwrap();
+fn crf_18_encode_decodes_back_above_forty_db() {
+    let (w, h, _) = CRF18;
+    let frames = refs::source(w, h, CRF18.2, 0);
+    let config = crf18_config(0);
+    let (avcc, packets) = encode(config.clone(), &frames).unwrap();
     assert_eq!(packets.len(), frames.len());
-    let (_, single) = refs::encode(refs::crf18_config(1), &frames).unwrap();
+    let (_, single) = encode(crf18_config(1), &frames).unwrap();
     assert!(
         packets
             .iter()
@@ -127,11 +236,7 @@ fn crf_18_encode_plays_in_ffmpeg_and_decodes_back() {
     pts.sort();
     assert_eq!(pts, (0..frames.len() as i64).collect::<Vec<_>>());
 
-    let stream = refs::to_annexb(&avcc, &packets).unwrap();
-    assert!(refs::crf18().unwrap() == stream, "crf18() is not this encode");
-    r.assert_digest("crf18.h264", &crate::testref::sha256(&stream));
-    let probed = String::from_utf8(r.bytes("crf18.probe")).unwrap();
-    assert_eq!(probed.trim(), format!("h264,{w},{h},{}", frames.len()));
+    let stream = to_annexb(&avcc, &packets).unwrap();
 
     let mut dec = Decoder::with_extradata(&avcc).unwrap();
     let mut ours = Vec::new();
@@ -140,7 +245,10 @@ fn crf_18_encode_plays_in_ffmpeg_and_decodes_back() {
     }
     ours.extend(dec.flush().unwrap());
     assert_eq!(ours.len(), frames.len());
-    r.assert_digest("crf18.yuv", &frames_digest(&ours));
+    assert!(
+        ours.iter().all(|f| (f.width, f.height) == (w, h)),
+        "a decoded frame is not {w}x{h}"
+    );
     let db = psnr(&raw(&ours), &raw(&frames));
     assert!(db > 40.0, "PSNR {db:.2} dB at CRF 18");
     assert_eq!(
@@ -158,8 +266,8 @@ fn bench_stream(w: u32, h: u32, frames: u64) -> Vec<u8> {
         rate: crate::media::Rate::Crf(20),
         ..EncoderConfig::default()
     };
-    let (avcc, packets) = refs::encode(config, &refs::source(w, h, frames, 3)).unwrap();
-    refs::to_annexb(&avcc, &packets).unwrap()
+    let (avcc, packets) = encode(config, &refs::source(w, h, frames, 3)).unwrap();
+    to_annexb(&avcc, &packets).unwrap()
 }
 
 fn bench_decode(data: &[u8], label: &str) {
@@ -256,7 +364,7 @@ fn corrupt_streams_never_panic() {
     let r = Refs::open(refs::AREA);
     let streams: Vec<Vec<u8>> = refs::FUZZ
         .iter()
-        .map(|name| r.bytes(&format!("{name}.h264")))
+        .map(|name| r.bytes(&refs::stream(name)))
         .collect();
     let me = std::thread::current().id();
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -523,12 +631,10 @@ fn sps_vui_carries_the_given_colour_tags() {
 
 #[test]
 fn encoded_frames_carry_the_colour_tags_back_out() {
-    let r = Refs::open(refs::AREA);
-    for (n, (color, names)) in refs::COLOURS.into_iter().enumerate() {
-        let (avcc, packets) = refs::encode(refs::colour_config(n), &refs::colour_frames()).unwrap();
+    for (n, color) in COLOURS.into_iter().enumerate() {
+        let (avcc, packets) = encode(colour_config(n), &colour_frames()).unwrap();
         assert_eq!(packets.len(), 6);
-        let stream = refs::to_annexb(&avcc, &packets).unwrap();
-        assert!(refs::colour(n).unwrap() == stream, "colour({n}) is not this encode");
+        let stream = to_annexb(&avcc, &packets).unwrap();
         let starts: Vec<usize> = stream
             .windows(3)
             .enumerate()
@@ -581,22 +687,6 @@ fn encoded_frames_carry_the_colour_tags_back_out() {
                 matrix: color.matrix,
             })
         );
-        r.assert_digest(
-            &format!("colour-{n}.h264"),
-            &crate::testref::sha256(&stream),
-        );
-        let text = String::from_utf8(r.bytes(&format!("colour-{n}.probe"))).unwrap();
-        let tag = |key: &str| {
-            text.lines()
-                .find_map(|l| l.strip_prefix(&format!("{key}=")))
-                .unwrap_or("")
-                .to_string()
-        };
-        assert_eq!(
-            refs::COLOUR_KEYS.map(tag),
-            names.map(String::from),
-            "{text}"
-        );
     }
 }
 
@@ -612,5 +702,9 @@ fn the_x264_sources_are_what_the_recorder_feeds_x264() {
     }
     assert!(refs::x264("nothing").is_err());
     assert!(refs::x264_source("nothing").is_err());
-    assert!(refs::to_annexb(&[1, 0x64, 0, 0x1f, 0xff, 0xe1], &[]).is_err());
+    assert_eq!(
+        (refs::stream("a"), refs::recon("a")),
+        ("a.h264".into(), "a.yuv".into())
+    );
+    assert!(to_annexb(&[1, 0x64, 0, 0x1f, 0xff, 0xe1], &[]).is_err());
 }

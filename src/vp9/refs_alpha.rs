@@ -7,6 +7,13 @@ pub const FRAMES: u64 = 24;
 pub const LIBVPX_FRAMES: u64 = 8;
 pub const OURS: &str = "alpha-round-trip";
 pub const LIBVPX: &str = "alpha-libvpx";
+pub const LIBVPX_ARGS: &[&str] = &[
+    "--end-usage=q",
+    "--cq-level=30",
+    "--good",
+    "--cpu-used=4",
+    "--passes=1",
+];
 
 pub fn source(n: u64) -> Rgba {
     let (w, h) = SIZE;
@@ -40,13 +47,38 @@ pub fn export_ours(out: &Path) -> Result<u64, String> {
         fps: (24, 1),
         frames: Some(FRAMES),
     };
-    export_rgba(out, canvas, true, opts, |n, _| Ok(Some(source(n))), |_| true)
-        .map(|done| done.frames)
-        .map_err(|e| e.to_string())
+    export_rgba(
+        out,
+        canvas,
+        true,
+        opts,
+        |n, _| Ok(Some(source(n))),
+        |_| true,
+    )
+    .map(|done| done.frames)
+    .map_err(|e| e.to_string())
 }
 
 pub fn ours_webm() -> Result<Vec<u8>, String> {
     let out = crate::testref::scratch(AREA).join(format!("{OURS}.made.webm"));
     export_ours(&out)?;
     std::fs::read(&out).map_err(|e| format!("{}: {e}", out.display()))
+}
+
+pub type Frames = Vec<Vec<u8>>;
+
+pub fn webm_streams(path: &Path) -> Result<(Frames, Frames), String> {
+    let r = pito_codecs::mkv::Reader::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let t = r
+        .video()
+        .ok_or_else(|| format!("{}: no video track", path.display()))?;
+    let (mut colour, mut alpha, mut extra) = (Vec::new(), Vec::new(), Vec::new());
+    for i in 0..r.tracks[t].samples.len() {
+        colour.push(r.packet(t, i).map_err(|e| e.to_string())?.data);
+        if !r.read_alpha(t, i, &mut extra).map_err(|e| e.to_string())? {
+            return Err(format!("{}: frame {i} has no alpha", path.display()));
+        }
+        alpha.push(extra.clone());
+    }
+    Ok((colour, alpha))
 }

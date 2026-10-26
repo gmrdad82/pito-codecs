@@ -45,7 +45,7 @@ fn parts_are_unique_per_call_and_keep_the_extension() {
 fn a_builder_that_panics_leaves_nothing_and_the_next_caller_builds() {
     let path = dir().join(format!("retry-{}.bin", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    let failed = std::panic::catch_unwind(|| once(&path, |_| panic!("ffmpeg failed")));
+    let failed = std::panic::catch_unwind(|| once(&path, |_| panic!("the builder failed")));
     assert!(failed.is_err());
     assert!(!path.exists());
     once(&path, |part| std::fs::write(part, b"ok").unwrap());

@@ -14,7 +14,7 @@ mod refs;
 use refs::X265;
 
 fn stream(r: &Refs, f: &X265) -> Vec<u8> {
-    r.bytes(&format!("{}.hevc", f.name))
+    r.bytes(&refs::stream(f.name))
 }
 
 fn format_of(f: &X265) -> PixelFormat {
@@ -105,11 +105,11 @@ fn check_shape(name: &str, frames: &[Frame], f: &X265) {
 fn compare(r: &Refs, name: &str, frames: &[Frame], f: &X265) {
     assert_eq!(frames.len() as u64, f.frames, "{name}: frame count");
     check_shape(name, frames, f);
-    r.assert_digest(&format!("{}.yuv", f.name), &digest(frames));
+    r.assert_digest(&refs::recon(f.name), &digest(frames));
 }
 
 #[test]
-fn bit_exact_against_ffmpeg() {
+fn bit_exact_against_the_x265_reconstruction() {
     let r = Refs::open(refs::AREA);
     for f in &refs::CONFORMANCE {
         let units = units_of(&stream(&r, f));
@@ -120,31 +120,44 @@ fn bit_exact_against_ffmpeg() {
     }
 }
 
-fn hvcc_box(mp4: &[u8]) -> &[u8] {
-    let at = mp4.windows(4).position(|w| w == b"hvcC").unwrap();
-    let size = u32::from_be_bytes(mp4[at - 4..at].try_into().unwrap()) as usize;
-    &mp4[at + 4..at - 4 + size]
+fn parameter_sets(data: &[u8], kind: u8) -> Vec<Vec<u8>> {
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    for nal in annexb_nals(data) {
+        if (nal[0] >> 1) & 0x3f == kind && !out.iter().any(|n| n == nal) {
+            out.push(nal.to_vec());
+        }
+    }
+    out
 }
 
 #[test]
-fn hvcc_matches_ffmpeg_and_drives_length_prefixed_decode() {
+fn hvcc_carries_the_x265_parameter_sets_and_drives_length_prefixed_decode() {
     let r = Refs::open(refs::AREA);
     for name in refs::HVCC {
         let f = refs::find(name).unwrap();
-        let mp4 = r.bytes(&format!("{name}.mp4"));
-        let theirs = Hvcc::parse(hvcc_box(&mp4)).unwrap();
         let data = stream(&r, f);
         let ours = Hvcc::parse(&Hvcc::from_annexb(&data).unwrap().to_bytes()).unwrap();
+        let (profile, depth) = if f.ten_bit { (2, 10) } else { (1, 8) };
         assert_eq!(
-            (ours.profile, ours.chroma_format, ours.bit_depth_luma),
-            (theirs.profile, theirs.chroma_format, theirs.bit_depth_luma),
+            (
+                ours.profile_idc(),
+                ours.chroma_format,
+                ours.bit_depth_luma,
+                ours.bit_depth_chroma
+            ),
+            (profile, 1, depth, depth),
             "{name}"
         );
         assert_eq!(
             (&ours.vps, &ours.sps, &ours.pps),
-            (&theirs.vps, &theirs.sps, &theirs.pps),
+            (
+                &parameter_sets(&data, 32),
+                &parameter_sets(&data, 33),
+                &parameter_sets(&data, 34)
+            ),
             "{name}"
         );
+        assert_eq!(ours.nal_length_size, 4, "{name}");
         assert_eq!((ours.width, ours.height), f.size);
         let units: Vec<Vec<u8>> = access_units(&data)
             .into_iter()
@@ -160,7 +173,7 @@ fn hvcc_matches_ffmpeg_and_drives_length_prefixed_decode() {
                 sample
             })
             .collect();
-        let mut dec = Decoder::from_hvcc(&theirs.to_bytes()).unwrap();
+        let mut dec = Decoder::from_hvcc(&ours.to_bytes()).unwrap();
         let frames = decode_units(&mut dec, &units);
         compare(&r, &format!("{name} via hvcC"), &frames, f);
     }
@@ -385,7 +398,7 @@ fn assert_feature(name: &str, x: &Facts) {
 }
 
 #[test]
-fn feature_streams_bit_exact_against_ffmpeg() {
+fn feature_streams_bit_exact_against_the_x265_reconstruction() {
     let r = Refs::open(refs::AREA);
     for f in &refs::FEATURES {
         let data = stream(&r, f);
@@ -400,7 +413,7 @@ fn feature_streams_bit_exact_against_ffmpeg() {
 
 #[cfg(target_arch = "x86_64")]
 #[test]
-fn scalar_path_bit_exact_against_ffmpeg() {
+fn scalar_path_bit_exact_against_the_x265_reconstruction() {
     let r = Refs::open(refs::AREA);
     for f in refs::all() {
         let units = units_of(&stream(&r, f));
@@ -577,7 +590,12 @@ fn the_x265_sources_are_what_the_recorder_feeds_x265() {
         let samples = w * h + 2 * w.div_ceil(2) * h.div_ceil(2);
         let bytes = refs::source_bytes(f);
         let depth = if f.ten_bit { 2 } else { 1 };
-        assert_eq!(bytes.len(), samples * depth * f.frames as usize, "{}", f.name);
+        assert_eq!(
+            bytes.len(),
+            samples * depth * f.frames as usize,
+            "{}",
+            f.name
+        );
         assert_eq!(refs::source(f.name).unwrap(), bytes, "{}", f.name);
         if f.ten_bit {
             assert!(
@@ -591,8 +609,10 @@ fn the_x265_sources_are_what_the_recorder_feeds_x265() {
     }
     assert!(refs::source("nothing").is_err());
     assert!(refs::find("nothing").is_err());
-    assert_eq!(refs::pix_fmt(true), "yuv420p10le");
-    assert_eq!(refs::pix_fmt(false), "yuv420p");
+    assert_eq!(
+        (refs::stream("a"), refs::recon("a")),
+        ("a.hevc".into(), "a.yuv".into())
+    );
 }
 
 #[test]

@@ -1,4 +1,5 @@
-use crate::{Def, FFMPEG, ff, sha};
+use crate::testref;
+use crate::{Def, sha, tool};
 
 #[allow(dead_code)]
 #[path = "../../src/h264/refs.rs"]
@@ -16,177 +17,217 @@ mod vp9;
 #[path = "../../src/vp9/refs_alpha.rs"]
 mod vp9_alpha;
 
-const FFPROBE: &str = "ffprobe";
-const X265: &str = "x265";
-const STRICT: &[&str] = &["-err_detect", "explode", "-xerror"];
+pub const X264: &str = "x264";
+pub const X265: &str = "x265";
+const VPXENC: &str = "vpxenc";
+const VPXDEC: &str = "vpxdec";
 
-fn raw_input(pix_fmt: &str, (w, h): (u32, u32), rate: &str) -> Vec<String> {
-    [
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        pix_fmt,
-        "-s",
-        &format!("{w}x{h}"),
-        "-r",
-        rate,
-        "-i",
-        "{src}",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect()
+pub fn i420(w: u32, h: u32) -> usize {
+    let (w, h) = (w as usize, h as usize);
+    w * h + 2 * w.div_ceil(2) * h.div_ceil(2)
 }
 
-fn args(parts: &[Vec<String>]) -> Vec<String> {
-    let mut out = ff(&[]);
-    for p in parts {
-        out.extend(p.iter().cloned());
+pub fn y4m(
+    w: u32,
+    h: u32,
+    fps: u32,
+    csp: &str,
+    frame: usize,
+    raw: &[u8],
+) -> Result<Vec<u8>, String> {
+    if frame == 0 || !raw.len().is_multiple_of(frame) {
+        return Err(format!(
+            "{} bytes are not whole {w}x{h} C{csp} frames of {frame} bytes",
+            raw.len()
+        ));
     }
-    out
+    let mut out = format!("YUV4MPEG2 W{w} H{h} F{fps}:1 Ip A1:1 C{csp}\n").into_bytes();
+    for f in raw.chunks_exact(frame) {
+        out.extend_from_slice(b"FRAME\n");
+        out.extend_from_slice(f);
+    }
+    Ok(out)
 }
 
-fn strs(list: &[&str]) -> Vec<String> {
-    list.iter().map(|s| s.to_string()).collect()
+pub fn upshift(raw: &[u8]) -> Vec<u8> {
+    raw.iter()
+        .flat_map(|&v| (u16::from(v) << 2).to_le_bytes())
+        .collect()
 }
 
-fn decoded(area: &'static str, name: &str, input: &str, pre: &[&str], pix_fmt: &str) -> Def {
-    let mut a = strs(pre);
-    a.extend(strs(&[
-        "-i",
-        &format!("{{ref:{input}}}"),
-        "-fps_mode",
-        "passthrough",
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        pix_fmt,
+struct Y4m<'a> {
+    w: usize,
+    h: usize,
+    frames: Vec<&'a [u8]>,
+}
+
+fn y4m_frames(bytes: &[u8]) -> Result<Y4m<'_>, String> {
+    let end = bytes
+        .iter()
+        .position(|&b| b == b'\n')
+        .ok_or("no y4m header")?;
+    let head = std::str::from_utf8(&bytes[..end]).map_err(|e| e.to_string())?;
+    let field = |tag: char| {
+        head.split(' ')
+            .find_map(|t| t.strip_prefix(tag))
+            .ok_or(format!("y4m header '{head}' has no {tag}"))
+    };
+    let w: usize = field('W')?.parse().map_err(|e| format!("width: {e}"))?;
+    let h: usize = field('H')?.parse().map_err(|e| format!("height: {e}"))?;
+    let bytes_per_sample = match field('C')? {
+        "420" | "420jpeg" | "420mpeg2" | "420paldv" => 1,
+        "420p10" | "420p12" => 2,
+        other => return Err(format!("y4m colourspace C{other} is not 4:2:0")),
+    };
+    let size = (w * h + 2 * w.div_ceil(2) * h.div_ceil(2)) * bytes_per_sample;
+    let mut frames = Vec::new();
+    let mut at = end + 1;
+    while at < bytes.len() {
+        if !bytes[at..].starts_with(b"FRAME") {
+            return Err(format!("no FRAME at byte {at}"));
+        }
+        let line = bytes[at..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .ok_or("a FRAME line has no end")?;
+        at += line + 1;
+        frames.push(
+            bytes
+                .get(at..at + size)
+                .ok_or(format!("a frame ends early at byte {at}"))?,
+        );
+        at += size;
+    }
+    Ok(Y4m { w, h, frames })
+}
+
+fn y4m_luma(bytes: &[u8]) -> Result<String, String> {
+    let y = y4m_frames(bytes)?;
+    let mut d = testref::Digest::new();
+    for f in &y.frames {
+        if f.len() != i420(y.w as u32, y.h as u32) {
+            return Err("the alpha pictures are not 8-bit".into());
+        }
+        d.bytes(&f[..y.w * y.h]);
+    }
+    Ok(d.hex())
+}
+
+pub fn y4m_payload(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    Ok(y4m_frames(bytes)?.frames.concat())
+}
+
+pub fn written(
+    area: &'static str,
+    name: String,
+    file: String,
+    what: &str,
+    take: fn(&[u8]) -> Result<Vec<u8>, String>,
+) -> Def {
+    Def::ours(area, name, what, move || {
+        let at = testref::root()
+            .join("tmp/record_refs")
+            .join(area)
+            .join(&file);
+        take(&std::fs::read(&at).map_err(|e| format!("{}: {e}", at.display()))?)
+    })
+}
+
+pub fn raw(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    Ok(bytes.to_vec())
+}
+
+pub fn x264_args(frames: u64, opts: &[&str], recon: &str) -> Vec<String> {
+    let frames = frames.to_string();
+    let mut a = vec![
+        "--quiet",
+        "--no-progress",
+        "--demuxer",
+        "y4m",
+        "--threads",
+        "1",
+        "--frames",
+        &frames,
+    ];
+    a.extend_from_slice(opts);
+    a.extend(["--dump-yuv", recon, "-o", "{out}", "{src}"]);
+    tool(X264, &a)
+}
+
+pub fn x265_args(frames: u64, ten: bool, opts: &[String], recon: &str) -> Vec<String> {
+    let frames = frames.to_string();
+    let depth = if ten { "10" } else { "8" };
+    let mut a = vec![
+        "--log-level",
+        "error",
+        "--y4m",
+        "--input",
+        "{src}",
+        "--frames",
+        &frames,
+        "--frame-threads",
+        "1",
+        "--output-depth",
+        depth,
+        "--recon-depth",
+        depth,
+        "--recon",
+        recon,
+        "--output",
         "{out}",
-    ]));
-    Def::digest(area, name.to_string(), FFMPEG, args(&[a]), sha)
+    ];
+    a.extend(opts.iter().map(String::as_str));
+    tool(X265, &a)
 }
 
 fn h264_defs() -> Vec<Def> {
     let area = h264::AREA;
     let mut defs = Vec::new();
     for s in &h264::X264_STREAMS {
-        let name = s.name;
-        let mut encode = strs(&[
-            "-frames:v",
-            &s.frames.to_string(),
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-        ]);
-        encode.extend(strs(s.opts));
-        encode.extend(strs(&["-f", "h264", "{out}"]));
+        let (name, (w, h)) = (s.name, s.size);
+        let stream = h264::stream(name);
+        let recon = format!("{name}.recon.yuv");
         defs.push(
             Def::fixture(
                 area,
-                format!("{name}.h264"),
-                FFMPEG,
-                args(&[raw_input("yuv420p", s.size, "25"), encode]),
+                stream.clone(),
+                X264,
+                x264_args(s.frames, s.opts, &recon),
             )
-            .from(move || h264::x264_source(name)),
+            .from(move || y4m(w, h, 25, "420jpeg", i420(w, h), &h264::x264_source(name)?)),
         );
-        defs.push(decoded(
+        defs.push(written(
             area,
-            &format!("{name}.yuv"),
-            &format!("{name}.h264"),
-            &[],
-            "yuv420p",
+            h264::recon(name),
+            recon,
+            &format!("the --dump-yuv reconstruction x264 wrote while making {{ref:{stream}}}"),
+            raw,
         ));
-    }
-    defs.push(Def::ours(
-        area,
-        "crf18.h264".into(),
-        "src/h264/refs.rs crf18()",
-        h264::crf18,
-    ));
-    defs.push(decoded(area, "crf18.yuv", "crf18.h264", STRICT, "yuv420p"));
-    defs.push(Def::exact(
-        area,
-        "crf18.probe".into(),
-        FFPROBE,
-        strs(&[
-            "-v",
-            "error",
-            "-count_frames",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=codec_name,width,height,nb_read_frames",
-            "-of",
-            "csv=p=0",
-            "-o",
-            "{out}",
-            "{ref:crf18.h264}",
-        ]),
-    ));
-    for n in 0..h264::COLOURS.len() {
-        defs.push(Def::ours(
-            area,
-            format!("colour-{n}.h264"),
-            &format!("src/h264/refs.rs colour({n})"),
-            move || h264::colour(n),
-        ));
-        defs.push(Def::exact(
-            area,
-            format!("colour-{n}.probe"),
-            FFPROBE,
-            strs(&[
-                "-v",
-                "error",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=color_range,color_primaries,color_transfer,color_space",
-                "-of",
-                "default=nw=1",
-                "-o",
-                "{out}",
-                &format!("{{ref:colour-{n}.h264}}"),
-            ]),
-        ));
-    }
-    for name in h264::PINNED {
-        let file = format!("{name}.h264");
-        defs.push(Def::ours(
-            area,
-            file.clone(),
-            &format!("src/h264/refs.rs pinned(\"{name}\")"),
-            move || h264::pinned(name),
-        ));
-        defs.push(decoded(area, &format!("{name}.yuv"), &file, STRICT, "yuv420p"));
     }
     defs
 }
 
-fn x265_cli(f: &hevc::X265, outputs: &[&str]) -> Vec<String> {
-    let (w, h) = f.size;
-    let depth = if f.ten_bit { "10" } else { "8" };
-    let mut a = strs(&[
-        "--log-level",
-        "error",
-        "--input",
-        "{src}",
-        "--input-res",
-        &format!("{w}x{h}"),
-        "--fps",
-        "25",
-        "--frames",
-        &f.frames.to_string(),
-        "--input-depth",
-        depth,
-        "--output-depth",
-        depth,
-        "--recon-depth",
-        depth,
-    ]);
-    a.extend(hevc::x265_cli(f.params));
-    a.extend(strs(outputs));
-    a
+fn hevc_decode(stream: &[u8]) -> Result<Vec<u8>, String> {
+    use pito_codecs::media::Packet;
+    let mut dec = pito_codecs::hevc::Decoder::with_threads(1);
+    let packet = Packet {
+        data: stream.to_vec(),
+        pts: 0,
+        dts: 0,
+        keyframe: true,
+    };
+    let mut frames = dec.decode(&packet).map_err(|e| e.to_string())?;
+    frames.extend(dec.flush().map_err(|e| e.to_string())?);
+    let mut d = Vec::new();
+    for f in &frames {
+        let bytes = f.format.bytes_per_sample();
+        for p in &f.planes {
+            for row in p.data.chunks(p.stride.max(1)).take(p.height) {
+                d.extend_from_slice(&row[..(p.width * bytes).min(row.len())]);
+            }
+        }
+    }
+    Ok(d)
 }
 
 fn hevc_defs() -> Vec<Def> {
@@ -198,60 +239,35 @@ fn hevc_defs() -> Vec<Def> {
         || Ok(hevc::scaling_list_text().into_bytes()),
     )];
     for f in hevc::all() {
-        let name = f.name;
-        let pix = hevc::pix_fmt(f.ten_bit);
-        let file = format!("{name}.hevc");
-        if f.recon {
-            let recon = format!("{name}.recon.yuv");
-            defs.push(
-                Def::fixture(
-                    area,
-                    file,
-                    X265,
-                    x265_cli(f, &["-o", "{out}", "--recon", &recon]),
-                )
-                .from(move || hevc::source(name)),
-            );
-            let mut copy = raw_input(pix, f.size, "25");
-            copy.pop();
-            copy.push(recon);
-            copy.extend(strs(&["-c", "copy", "-f", "rawvideo", "{out}"]));
-            defs.push(Def::digest(
-                area,
-                format!("{name}.yuv"),
-                FFMPEG,
-                args(&[copy]),
-                sha,
-            ));
-            continue;
-        }
-        let mut encode = strs(&[
-            "-frames:v",
-            &f.frames.to_string(),
-            "-c:v",
-            "libx265",
-            "-pix_fmt",
-            pix,
-        ]);
+        let (name, (w, h)) = (f.name, f.size);
+        let stream = hevc::stream(name);
+        let recon = format!("{name}.recon.y4m");
+        let mut opts = Vec::new();
         if !f.preset.is_empty() {
-            encode.extend(strs(&["-preset", f.preset]));
+            opts.extend(["--preset".to_string(), f.preset.to_string()]);
         }
-        let params = if f.params.is_empty() {
-            "log-level=error".to_string()
+        opts.extend(hevc::x265_cli(f.params));
+        let (csp, bytes) = if f.ten_bit {
+            ("420p10", 2)
         } else {
-            format!("{}:log-level=error", f.params)
+            ("420jpeg", 1)
         };
-        encode.extend(strs(&["-x265-params", &params, "-f", "hevc", "{out}"]));
         defs.push(
             Def::fixture(
                 area,
-                file.clone(),
-                FFMPEG,
-                args(&[raw_input(pix, f.size, "25"), encode]),
+                stream.clone(),
+                X265,
+                x265_args(f.frames, f.ten_bit, &opts, &recon),
             )
-            .from(move || hevc::source(name)),
+            .from(move || y4m(w, h, 25, csp, i420(w, h) * bytes, &hevc::source(name)?)),
         );
-        defs.push(decoded(area, &format!("{name}.yuv"), &file, &[], pix));
+        defs.push(written(
+            area,
+            hevc::recon(name),
+            recon,
+            &format!("the --recon reconstruction x265 wrote while making {{ref:{stream}}}"),
+            y4m_payload,
+        ));
     }
     for name in hevc_synth::DEBLOCKED {
         let file = hevc_synth::file(name);
@@ -261,205 +277,176 @@ fn hevc_defs() -> Vec<Def> {
             &format!("src/hevc/refs_synth.rs stream(\"{name}\")"),
             move || hevc_synth::stream(name),
         ));
-        defs.push(decoded(
+        defs.push(Def::ours(
             area,
-            &hevc_synth::decoded(name),
-            &file,
-            STRICT,
-            "yuv420p",
-        ));
-    }
-    for name in hevc::HVCC {
-        defs.push(Def::fixture(
-            area,
-            format!("{name}.mp4"),
-            FFMPEG,
-            ff(&[
-                "-i",
-                &format!("{{ref:{name}.hevc}}"),
-                "-frames:v",
-                "1",
-                "-c",
-                "copy",
-                "-tag:v",
-                "hvc1",
-                "{out}",
-            ]),
+            hevc_synth::decoded(name),
+            &format!("our one-thread HEVC decode of {{ref:{file}}}, a regression pin"),
+            move || hevc_decode(&hevc_synth::stream(name)?),
         ));
     }
     defs
+}
+
+fn vpxenc(frames: u64, opts: &[&str]) -> Vec<String> {
+    let limit = format!("--limit={frames}");
+    let mut a = vec!["--codec=vp9", "--ivf", "--quiet", &limit];
+    a.extend_from_slice(opts);
+    a.extend(["-o", "{out}", "{src}"]);
+    tool(VPXENC, &a)
+}
+
+fn vpxdec(area: &'static str, name: String, input: &str) -> Def {
+    let input = format!("{{ref:{input}}}");
+    Def::digest(
+        area,
+        name,
+        VPXDEC,
+        tool(
+            VPXDEC,
+            &["--codec=vp9", "--rawvideo", "-o", "{out}", &input],
+        ),
+        sha,
+    )
+}
+
+fn vpxdec_luma(area: &'static str, name: String, input: &str) -> Def {
+    let input = format!("{{ref:{input}}}");
+    Def::digest(
+        area,
+        name,
+        VPXDEC,
+        tool(VPXDEC, &["--codec=vp9", "-o", "{out}", &input]),
+        y4m_luma,
+    )
+}
+
+type Rgba = fn() -> Result<Vec<u8>, String>;
+
+fn alpha_pair(
+    area: &'static str,
+    name: &'static str,
+    (w, h): (u32, u32),
+    fps: u32,
+    frames: u64,
+    opts: &'static [&'static str],
+    rgba: Rgba,
+) -> Vec<Def> {
+    let picture = move |alpha: bool| -> Result<Vec<u8>, String> {
+        let (colour, a) = vp9::split_rgba(&rgba()?, w, h);
+        y4m(
+            w,
+            h,
+            fps,
+            "420jpeg",
+            i420(w, h),
+            if alpha { &a } else { &colour },
+        )
+    };
+    vec![
+        Def::fixture(area, vp9::stream(name), VPXENC, vpxenc(frames, opts))
+            .from(move || picture(false)),
+        Def::fixture(area, vp9::alpha_stream(name), VPXENC, vpxenc(frames, opts))
+            .from(move || picture(true)),
+        vpxdec(area, vp9::decoded(name), &vp9::stream(name)),
+        vpxdec_luma(area, vp9::alpha_decoded(name), &vp9::alpha_stream(name)),
+    ]
+}
+
+fn ours_alpha(alpha: bool) -> Result<Vec<u8>, String> {
+    let webm = testref::scratch(vp9_alpha::AREA).join(format!("{}.recorded.webm", vp9_alpha::OURS));
+    vp9_alpha::export_ours(&webm)?;
+    let (colour, a) = vp9_alpha::webm_streams(&webm)?;
+    let (w, h) = vp9_alpha::SIZE;
+    Ok(vp9::ivf(w, h, if alpha { &a } else { &colour }))
 }
 
 fn vp9_defs() -> Vec<Def> {
     let area = vp9::AREA;
     let mut defs = Vec::new();
     for f in &vp9::CONFORMANCE {
-        let name = f.name;
-        let file = format!("{name}.ivf");
-        let mut encode = strs(&[
-            "-frames:v",
-            &f.frames.to_string(),
-            "-c:v",
-            "libvpx-vp9",
-            "-pix_fmt",
-            f.pix_fmt,
-        ]);
-        encode.extend(strs(f.args));
-        let log = format!("{name}.passlog");
-        if f.two_pass {
-            let mut first = encode.clone();
-            first.extend(strs(&[
-                "-pass",
-                "1",
-                "-passlogfile",
-                &log,
-                "-f",
-                "ivf",
-                "{out}",
-            ]));
-            defs.push(
-                Def::digest(
-                    area,
-                    format!("{name}.pass1-log"),
-                    FFMPEG,
-                    args(&[raw_input(f.pix_fmt, f.size, "25"), first]),
-                    sha,
-                )
-                .from(move || vp9::source(name)),
-            );
-            encode.extend(strs(&["-pass", "2", "-passlogfile", &log]));
-        }
-        encode.extend(strs(&["-f", "ivf", "{out}"]));
+        let (name, (w, h)) = (f.name, f.size);
+        let stream = vp9::stream(name);
+        let frame = vp9::frame_bytes(f);
+        let csp = f.csp;
         defs.push(
-            Def::fixture(
-                area,
-                file.clone(),
-                FFMPEG,
-                args(&[raw_input(f.pix_fmt, f.size, "25"), encode]),
-            )
-            .from(move || vp9::source(name)),
+            Def::fixture(area, stream.clone(), VPXENC, vpxenc(f.frames, f.args))
+                .from(move || y4m(w, h, 25, csp, frame, &vp9::source(name)?)),
         );
-        defs.push(decoded(
-            area,
-            &format!("{name}.yuv"),
-            &file,
-            &["-c:v", "vp9"],
-            f.pix_fmt,
-        ));
+        defs.push(vpxdec(area, vp9::decoded(name), &stream));
     }
     for o in vp9::ours() {
         let name = o.name;
-        let file = format!("{name}.ivf");
+        let stream = vp9::stream(name);
         defs.push(Def::ours(
             area,
-            file.clone(),
+            stream.clone(),
             &format!("src/vp9/refs.rs encode_ours(\"{name}\")"),
             move || vp9::encode_ours(name),
         ));
-        defs.push(decoded(
+        defs.push(vpxdec(area, vp9::decoded(name), &stream));
+    }
+    for (w, h) in vp9::EDGES {
+        let name = vp9::edge(w, h);
+        let stream = vp9::stream(&name);
+        defs.push(Def::ours(
             area,
-            &format!("{name}.yuv"),
-            &file,
-            &["-c:v", "vp9", "-err_detect", "explode", "-xerror"],
-            "yuv420p",
+            stream.clone(),
+            &format!("src/vp9/refs.rs edge_ivf({w}, {h})"),
+            move || vp9::edge_ivf(w, h),
         ));
-        defs.push(decoded(
-            area,
-            &format!("{name}.libvpx.yuv"),
-            &file,
-            &["-c:v", "libvpx-vp9", "-xerror"],
-            "yuv420p",
-        ));
+        defs.push(vpxdec(area, vp9::decoded(&name), &stream));
     }
     for (name, w, h) in vp9::ALPHA {
-        let file = format!("{name}.webm");
-        let encode = strs(&[
-            "-frames:v",
-            &vp9::ALPHA_FRAMES.to_string(),
-            "-c:v",
-            "libvpx-vp9",
-            "-pix_fmt",
-            "yuva420p",
-            "-b:v",
-            "100k",
-            "-g",
-            "4",
-            "-f",
-            "webm",
-            "{out}",
-        ]);
-        defs.push(
-            Def::fixture(
-                area,
-                file.clone(),
-                FFMPEG,
-                args(&[raw_input("rgba", (w, h), "10"), encode]),
-            )
-            .from(move || vp9::alpha_source(name)),
-        );
-        defs.push(yuva(area, name, &file));
+        let rgba: Rgba = match name {
+            "alpha-96x64" => || vp9::alpha_source("alpha-96x64"),
+            "alpha-66x50" => || vp9::alpha_source("alpha-66x50"),
+            _ => || vp9::alpha_source("alpha-65x49"),
+        };
+        defs.extend(alpha_pair(
+            area,
+            name,
+            (w, h),
+            10,
+            vp9::ALPHA_FRAMES,
+            vp9::ALPHA_ARGS,
+            rgba,
+        ));
     }
-    let ours = format!("{}.webm", vp9_alpha::OURS);
+    defs.extend(alpha_pair(
+        area,
+        vp9_alpha::LIBVPX,
+        vp9_alpha::SIZE,
+        24,
+        vp9_alpha::LIBVPX_FRAMES,
+        vp9_alpha::LIBVPX_ARGS,
+        || Ok(vp9_alpha::source_bytes(vp9_alpha::LIBVPX_FRAMES)),
+    ));
+    let ours = vp9_alpha::OURS;
     defs.push(Def::ours(
         area,
-        ours.clone(),
+        format!("{ours}.webm"),
         "src/vp9/refs_alpha.rs ours_webm()",
         vp9_alpha::ours_webm,
     ));
-    defs.push(yuva(area, vp9_alpha::OURS, &ours));
-    let theirs = format!("{}.webm", vp9_alpha::LIBVPX);
-    let encode = strs(&[
-        "-frames:v",
-        &vp9_alpha::LIBVPX_FRAMES.to_string(),
-        "-c:v",
-        "libvpx-vp9",
-        "-pix_fmt",
-        "yuva420p",
-        "-crf",
-        "30",
-        "-b:v",
-        "0",
-        "-deadline",
-        "good",
-        "-cpu-used",
-        "4",
-        "-f",
-        "webm",
-        "{out}",
-    ]);
-    defs.push(
-        Def::fixture(
-            area,
-            theirs.clone(),
-            FFMPEG,
-            args(&[raw_input("rgba", vp9_alpha::SIZE, "24"), encode]),
-        )
-        .from(|| Ok(vp9_alpha::source_bytes(vp9_alpha::LIBVPX_FRAMES))),
-    );
-    defs.push(yuva(area, vp9_alpha::LIBVPX, &theirs));
-    defs
-}
-
-fn yuva(area: &'static str, name: &str, file: &str) -> Def {
-    Def::digest(
+    defs.push(Def::ours(
         area,
-        format!("{name}.yuva"),
-        FFMPEG,
-        ff(&[
-            "-c:v",
-            "libvpx-vp9",
-            "-i",
-            &format!("{{ref:{file}}}"),
-            "-fps_mode",
-            "passthrough",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "yuva420p",
-            "{out}",
-        ]),
-        sha,
-    )
+        vp9::stream(ours),
+        "the colour frames of src/vp9/refs_alpha.rs ours_webm() in IVF",
+        || ours_alpha(false),
+    ));
+    defs.push(Def::ours(
+        area,
+        vp9::alpha_stream(ours),
+        "the alpha frames of src/vp9/refs_alpha.rs ours_webm() in IVF",
+        || ours_alpha(true),
+    ));
+    defs.push(vpxdec(area, vp9::decoded(ours), &vp9::stream(ours)));
+    defs.push(vpxdec_luma(
+        area,
+        vp9::alpha_decoded(ours),
+        &vp9::alpha_stream(ours),
+    ));
+    defs
 }
 
 pub fn defs() -> Vec<Def> {

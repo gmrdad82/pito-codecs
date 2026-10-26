@@ -356,6 +356,12 @@ fn refs_name_each_stream_once_and_size_sources_to_their_frames() {
             s.name
         );
         assert!(std::ptr::eq(refs::find(s.name), *s));
+        assert!(
+            [refs::AOM, refs::SVT, refs::RAV1E_TOOL].contains(&s.encoder),
+            "{}",
+            s.name
+        );
+        assert!(matches!(s.bits, 8 | 10), "{}", s.name);
         let (w, h) = (s.size.0 as usize, s.size.1 as usize);
         let frame = w * h + 2 * w.div_ceil(2) * h.div_ceil(2);
         let bytes = refs::source_bytes(s);

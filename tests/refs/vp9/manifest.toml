@@ -1,0 +1,407 @@
+[[ref]]
+name = "good.ivf"
+file = "good.ivf"
+sha256 = "33254735a197feade0ecc9350a4176f888204bd716a34fb7f71caa2f94b8fd94"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --ivf --quiet --limit=14 --target-bitrate=300 --frame-parallel=0 --passes=1 -o {out} {src}"
+
+[[ref]]
+name = "good.yuv"
+file = ""
+sha256 = "9799aa850d2ec7ac68e457f2e5387a316ee5c2a17259e7d720a6bb8488754ab5"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 --rawvideo -o {out} {ref:good.ivf}"
+
+[[ref]]
+name = "altref_10bit.ivf"
+file = "altref_10bit.ivf"
+sha256 = "1d625831c0f582f48e18a6e1cdf1f7ea91545037383074752add1f5553b590ec"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --ivf --quiet --limit=12 --target-bitrate=300 --profile=2 --bit-depth=10 --input-bit-depth=10 --auto-alt-ref=1 --lag-in-frames=16 --frame-parallel=0 --passes=2 -o {out} {src}"
+
+[[ref]]
+name = "altref_10bit.yuv"
+file = ""
+sha256 = "1069a59a35d9ee2941dff9b2131f6d90d5516c53ea4be8de62180a529678e0ee"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 --rawvideo -o {out} {ref:altref_10bit.ivf}"
+
+[[ref]]
+name = "tiles_512x240.ivf"
+file = "tiles_512x240.ivf"
+sha256 = "850d8b950c72021d082044ce73fc36df505e1cddcccccaabc88ff49738e1f10d"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --ivf --quiet --limit=4 --target-bitrate=600 --tile-columns=1 --tile-rows=1 --cpu-used=4 --frame-parallel=0 --passes=1 -o {out} {src}"
+
+[[ref]]
+name = "tiles_512x240.yuv"
+file = ""
+sha256 = "7d9974583770a9a4b906c86c774313ff0191ac1466632c8b85ad8982a305d05d"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 --rawvideo -o {out} {ref:tiles_512x240.ivf}"
+
+[[ref]]
+name = "profile1_444.ivf"
+file = "profile1_444.ivf"
+sha256 = "7db8b9d897552027ada0eca80e4854228748e8a7c4ea84810ea194fdc1611aa0"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --ivf --quiet --limit=6 --target-bitrate=300 --profile=1 --frame-parallel=0 --passes=1 -o {out} {src}"
+
+[[ref]]
+name = "profile1_444.yuv"
+file = ""
+sha256 = "33fd9731a6e36fb903fda2095e171eda2d078d6308368ca4d0a3eee5307e29be"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 --rawvideo -o {out} {ref:profile1_444.ivf}"
+
+[[ref]]
+name = "profile3_422_12bit.ivf"
+file = "profile3_422_12bit.ivf"
+sha256 = "0018fe8ffd011d38151a4f613f43af4835b885e069b2f92d46dd681daf527c2c"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --ivf --quiet --limit=4 --target-bitrate=300 --profile=3 --bit-depth=12 --input-bit-depth=12 --frame-parallel=0 --passes=1 -o {out} {src}"
+
+[[ref]]
+name = "profile3_422_12bit.yuv"
+file = ""
+sha256 = "59b185c5c69e853070de4d3ecfa1907e643fffbfdf6f23992a1f9ba69510c738"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 --rawvideo -o {out} {ref:profile3_422_12bit.ivf}"
+
+[[ref]]
+name = "lossless.ivf"
+file = "lossless.ivf"
+sha256 = "3344e6831dad6b949b741eb7671f7af3e9faa5189c18fc519e8186bfc5394541"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --ivf --quiet --limit=4 --lossless=1 --frame-parallel=0 --passes=1 -o {out} {src}"
+
+[[ref]]
+name = "lossless.yuv"
+file = ""
+sha256 = "4efdf19a0bcc632b2dacb7ff45d8e0c99b803f170b88551faded3c463d9077d9"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 --rawvideo -o {out} {ref:lossless.ivf}"
+
+[[ref]]
+name = "odd_aq.ivf"
+file = "odd_aq.ivf"
+sha256 = "d40ccc9ab5c972db139188723db3c901aea68dfe0f1a75a8a728bf31c52cb11e"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --ivf --quiet --limit=8 --target-bitrate=300 --aq-mode=3 --frame-parallel=0 --passes=1 -o {out} {src}"
+
+[[ref]]
+name = "odd_aq.yuv"
+file = ""
+sha256 = "6e135f107206375c16a4501f11d5ccfaf09b4dd0f6dbe79402ae4c095f8f7fc3"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 --rawvideo -o {out} {ref:odd_aq.ivf}"
+
+[[ref]]
+name = "realtime_resilient.ivf"
+file = "realtime_resilient.ivf"
+sha256 = "e104c0edfc795733f52b9a9bf6f5995bb1194ba427ff1848b185b2fd94400999"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --ivf --quiet --limit=10 --target-bitrate=300 --rt --cpu-used=8 --error-resilient=1 --passes=1 -o {out} {src}"
+
+[[ref]]
+name = "realtime_resilient.yuv"
+file = ""
+sha256 = "11b25eaef5b510bc32c6d0115661b749d7dab685b0c8dd18e4619d787143fb04"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 --rawvideo -o {out} {ref:realtime_resilient.ivf}"
+
+[[ref]]
+name = "exact.ivf"
+file = ""
+sha256 = "be56d64bbc5e1c0f6000728d8af28ea1cdf78afd6bc4b5409f205ec0d44b99ec"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/vp9/refs.rs encode_ours(\"exact\")"
+
+[[ref]]
+name = "exact.yuv"
+file = ""
+sha256 = "e185474895bee0b564c886f8a2a3b466abadf64107c7143eea0da8fea9bfd284"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 --rawvideo -o {out} {ref:exact.ivf}"
+
+[[ref]]
+name = "tiles.ivf"
+file = ""
+sha256 = "00a2f6d26df4f2b771f9d6ceedc9c722ef0e7df822f065ba127be2c4b35ab087"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/vp9/refs.rs encode_ours(\"tiles\")"
+
+[[ref]]
+name = "tiles.yuv"
+file = ""
+sha256 = "e28b5c66f9956936755aaed3c4c9a3f7d82e786df1b48efe86523278712dcb25"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 --rawvideo -o {out} {ref:tiles.ivf}"
+
+[[ref]]
+name = "edge-1080x1920.ivf"
+file = ""
+sha256 = "86d43aaa7d48a76d413a3b35fa47d601efa1bcd1958a7eee60d5d85650a67bdc"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/vp9/refs.rs edge_ivf(1080, 1920)"
+
+[[ref]]
+name = "edge-1080x1920.yuv"
+file = ""
+sha256 = "b6b57296c20ccd6c29b646385527591f4e5366b4633d3858b58183ca79e15755"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 --rawvideo -o {out} {ref:edge-1080x1920.ivf}"
+
+[[ref]]
+name = "edge-1080x1080.ivf"
+file = ""
+sha256 = "bbe624869b9315a6e70c26ae9e5742eaeff559032206b2d3272a34505f60596c"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/vp9/refs.rs edge_ivf(1080, 1080)"
+
+[[ref]]
+name = "edge-1080x1080.yuv"
+file = ""
+sha256 = "7b180be6a661953a97d8b18a706920ae56f89bae7edd14140f285a78d625ac0c"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 --rawvideo -o {out} {ref:edge-1080x1080.ivf}"
+
+[[ref]]
+name = "edge-200x120.ivf"
+file = ""
+sha256 = "ec3fdeecd68e09b2f50a0b717ae972c754cc548bb7bb02abb1743443e1a90806"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/vp9/refs.rs edge_ivf(200, 120)"
+
+[[ref]]
+name = "edge-200x120.yuv"
+file = ""
+sha256 = "0195abe4ccc3231d570c6cfd2aa0d799200ee3d55ee83440b985053f34b7a724"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 --rawvideo -o {out} {ref:edge-200x120.ivf}"
+
+[[ref]]
+name = "edge-66x66.ivf"
+file = ""
+sha256 = "8e8b48d6177610858ae571297d795ff4cf2303eb00e6394069605a5d14c9c63e"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/vp9/refs.rs edge_ivf(66, 66)"
+
+[[ref]]
+name = "edge-66x66.yuv"
+file = ""
+sha256 = "22dedb400d19e935a50c3c211a32f5432f2b35f92c040f250e3fb62e31d972f3"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 --rawvideo -o {out} {ref:edge-66x66.ivf}"
+
+[[ref]]
+name = "edge-8x8.ivf"
+file = ""
+sha256 = "ca407b622da196c659245d3bd5a7e09cf3d3952fb207d3307a9ae3440c1d4cba"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/vp9/refs.rs edge_ivf(8, 8)"
+
+[[ref]]
+name = "edge-8x8.yuv"
+file = ""
+sha256 = "d56a6d208df6317d369282dfc8e68188a282e2d385a6aeaf9d4aba6c4e0d4e38"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 --rawvideo -o {out} {ref:edge-8x8.ivf}"
+
+[[ref]]
+name = "alpha-96x64.ivf"
+file = "alpha-96x64.ivf"
+sha256 = "7a1d50abf6429a2e28573b3685a3231f6cec234f274ad5cf12c9355ba82fa1ce"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --ivf --quiet --limit=6 --target-bitrate=100 --kf-max-dist=4 --passes=1 -o {out} {src}"
+
+[[ref]]
+name = "alpha-96x64.alpha.ivf"
+file = "alpha-96x64.alpha.ivf"
+sha256 = "9d79e9cabe2812b6add822047074cbc20f28e60a9031575859e859e43abf749c"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --ivf --quiet --limit=6 --target-bitrate=100 --kf-max-dist=4 --passes=1 -o {out} {src}"
+
+[[ref]]
+name = "alpha-96x64.yuv"
+file = ""
+sha256 = "ce975a846ef3162d2b41d4693f8ab9b8b7eb510c3e3c000963b717ef6896dbc1"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 --rawvideo -o {out} {ref:alpha-96x64.ivf}"
+
+[[ref]]
+name = "alpha-96x64.alpha"
+file = ""
+sha256 = "101505aae272a88d98e4b1a7465321748a87e333cc0313d50840b27ae2294a81"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 -o {out} {ref:alpha-96x64.alpha.ivf}"
+
+[[ref]]
+name = "alpha-66x50.ivf"
+file = "alpha-66x50.ivf"
+sha256 = "b93fb74898125f720526e384c35584109e7cb92f7b75ddc86de8be265f3fb512"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --ivf --quiet --limit=6 --target-bitrate=100 --kf-max-dist=4 --passes=1 -o {out} {src}"
+
+[[ref]]
+name = "alpha-66x50.alpha.ivf"
+file = "alpha-66x50.alpha.ivf"
+sha256 = "de521d89b32ba379612c8041a0f22916b995b5d0ab7e0ffbe3d85f685f238e6e"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --ivf --quiet --limit=6 --target-bitrate=100 --kf-max-dist=4 --passes=1 -o {out} {src}"
+
+[[ref]]
+name = "alpha-66x50.yuv"
+file = ""
+sha256 = "4c3d3545ee10d685b97d2d8288c16cd146fb9db7e4cc9629a5941e126de98a78"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 --rawvideo -o {out} {ref:alpha-66x50.ivf}"
+
+[[ref]]
+name = "alpha-66x50.alpha"
+file = ""
+sha256 = "6c6f754b624498a97d3662dad2c0a0ab9b15c93aa9193c793cd9754409d4f94a"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 -o {out} {ref:alpha-66x50.alpha.ivf}"
+
+[[ref]]
+name = "alpha-65x49.ivf"
+file = "alpha-65x49.ivf"
+sha256 = "0742a6e051e76beaa64a03e7e9cc12de7d1cd2460c5ce14b771ce75b95aa33fd"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --ivf --quiet --limit=6 --target-bitrate=100 --kf-max-dist=4 --passes=1 -o {out} {src}"
+
+[[ref]]
+name = "alpha-65x49.alpha.ivf"
+file = "alpha-65x49.alpha.ivf"
+sha256 = "2ff8d069413c1049fa9cafd5f50c7d85f235ad152ce196b19642104e536e4738"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --ivf --quiet --limit=6 --target-bitrate=100 --kf-max-dist=4 --passes=1 -o {out} {src}"
+
+[[ref]]
+name = "alpha-65x49.yuv"
+file = ""
+sha256 = "685fcb499e2565694163623d6ba9938107df4eaec651b5fc78f3c2a456b9861e"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 --rawvideo -o {out} {ref:alpha-65x49.ivf}"
+
+[[ref]]
+name = "alpha-65x49.alpha"
+file = ""
+sha256 = "67ac4426846cc611d645fbb136d5c38a8c9d828d090918a8ec3437c5ba397108"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 -o {out} {ref:alpha-65x49.alpha.ivf}"
+
+[[ref]]
+name = "alpha-libvpx.ivf"
+file = "alpha-libvpx.ivf"
+sha256 = "66b6c7f0cc2bcf3f5ecf28a63b30502b5e0f0965fdde030bc7d0805e2d27ad04"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --ivf --quiet --limit=8 --end-usage=q --cq-level=30 --good --cpu-used=4 --passes=1 -o {out} {src}"
+
+[[ref]]
+name = "alpha-libvpx.alpha.ivf"
+file = "alpha-libvpx.alpha.ivf"
+sha256 = "7a1601d45e5d54594e82cbfb5bf99e12d26e68e9322edd490c7daffd9cd08ce5"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --ivf --quiet --limit=8 --end-usage=q --cq-level=30 --good --cpu-used=4 --passes=1 -o {out} {src}"
+
+[[ref]]
+name = "alpha-libvpx.yuv"
+file = ""
+sha256 = "129eadf65870556da0c3ac3a82bcb7a54ec2cc9d7bab3fd806ab696e56ed20bf"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 --rawvideo -o {out} {ref:alpha-libvpx.ivf}"
+
+[[ref]]
+name = "alpha-libvpx.alpha"
+file = ""
+sha256 = "b7f8f1575db4436eae1013033b677b0679e7f261ebdc0b9a0dbc36bda21e0a2b"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 -o {out} {ref:alpha-libvpx.alpha.ivf}"
+
+[[ref]]
+name = "alpha-round-trip.webm"
+file = ""
+sha256 = "8e46158c0b089b7b19603074e20e894073dd93ca167c17c75414fad84f32e2ca"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/vp9/refs_alpha.rs ours_webm()"
+
+[[ref]]
+name = "alpha-round-trip.ivf"
+file = ""
+sha256 = "c2df61b91b5aff82f681baba68716d886dfedf66a44301bc83ab4c3b6bd2597c"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the colour frames of src/vp9/refs_alpha.rs ours_webm() in IVF"
+
+[[ref]]
+name = "alpha-round-trip.alpha.ivf"
+file = ""
+sha256 = "2e8595dc928e83e320c60613b3d88330be5b591c89d22ffee71fdc23568039c9"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the alpha frames of src/vp9/refs_alpha.rs ours_webm() in IVF"
+
+[[ref]]
+name = "alpha-round-trip.yuv"
+file = ""
+sha256 = "7171bb07f38d2c03c289f85c56276b39ae61140e6200b8850a42e8b0f6b7f81f"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 --rawvideo -o {out} {ref:alpha-round-trip.ivf}"
+
+[[ref]]
+name = "alpha-round-trip.alpha"
+file = ""
+sha256 = "793b1c28a872a90043b410eb9786bce823a807b560f82df563d31f5d89e5387e"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --codec=vp9 -o {out} {ref:alpha-round-trip.alpha.ivf}"

@@ -1,49 +1,64 @@
 use super::{AlphaDecoder, AlphaEncoder, Decoder, EncoderConfig, Rate};
 use crate::media::{Error, Frame, Packet, PixelFormat, Plane, TimeBase};
-use crate::mkv::Reader;
 use crate::testref::{Digest, Refs};
-use std::path::Path;
 
 use super::tests::refs;
 
 type Pairs = Vec<(Frame, Option<Plane>)>;
 
-fn ours(path: &Path) -> Pairs {
-    let r = Reader::open(path).unwrap();
-    let t = r.video().unwrap();
-    assert!(r.tracks[t].alpha(), "the track is not marked as alpha");
+fn streams(r: &Refs, name: &str) -> (Vec<u8>, Vec<u8>) {
+    (
+        r.bytes(&refs::stream(name)),
+        r.bytes(&refs::alpha_stream(name)),
+    )
+}
+
+fn packet(data: &[u8], i: usize) -> Packet {
+    Packet {
+        data: data.to_vec(),
+        pts: i as i64,
+        dts: i as i64,
+        keyframe: super::is_keyframe(data),
+    }
+}
+
+fn ours(colour: &[u8], alpha: &[u8]) -> Pairs {
+    let (colour, alpha) = (refs::ivf_frames(colour), refs::ivf_frames(alpha));
+    assert_eq!(
+        colour.len(),
+        alpha.len(),
+        "one alpha frame per colour frame"
+    );
     let mut dec = AlphaDecoder::with_threads(3);
     let mut out = Vec::new();
-    let mut extra = Vec::new();
-    for i in 0..r.tracks[t].samples.len() {
-        let p = r.packet(t, i).unwrap();
-        let has = r.read_alpha(t, i, &mut extra).unwrap();
-        out.extend(dec.decode(&p, has.then_some(extra.as_slice())).unwrap());
+    for (i, (c, a)) in colour.iter().zip(&alpha).enumerate() {
+        out.extend(dec.decode(&packet(c, i), Some(*a)).unwrap());
     }
     out.extend(dec.flush().unwrap());
     out
 }
 
-fn yuva_digest(name: &str, decoded: &Pairs) -> String {
-    let mut d = Digest::new();
+fn digests(name: &str, decoded: &Pairs) -> (String, String) {
+    let (mut colour, mut alpha) = (Digest::new(), Digest::new());
     for (i, (f, a)) in decoded.iter().enumerate() {
-        d.frame(f);
+        colour.frame(f);
         let a = a
             .as_ref()
             .unwrap_or_else(|| panic!("{name}: frame {i} lost its alpha"));
         assert_eq!((a.width as u32, a.height as u32), (f.width, f.height));
         for y in 0..a.height {
-            d.bytes(&a.data[y * a.stride..y * a.stride + a.width]);
+            alpha.bytes(&a.data[y * a.stride..y * a.stride + a.width]);
         }
     }
-    d.hex()
+    (colour.hex(), alpha.hex())
 }
 
 #[test]
-fn libvpx_alpha_planes_decode_bit_exact() {
+fn libvpx_alpha_planes_decode_bit_exact_with_vpxdec() {
     let r = Refs::open(refs::AREA);
     for (name, w, h) in refs::ALPHA {
-        let decoded = ours(&r.path(&format!("{name}.webm")));
+        let (colour, alpha) = streams(&r, name);
+        let decoded = ours(&colour, &alpha);
         assert_eq!(decoded.len() as u64, refs::ALPHA_FRAMES, "{name}");
         let pts: Vec<i64> = decoded.iter().map(|(f, _)| f.pts).collect();
         assert!(pts.windows(2).all(|p| p[0] < p[1]), "{name}: {pts:?}");
@@ -51,28 +66,27 @@ fn libvpx_alpha_planes_decode_bit_exact() {
             decoded.iter().all(|(f, _)| (f.width, f.height) == (w, h)),
             "{name}: a frame is not {w}x{h}"
         );
-        r.assert_digest(&format!("{name}.yuva"), &yuva_digest(name, &decoded));
+        let (c, a) = digests(name, &decoded);
+        r.assert_digest(&refs::decoded(name), &c);
+        r.assert_digest(&refs::alpha_decoded(name), &a);
     }
 }
 
 #[test]
 fn colour_without_alpha_comes_out_bare() {
-    let store = Refs::open(refs::AREA);
-    let path = store.path("alpha-96x64.webm");
-    let r = Reader::open(&path).unwrap();
-    let t = r.video().unwrap();
+    let r = Refs::open(refs::AREA);
+    let (colour, alpha) = streams(&r, "alpha-96x64");
+    let (colour, alpha) = (refs::ivf_frames(&colour), refs::ivf_frames(&alpha));
     let mut dec = AlphaDecoder::new();
     let mut out = Vec::new();
-    for i in 0..r.tracks[t].samples.len() {
-        out.extend(dec.decode(&r.packet(t, i).unwrap(), None).unwrap());
+    for (i, c) in colour.iter().enumerate() {
+        out.extend(dec.decode(&packet(c, i), None).unwrap());
     }
     out.extend(dec.flush().unwrap());
     assert_eq!(out.len() as u64, refs::ALPHA_FRAMES);
     assert!(out.iter().all(|(_, a)| a.is_none()));
     dec.reset();
-    let mut extra = Vec::new();
-    assert!(r.read_alpha(t, 0, &mut extra).unwrap());
-    let first = dec.decode(&r.packet(t, 0).unwrap(), Some(&extra)).unwrap();
+    let first = dec.decode(&packet(colour[0], 0), Some(alpha[0])).unwrap();
     let rest = dec.flush().unwrap();
     let all: Vec<_> = first.into_iter().chain(rest).collect();
     assert_eq!(all.len(), 1);
@@ -404,6 +418,9 @@ fn the_export_settings_encode_the_same_at_every_thread_count() {
     let one = encode(1);
     assert!(!one.is_empty());
     for threads in [2, 3, 8] {
-        assert!(encode(threads) == one, "{threads} threads change the stream");
+        assert!(
+            encode(threads) == one,
+            "{threads} threads change the stream"
+        );
     }
 }
