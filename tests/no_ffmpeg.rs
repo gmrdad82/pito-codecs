@@ -42,6 +42,50 @@ fn rel(root: &Path, p: &Path) -> String {
         .replace('\\', "/")
 }
 
+fn git(root: &Path) -> std::process::Command {
+    let mut c = std::process::Command::new("git");
+    c.arg("-C")
+        .arg(root)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE");
+    c
+}
+
+fn git_files(root: &Path) -> Option<Vec<String>> {
+    if !root.join(".git").exists() {
+        return None;
+    }
+    let out = git(root).args(["ls-files", "-z"]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(
+        out.stdout
+            .split(|b| *b == 0)
+            .filter(|s| !s.is_empty())
+            .map(|s| String::from_utf8_lossy(s).replace('\\', "/"))
+            .collect(),
+    )
+}
+
+fn files_in(root: &Path, dirs: &[&str]) -> Vec<String> {
+    let inside = |r: &str| {
+        dirs.iter()
+            .any(|d| r.strip_prefix(d).is_some_and(|t| t.starts_with('/')))
+    };
+    match git_files(root) {
+        Some(all) => all.into_iter().filter(|r| inside(r)).collect(),
+        None => {
+            let mut files = Vec::new();
+            for d in dirs {
+                walk(&root.join(d), &mut files);
+            }
+            files.iter().map(|f| rel(root, f)).collect()
+        }
+    }
+}
+
 fn under(rel: &str, list: &[&str]) -> bool {
     list.iter().any(|a| {
         if a.ends_with('/') {
@@ -116,44 +160,42 @@ pub fn names_in_manifest(text: &str) -> Vec<usize> {
 }
 
 fn offenders_in(root: &Path) -> Vec<String> {
-    let mut files = Vec::new();
-    for d in [
-        "src", "tests", "examples", "benches", "fuzz", "bin", "render",
-    ] {
-        walk(&root.join(d), &mut files);
-    }
+    let files = files_in(
+        root,
+        &[
+            "src", "tests", "examples", "benches", "fuzz", "bin", "render",
+        ],
+    );
     let mut found = Vec::new();
-    for f in files {
-        let r = rel(root, &f);
+    for r in files {
         if allowed(&r) || r.starts_with("tests/refs/") {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(&f) else {
+        let Ok(text) = std::fs::read_to_string(root.join(&r)) else {
             continue;
         };
         let lines = if never(&r) {
             names_in_text(&text)
-        } else if f.extension().is_some_and(|e| e == "rs") {
+        } else if r.ends_with(".rs") {
             spawns_in_rust(&text)
         } else {
             continue;
         };
         found.extend(lines.into_iter().map(|l| format!("{r}:{l}")));
     }
-    let Ok(areas) = std::fs::read_dir(root.join("tests/refs")) else {
-        return found;
-    };
-    let mut manifests: Vec<PathBuf> = areas
-        .flatten()
-        .map(|a| a.path().join(testref::MANIFEST))
-        .filter(|m| m.is_file())
+    let mut manifests: Vec<String> = files_in(root, &["tests/refs"])
+        .into_iter()
+        .filter(|r| {
+            r.strip_prefix("tests/refs/")
+                .and_then(|t| t.split_once('/'))
+                .is_some_and(|(_, n)| n == testref::MANIFEST)
+        })
         .collect();
     manifests.sort();
-    for m in manifests {
-        let Ok(text) = std::fs::read_to_string(&m) else {
+    for r in manifests {
+        let Ok(text) = std::fs::read_to_string(root.join(&r)) else {
             continue;
         };
-        let r = rel(root, &m);
         found.extend(
             names_in_manifest(&text)
                 .into_iter()
@@ -308,29 +350,56 @@ fn a_clean_tree_passes() {
 }
 
 fn tracked() -> Vec<(String, PathBuf, u64)> {
+    let root = testref::root();
     let mut out = Vec::new();
-    let Ok(areas) = std::fs::read_dir(testref::refs_dir()) else {
-        return out;
-    };
-    for area in areas.flatten() {
-        let path = area.path();
-        let name = area.file_name().to_string_lossy().into_owned();
-        if name == testref::TOOLS {
+    for r in files_in(&root, &["tests/refs"]) {
+        let t = r.strip_prefix("tests/refs/").unwrap_or(&r);
+        let Some((area, _)) = t.split_once('/') else {
+            assert!(
+                t == testref::TOOLS,
+                "tests/refs/{t}: only area folders and {} sit in tests/refs",
+                testref::TOOLS
+            );
             continue;
-        }
-        assert!(
-            path.is_dir(),
-            "tests/refs/{name}: only area folders and {} sit in tests/refs",
-            testref::TOOLS
-        );
-        let mut files = Vec::new();
-        walk(&path, &mut files);
-        for f in files {
-            let size = std::fs::metadata(&f).map(|m| m.len()).unwrap_or(0);
-            out.push((name.clone(), f, size));
-        }
+        };
+        let f = root.join(&r);
+        let size = std::fs::metadata(&f).map(|m| m.len()).unwrap_or(0);
+        out.push((area.to_string(), f, size));
     }
     out
+}
+
+#[test]
+fn only_git_tracked_files_are_scanned() {
+    let [ff, probe] = tools();
+    let root = tree(
+        "git",
+        &[
+            ("fuzz/seeds", format!("set -e\n{ff} x\n")),
+            ("fuzz/corpus/local", format!("{probe} y\n")),
+            ("src/a.rs", "fn a() {}\n".to_string()),
+        ],
+    );
+    assert!(git_files(&root).is_none());
+    let disk: BTreeSet<String> = offenders_in(&root).into_iter().collect();
+    let both: BTreeSet<String> = ["fuzz/seeds:2", "fuzz/corpus/local:1"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(disk, both);
+    assert!(git(&root).args(["init", "-q"]).status().unwrap().success());
+    assert!(
+        git(&root)
+            .args(["add", "--", "fuzz/seeds", "src/a.rs"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        git_files(&root),
+        Some(vec!["fuzz/seeds".to_string(), "src/a.rs".to_string()])
+    );
+    assert_eq!(offenders_in(&root), vec!["fuzz/seeds:2".to_string()]);
 }
 
 #[test]
