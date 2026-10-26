@@ -53,7 +53,6 @@ struct Rows {
     order: Vec<String>,
     date: String,
     commit: String,
-    ffmpeg: String,
 }
 
 impl Rows {
@@ -77,10 +76,6 @@ impl Rows {
             order,
             date: text("date"),
             commit: text("commit"),
-            ffmpeg: doc["machine"]["ffmpeg"]
-                .as_str()
-                .unwrap_or("none")
-                .to_string(),
         })
     }
 
@@ -531,15 +526,6 @@ impl Docs<'_> {
 
 pub fn charts(results: &Path, out: &Path, reference: &Reference) -> Res<()> {
     let rows = Rows::read(results)?;
-    if rows.ffmpeg != reference.ffmpeg {
-        return Err(format!(
-            "{}: its ffmpeg column is from `{}`, not the reference's `{}`; run the bench again so it reads the reference",
-            results.display(),
-            rows.ffmpeg,
-            reference.ffmpeg
-        )
-        .into());
-    }
     fs::create_dir_all(out)?;
     let (sub, ff) = ffmpeg_names(reference);
     Docs {

@@ -2787,30 +2787,20 @@ mod tests {
     }
 
     #[test]
-    fn chart_docs_refuse_results_timed_on_another_ffmpeg() {
+    fn chart_docs_ignore_the_ffmpeg_column_of_the_results() {
         let s = scratch("chart-docs-version");
         let r = reference::tests::sample();
         let results = s.0.join("results.json");
         let old = "ffmpeg version 9.0.0 Copyright (c) 2000-2026 the FFmpeg developers";
         let doc = |ffmpeg: &str| serde_json::json!({"date": "2026-10-15", "commit": "abc", "machine": {"ffmpeg": ffmpeg}, "rows": []});
-        fs::write(&results, doc(old).to_string()).unwrap();
-        let err = docs::charts(&results, &s.0.join("charts"), &r)
-            .unwrap_err()
-            .to_string();
-        assert_eq!(
-            err,
-            format!(
-                "{}: its ffmpeg column is from `{old}`, not the reference's `{}`; run the bench again so it reads the reference",
-                results.display(),
-                r.ffmpeg
-            )
-        );
-        assert!(!s.0.join("charts").exists());
-        fs::write(&results, doc(&r.ffmpeg).to_string()).unwrap();
-        let same = docs::charts(&results, &s.0.join("charts"), &r)
-            .unwrap_err()
-            .to_string();
-        assert!(!same.contains("its ffmpeg column"), "{same}");
+        for ffmpeg in [old, r.ffmpeg.as_str()] {
+            fs::write(&results, doc(ffmpeg).to_string()).unwrap();
+            let err = docs::charts(&results, &s.0.join("charts"), &r)
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            assert!(!err.contains("its ffmpeg column"), "{err}");
+        }
     }
 
     #[test]
