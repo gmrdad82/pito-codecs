@@ -7,48 +7,6 @@ use std::time::Instant;
 #[path = "refs.rs"]
 mod refs;
 
-fn frames_of(what: &str, bytes: &[u8], format: PixelFormat, w: u32, h: u32) -> Vec<Frame> {
-    let one = Frame::new(format, w, h, 0, TimeBase::new(1, 30));
-    let size: usize = one.planes.iter().map(|p| p.data.len()).sum();
-    assert_eq!(
-        bytes.len(),
-        size * refs::FRAMES as usize,
-        "{what}: {} bytes, not {} frames of {w}x{h} {format:?}",
-        bytes.len(),
-        refs::FRAMES
-    );
-    bytes
-        .chunks_exact(size)
-        .map(|chunk| {
-            let mut f = one.clone();
-            let mut at = 0;
-            for p in f.planes.iter_mut() {
-                let n = p.data.len();
-                p.data.copy_from_slice(&chunk[at..at + n]);
-                at += n;
-            }
-            f
-        })
-        .collect()
-}
-
-fn yuv_ref(r: &Refs, name: &str, format: PixelFormat, w: u32, h: u32) -> Vec<Frame> {
-    frames_of(name, &r.bytes(name), format, w, h)
-}
-
-fn packed_ref(r: &Refs, name: &str, (w, h): (u32, u32)) -> Vec<Vec<u8>> {
-    let bytes = r.bytes(name);
-    let size = (w * h * 4) as usize;
-    assert_eq!(
-        bytes.len(),
-        size * refs::FRAMES as usize,
-        "{name}: {} bytes, not {} frames of {w}x{h} packed",
-        bytes.len(),
-        refs::FRAMES
-    );
-    bytes.chunks_exact(size).map(<[u8]>::to_vec).collect()
-}
-
 fn psnr(a: &[u8], b: &[u8], wide: bool) -> f64 {
     if !wide {
         return crate::testref::psnr(a, b);
@@ -69,36 +27,30 @@ fn psnr(a: &[u8], b: &[u8], wide: bool) -> f64 {
 
 fn frame_psnr(a: &Frame, b: &Frame) -> [f64; 3] {
     let wide = a.format == PixelFormat::Yuv420p10;
-    [0, 1, 2].map(|i| psnr(&a.planes[i].data, &b.planes[i].data, wide))
+    [0, 1, 2].map(|i| psnr(&visible_plane(a, i), &visible_plane(b, i), wide))
 }
 
-fn summary_of(samples: &[f32], rate: u32) -> Loudness {
-    let channels = refs::CHANNELS;
-    let mut meter = LoudnessMeter::new(rate, channels).unwrap();
-    for chunk in samples.chunks(usize::from(channels) * 1999) {
-        let part = AudioBuffer {
-            samples: chunk.to_vec(),
-            rate,
-            channels,
-        };
-        meter.process(&part).unwrap();
-    }
-    meter.summary()
+fn visible_plane(f: &Frame, i: usize) -> Vec<u8> {
+    let p = &f.planes[i];
+    let row = p.width * f.format.bytes_per_sample();
+    p.data
+        .chunks(p.stride.max(1))
+        .take(p.height)
+        .flat_map(|r| r[..row.min(r.len())].to_vec())
+        .collect()
 }
 
 #[test]
-fn r128_matches_ffmpeg_ebur128() {
+fn r128_holds_the_numbers_our_meter_recorded() {
     let r = Refs::open(refs::AREA);
     for (label, rate, seconds, sound) in refs::loudness() {
         let name = refs::loudness_ref(label);
-        let log = String::from_utf8(r.bytes(&name)).unwrap();
+        let text = String::from_utf8(r.bytes(&name)).unwrap();
         let field = |key: &str| {
-            refs::meter_field(&log, key)
-                .unwrap_or_else(|| panic!("{name}: no lavfi.r128.{key} in {log}"))
+            refs::meter_field(&text, key).unwrap_or_else(|| panic!("{name}: no {key} in {text}"))
         };
-        let (i, lra) = (field("I"), field("LRA"));
-        let tp = 20.0 * field("true_peak").max(1e-12).log10();
-        let ours = summary_of(&refs::loudness_pcm(sound, rate, seconds), rate);
+        let (i, lra, tp) = (field("I"), field("LRA"), field("TP"));
+        let ours = refs::meter_summary(sound, rate, seconds).unwrap();
         println!(
             "{label}: I {:.2}/{i} LRA {:.2}/{lra} TP {:.2}/{tp:.2}",
             ours.integrated, ours.range, ours.true_peak
@@ -122,11 +74,31 @@ fn r128_matches_ffmpeg_ebur128() {
 }
 
 #[test]
+fn r128_of_a_steady_stereo_tone_is_its_level_in_dbfs() {
+    let (_, rate, seconds, sound) = refs::loudness()[0];
+    let l = refs::meter_summary(sound, rate, seconds).unwrap();
+    let level = 20.0 * 0.25f64.log10();
+    assert!(
+        (l.integrated - level).abs() <= 0.1,
+        "I {} against {level:.2}",
+        l.integrated
+    );
+    assert!(
+        (l.true_peak - level).abs() <= 0.2,
+        "TP {} against {level:.2}",
+        l.true_peak
+    );
+    assert!(l.range <= 0.5, "LRA {} of a steady tone", l.range);
+    let (_, rate, seconds, sound) = refs::loudness()[1];
+    let steps = refs::meter_summary(sound, rate, seconds).unwrap();
+    assert!(steps.range > 3.0, "LRA {} of three steps", steps.range);
+}
+
+#[test]
 fn the_loudness_inputs_are_the_ones_recorded() {
+    let r = Refs::open(refs::AREA);
     for (label, rate, seconds, sound) in refs::loudness() {
         let a = refs::loudness_pcm(sound, rate, seconds);
-        let b = refs::loudness_pcm(sound, rate, seconds);
-        assert_eq!(a, b, "{label} is not deterministic");
         assert_eq!(
             a.len(),
             refs::loudness_frames(rate, seconds) * usize::from(refs::CHANNELS),
@@ -134,24 +106,34 @@ fn the_loudness_inputs_are_the_ones_recorded() {
         );
         let peak = a.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         assert!(peak > 0.01 && peak <= 1.0, "{label}: peak {peak}");
-        assert_eq!(
-            refs::loudness_bytes(sound, rate, seconds).len(),
-            a.len() * 4,
-            "{label}"
+        let bytes = refs::loudness_bytes(sound, rate, seconds);
+        assert_eq!(bytes.len(), a.len() * 4, "{label}");
+        r.assert_digest(
+            &refs::loudness_input(label),
+            &crate::testref::sha256(&bytes),
         );
     }
 }
 
 #[test]
-fn a_meter_log_gives_the_last_value_of_each_field() {
-    let log = "frame:0    pts:0       pts_time:0\nlavfi.r128.I=-70.000\nlavfi.r128.LRA=0.000\n\
-               frame:1    pts:4800    pts_time:0.1\nlavfi.r128.I=-23.015\nlavfi.r128.LRA=4.250\n\
-               lavfi.r128.true_peaks_ch0=0.251\nlavfi.r128.true_peak=0.251\n";
-    assert_eq!(refs::meter_field(log, "I"), Some(-23.015));
-    assert_eq!(refs::meter_field(log, "LRA"), Some(4.25));
-    assert_eq!(refs::meter_field(log, "true_peak"), Some(0.251));
-    assert_eq!(refs::meter_field(log, "M"), None);
-    assert_eq!(refs::meter_field("lavfi.r128.I=loud", "I"), None);
+fn a_meter_text_gives_the_last_value_of_each_field() {
+    let l = Loudness {
+        integrated: -23.0154,
+        range: 4.25,
+        true_peak: -12.0,
+        sample_peak: -12.5,
+        momentary_max: -20.0,
+        short_term_max: -21.0,
+    };
+    let text = refs::meter_text(&l);
+    assert_eq!(text, "I=-23.015\nLRA=4.250\nTP=-12.000\n");
+    assert_eq!(refs::meter_field(&text, "I"), Some(-23.015));
+    assert_eq!(refs::meter_field(&text, "LRA"), Some(4.25));
+    assert_eq!(refs::meter_field(&text, "TP"), Some(-12.0));
+    let twice = format!("I=-70.000\n{text}");
+    assert_eq!(refs::meter_field(&twice, "I"), Some(-23.015));
+    assert_eq!(refs::meter_field(&text, "M"), None);
+    assert_eq!(refs::meter_field("I=loud", "I"), None);
 }
 
 fn kernel_of(name: &str) -> Kernel {
@@ -162,38 +144,38 @@ fn kernel_of(name: &str) -> Kernel {
     }
 }
 
-fn spec_of(matrix: &str, range: &str) -> ColorSpec {
-    let m = match matrix {
+fn matrix_of(matrix: &str) -> Matrix {
+    match matrix {
         "bt601" => Matrix::Bt601,
         "bt2020" => Matrix::Bt2020,
         _ => Matrix::Bt709,
-    };
-    let r = if range == "pc" {
-        Range::Full
-    } else {
-        Range::Limited
-    };
-    ColorSpec::new(m, r)
-}
-
-fn depth(deep: bool) -> PixelFormat {
-    if deep {
-        PixelFormat::Yuv420p10
-    } else {
-        PixelFormat::Yuv420p8
     }
 }
 
+fn range_of(range: &str) -> Range {
+    if range == "pc" {
+        Range::Full
+    } else {
+        Range::Limited
+    }
+}
+
+fn spec_of(matrix: &str, range: &str) -> ColorSpec {
+    ColorSpec::new(matrix_of(matrix), range_of(range))
+}
+
 #[test]
-fn the_synthetic_sources_are_what_the_recorder_feeds() {
+fn the_synthetic_sources_are_distinct_frames_at_both_depths() {
     for deep in [false, true] {
         for size in [refs::SCALE_SIZE, refs::COLOUR_SIZE] {
-            let bytes = refs::yuv_bytes(size, deep);
-            let frames = frames_of("source", &bytes, depth(deep), size.0, size.1);
+            let frames: Vec<Frame> = (0..refs::FRAMES)
+                .map(|n| refs::yuv(size, n, deep))
+                .collect();
             for (n, f) in frames.iter().enumerate() {
+                assert_eq!((f.width, f.height), size, "{size:?} {deep} frame {n}");
                 assert_eq!(
-                    refs::visible(f),
-                    refs::visible(&refs::yuv(size, n as u64, deep)),
+                    refs::visible(f).len(),
+                    model::bytes(size, deep),
                     "{size:?} {deep} frame {n}"
                 );
             }
@@ -217,36 +199,359 @@ fn the_synthetic_sources_are_what_the_recorder_feeds() {
     }
 }
 
-#[test]
-fn a_short_reference_is_refused_by_name() {
-    let caught = std::panic::catch_unwind(|| {
-        frames_of("short.yuv", &[0; 100], PixelFormat::Yuv420p8, 48, 36)
-    });
-    let message = caught
-        .err()
-        .and_then(|e| e.downcast::<String>().ok())
-        .expect("a short reference was read");
-    assert!(message.contains("short.yuv"), "{message}");
-    let one = frames_of(
-        "two.yuv",
-        &refs::yuv_bytes(refs::SCALE_SIZE, false),
-        PixelFormat::Yuv420p8,
-        refs::SCALE_SIZE.0,
-        refs::SCALE_SIZE.1,
-    );
-    assert_eq!(one.len() as u64, refs::FRAMES);
+mod model {
+    use super::refs;
+    use crate::filter::{Kernel, Matrix, Range, Siting};
+    use crate::media::{Frame, PixelFormat, TimeBase};
+
+    pub fn bytes((w, h): (u32, u32), deep: bool) -> usize {
+        let (w, h) = (w as usize, h as usize);
+        (w * h + 2 * w.div_ceil(2) * h.div_ceil(2)) * if deep { 2 } else { 1 }
+    }
+
+    pub fn kr_kb(m: Matrix) -> (f64, f64) {
+        match m {
+            Matrix::Bt601 => (0.299, 0.114),
+            Matrix::Bt709 => (0.2126, 0.0722),
+            Matrix::Bt2020 => (0.2627, 0.0593),
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    pub struct Levels {
+        y_off: f64,
+        y_range: f64,
+        c_off: f64,
+        c_range: f64,
+    }
+
+    pub fn levels(range: Range, depth: u32) -> Levels {
+        let top = f64::from((1u32 << depth) - 1);
+        let s = f64::from(1u32 << (depth - 8));
+        match range {
+            Range::Limited => Levels {
+                y_off: 16.0 * s,
+                y_range: 219.0 * s,
+                c_off: 128.0 * s,
+                c_range: 224.0 * s,
+            },
+            Range::Full => Levels {
+                y_off: 0.0,
+                y_range: top,
+                c_off: f64::from(1u32 << (depth - 1)),
+                c_range: top,
+            },
+        }
+    }
+
+    pub fn rgb_of([ey, eb, er]: [f64; 3], (kr, kb): (f64, f64)) -> [f64; 3] {
+        let r = ey + 2.0 * (1.0 - kr) * er;
+        let b = ey + 2.0 * (1.0 - kb) * eb;
+        let g = (ey - kr * r - kb * b) / (1.0 - kr - kb);
+        [r, g, b]
+    }
+
+    pub fn ycc_of([r, g, b]: [f64; 3], (kr, kb): (f64, f64)) -> [f64; 3] {
+        let ey = kr * r + (1.0 - kr - kb) * g + kb * b;
+        [
+            ey,
+            (b - ey) / (2.0 * (1.0 - kb)),
+            (r - ey) / (2.0 * (1.0 - kr)),
+        ]
+    }
+
+    fn depth(f: &Frame) -> u32 {
+        if f.format == PixelFormat::Yuv420p10 {
+            10
+        } else {
+            8
+        }
+    }
+
+    pub fn at(f: &Frame, i: usize, x: usize, y: usize) -> f64 {
+        let p = &f.planes[i];
+        let (x, y) = (x.min(p.width - 1), y.min(p.height - 1));
+        if depth(f) == 10 {
+            let o = y * p.stride + 2 * x;
+            f64::from(u16::from_le_bytes([p.data[o], p.data[o + 1]]))
+        } else {
+            f64::from(p.data[y * p.stride + x])
+        }
+    }
+
+    pub fn frame(
+        format: PixelFormat,
+        (w, h): (u32, u32),
+        value: impl Fn(usize, usize, usize) -> f64,
+    ) -> Frame {
+        let mut f = Frame::new(format, w, h, 0, TimeBase::new(1, 30));
+        let top = if format == PixelFormat::Yuv420p10 {
+            1023.0
+        } else {
+            255.0
+        };
+        for (i, p) in f.planes.iter_mut().enumerate() {
+            for y in 0..p.height {
+                for x in 0..p.width {
+                    let v = value(i, x, y).round().clamp(0.0, top);
+                    if top > 255.0 {
+                        let o = y * p.stride + 2 * x;
+                        p.data[o..o + 2].copy_from_slice(&(v as u16).to_le_bytes());
+                    } else {
+                        p.data[y * p.stride + x] = v as u8;
+                    }
+                }
+            }
+        }
+        f
+    }
+
+    #[derive(Clone, Copy)]
+    pub enum Up {
+        Nearest,
+        Bilinear(Siting),
+    }
+
+    fn chroma(f: &Frame, i: usize, x: usize, y: usize, up: Up) -> f64 {
+        let (cx, cy) = (x / 2, y / 2);
+        let Up::Bilinear(siting) = up else {
+            return at(f, i, cx, cy);
+        };
+        let near_y = if y.is_multiple_of(2) {
+            cy.saturating_sub(1)
+        } else {
+            cy + 1
+        };
+        let row = |c: usize| 0.75 * at(f, i, c, cy) + 0.25 * at(f, i, c, near_y);
+        match (siting, x % 2) {
+            (Siting::Left, 0) => row(cx),
+            (Siting::Left, _) => 0.5 * row(cx) + 0.5 * row(cx + 1),
+            (Siting::Centre, 0) => 0.75 * row(cx) + 0.25 * row(cx.saturating_sub(1)),
+            (Siting::Centre, _) => 0.75 * row(cx) + 0.25 * row(cx + 1),
+        }
+    }
+
+    pub fn to_packed(f: &Frame, matrix: Matrix, range: Range, up: Up, bgr: bool) -> Vec<u8> {
+        let l = levels(range, depth(f));
+        let k = kr_kb(matrix);
+        let (w, h) = (f.width as usize, f.height as usize);
+        let mut out = Vec::with_capacity(w * h * 4);
+        for y in 0..h {
+            for x in 0..w {
+                let e = [
+                    (at(f, 0, x, y) - l.y_off) / l.y_range,
+                    (chroma(f, 1, x, y, up) - l.c_off) / l.c_range,
+                    (chroma(f, 2, x, y, up) - l.c_off) / l.c_range,
+                ];
+                let [r, g, b] = rgb_of(e, k).map(|v| (255.0 * v).round().clamp(0.0, 255.0) as u8);
+                out.extend(if bgr { [b, g, r, 255] } else { [r, g, b, 255] });
+            }
+        }
+        out
+    }
+
+    pub fn from_packed(
+        px: &[u8],
+        (w, h): (u32, u32),
+        bgr: bool,
+        matrix: Matrix,
+        range: Range,
+        siting: Siting,
+    ) -> Frame {
+        let l = levels(range, 8);
+        let k = kr_kb(matrix);
+        let (wu, hu) = (w as usize, h as usize);
+        let e = |x: usize, y: usize| {
+            let o = (y.min(hu - 1) * wu + x.min(wu - 1)) * 4;
+            let p = &px[o..o + 3];
+            let rgb = if bgr {
+                [p[2], p[1], p[0]]
+            } else {
+                [p[0], p[1], p[2]]
+            };
+            ycc_of(rgb.map(|v| f64::from(v) / 255.0), k)
+        };
+        frame(PixelFormat::Yuv420p8, (w, h), |i, x, y| {
+            if i == 0 {
+                return l.y_off + l.y_range * e(x, y)[0];
+            }
+            let taps: &[(usize, f64)] = match siting {
+                Siting::Centre => &[(2 * x, 0.5), (2 * x + 1, 0.5)],
+                Siting::Left => &[
+                    ((2 * x).saturating_sub(1), 0.25),
+                    (2 * x, 0.5),
+                    (2 * x + 1, 0.25),
+                ],
+            };
+            let c: f64 = taps
+                .iter()
+                .flat_map(|&(sx, wx)| [2 * y, 2 * y + 1].map(|sy| 0.5 * wx * e(sx, sy)[i]))
+                .sum();
+            l.c_off + l.c_range * c
+        })
+    }
+
+    pub fn convert(
+        f: &Frame,
+        from: (Matrix, Range),
+        to: (Matrix, Range),
+        format: PixelFormat,
+    ) -> Frame {
+        let ls = levels(from.1, depth(f));
+        let lt = levels(
+            to.1,
+            if format == PixelFormat::Yuv420p10 {
+                10
+            } else {
+                8
+            },
+        );
+        let swap = |ey: f64, u: f64, v: f64| {
+            let e = [ey, (u - ls.c_off) / ls.c_range, (v - ls.c_off) / ls.c_range];
+            ycc_of(rgb_of(e, kr_kb(from.0)), kr_kb(to.0))
+        };
+        frame(format, (f.width, f.height), |i, x, y| {
+            if i == 0 {
+                let ey = (at(f, 0, x, y) - ls.y_off) / ls.y_range;
+                let out = swap(ey, at(f, 1, x / 2, y / 2), at(f, 2, x / 2, y / 2));
+                return lt.y_off + lt.y_range * out[0];
+            }
+            let out = swap(0.5, at(f, 1, x, y), at(f, 2, x, y));
+            lt.c_off + lt.c_range * out[i]
+        })
+    }
+
+    pub fn weight(k: Kernel, x: f64) -> f64 {
+        let x = x.abs();
+        let sinc = |x: f64| {
+            if x == 0.0 {
+                1.0
+            } else {
+                (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
+            }
+        };
+        let a = -0.5;
+        match k {
+            Kernel::Bilinear => (1.0 - x).max(0.0),
+            Kernel::Bicubic if x < 1.0 => (a + 2.0) * x.powi(3) - (a + 3.0) * x * x + 1.0,
+            Kernel::Bicubic if x < 2.0 => a * x.powi(3) - 5.0 * a * x * x + 8.0 * a * x - 4.0 * a,
+            Kernel::Bicubic => 0.0,
+            Kernel::Lanczos if x < 3.0 => sinc(x) * sinc(x / 3.0),
+            Kernel::Lanczos => 0.0,
+        }
+    }
+
+    fn radius(k: Kernel) -> f64 {
+        match k {
+            Kernel::Bilinear => 1.0,
+            Kernel::Bicubic => 2.0,
+            Kernel::Lanczos => 3.0,
+        }
+    }
+
+    fn taps(src: usize, centre: f64, ratio: f64, k: Kernel) -> Vec<(usize, f64)> {
+        let widen = ratio.max(1.0);
+        let reach = radius(k) * widen;
+        let from = (centre - reach).floor() as i64;
+        let to = (centre + reach).ceil() as i64;
+        let raw: Vec<(usize, f64)> = (from..=to)
+            .map(|i| {
+                let w = weight(k, (i as f64 - centre) / widen);
+                (i.clamp(0, src as i64 - 1) as usize, w)
+            })
+            .collect();
+        let sum: f64 = raw.iter().map(|t| t.1).sum();
+        raw.into_iter().map(|(i, w)| (i, w / sum)).collect()
+    }
+
+    pub fn scale(f: &Frame, (dw, dh): (u32, u32), k: Kernel, siting: Siting) -> Frame {
+        let rx = f64::from(f.width) / f64::from(dw);
+        let ry = f64::from(f.height) / f64::from(dh);
+        let at_x = |i: usize, j: usize| match (i, siting) {
+            (0, _) => (j as f64 + 0.5) * rx - 0.5,
+            (_, Siting::Left) => ((2 * j) as f64 + 0.5) * rx / 2.0 - 0.25,
+            (_, Siting::Centre) => ((2 * j + 1) as f64 * rx - 1.0) / 2.0,
+        };
+        let at_y = |i: usize, j: usize| {
+            if i == 0 {
+                (j as f64 + 0.5) * ry - 0.5
+            } else {
+                ((2 * j + 1) as f64 * ry - 1.0) / 2.0
+            }
+        };
+        frame(f.format, (dw, dh), |i, x, y| {
+            let p = &f.planes[i];
+            let tx = taps(p.width, at_x(i, x), rx, k);
+            let ty = taps(p.height, at_y(i, y), ry, k);
+            ty.iter()
+                .map(|&(sy, wy)| {
+                    wy * tx
+                        .iter()
+                        .map(|&(sx, wx)| wx * at(f, i, sx, sy))
+                        .sum::<f64>()
+                })
+                .sum()
+        })
+    }
+
+    pub fn source(size: (u32, u32), n: u64, deep: bool) -> Frame {
+        refs::yuv(size, n, deep)
+    }
 }
 
 #[test]
-fn scale_matches_zscale() {
-    let r = Refs::open(refs::AREA);
+fn the_kernels_are_one_at_zero_and_zero_at_their_reach() {
+    for k in [Kernel::Bilinear, Kernel::Bicubic, Kernel::Lanczos] {
+        assert!((model::weight(k, 0.0) - 1.0).abs() < 1e-12, "{k:?}");
+        for x in [1.0, 2.0, 3.0] {
+            assert!(model::weight(k, x).abs() < 1e-12, "{k:?} at {x}");
+            assert!(
+                (model::weight(k, x) - k.weight(x)).abs() < 1e-12,
+                "{k:?} at {x}"
+            );
+        }
+        for i in 0..60 {
+            let x = f64::from(i) * 0.05;
+            assert!(
+                (model::weight(k, x) - k.weight(x)).abs() < 1e-12,
+                "{k:?} at {x}"
+            );
+        }
+    }
+    let flat = model::frame(PixelFormat::Yuv420p8, (64, 48), |_, _, _| 77.0);
+    let down = model::scale(&flat, (22, 16), Kernel::Lanczos, Siting::Left);
+    assert!(down.planes.iter().all(|p| p.data.iter().all(|&v| v == 77)));
+}
+
+#[test]
+fn the_colour_model_round_trips_and_keeps_grey_grey() {
+    for m in [Matrix::Bt601, Matrix::Bt709, Matrix::Bt2020] {
+        let k = model::kr_kb(m);
+        for rgb in [
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [0.9, 0.2, 0.4],
+            [0.1, 0.7, 0.3],
+        ] {
+            let back = model::rgb_of(model::ycc_of(rgb, k), k);
+            for (a, b) in rgb.iter().zip(back) {
+                assert!((a - b).abs() < 1e-12, "{m:?} {rgb:?} came back as {back:?}");
+            }
+        }
+        let [ey, eb, er] = model::ycc_of([0.5; 3], k);
+        assert!((ey - 0.5).abs() < 1e-12 && eb.abs() < 1e-12 && er.abs() < 1e-12);
+    }
+}
+
+#[test]
+fn scale_matches_the_kernel_model() {
     for (name, w, h, deep) in refs::SCALES {
         let pix = refs::pix(deep);
-        let theirs = yuv_ref(&r, &refs::scale_ref(name, w, h, deep), depth(deep), w, h);
-        for (n, t) in theirs.iter().enumerate() {
-            let input = refs::yuv(refs::SCALE_SIZE, n as u64, deep);
+        for n in 0..refs::FRAMES {
+            let input = model::source(refs::SCALE_SIZE, n, deep);
+            let want = model::scale(&input, (w, h), kernel_of(name), Siting::Left);
             let ours = scale(&input, w, h, kernel_of(name)).unwrap();
-            let p = frame_psnr(&ours, t);
+            let p = frame_psnr(&ours, &want);
             println!(
                 "{name} {w}x{h} {pix} frame {n}: PSNR {:.1} {:.1} {:.1}",
                 p[0], p[1], p[2]
@@ -260,25 +565,18 @@ fn scale_matches_zscale() {
 }
 
 #[test]
-fn colour_matches_ffmpeg() {
-    let r = Refs::open(refs::AREA);
+fn colour_matches_the_bt601_709_2020_model() {
     let size = refs::COLOUR_SIZE;
     let (w, h) = size;
     for (matrix, range) in refs::COLOURS {
         let spec = spec_of(matrix, range);
-        let theirs = packed_ref(&r, &refs::rgba_ref(matrix, range), size);
-        let back = yuv_ref(
-            &r,
-            &refs::yuv_ref(matrix, range),
-            PixelFormat::Yuv420p8,
-            w,
-            h,
-        );
+        let (m, r) = (matrix_of(matrix), range_of(range));
         for n in 0..refs::FRAMES {
             let frame = refs::yuv8(size, n);
             let mut rgba = Rgba::new(0, 0);
             yuv_to_rgba(&frame, spec, &mut rgba).unwrap();
-            let p = psnr(&rgba.data, &theirs[n as usize], false);
+            let want = model::to_packed(&frame, m, r, model::Up::Nearest, false);
+            let p = psnr(&rgba.data, &want, false);
             println!("yuv to rgba {matrix} {range} frame {n}: PSNR {p:.1}");
             assert!(p > 70.0, "yuv to rgba {matrix} {range} frame {n}: {p}");
 
@@ -295,7 +593,8 @@ fn colour_matches_ffmpeg() {
                 &mut ours,
             )
             .unwrap();
-            let p = frame_psnr(&ours, &back[n as usize]);
+            let want = model::from_packed(&image.data, size, false, m, r, Siting::Centre);
+            let p = frame_psnr(&ours, &want);
             println!(
                 "rgba to yuv {matrix} {range} frame {n}: PSNR {:.1} {:.1} {:.1}",
                 p[0], p[1], p[2]
@@ -306,9 +605,8 @@ fn colour_matches_ffmpeg() {
             );
         }
     }
-    let theirs = yuv_ref(&r, refs::CONVERT_10BIT, PixelFormat::Yuv420p10, w, h);
-    for (n, t) in theirs.iter().enumerate() {
-        let frame = refs::yuv8(size, n as u64);
+    for n in 0..refs::FRAMES {
+        let frame = refs::yuv8(size, n);
         let mut ours = Frame::new(PixelFormat::Yuv420p10, 0, 0, 0, frame.time_base);
         convert_color(
             &frame,
@@ -318,7 +616,13 @@ fn colour_matches_ffmpeg() {
             &mut ours,
         )
         .unwrap();
-        let p = frame_psnr(&ours, t);
+        let want = model::convert(
+            &frame,
+            (Matrix::Bt601, Range::Limited),
+            (Matrix::Bt709, Range::Full),
+            PixelFormat::Yuv420p10,
+        );
+        let p = frame_psnr(&ours, &want);
         println!(
             "bt601 limited 8-bit to bt709 full 10-bit frame {n}: PSNR {:.1} {:.1} {:.1}",
             p[0], p[1], p[2]
@@ -410,20 +714,11 @@ fn simd_kernels_match_plain() {
 }
 
 #[test]
-fn orders_and_siting_match_ffmpeg() {
-    let r = Refs::open(refs::AREA);
+fn orders_and_siting_match_the_model() {
     let size = refs::COLOUR_SIZE;
     let (w, h) = size;
     let mut ours = vec![0u8; (w * h * 4) as usize];
-    let bgra = packed_ref(&r, refs::BGRA, size);
-    let back = yuv_ref(&r, refs::BGR0_TO_YUV, PixelFormat::Yuv420p8, w, h);
-    let zscaled: Vec<Vec<Vec<u8>>> = refs::SITINGS
-        .iter()
-        .map(|s| packed_ref(&r, &refs::zscale_rgba_ref(s), size))
-        .collect();
-    let left = yuv_ref(&r, refs::RGBA_TO_YUV_LEFT, PixelFormat::Yuv420p8, w, h);
     for n in 0..refs::FRAMES {
-        let at = n as usize;
         let frame = refs::yuv8(size, n);
         yuv_to_packed(
             &frame,
@@ -432,7 +727,14 @@ fn orders_and_siting_match_ffmpeg() {
             PackedMut::new(w, h, Order::Bgra, &mut ours),
         )
         .unwrap();
-        let p = psnr(&ours, &bgra[at], false);
+        let want = model::to_packed(
+            &frame,
+            Matrix::Bt709,
+            Range::Limited,
+            model::Up::Nearest,
+            true,
+        );
+        let p = psnr(&ours, &want, false);
         println!("yuv to bgra frame {n}: PSNR {p:.1}");
         assert!(p > 70.0, "yuv to bgra frame {n}: {p}");
 
@@ -445,16 +747,24 @@ fn orders_and_siting_match_ffmpeg() {
             &mut got,
         )
         .unwrap();
-        let p = frame_psnr(&got, &back[at]);
+        let want = model::from_packed(
+            &image,
+            size,
+            true,
+            Matrix::Bt709,
+            Range::Limited,
+            Siting::Centre,
+        );
+        let p = frame_psnr(&got, &want);
         println!(
             "bgrx to yuv, centre, frame {n}: PSNR {:.1} {:.1} {:.1}",
             p[0], p[1], p[2]
         );
         assert!(p.iter().all(|&v| v > 75.0), "bgrx to yuv frame {n}: {p:?}");
 
-        for (siting, (name, theirs)) in [Siting::Left, Siting::Centre]
+        for (siting, name) in [Siting::Left, Siting::Centre]
             .into_iter()
-            .zip(refs::SITINGS.iter().zip(&zscaled))
+            .zip(refs::SITINGS)
         {
             yuv_to_packed(
                 &frame,
@@ -463,7 +773,9 @@ fn orders_and_siting_match_ffmpeg() {
                 PackedMut::new(w, h, Order::Rgba, &mut ours),
             )
             .unwrap();
-            let p = psnr(&ours, &theirs[at], false);
+            let up = model::Up::Bilinear(siting);
+            let want = model::to_packed(&frame, Matrix::Bt709, Range::Limited, up, false);
+            let p = psnr(&ours, &want, false);
             println!("yuv to rgba, bilinear chroma, {name}, frame {n}: PSNR {p:.1}");
             assert!(p > 80.0, "bilinear chroma {name} frame {n}: {p}");
         }
@@ -476,7 +788,15 @@ fn orders_and_siting_match_ffmpeg() {
             &mut got,
         )
         .unwrap();
-        let p = frame_psnr(&got, &left[at]);
+        let want = model::from_packed(
+            &image,
+            size,
+            false,
+            Matrix::Bt709,
+            Range::Limited,
+            Siting::Left,
+        );
+        let p = frame_psnr(&got, &want);
         println!(
             "rgba to yuv, left, frame {n}: PSNR {:.1} {:.1} {:.1}",
             p[0], p[1], p[2]
@@ -487,17 +807,17 @@ fn orders_and_siting_match_ffmpeg() {
         );
     }
 
-    let (sw, sh) = refs::SCALE_SIZE;
     let (cw, ch) = refs::CENTRE_SIZE;
-    let expect = yuv_ref(&r, refs::SCALE_CENTRE, PixelFormat::Yuv420p8, cw, ch);
+    let (sw, sh) = refs::SCALE_SIZE;
     let scaler = Scaler::new(sw, sh, cw, ch, PixelFormat::Yuv420p8, Kernel::Lanczos)
         .unwrap()
         .siting(Siting::Centre);
-    for (n, t) in expect.iter().enumerate() {
-        let frame = refs::yuv8(refs::SCALE_SIZE, n as u64);
+    for n in 0..refs::FRAMES {
+        let frame = refs::yuv8(refs::SCALE_SIZE, n);
+        let want = model::scale(&frame, (cw, ch), Kernel::Lanczos, Siting::Centre);
         let mut scaled = Frame::new(PixelFormat::Yuv420p8, 0, 0, 0, frame.time_base);
         scaler.run(&frame, &mut scaled).unwrap();
-        let p = frame_psnr(&scaled, t);
+        let p = frame_psnr(&scaled, &want);
         println!(
             "scale lanczos, centre siting, frame {n}: PSNR {:.1} {:.1} {:.1}",
             p[0], p[1], p[2]

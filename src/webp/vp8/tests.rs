@@ -68,14 +68,14 @@ fn decodes_libwebp_bit_exact() {
 }
 
 #[test]
-fn decodes_libvpx_partitions_and_simple_filter_like_ffmpeg() {
+fn decodes_libvpx_partitions_and_simple_filter_like_vpxdec() {
     let r = Refs::open(refs::AREA);
-    for (name, _, profile, slices, sharpness, (w, h), _) in refs::LIBVPX {
+    for (name, _, profile, parts, sharpness, (w, h), _) in refs::LIBVPX {
         let file = r.bytes(&format!("{name}.ivf"));
         let frame = &file[32 + 12..];
         let f = super::decode_yuv(frame).expect("decode");
         assert_eq!((f.width, f.height), (w as usize, h as usize), "{name}");
-        eprintln!("{name}: profile {profile}, {slices} partitions, sharpness {sharpness}");
+        eprintln!("{name}: profile {profile}, 2^{parts} partitions, sharpness {sharpness}");
         r.assert_digest(&format!("{name}.yuv"), &yuv_digest(&f));
     }
 }

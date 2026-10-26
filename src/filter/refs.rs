@@ -1,5 +1,6 @@
 use crate::testref::{self, Sound};
-use pito_codecs::media::{Frame, PixelFormat, TimeBase};
+use pito_codecs::filter::{Loudness, LoudnessMeter};
+use pito_codecs::media::{AudioBuffer, Frame, PixelFormat, TimeBase};
 
 pub const AREA: &str = "filter";
 pub const FRAMES: u64 = 2;
@@ -24,28 +25,6 @@ pub const SITINGS: [&str; 2] = ["left", "center"];
 pub fn pix(deep: bool) -> &'static str {
     if deep { "yuv420p10le" } else { "yuv420p" }
 }
-
-pub fn scale_ref(kernel: &str, w: u32, h: u32, deep: bool) -> String {
-    format!("zscale-{kernel}-{w}x{h}-{}.yuv", pix(deep))
-}
-
-pub fn rgba_ref(matrix: &str, range: &str) -> String {
-    format!("rgba-{matrix}-{range}.rgba")
-}
-
-pub fn yuv_ref(matrix: &str, range: &str) -> String {
-    format!("yuv-{matrix}-{range}.yuv")
-}
-
-pub fn zscale_rgba_ref(siting: &str) -> String {
-    format!("zscale-rgba-{siting}.rgba")
-}
-
-pub const CONVERT_10BIT: &str = "bt601-tv-to-bt709-pc-10bit.yuv";
-pub const BGRA: &str = "bgra-bt709-tv.bgra";
-pub const BGR0_TO_YUV: &str = "bgr0-to-yuv-bt709-tv-area.yuv";
-pub const RGBA_TO_YUV_LEFT: &str = "rgba-to-yuv-bt709-tv-left.yuv";
-pub const SCALE_CENTRE: &str = "zscale-lanczos-48x36-center.yuv";
 
 pub fn yuv8(size: (u32, u32), n: u64) -> Frame {
     testref::yuv_frame(size.0, size.1, n, NOISE[n as usize % 2])
@@ -153,6 +132,10 @@ pub fn loudness_ref(label: &str) -> String {
     format!("r128-{label}.txt")
 }
 
+pub fn loudness_input(label: &str) -> String {
+    format!("r128-{label}.f32")
+}
+
 pub fn loudness_frames(rate: u32, seconds: f64) -> usize {
     (f64::from(rate) * seconds) as usize
 }
@@ -168,8 +151,32 @@ pub fn loudness_bytes(sound: Sound, rate: u32, seconds: f64) -> Vec<u8> {
         .collect()
 }
 
+pub fn meter_summary(sound: Sound, rate: u32, seconds: f64) -> Result<Loudness, String> {
+    let samples = loudness_pcm(sound, rate, seconds);
+    let mut meter =
+        LoudnessMeter::new(rate, CHANNELS).map_err(|e| format!("a {rate} Hz meter: {e}"))?;
+    for chunk in samples.chunks(usize::from(CHANNELS) * 1999) {
+        let part = AudioBuffer {
+            samples: chunk.to_vec(),
+            rate,
+            channels: CHANNELS,
+        };
+        meter
+            .process(&part)
+            .map_err(|e| format!("{rate} Hz: {e}"))?;
+    }
+    Ok(meter.summary())
+}
+
+pub fn meter_text(l: &Loudness) -> String {
+    format!(
+        "I={:.3}\nLRA={:.3}\nTP={:.3}\n",
+        l.integrated, l.range, l.true_peak
+    )
+}
+
 pub fn meter_field(text: &str, key: &str) -> Option<f64> {
-    let want = format!("lavfi.r128.{key}=");
+    let want = format!("{key}=");
     text.lines()
         .rev()
         .find_map(|l| l.trim().strip_prefix(want.as_str()))

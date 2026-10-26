@@ -1,6 +1,9 @@
 use super::*;
-use std::io::Write;
-use std::process::{Command, Stdio};
+use crate::testref::Refs;
+
+#[allow(dead_code)]
+#[path = "refs.rs"]
+pub(crate) mod refs;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Pattern {
@@ -84,21 +87,6 @@ fn psnr(a: &[u8], b: &[u8]) -> f64 {
     } else {
         10.0 * (255.0 * 255.0 / mse).log10()
     }
-}
-
-fn run(tool: &str, args: &[&str], input: Vec<u8>) -> Option<Vec<u8>> {
-    let mut child = Command::new(tool)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let mut stdin = child.stdin.take()?;
-    let feeder = std::thread::spawn(move || stdin.write_all(&input).is_ok());
-    let out = child.wait_with_output().ok()?;
-    let fed = feeder.join().ok()?;
-    (fed && out.status.success()).then_some(out.stdout)
 }
 
 fn planes(file: &[u8]) -> Option<Vec<u8>> {
@@ -663,50 +651,6 @@ fn flat_colours_decode_back() {
     }
 }
 
-fn photo_like(width: u32, height: u32) -> Rgba {
-    let mut img = image(Pattern::Gradient, width, height);
-    let mut s = 99u32;
-    for (i, px) in img.data.chunks_exact_mut(4).enumerate() {
-        let (x, y) = (i as u32 % width, i as u32 / width);
-        s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        let grain = ((s >> 24) as i16 - 128) / 10;
-        let disc = {
-            let dx = x as i32 - width as i32 / 3;
-            let dy = y as i32 - height as i32 / 2;
-            dx * dx + dy * dy < (height as i32 / 4).pow(2)
-        };
-        let stripes = (x / 40 + y / 40) % 7 == 0;
-        for (c, p) in px.iter_mut().take(3).enumerate() {
-            let mut v = i16::from(*p) + grain;
-            if disc {
-                v = 230 - v / 3;
-            }
-            if stripes {
-                v = (v + 90 * c as i16) % 256;
-            }
-            *p = v.clamp(0, 255) as u8;
-        }
-    }
-    img
-}
-
-fn ppm(img: &Rgba) -> Vec<u8> {
-    let mut out = format!("P6\n{} {}\n255\n", img.width, img.height).into_bytes();
-    for px in img.data.chunks_exact(4) {
-        out.extend_from_slice(&px[..3]);
-    }
-    out
-}
-
-fn libjpeg_turbo() -> bool {
-    Command::new("cjpeg")
-        .arg("-version")
-        .output()
-        .is_ok_and(|o| {
-            String::from_utf8_lossy(&[o.stdout, o.stderr].concat()).contains("libjpeg-turbo")
-        })
-}
-
 fn photo_floor(quality: u8) -> f64 {
     match quality {
         50 => 31.0,
@@ -718,11 +662,9 @@ fn photo_floor(quality: u8) -> f64 {
 
 #[test]
 fn size_and_psnr_stay_close_to_libjpeg_turbo() {
-    let turbo = libjpeg_turbo();
-    let img = photo_like(1920, 1080);
+    let img = refs::photo_like(1920, 1080);
     let want = luma(&img);
-    let input = ppm(&img);
-    for q in [50u8, 75, 85, 90] {
+    for q in refs::LIBJPEG_QUALITIES {
         let ours = scalar(&img, q);
         let fast = encode(&img, q).expect("encode");
         assert!(ours == fast, "q{q}: dispatch and scalar differ");
@@ -734,18 +676,22 @@ fn size_and_psnr_stay_close_to_libjpeg_turbo() {
             "q{q}: {ours_psnr:.2} dB < {}",
             photo_floor(q)
         );
-        if !turbo {
-            eprintln!("no libjpeg-turbo cjpeg; its size and PSNR comparison skipped");
-            continue;
-        }
-        let qs = q.to_string();
-        let theirs = run("cjpeg", &["-quality", &qs, "-sample", "2x2"], input.clone())
-            .expect("cjpeg encode");
+    }
+    let r = Refs::open(refs::AREA);
+    let (w, h) = refs::LIBJPEG_SIZE;
+    let img = refs::photo_like(w, h);
+    let want = luma(&img);
+    for q in refs::LIBJPEG_QUALITIES {
+        let ours = encode(&img, q).expect("encode");
+        let ours_y = planes(&ours).expect("decode ours");
+        let ours_psnr = psnr(&want, &ours_y[..want.len()]);
+        let theirs = r.bytes(&format!("{}.jpg", refs::libjpeg(q)));
         let theirs_y = planes(&theirs).expect("decode cjpeg");
         let theirs_psnr = psnr(&want, &theirs_y[..want.len()]);
         let ratio = ours.len() as f64 / theirs.len() as f64;
         eprintln!(
-            "1080p q{q}: libjpeg-turbo {} B {theirs_psnr:.2} dB; size ratio {ratio:.3}",
+            "{w}x{h} q{q}: ours {} B {ours_psnr:.2} dB, libjpeg-turbo {} B {theirs_psnr:.2} dB; size ratio {ratio:.3}",
+            ours.len(),
             theirs.len()
         );
         if q == 85 {
@@ -756,4 +702,14 @@ fn size_and_psnr_stay_close_to_libjpeg_turbo() {
             "q{q}: {ours_psnr:.2} dB against libjpeg-turbo's {theirs_psnr:.2}"
         );
     }
+}
+
+#[test]
+fn the_photo_is_the_gradient_with_grain_a_disc_and_stripes() {
+    let (w, h) = refs::LIBJPEG_SIZE;
+    assert_eq!(refs::gradient(w, h), image(Pattern::Gradient, w, h));
+    let photo = refs::photo_like(w, h);
+    assert_eq!((photo.width, photo.height), (w, h));
+    assert_ne!(photo, image(Pattern::Gradient, w, h));
+    assert!(photo.data.chunks_exact(4).all(|p| p[3] == 255));
 }

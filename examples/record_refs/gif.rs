@@ -1,5 +1,5 @@
 use crate::testref;
-use crate::{Def, FFMPEG, ff};
+use crate::{Def, tool};
 
 #[path = "../../src/gif/refs.rs"]
 mod refs;
@@ -14,43 +14,51 @@ fn decoded(gif: &str) -> Def {
     Def::digest(
         AREA,
         format!("{gif}.rgba"),
-        FFMPEG,
-        ff(&[
-            "-i",
-            &format!("{{ref:{gif}.gif}}"),
-            "-fps_mode",
-            "passthrough",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgba",
-            "{out}",
-        ]),
+        "magick",
+        tool(
+            "magick",
+            &[
+                &format!("{{ref:{gif}.gif}}"),
+                "-coalesce",
+                "-alpha",
+                "on",
+                "-depth",
+                "8",
+                "rgba:{out}",
+            ],
+        ),
         rgba,
     )
+}
+
+fn split(ops: &str) -> Vec<String> {
+    ops.split('|').map(str::to_string).collect()
 }
 
 pub fn defs() -> Vec<Def> {
     let size = format!("{}x{}", refs::SIZE.0, refs::SIZE.1);
     let mut defs = Vec::new();
-    for (name, graph) in refs::FFMPEG_GIFS {
-        let args = ff(&[
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgba",
-            "-s",
-            &size,
-            "-r",
-            "10",
-            "-i",
-            "{src}",
-            "-filter_complex",
-            &format!("split[s0][s1];[s0]{graph}"),
-            "{out}",
-        ]);
+    for (name, ops) in refs::MAGICK_ANIMS {
+        let mut args = tool(
+            "magick",
+            &[
+                "-size",
+                &size,
+                "-depth",
+                "8",
+                "rgba:{src}",
+                "-alpha",
+                "off",
+                "-delay",
+                "10",
+                "-loop",
+                "0",
+            ],
+        );
+        args.extend(split(ops));
+        args.push("{out}".into());
         defs.push(
-            Def::fixture(AREA, format!("{name}.gif"), FFMPEG, args)
+            Def::fixture(AREA, format!("{name}.gif"), "magick", args)
                 .from(|| Ok(refs::source_bytes())),
         );
         defs.push(decoded(name));
@@ -72,7 +80,7 @@ pub fn defs() -> Vec<Def> {
     ));
     defs.push(decoded("alpha"));
     for (name, _, _, args) in refs::MAGICK_GIFS {
-        let mut args: Vec<String> = args.split('|').map(str::to_string).collect();
+        let mut args = split(args);
         args.push(
             if name == "im-87" {
                 "GIF87:{out}"
@@ -81,7 +89,15 @@ pub fn defs() -> Vec<Def> {
             }
             .into(),
         );
-        defs.push(Def::fixture(AREA, format!("{name}.gif"), "magick", args));
+        defs.push(Def::fixture(
+            AREA,
+            format!("{name}.gif"),
+            "magick",
+            tool(
+                "magick",
+                &args.iter().map(String::as_str).collect::<Vec<_>>(),
+            ),
+        ));
         defs.push(decoded(name));
     }
     defs

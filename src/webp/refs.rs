@@ -57,40 +57,37 @@ pub fn bytes(frames: &[Rgba]) -> Vec<u8> {
 pub type Still = (&'static str, Pic, (u32, u32), &'static [&'static str]);
 
 pub const LOSSLESS: [Still; 6] = [
-    (
-        "ll_pattern",
-        Pic::Pattern(0),
-        (131, 87),
-        &["-lossless", "1"],
-    ),
+    ("ll_pattern", Pic::Pattern(0), (131, 87), &LOSSLESS_DEFAULT),
     (
         "ll_fast",
         Pic::Noisy(1, 6),
         (96, 64),
-        &["-lossless", "1", "-compression_level", "0"],
+        &["-define", "webp:lossless=true", "-define", "webp:method=0"],
     ),
     (
         "ll_best",
         Pic::Pattern(2),
         (120, 90),
         &[
-            "-lossless",
-            "1",
-            "-compression_level",
-            "6",
+            "-define",
+            "webp:lossless=true",
+            "-define",
+            "webp:method=6",
             "-quality",
             "100",
         ],
     ),
-    ("ll_alpha", Pic::Ramp, (100, 60), &["-lossless", "1"]),
-    ("ll_palette", Pic::Bars, (150, 50), &["-lossless", "1"]),
+    ("ll_alpha", Pic::Ramp, (100, 60), &LOSSLESS_DEFAULT),
+    ("ll_palette", Pic::Bars, (150, 50), &LOSSLESS_DEFAULT),
     (
         "ll_odd",
         Pic::Pattern(3),
         (97, 61),
-        &["-lossless", "1", "-compression_level", "6"],
+        &["-define", "webp:lossless=true", "-define", "webp:method=6"],
     ),
 ];
+
+pub const LOSSLESS_DEFAULT: [&str; 2] = ["-define", "webp:lossless=true"];
 
 pub const ANIM: &str = "anim_ll";
 pub const ANIM_SIZE: (u32, u32) = (96, 64);
@@ -252,10 +249,10 @@ pub type Vpx = (
 );
 
 pub const LIBVPX: [Vpx; 6] = [
-    ("vpx-a", Pic::Pattern(0), "0", "1", "0", (352, 240), "30"),
-    ("vpx-b", Pic::Noisy(1, 4), "0", "8", "0", (352, 240), "50"),
-    ("vpx-c", Pic::Pattern(1), "0", "4", "3", (352, 240), "50"),
-    ("vpx-d", Pic::Noisy(2, 4), "1", "1", "0", (352, 240), "50"),
-    ("vpx-e", Pic::Pattern(2), "1", "8", "6", (320, 240), "40"),
-    ("vpx-f", Pic::Noisy(3, 4), "3", "2", "2", (98, 62), "60"),
+    ("vpx-a", Pic::Pattern(0), "0", "0", "0", (352, 240), "30"),
+    ("vpx-b", Pic::Noisy(1, 4), "0", "3", "0", (352, 240), "50"),
+    ("vpx-c", Pic::Pattern(1), "0", "2", "3", (352, 240), "50"),
+    ("vpx-d", Pic::Noisy(2, 4), "1", "0", "0", (352, 240), "50"),
+    ("vpx-e", Pic::Pattern(2), "1", "3", "6", (320, 240), "40"),
+    ("vpx-f", Pic::Noisy(3, 4), "3", "1", "2", (98, 62), "60"),
 ];

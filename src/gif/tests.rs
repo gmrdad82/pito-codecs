@@ -14,7 +14,7 @@ fn rgba_digest(a: &Animation) -> String {
     d.hex()
 }
 
-fn assert_like_ffmpeg(r: &Refs, gif: &str, a: &Animation) {
+fn assert_like_magick(r: &Refs, gif: &str, a: &Animation) {
     r.assert_digest(&format!("{gif}.rgba"), &rgba_digest(a));
 }
 
@@ -46,19 +46,19 @@ fn psnr(a: &Rgba, b: &Rgba) -> f64 {
 }
 
 #[test]
-fn decodes_ffmpeg_gifs_exactly() {
+fn decodes_magick_animations_like_magick() {
     let r = Refs::open(refs::AREA);
     let (w, h) = refs::SIZE;
-    for (name, _) in refs::FFMPEG_GIFS {
+    for (name, _) in refs::MAGICK_ANIMS {
         let a = decode(&r.bytes(&format!("{name}.gif"))).unwrap();
         assert_eq!((a.width, a.height), (w, h), "{name}");
         assert_eq!(a.frames.len() as u64, refs::FRAMES, "{name}");
-        assert_like_ffmpeg(&r, name, &a);
+        assert_like_magick(&r, name, &a);
     }
 }
 
 #[test]
-fn ffmpeg_decodes_ours_exactly() {
+fn magick_decodes_ours_exactly() {
     let r = Refs::open(refs::AREA);
     let src = refs::source();
     for (name, _) in refs::ours() {
@@ -67,7 +67,7 @@ fn ffmpeg_decodes_ours_exactly() {
         let a = decode(&bytes).unwrap();
         assert_eq!(a.loop_count, Some(0));
         assert_eq!(a.frames.len(), src.len(), "{name}");
-        assert_like_ffmpeg(&r, name, &a);
+        assert_like_magick(&r, name, &a);
         for (i, ((f, _), s)) in a.frames.iter().zip(&src).enumerate() {
             let p = psnr(f, s);
             assert!(p > 26.0, "{name}: frame {i} PSNR {p:.1}");
@@ -78,11 +78,11 @@ fn ffmpeg_decodes_ours_exactly() {
 #[test]
 fn a_damaged_reference_is_refused_before_use() {
     let r = Refs::open(refs::AREA);
-    let mut bytes = r.bytes("ff-global.gif");
+    let mut bytes = r.bytes("im-global.gif");
     bytes[20] ^= 1;
-    assert_ne!(testref::sha256(&bytes), r.digest("ff-global.gif"));
+    assert_ne!(testref::sha256(&bytes), r.digest("im-global.gif"));
     let a = decode(&bytes).ok().map(|a| rgba_digest(&a));
-    assert_ne!(a.as_deref(), Some(r.digest("ff-global.rgba")));
+    assert_ne!(a.as_deref(), Some(r.digest("im-global.rgba")));
 }
 
 #[test]
@@ -132,7 +132,7 @@ fn transparency_and_still_frames_survive() {
         let p = psnr(got, &frames[k]);
         assert!(p > 22.0, "frame {k}: PSNR {p:.1}");
     }
-    assert_like_ffmpeg(&r, "alpha", &a);
+    assert_like_magick(&r, "alpha", &a);
 }
 
 #[test]
@@ -170,7 +170,7 @@ fn decodes_interlaced_disposal_and_gif87a_exactly() {
     for (name, w, h, _) in refs::MAGICK_GIFS {
         let a = decode(&r.bytes(&format!("{name}.gif"))).unwrap();
         assert_eq!((a.width, a.height), (w, h), "{name}");
-        assert_like_ffmpeg(&r, name, &a);
+        assert_like_magick(&r, name, &a);
     }
     let dispose = decode(&r.bytes("im-dispose.gif")).unwrap();
     assert_eq!(dispose.loop_count, Some(2));

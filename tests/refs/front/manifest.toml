@@ -1,0 +1,71 @@
+[[ref]]
+name = "source.i420"
+file = ""
+sha256 = "39c194f323dbd7908f67a36011fab14de5763a6bcff05142b6452633daf5694d"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/media/front/refs.rs source_bytes()"
+
+[[ref]]
+name = "hevc-tagged.265"
+file = ""
+sha256 = "059bcf54a3aa23c75b3008c566e976688809ef39cfb8e735abcecceeaf9f039b"
+kind = "bit-exact"
+tool = "x265 [info]: HEVC encoder version 4.3"
+command = "x265 --input {src} --input-res 352x240 --input-csp i420 --fps 10 --frames 65 --preset ultrafast --crf 51 --keyint 5 --min-keyint 5 --no-scenecut --no-open-gop --bframes 0 --frame-threads 1 --no-info --log-level error --sar 4:3 --colorprim bt709 --transfer bt709 --colormatrix bt709 --range limited --output {out}"
+
+[[ref]]
+name = "hevc-tagged.mp4"
+file = "hevc-tagged.mp4"
+sha256 = "d1de1c862aa604643c441a0a8e44c7824f12b892c4a7ad8925a665de78a6498d"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: examples/record_refs/filter.rs hevc_mp4(\"hevc-tagged.265\")"
+
+[[ref]]
+name = "hevc-untagged.265"
+file = ""
+sha256 = "dee0f7cd1208c8780ae5b320ca7602c4d9d7e6a5e6c4d47fad75d619c3469e4c"
+kind = "bit-exact"
+tool = "x265 [info]: HEVC encoder version 4.3"
+command = "x265 --input {src} --input-res 352x240 --input-csp i420 --fps 10 --frames 65 --preset ultrafast --crf 51 --keyint 5 --min-keyint 5 --no-scenecut --no-open-gop --bframes 0 --frame-threads 1 --no-info --log-level error --output {out}"
+
+[[ref]]
+name = "hevc-untagged.mp4"
+file = "hevc-untagged.mp4"
+sha256 = "dd34ba5e98d229a35302e198f56e5da74906c26ad4e714c82a70b7e4f9e556b1"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: examples/record_refs/filter.rs hevc_mp4(\"hevc-untagged.265\")"
+
+[[ref]]
+name = "hevc-anamorphic-full.265"
+file = ""
+sha256 = "5b78b6356b0d325d395f134c8a9378bfacc2491a6a8eaf6feb1d2d2fb214a37f"
+kind = "bit-exact"
+tool = "x265 [info]: HEVC encoder version 4.3"
+command = "x265 --input {src} --input-res 352x240 --input-csp i420 --fps 10 --frames 65 --preset ultrafast --crf 51 --keyint 5 --min-keyint 5 --no-scenecut --no-open-gop --bframes 0 --frame-threads 1 --no-info --log-level error --sar 8:9 --colorprim bt709 --transfer bt709 --colormatrix bt709 --range full --output {out}"
+
+[[ref]]
+name = "hevc-anamorphic-full.mp4"
+file = "hevc-anamorphic-full.mp4"
+sha256 = "3fbdc8cf38c23d9bb9eee863b8bc36dd25add0f54127da6ac769139982c91e81"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: examples/record_refs/filter.rs hevc_mp4(\"hevc-anamorphic-full.265\")"
+
+[[ref]]
+name = "h264-untagged.mp4"
+file = "h264-untagged.mp4"
+sha256 = "e93f9af3036d33d3f3b406fc0732326713e5420aa4f2d62c91e0113721fdad82"
+kind = "fixture"
+tool = "x264 0.165.3222 b35605a"
+command = "x264 --demuxer raw --input-csp i420 --input-res 352x240 --fps 10 --frames 65 --preset ultrafast --crf 51 --keyint 5 --min-keyint 5 --scenecut 0 --bframes 0 --threads 1 --quiet --muxer mp4 -o {out} {src}"
+
+[[ref]]
+name = "h264-anamorphic-full.mp4"
+file = "h264-anamorphic-full.mp4"
+sha256 = "739bae2f81fc92936a8061b3bf9a9ed77f9b3b3e282d83c7e6b4e1888c9ec119"
+kind = "fixture"
+tool = "x264 0.165.3222 b35605a"
+command = "x264 --demuxer raw --input-csp i420 --input-res 352x240 --fps 10 --frames 65 --preset ultrafast --crf 51 --keyint 5 --min-keyint 5 --scenecut 0 --bframes 0 --threads 1 --quiet --sar 8:9 --colorprim bt709 --transfer bt709 --colormatrix bt709 --range pc --input-range pc --muxer mp4 -o {out} {src}"

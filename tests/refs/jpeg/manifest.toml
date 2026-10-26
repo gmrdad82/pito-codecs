@@ -1,0 +1,1535 @@
+[[ref]]
+name = "cj444-7x5.jpg"
+file = "cj444-7x5.jpg"
+sha256 = "20d95a852f15916720781ce63cfbc66a596c2819c8628e27112f44414e34658a"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 1x1 -quality 95 -outfile {out} {src}"
+
+[[ref]]
+name = "cj444-7x5.planes.ppm"
+file = "cj444-7x5.planes.ppm"
+sha256 = "70ebe0ec8bdeee01d92ebcc48e100d8eea8df9d2a0d4a1c92f6b220cd6896dad"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj444-7x5-prog.jpg"
+file = "cj444-7x5-prog.jpg"
+sha256 = "030ca3477261042847bb4383aa8067dcebbcb9ba14ba0a9bdfc8f869abcf912c"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:cj444-7x5.jpg}"
+
+[[ref]]
+name = "cj444-7x5-rst1.jpg"
+file = "cj444-7x5-rst1.jpg"
+sha256 = "d350f794dd1ff0081416df62697f62fbf93915357db376bfc858a6ef0cfa7d66"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 1 -outfile {out} {ref:cj444-7x5.jpg}"
+
+[[ref]]
+name = "cj444-7x5-rst3b.jpg"
+file = "cj444-7x5-rst3b.jpg"
+sha256 = "fa924e51015d6eb2e247a7c9b3000e5848a5c64dbd3cfdd56ff3501fc80e1b7b"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 3B -outfile {out} {ref:cj444-7x5.jpg}"
+
+[[ref]]
+name = "cj444-7x5-prog-rst2b.jpg"
+file = "cj444-7x5-prog-rst2b.jpg"
+sha256 = "5d7724eda864020d0d5e682135e20206922e008b71cdab939f61c2ec511e8bd3"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -restart 2B -outfile {out} {ref:cj444-7x5.jpg}"
+
+[[ref]]
+name = "cj444-33x17.jpg"
+file = "cj444-33x17.jpg"
+sha256 = "10d795105008586893ad94b5a600d6e2dcb7bdfd48d0bf66923a8a4fd92ae6c7"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 1x1 -quality 95 -outfile {out} {src}"
+
+[[ref]]
+name = "cj444-33x17.planes.ppm"
+file = "cj444-33x17.planes.ppm"
+sha256 = "eee6ad5c475aa39e0a8ff0515e633ef59d191ac3da4e37a21aaa1a29d52a9cf6"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj444-33x17-prog.jpg"
+file = "cj444-33x17-prog.jpg"
+sha256 = "b80f9dcc48e1705b3a6808cf5895c7f97607fd78a49f5b3ee4f3258d166b0150"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:cj444-33x17.jpg}"
+
+[[ref]]
+name = "cj444-33x17-rst1.jpg"
+file = "cj444-33x17-rst1.jpg"
+sha256 = "42aa3ba6f05837be41156235455b4e52bc389c691bec6eb5448d45dcb8cbe2ca"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 1 -outfile {out} {ref:cj444-33x17.jpg}"
+
+[[ref]]
+name = "cj444-33x17-rst3b.jpg"
+file = "cj444-33x17-rst3b.jpg"
+sha256 = "6d450aee9f5ae6d935ab3a5cf6fc362b5daeecf089828677873cc4fdf74fbaf6"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 3B -outfile {out} {ref:cj444-33x17.jpg}"
+
+[[ref]]
+name = "cj444-33x17-prog-rst2b.jpg"
+file = "cj444-33x17-prog-rst2b.jpg"
+sha256 = "7e9d92de3b982c1df8a23185d08cd3a59aaf96af27b593b19b9eedc76e459c1f"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -restart 2B -outfile {out} {ref:cj444-33x17.jpg}"
+
+[[ref]]
+name = "cj444-17x33.jpg"
+file = "cj444-17x33.jpg"
+sha256 = "9e3d8a7cf63be63f5aff49ba011a9506ac8ed61521f62e6f5a246bb82082ce4d"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 1x1 -quality 95 -outfile {out} {src}"
+
+[[ref]]
+name = "cj444-17x33.planes.ppm"
+file = "cj444-17x33.planes.ppm"
+sha256 = "5a6f3683aeb1de12529e02d8a3d714c2482a13b425bebe41f77a9adfbf265b3b"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj444-17x33-prog.jpg"
+file = "cj444-17x33-prog.jpg"
+sha256 = "2b3ae047a1ebb948368a1618c9e439696ccff6f4f0d070e5d020d9b045121248"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:cj444-17x33.jpg}"
+
+[[ref]]
+name = "cj444-17x33-rst1.jpg"
+file = "cj444-17x33-rst1.jpg"
+sha256 = "36fc4ae78a38028753884f5e0190127d4ebe4ec5109a727be7510029844a1e67"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 1 -outfile {out} {ref:cj444-17x33.jpg}"
+
+[[ref]]
+name = "cj444-17x33-rst3b.jpg"
+file = "cj444-17x33-rst3b.jpg"
+sha256 = "36fc4ae78a38028753884f5e0190127d4ebe4ec5109a727be7510029844a1e67"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 3B -outfile {out} {ref:cj444-17x33.jpg}"
+
+[[ref]]
+name = "cj444-17x33-prog-rst2b.jpg"
+file = "cj444-17x33-prog-rst2b.jpg"
+sha256 = "fc5a4654c94f45b244afd5a20e1b9eb2b4da498649ee930537a1d7c34dc82cae"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -restart 2B -outfile {out} {ref:cj444-17x33.jpg}"
+
+[[ref]]
+name = "cj444-64x48.jpg"
+file = "cj444-64x48.jpg"
+sha256 = "ae195690156563013bdd60fe98e99dfe7bd5e89f7cb9d71113aa783067b4b7dc"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 1x1 -quality 95 -outfile {out} {src}"
+
+[[ref]]
+name = "cj444-64x48.planes.ppm"
+file = "cj444-64x48.planes.ppm"
+sha256 = "77ae549421e934665a1821a035735883a6e43ef868196f7d2a51f100b2b20038"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj444-64x48-prog.jpg"
+file = "cj444-64x48-prog.jpg"
+sha256 = "78e5005e59d0abe89fc2e129499ed952250f7f2289bdf42130ebbc925a2b596c"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:cj444-64x48.jpg}"
+
+[[ref]]
+name = "cj444-64x48-rst1.jpg"
+file = "cj444-64x48-rst1.jpg"
+sha256 = "011001a6c6c8231323d9573b7c75030f7d730794ecc80d56ff94b1c6244aaaa1"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 1 -outfile {out} {ref:cj444-64x48.jpg}"
+
+[[ref]]
+name = "cj444-64x48-rst3b.jpg"
+file = "cj444-64x48-rst3b.jpg"
+sha256 = "73827f367447311508537a74699e2e0dcabc4599f05feb3a198647040f2aa770"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 3B -outfile {out} {ref:cj444-64x48.jpg}"
+
+[[ref]]
+name = "cj444-64x48-prog-rst2b.jpg"
+file = "cj444-64x48-prog-rst2b.jpg"
+sha256 = "301ad0168e0987c89d533e53b46f1d0a8eaf3395b5924c659b42feec1da3d2bc"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -restart 2B -outfile {out} {ref:cj444-64x48.jpg}"
+
+[[ref]]
+name = "cj444-49x37.jpg"
+file = "cj444-49x37.jpg"
+sha256 = "ec18fa34e8cc2c92a3f384d049ba2348e2b067cb9f5d8de36c5f384cedd02a8d"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 1x1 -quality 95 -outfile {out} {src}"
+
+[[ref]]
+name = "cj444-49x37.planes.ppm"
+file = "cj444-49x37.planes.ppm"
+sha256 = "6cf04a3e89ba533cc0c3ead3945402c386412f01fa9e6d15b326665d30c5fefa"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj444-49x37-prog.jpg"
+file = "cj444-49x37-prog.jpg"
+sha256 = "71c89c4a2f9d264d31907f4890249ab1ebab407206ff92c501822cd6e48bd585"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:cj444-49x37.jpg}"
+
+[[ref]]
+name = "cj444-49x37-rst1.jpg"
+file = "cj444-49x37-rst1.jpg"
+sha256 = "d95d9f37c6937d8f9a320fee344e286aa2e69397ef4e863ebdcaa7ef227d1ea4"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 1 -outfile {out} {ref:cj444-49x37.jpg}"
+
+[[ref]]
+name = "cj444-49x37-rst3b.jpg"
+file = "cj444-49x37-rst3b.jpg"
+sha256 = "7939e2b3097d7feb9b09d710c633e271be8dd10799d30857ba1e338f011236e5"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 3B -outfile {out} {ref:cj444-49x37.jpg}"
+
+[[ref]]
+name = "cj444-49x37-prog-rst2b.jpg"
+file = "cj444-49x37-prog-rst2b.jpg"
+sha256 = "5e557ee2d409db64ab96faca65a273737f9a4bf0c955875fdda3f685ae9c9bd0"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -restart 2B -outfile {out} {ref:cj444-49x37.jpg}"
+
+[[ref]]
+name = "cj422-7x5.jpg"
+file = "cj422-7x5.jpg"
+sha256 = "74c8d4d0bcbd1e49578fad849c4fb01849397733f6831af1e6d2bc24a2a5d4dc"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 2x1 -quality 95 -outfile {out} {src}"
+
+[[ref]]
+name = "cj422-7x5.planes.ppm"
+file = "cj422-7x5.planes.ppm"
+sha256 = "625901813bf5bbd9913e282006c3cf749c99dc66a68dc6298388f6cce9eab4e8"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj422-7x5-prog.jpg"
+file = "cj422-7x5-prog.jpg"
+sha256 = "aa0360f431967364a6de26727dd922e9bd22e87f5e7c2882158a6d36198f7bac"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:cj422-7x5.jpg}"
+
+[[ref]]
+name = "cj422-7x5-rst1.jpg"
+file = "cj422-7x5-rst1.jpg"
+sha256 = "36c7a8ad0cc3d5a2d030a19c5db773ede8b98f44a0d5106ff78175cca9945429"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 1 -outfile {out} {ref:cj422-7x5.jpg}"
+
+[[ref]]
+name = "cj422-7x5-rst3b.jpg"
+file = "cj422-7x5-rst3b.jpg"
+sha256 = "49d1c181963fc8828bf88ebfa708b975767cb2ef5021cf66c21a6349b1c5b46c"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 3B -outfile {out} {ref:cj422-7x5.jpg}"
+
+[[ref]]
+name = "cj422-7x5-prog-rst2b.jpg"
+file = "cj422-7x5-prog-rst2b.jpg"
+sha256 = "5c83e09306e455060cfc861cb6356e20a0f169c1f4058a263f288e4731b01bdb"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -restart 2B -outfile {out} {ref:cj422-7x5.jpg}"
+
+[[ref]]
+name = "cj422-33x17.jpg"
+file = "cj422-33x17.jpg"
+sha256 = "ac1639232356cb0b805da1a0863dc848a7e8edc7bee0c3581c933561df996c48"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 2x1 -quality 95 -outfile {out} {src}"
+
+[[ref]]
+name = "cj422-33x17.planes.ppm"
+file = "cj422-33x17.planes.ppm"
+sha256 = "b908ba26de3da44cc06a69352447d3d6ede4e2a067c9839800cb96d770fb7bb4"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj422-33x17-prog.jpg"
+file = "cj422-33x17-prog.jpg"
+sha256 = "d6e600f32208e61df0660afe0cbeae73b7fbef58d66c9bfa585b52ba5b2633e5"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:cj422-33x17.jpg}"
+
+[[ref]]
+name = "cj422-33x17-rst1.jpg"
+file = "cj422-33x17-rst1.jpg"
+sha256 = "70874d6887fa35f051d9d0fa1a28e407fe70cb58e7624b0f9b6b1c2a6f12b4da"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 1 -outfile {out} {ref:cj422-33x17.jpg}"
+
+[[ref]]
+name = "cj422-33x17-rst3b.jpg"
+file = "cj422-33x17-rst3b.jpg"
+sha256 = "70874d6887fa35f051d9d0fa1a28e407fe70cb58e7624b0f9b6b1c2a6f12b4da"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 3B -outfile {out} {ref:cj422-33x17.jpg}"
+
+[[ref]]
+name = "cj422-33x17-prog-rst2b.jpg"
+file = "cj422-33x17-prog-rst2b.jpg"
+sha256 = "7b908eab22059cda42106e9ceb5a762d6941c00dfa79ef0633d9b0bdad891b9b"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -restart 2B -outfile {out} {ref:cj422-33x17.jpg}"
+
+[[ref]]
+name = "cj422-17x33.jpg"
+file = "cj422-17x33.jpg"
+sha256 = "0974745d588980d9a0a4cabaf53ada1a9562aacd026da616e37150ff0ee8ae3c"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 2x1 -quality 95 -outfile {out} {src}"
+
+[[ref]]
+name = "cj422-17x33.planes.ppm"
+file = "cj422-17x33.planes.ppm"
+sha256 = "78e85fb9cac38856ab8bee336f998acc2ba349d9b702164d5f89ca74cc47a4f4"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj422-17x33-prog.jpg"
+file = "cj422-17x33-prog.jpg"
+sha256 = "6032a018b79108a30d5dec915278dce6fb326e7576b65f31ef1bd2b12fef5a95"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:cj422-17x33.jpg}"
+
+[[ref]]
+name = "cj422-17x33-rst1.jpg"
+file = "cj422-17x33-rst1.jpg"
+sha256 = "de33b6a6bdd5a4c03bb922463aa855c5f544c50e09cb0d3062af80ccd6d9c7e1"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 1 -outfile {out} {ref:cj422-17x33.jpg}"
+
+[[ref]]
+name = "cj422-17x33-rst3b.jpg"
+file = "cj422-17x33-rst3b.jpg"
+sha256 = "241d5a1d613a989eae2c47dd3e268d495a3ec072521febb685609b3d58350d71"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 3B -outfile {out} {ref:cj422-17x33.jpg}"
+
+[[ref]]
+name = "cj422-17x33-prog-rst2b.jpg"
+file = "cj422-17x33-prog-rst2b.jpg"
+sha256 = "8e652c3192d78e70c0d4a01a9222edd4665668f9dbdba7a6916aa71993777592"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -restart 2B -outfile {out} {ref:cj422-17x33.jpg}"
+
+[[ref]]
+name = "cj422-64x48.jpg"
+file = "cj422-64x48.jpg"
+sha256 = "6b29d104ea00559ddb9639083cd401ab7a5c364fed1e64a17ccf96b2e5b0a393"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 2x1 -quality 95 -outfile {out} {src}"
+
+[[ref]]
+name = "cj422-64x48.planes.ppm"
+file = "cj422-64x48.planes.ppm"
+sha256 = "311cc3c8cdbeb84f460f3c7680bf861e27c109281780203d71e9e8284e4a8806"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj422-64x48-prog.jpg"
+file = "cj422-64x48-prog.jpg"
+sha256 = "80c6028956133e73e3bf5dc7939be2d646b7fb5c875e1946d24e386145af5c91"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:cj422-64x48.jpg}"
+
+[[ref]]
+name = "cj422-64x48-rst1.jpg"
+file = "cj422-64x48-rst1.jpg"
+sha256 = "150483d43b7bd786f52a3e57f3343230b73688fcc6fb25b4f25dc07a5b4efbd5"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 1 -outfile {out} {ref:cj422-64x48.jpg}"
+
+[[ref]]
+name = "cj422-64x48-rst3b.jpg"
+file = "cj422-64x48-rst3b.jpg"
+sha256 = "74485e6a5a4b248ddb3788f80afe1d5201b2063d2b513ac50d0d6f3b4828bb55"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 3B -outfile {out} {ref:cj422-64x48.jpg}"
+
+[[ref]]
+name = "cj422-64x48-prog-rst2b.jpg"
+file = "cj422-64x48-prog-rst2b.jpg"
+sha256 = "4bc42ca989bda7c53b8611b5a2ed56b8252e2873aa4f003cd7ebbdce4d16617c"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -restart 2B -outfile {out} {ref:cj422-64x48.jpg}"
+
+[[ref]]
+name = "cj422-49x37.jpg"
+file = "cj422-49x37.jpg"
+sha256 = "65234f3db07b0ca33451f59f688c244daee8277240d45051d268a4cf78b91114"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 2x1 -quality 95 -outfile {out} {src}"
+
+[[ref]]
+name = "cj422-49x37.planes.ppm"
+file = "cj422-49x37.planes.ppm"
+sha256 = "2232ba6879b350441cdbd0118f4791eb510b7dc7b467a861d9d3f55c388064cd"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj422-49x37-prog.jpg"
+file = "cj422-49x37-prog.jpg"
+sha256 = "20c8349bb9316c30544eabbb634fd6dab7c40663c6c9c56324094cd124664f86"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:cj422-49x37.jpg}"
+
+[[ref]]
+name = "cj422-49x37-rst1.jpg"
+file = "cj422-49x37-rst1.jpg"
+sha256 = "f6c421d9b913a21065c42145b304bb00879239d667835d146285257ee13ae171"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 1 -outfile {out} {ref:cj422-49x37.jpg}"
+
+[[ref]]
+name = "cj422-49x37-rst3b.jpg"
+file = "cj422-49x37-rst3b.jpg"
+sha256 = "5d323c4dc7ea1f31e2365bb6c2262c5c6e2ae16828015e6848939c58e9071a78"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 3B -outfile {out} {ref:cj422-49x37.jpg}"
+
+[[ref]]
+name = "cj422-49x37-prog-rst2b.jpg"
+file = "cj422-49x37-prog-rst2b.jpg"
+sha256 = "4f162f3d53ee6dd38a3c0dd17b35a64f77aba86fb87ce6e8062b4a440bcf2892"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -restart 2B -outfile {out} {ref:cj422-49x37.jpg}"
+
+[[ref]]
+name = "cj420-7x5.jpg"
+file = "cj420-7x5.jpg"
+sha256 = "e26ea7b7cecb7b424da78a8bb53db330c6ad5c4da8394fdaeaee14d1ba953dae"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 2x2 -quality 95 -outfile {out} {src}"
+
+[[ref]]
+name = "cj420-7x5.planes.ppm"
+file = "cj420-7x5.planes.ppm"
+sha256 = "f8d5f9bc1fb386c08982bad07a67f892c8d473795e8a423f21ee13c9ebf48d34"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj420-7x5-prog.jpg"
+file = "cj420-7x5-prog.jpg"
+sha256 = "d7a49e2b5caa11e08070a8bbbd8e8104f23ffff063b2b59d3b06f555373bfb8d"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:cj420-7x5.jpg}"
+
+[[ref]]
+name = "cj420-7x5-rst1.jpg"
+file = "cj420-7x5-rst1.jpg"
+sha256 = "6a8aede5401656cc02c5af22b33b3d1a20ceb4acc5e2dfc59cb066743ba36ce3"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 1 -outfile {out} {ref:cj420-7x5.jpg}"
+
+[[ref]]
+name = "cj420-7x5-rst3b.jpg"
+file = "cj420-7x5-rst3b.jpg"
+sha256 = "cb71ddb85c660efe2bc19dd91fbe1d38e573ce776579f0b198fec3de1e5b1591"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 3B -outfile {out} {ref:cj420-7x5.jpg}"
+
+[[ref]]
+name = "cj420-7x5-prog-rst2b.jpg"
+file = "cj420-7x5-prog-rst2b.jpg"
+sha256 = "b37fc427fe4bc7b3be7a28a3dab064b041d7cfb49660deeb06bc6938a5e3f20a"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -restart 2B -outfile {out} {ref:cj420-7x5.jpg}"
+
+[[ref]]
+name = "cj420-33x17.jpg"
+file = "cj420-33x17.jpg"
+sha256 = "69e741ce32cd7b4c7739cee948f29d1a137359b48b99b730448892babb2a9129"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 2x2 -quality 95 -outfile {out} {src}"
+
+[[ref]]
+name = "cj420-33x17.planes.ppm"
+file = "cj420-33x17.planes.ppm"
+sha256 = "9161210b8493307cf303c84b5a890ecc4093e7b8f88af24ba7bf530c753c0b69"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj420-33x17-prog.jpg"
+file = "cj420-33x17-prog.jpg"
+sha256 = "01afa0591a99082b88fa3d1d7e43f98d2ccfb7715b263d76f8741830fff3a365"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:cj420-33x17.jpg}"
+
+[[ref]]
+name = "cj420-33x17-rst1.jpg"
+file = "cj420-33x17-rst1.jpg"
+sha256 = "ad1ff358921a08174c007d13166537bdc6dd2c68d630e6093d639f4a50844be1"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 1 -outfile {out} {ref:cj420-33x17.jpg}"
+
+[[ref]]
+name = "cj420-33x17-rst3b.jpg"
+file = "cj420-33x17-rst3b.jpg"
+sha256 = "ad1ff358921a08174c007d13166537bdc6dd2c68d630e6093d639f4a50844be1"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 3B -outfile {out} {ref:cj420-33x17.jpg}"
+
+[[ref]]
+name = "cj420-33x17-prog-rst2b.jpg"
+file = "cj420-33x17-prog-rst2b.jpg"
+sha256 = "4a6481cda0a61d815a29c0f94c336beed23d7987170e3612fa5075e27ab9ecde"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -restart 2B -outfile {out} {ref:cj420-33x17.jpg}"
+
+[[ref]]
+name = "cj420-17x33.jpg"
+file = "cj420-17x33.jpg"
+sha256 = "0de7ef69d33ba2dd6615bf7bcb550571652aa0da16def2c89fda6291d6b67178"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 2x2 -quality 95 -outfile {out} {src}"
+
+[[ref]]
+name = "cj420-17x33.planes.ppm"
+file = "cj420-17x33.planes.ppm"
+sha256 = "b8f9d0560438fbfede23b7669a6d0b3d34d9123f2364e087eda1bd19bb738ff4"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj420-17x33-prog.jpg"
+file = "cj420-17x33-prog.jpg"
+sha256 = "985e7db9a389145f97a3d9d991d43c7c97a58b5981a4b0451498540449b4210d"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:cj420-17x33.jpg}"
+
+[[ref]]
+name = "cj420-17x33-rst1.jpg"
+file = "cj420-17x33-rst1.jpg"
+sha256 = "5bdec9f2e3e9e4aa69ab5e4e94008ef8be22620c46a7747ba9ca219468185502"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 1 -outfile {out} {ref:cj420-17x33.jpg}"
+
+[[ref]]
+name = "cj420-17x33-rst3b.jpg"
+file = "cj420-17x33-rst3b.jpg"
+sha256 = "eb023d0567db058fd9d10f610278589c79d10ebab817e2bc6e6da657dd8da066"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 3B -outfile {out} {ref:cj420-17x33.jpg}"
+
+[[ref]]
+name = "cj420-17x33-prog-rst2b.jpg"
+file = "cj420-17x33-prog-rst2b.jpg"
+sha256 = "b0a1a0c24c791c4ac1e240f0d74033b6d6098a1ca6fed513dd2f0c42da0109b9"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -restart 2B -outfile {out} {ref:cj420-17x33.jpg}"
+
+[[ref]]
+name = "cj420-64x48.jpg"
+file = "cj420-64x48.jpg"
+sha256 = "b978f9eb0323a6565d151c77fedc524d57d1173575307eec1cbb70225e0fdaf9"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 2x2 -quality 95 -outfile {out} {src}"
+
+[[ref]]
+name = "cj420-64x48.planes.ppm"
+file = "cj420-64x48.planes.ppm"
+sha256 = "da5fb7f898d0d65645c2486eef0e21dbd8a07f79d567175fd1715a869230dfb8"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj420-64x48-prog.jpg"
+file = "cj420-64x48-prog.jpg"
+sha256 = "3973bd7ccd94f43e627f93c3b96d1c4da8840793053c0b988c1912740c7103e9"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:cj420-64x48.jpg}"
+
+[[ref]]
+name = "cj420-64x48-rst1.jpg"
+file = "cj420-64x48-rst1.jpg"
+sha256 = "f6a2b815f38c272c24142c628eb23c343e701acc874db94ae0854f144c44cf62"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 1 -outfile {out} {ref:cj420-64x48.jpg}"
+
+[[ref]]
+name = "cj420-64x48-rst3b.jpg"
+file = "cj420-64x48-rst3b.jpg"
+sha256 = "ad4c73ec99443ac6f332b459658c2e918ebd92067e3cfb4007c297c3380b373f"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 3B -outfile {out} {ref:cj420-64x48.jpg}"
+
+[[ref]]
+name = "cj420-64x48-prog-rst2b.jpg"
+file = "cj420-64x48-prog-rst2b.jpg"
+sha256 = "26c679363dc04d3130fa08cbe67b1673db399f55223c5ec25b20b6aa0c94af67"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -restart 2B -outfile {out} {ref:cj420-64x48.jpg}"
+
+[[ref]]
+name = "cj420-49x37.jpg"
+file = "cj420-49x37.jpg"
+sha256 = "1a7164ac4a5daa142d25fb5ae1479d4e5b382b0e24a9c21c8577634075428fac"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 2x2 -quality 95 -outfile {out} {src}"
+
+[[ref]]
+name = "cj420-49x37.planes.ppm"
+file = "cj420-49x37.planes.ppm"
+sha256 = "6f31e17a62c6ac2522f55d491c6a3df7fee3cc0f184edd74aadaa6adda5bbacc"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj420-49x37-prog.jpg"
+file = "cj420-49x37-prog.jpg"
+sha256 = "740aa210ae47c7ad6fc9985e4cdbefeaef010ce7042d5e0c79c01c8bddf30d46"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:cj420-49x37.jpg}"
+
+[[ref]]
+name = "cj420-49x37-rst1.jpg"
+file = "cj420-49x37-rst1.jpg"
+sha256 = "406708cc93091babf7e4a2c2b1be33b0373a2fb1a3434d2550b94f1b4cab10e0"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 1 -outfile {out} {ref:cj420-49x37.jpg}"
+
+[[ref]]
+name = "cj420-49x37-rst3b.jpg"
+file = "cj420-49x37-rst3b.jpg"
+sha256 = "1cf5b19b55bb4312b9c776a59a5a2f54a61a1541f0da9672041b2f6a251b8379"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 3B -outfile {out} {ref:cj420-49x37.jpg}"
+
+[[ref]]
+name = "cj420-49x37-prog-rst2b.jpg"
+file = "cj420-49x37-prog-rst2b.jpg"
+sha256 = "b282779874bc77fdf4e1ecdc3fa49011d091a3c93595c3bfc22283b3ad4a5e10"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -restart 2B -outfile {out} {ref:cj420-49x37.jpg}"
+
+[[ref]]
+name = "grey-7x5.jpg"
+file = "grey-7x5.jpg"
+sha256 = "019b690ed6d8975b1b7c1531cbe79cddb18e27881abf03c4fa99edb404be3457"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -grayscale -outfile {out} {ref:cj420-7x5.jpg}"
+
+[[ref]]
+name = "grey-7x5.pgm"
+file = "grey-7x5.pgm"
+sha256 = "a1f4a4ebb1e37a9eab876ca91e5c466693a6881ce30ebefcd22f4e615fa4ce13"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -pnm -outfile {out} {ref:grey-7x5.jpg}"
+
+[[ref]]
+name = "grey-7x5-prog.jpg"
+file = "grey-7x5-prog.jpg"
+sha256 = "0981c9cad36c67b6538a02cd9448fd12f8642af5bc7a55778ddee9bdbb25a591"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:grey-7x5.jpg}"
+
+[[ref]]
+name = "grey-7x5-rst1.jpg"
+file = "grey-7x5-rst1.jpg"
+sha256 = "951025645176b5b9978b98bc079b1edcac200ee42af47f45eebd215d9c06337a"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 1 -outfile {out} {ref:grey-7x5.jpg}"
+
+[[ref]]
+name = "grey-7x5-prog-rst2b.jpg"
+file = "grey-7x5-prog-rst2b.jpg"
+sha256 = "b5974c5040dc2c8d3ccbc7c23ad7cf21e267cee0549ffd8d6829d93c9871d423"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -restart 2B -outfile {out} {ref:grey-7x5.jpg}"
+
+[[ref]]
+name = "grey-33x17.jpg"
+file = "grey-33x17.jpg"
+sha256 = "8bb593a22cd0779ac398c08440b6323947a5ef4d0e300b0222bff49bba904cf5"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -grayscale -outfile {out} {ref:cj420-33x17.jpg}"
+
+[[ref]]
+name = "grey-33x17.pgm"
+file = "grey-33x17.pgm"
+sha256 = "ac58ca08ede25feb50bee618b294231335c3f2ca867552b28285098f6abfb371"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -pnm -outfile {out} {ref:grey-33x17.jpg}"
+
+[[ref]]
+name = "grey-33x17-prog.jpg"
+file = "grey-33x17-prog.jpg"
+sha256 = "ec76905bb5353301babe288af349c0818e4e00ec961330449d09528097eaebb7"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:grey-33x17.jpg}"
+
+[[ref]]
+name = "grey-33x17-rst1.jpg"
+file = "grey-33x17-rst1.jpg"
+sha256 = "4c182b6d95ca86e18cd3e787889e07a81f5f13dcf5a96146a891d6b7c9218dcf"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 1 -outfile {out} {ref:grey-33x17.jpg}"
+
+[[ref]]
+name = "grey-33x17-prog-rst2b.jpg"
+file = "grey-33x17-prog-rst2b.jpg"
+sha256 = "aa05a3a33cc5e8d1c6efa893a03636d747efb11f6fccf4388762c0932a93fbd4"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -restart 2B -outfile {out} {ref:grey-33x17.jpg}"
+
+[[ref]]
+name = "grey-17x33.jpg"
+file = "grey-17x33.jpg"
+sha256 = "c8e80e2c91dec9392649cc67402f3cd6a75dcf4747e8a1f9cb0b1ccd7b01622b"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -grayscale -outfile {out} {ref:cj420-17x33.jpg}"
+
+[[ref]]
+name = "grey-17x33.pgm"
+file = "grey-17x33.pgm"
+sha256 = "4fcf1ced0a0e44c7df84392f24a6a4476cbf72904bfa1c3f35c8a878a0444f54"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -pnm -outfile {out} {ref:grey-17x33.jpg}"
+
+[[ref]]
+name = "grey-17x33-prog.jpg"
+file = "grey-17x33-prog.jpg"
+sha256 = "b803361d3665f622517777c10d99bfbd6a42697e4c3fab3335fdec934738de21"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:grey-17x33.jpg}"
+
+[[ref]]
+name = "grey-17x33-rst1.jpg"
+file = "grey-17x33-rst1.jpg"
+sha256 = "54e79ee6d0761ae24a3cf205c963d648cdf4e94181ba96a3fe9160bfa4e337ce"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 1 -outfile {out} {ref:grey-17x33.jpg}"
+
+[[ref]]
+name = "grey-17x33-prog-rst2b.jpg"
+file = "grey-17x33-prog-rst2b.jpg"
+sha256 = "613c526d6567c4d6b8842cd9ac76cf5325d3a811b684643b7b1dac36bfb08d76"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -restart 2B -outfile {out} {ref:grey-17x33.jpg}"
+
+[[ref]]
+name = "grey-64x48.jpg"
+file = "grey-64x48.jpg"
+sha256 = "d40e2321b1932f752f62fa6be5fdcd9a14b18d0879aae71e22ba2f856b7d7055"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -grayscale -outfile {out} {ref:cj420-64x48.jpg}"
+
+[[ref]]
+name = "grey-64x48.pgm"
+file = "grey-64x48.pgm"
+sha256 = "d6e7ffda4692c63728fad5c2915b119a52917b0c028a055fb0a15d7cf5188089"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -pnm -outfile {out} {ref:grey-64x48.jpg}"
+
+[[ref]]
+name = "grey-64x48-prog.jpg"
+file = "grey-64x48-prog.jpg"
+sha256 = "855463f965830d93aa18e2ae2c8d9f06c8d163a1df8f45e238ba07a01d73103c"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:grey-64x48.jpg}"
+
+[[ref]]
+name = "grey-64x48-rst1.jpg"
+file = "grey-64x48-rst1.jpg"
+sha256 = "fbab2e6afcfe7523a7bbddc350675906026e9f1ecabe1b756cbb3e0dd2e5f583"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 1 -outfile {out} {ref:grey-64x48.jpg}"
+
+[[ref]]
+name = "grey-64x48-prog-rst2b.jpg"
+file = "grey-64x48-prog-rst2b.jpg"
+sha256 = "6c2177667468af4b2ca75456525c632da556151f8a96a8b0f7e43e14b8ad0342"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -restart 2B -outfile {out} {ref:grey-64x48.jpg}"
+
+[[ref]]
+name = "grey-49x37.jpg"
+file = "grey-49x37.jpg"
+sha256 = "d23585eb2f72b14e14bfb0b54ca99b1e3ad618c369f66a8363a9cecd3156acf9"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -grayscale -outfile {out} {ref:cj420-49x37.jpg}"
+
+[[ref]]
+name = "grey-49x37.pgm"
+file = "grey-49x37.pgm"
+sha256 = "50e60360990397bbea04d4755bc6d7ea22472ed7d6dfee2abb2b1e090f2db364"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -pnm -outfile {out} {ref:grey-49x37.jpg}"
+
+[[ref]]
+name = "grey-49x37-prog.jpg"
+file = "grey-49x37-prog.jpg"
+sha256 = "ebdee7c1757d90314c7f0d407a2ff3ffbabefcdb643f01c02b637f76f2e39701"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:grey-49x37.jpg}"
+
+[[ref]]
+name = "grey-49x37-rst1.jpg"
+file = "grey-49x37-rst1.jpg"
+sha256 = "a133335fa4683cd86d5114b5ffd34164643684d35074047449c6851f47efd334"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 1 -outfile {out} {ref:grey-49x37.jpg}"
+
+[[ref]]
+name = "grey-49x37-prog-rst2b.jpg"
+file = "grey-49x37-prog-rst2b.jpg"
+sha256 = "cd05aef915f9e4f7b89efc70e2e71c7ce9c8f8601da5dfa04fb258b3e305e27e"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -restart 2B -outfile {out} {ref:grey-49x37.jpg}"
+
+[[ref]]
+name = "our80-7x5.jpg"
+file = ""
+sha256 = "f582f8af30b93cbd1f94d464dc483429dad6ced7db545b55241c25a0534cf16a"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/jpeg/refs.rs encode_ours(80, 7, 5)"
+
+[[ref]]
+name = "our80-7x5.planes.ppm"
+file = "our80-7x5.planes.ppm"
+sha256 = "5fa42e9fd8634e110ec00e64d63bf68724f6d1073111b9d951c49de119eb9888"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "our80-33x17.jpg"
+file = ""
+sha256 = "91f77961a532079d5d1618d70a246ab392b809e6ce4cf8426477800f956c6a65"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/jpeg/refs.rs encode_ours(80, 33, 17)"
+
+[[ref]]
+name = "our80-33x17.planes.ppm"
+file = "our80-33x17.planes.ppm"
+sha256 = "0c3d25f2bafa5a4006a3b0043b40fff2c4938a6b60c5deaa0b6e21babc886083"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "our80-17x33.jpg"
+file = ""
+sha256 = "7422045cd854159eed8ecddd3c09d6976bd0189d33a21abc8b697d223765db4e"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/jpeg/refs.rs encode_ours(80, 17, 33)"
+
+[[ref]]
+name = "our80-17x33.planes.ppm"
+file = "our80-17x33.planes.ppm"
+sha256 = "279258d4b657028554a77be946677b60c310b02a2f8f28b51c8b664998a5fdd2"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "our80-64x48.jpg"
+file = ""
+sha256 = "91f56764b1ad3602d24fb249f5d56b97af945a4a4f506d84e039962d04d2da32"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/jpeg/refs.rs encode_ours(80, 64, 48)"
+
+[[ref]]
+name = "our80-64x48.planes.ppm"
+file = "our80-64x48.planes.ppm"
+sha256 = "077081eaa010933b719bb140c0f0655cfaec47bc63ee23ca4d6b270ddc0d2ed9"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "our80-49x37.jpg"
+file = ""
+sha256 = "880afadb651708c74cee383e0356a9b7ce10b98c76a9cd3f5c5e8482c8bebf69"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/jpeg/refs.rs encode_ours(80, 49, 37)"
+
+[[ref]]
+name = "our80-49x37.planes.ppm"
+file = "our80-49x37.planes.ppm"
+sha256 = "829104dd448e819a40a198b12921b06e0fca902e3c6f7aaf05621ab9deac3422"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "our95-1x1.jpg"
+file = ""
+sha256 = "31789fdbabe2b1007ee6326470eefe646e7f5e9b54d0c2350ff48abbbe50fed2"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/jpeg/refs.rs encode_ours(95, 1, 1)"
+
+[[ref]]
+name = "our95-1x1.planes.ppm"
+file = "our95-1x1.planes.ppm"
+sha256 = "3d62a3d040efc28a5eaec316cdf56ca10d6b472f66d286531f3c7f62e83e6da1"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "our95-2x2.jpg"
+file = ""
+sha256 = "13489e18912eee1608aa88711d9425bb05be7554f23ee22d46f555734cdafff7"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/jpeg/refs.rs encode_ours(95, 2, 2)"
+
+[[ref]]
+name = "our95-2x2.planes.ppm"
+file = "our95-2x2.planes.ppm"
+sha256 = "210afac780d9b9332e400b232307046b400ed7a8c340bf5fb65d31362c825521"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "our95-16x16.jpg"
+file = ""
+sha256 = "f9de5ba223ef042c80e85a5f0930c41661015dc2646158f81a886548a10f71a3"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/jpeg/refs.rs encode_ours(95, 16, 16)"
+
+[[ref]]
+name = "our95-16x16.planes.ppm"
+file = "our95-16x16.planes.ppm"
+sha256 = "127888b2c3cda94ea2ce11b68c7e82b919cfc905957bd0c06115e42a616d2e19"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "our75-7x5.jpg"
+file = ""
+sha256 = "75ff95ef627b568d9d0589b928e51b44c225b8d755896deebec94bdd3bb4b7c0"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/jpeg/refs.rs encode_ours(75, 7, 5)"
+
+[[ref]]
+name = "our75-7x5-base.jpg"
+file = "our75-7x5-base.jpg"
+sha256 = "a5d6f726a442c768a277fa7f76860e0f42d1d0b4304a01902bbf3495c76bb192"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -outfile {out} {ref:our75-7x5.jpg}"
+
+[[ref]]
+name = "our75-7x5-prog.jpg"
+file = "our75-7x5-prog.jpg"
+sha256 = "f367c309c078a6eb6759380d7d9d855c611ee2fc1723a5e205c4e7244baf9e4b"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:our75-7x5.jpg}"
+
+[[ref]]
+name = "our75-33x17.jpg"
+file = ""
+sha256 = "baa0b1e3d6b9d0d20a1886414800131c5f3e54e9bdbea5794e94549adc975d7d"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/jpeg/refs.rs encode_ours(75, 33, 17)"
+
+[[ref]]
+name = "our75-33x17-base.jpg"
+file = "our75-33x17-base.jpg"
+sha256 = "6361805245f8bdfb511215ed6825e0453fe6a6799c9ea771a4d8532b6ec0f771"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -outfile {out} {ref:our75-33x17.jpg}"
+
+[[ref]]
+name = "our75-33x17-prog.jpg"
+file = "our75-33x17-prog.jpg"
+sha256 = "436654f799d410b81408a3206fff778bbed4df81d2cd5d47a5731097cddfcb26"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:our75-33x17.jpg}"
+
+[[ref]]
+name = "our75-64x48.jpg"
+file = ""
+sha256 = "0ab10aa1ae5421ad04459d4ee2ab8de33b79468aac434f2ac04d4f190033e033"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/jpeg/refs.rs encode_ours(75, 64, 48)"
+
+[[ref]]
+name = "our75-64x48-base.jpg"
+file = "our75-64x48-base.jpg"
+sha256 = "0ab10aa1ae5421ad04459d4ee2ab8de33b79468aac434f2ac04d4f190033e033"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -outfile {out} {ref:our75-64x48.jpg}"
+
+[[ref]]
+name = "our75-64x48-prog.jpg"
+file = "our75-64x48-prog.jpg"
+sha256 = "68ddc247c86e395fdde792625c14baf7c1c85ec8645a799fc2997675f76ee39e"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:our75-64x48.jpg}"
+
+[[ref]]
+name = "our90-33x17.jpg"
+file = ""
+sha256 = "e70bc53364e8be5c4d54655433c0b85b863f68a1aeb2f6fcbec974a8bd12c244"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/jpeg/refs.rs encode_ours(90, 33, 17)"
+
+[[ref]]
+name = "our90-33x17-base.jpg"
+file = "our90-33x17-base.jpg"
+sha256 = "72fe0f31da0716209fff53fa62e24341b955b816c22f377acf872ca31569d4c3"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -outfile {out} {ref:our90-33x17.jpg}"
+
+[[ref]]
+name = "our90-33x17-prog.jpg"
+file = "our90-33x17-prog.jpg"
+sha256 = "7b130b3f0014cac24041632dd80325e37ea5d9df4709ff09d49d25108f8c6f49"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:our90-33x17.jpg}"
+
+[[ref]]
+name = "our90-33x17-rst1b.jpg"
+file = "our90-33x17-rst1b.jpg"
+sha256 = "54b87b2e610541df88f8ab06bad8d42cac15aea9418e86cec00e6dbd65f7a7b2"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 1B -outfile {out} {ref:our90-33x17.jpg}"
+
+[[ref]]
+name = "our90-33x17-prog-rst1b.jpg"
+file = "our90-33x17-prog-rst1b.jpg"
+sha256 = "5afd8b3b8c141f0da29144e81cbac9558503fb20cbf23b08e72519a1b081d8d5"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -restart 1B -outfile {out} {ref:our90-33x17.jpg}"
+
+[[ref]]
+name = "our85-48x32.jpg"
+file = ""
+sha256 = "3b9f624eeb893456d9226de00b2d06deff5cd2d961dc89681fdcd0b2c64788e5"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/jpeg/refs.rs encode_ours(85, 48, 32)"
+
+[[ref]]
+name = "our85-48x32-base.jpg"
+file = "our85-48x32-base.jpg"
+sha256 = "3b9f624eeb893456d9226de00b2d06deff5cd2d961dc89681fdcd0b2c64788e5"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -outfile {out} {ref:our85-48x32.jpg}"
+
+[[ref]]
+name = "our85-48x32-prog.jpg"
+file = "our85-48x32-prog.jpg"
+sha256 = "a015cf399608cf1ed0788e26159449076943ce65a5dac5790fada7d52f2f02bd"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -progressive -outfile {out} {ref:our85-48x32.jpg}"
+
+[[ref]]
+name = "our85-48x32-rst1b.jpg"
+file = "our85-48x32-rst1b.jpg"
+sha256 = "a9496b919511fb2672197132f8c34fc1b146dfc2b330dffeac65860c8ffb37c9"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "jpegtran -restart 1B -outfile {out} {ref:our85-48x32.jpg}"
+
+[[ref]]
+name = "split-scans.txt"
+file = ""
+sha256 = "31f3b160581bb625e0024d7a5b7c2508109bf5b3ace33e1b516c72456ed6cd9f"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the cjpeg scan script 0; 1; 2;"
+
+[[ref]]
+name = "cj-s1x2-7x5.jpg"
+file = "cj-s1x2-7x5.jpg"
+sha256 = "64f71863bdd2b9429114162cfaa47f6ea06ac9a5e6924831e86ece74a5e7ffe2"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 1x2 -quality 90 -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s1x2-7x5.planes.ppm"
+file = "cj-s1x2-7x5.planes.ppm"
+sha256 = "138e2ba33a3f68fa236f1481212dc1fe41c5bdb8220c4c38250ab8c3351e8db6"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s1x2-7x5.ppm"
+file = "cj-s1x2-7x5.ppm"
+sha256 = "fa9274f97e4487704387991dfbf567d49104db24668118f57f4c57bca9a7bea4"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -pnm -outfile {out} {ref:cj-s1x2-7x5.jpg}"
+
+[[ref]]
+name = "cj-s4x1-7x5.jpg"
+file = "cj-s4x1-7x5.jpg"
+sha256 = "53aaef6459b92cbb3ccb14852fad82a33f05e18ae8a268b309142676da37f1bc"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 4x1 -quality 90 -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s4x1-7x5.planes.ppm"
+file = "cj-s4x1-7x5.planes.ppm"
+sha256 = "8e93c4eaaa0ccb919774e0eda73691e77e7161d0ccea2718a4e87e5a91d3029b"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s4x1-7x5.ppm"
+file = "cj-s4x1-7x5.ppm"
+sha256 = "d3543fa93c54395601b4b50c146b41a162f7e8a303b79f1bfd38a4ac21ac1db7"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -pnm -outfile {out} {ref:cj-s4x1-7x5.jpg}"
+
+[[ref]]
+name = "cj-s2x2-scans-7x5.jpg"
+file = "cj-s2x2-scans-7x5.jpg"
+sha256 = "94f1b544a42dc784af5a92401b292b7e36cfb6fcf573401fcfa4af3b9c20ce21"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 2x2 -scans {ref:split-scans.txt} -quality 90 -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s2x2-scans-7x5.planes.ppm"
+file = "cj-s2x2-scans-7x5.planes.ppm"
+sha256 = "57e71e797f247e1267e345a5342d995c3052c871bed1f2a2aa4daa390051f5ba"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s2x2-scans-7x5.ppm"
+file = "cj-s2x2-scans-7x5.ppm"
+sha256 = "dedf78526f01b8ca2a297991c9d34580417d7f53dc651a065ba17d8ad024769b"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -pnm -outfile {out} {ref:cj-s2x2-scans-7x5.jpg}"
+
+[[ref]]
+name = "cj-s1x1-scans-7x5.jpg"
+file = "cj-s1x1-scans-7x5.jpg"
+sha256 = "b62cf8d4cd14b19eefe99899f92866b84ae650493d267a788b8b979b181f683c"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 1x1 -scans {ref:split-scans.txt} -quality 90 -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s1x1-scans-7x5.planes.ppm"
+file = "cj-s1x1-scans-7x5.planes.ppm"
+sha256 = "7a9831fd7945b8fda2cd42213849be01205ba5b1be4842194acf41b1d9917889"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s1x1-scans-7x5.ppm"
+file = "cj-s1x1-scans-7x5.ppm"
+sha256 = "e8374927483651fe0b385ff59c33918b8f96ac2ceeb03c600a96a47b8afd54c9"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -pnm -outfile {out} {ref:cj-s1x1-scans-7x5.jpg}"
+
+[[ref]]
+name = "cj-s1x2-33x17.jpg"
+file = "cj-s1x2-33x17.jpg"
+sha256 = "cd5934938e1fad1a6da08fc3c07b1f7906179ecc509ddb6a59da8fb2d16727ad"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 1x2 -quality 90 -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s1x2-33x17.planes.ppm"
+file = "cj-s1x2-33x17.planes.ppm"
+sha256 = "d89cb03ad5b17fe42177407590344871f0c31ca24cdddcadb3b1034f66bc1aac"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s1x2-33x17.ppm"
+file = "cj-s1x2-33x17.ppm"
+sha256 = "fb950f3b72726e5e6e07c4070210cdeadd93bbdf1013c9730769aed7df3cb133"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -pnm -outfile {out} {ref:cj-s1x2-33x17.jpg}"
+
+[[ref]]
+name = "cj-s4x1-33x17.jpg"
+file = "cj-s4x1-33x17.jpg"
+sha256 = "121c748d512d1ad846efe3bc519ec1e0247c964a1bc7efee8d6764347d6ea892"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 4x1 -quality 90 -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s4x1-33x17.planes.ppm"
+file = "cj-s4x1-33x17.planes.ppm"
+sha256 = "177a5879657078b01061f527f3310f07ec24bff8b4a74f3578b5aa7d5449e5b3"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s4x1-33x17.ppm"
+file = "cj-s4x1-33x17.ppm"
+sha256 = "e555f40634ca142425147f4dadfffe5329e94bef17873f1706fc4827c4d1fff8"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -pnm -outfile {out} {ref:cj-s4x1-33x17.jpg}"
+
+[[ref]]
+name = "cj-s2x2-scans-33x17.jpg"
+file = "cj-s2x2-scans-33x17.jpg"
+sha256 = "de24583d4abf45d51002c03f3ddc425df30a7239bd002581a8cc9ebc7d3cdb4a"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 2x2 -scans {ref:split-scans.txt} -quality 90 -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s2x2-scans-33x17.planes.ppm"
+file = "cj-s2x2-scans-33x17.planes.ppm"
+sha256 = "60216b1e8a92e1adb62375023f0a49b52f42689126d500899b04a373ed88892c"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s2x2-scans-33x17.ppm"
+file = "cj-s2x2-scans-33x17.ppm"
+sha256 = "bed56bdc0b40a39051d79ff75786adccc7aba2906e61d7ca990f2c798ddcd05b"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -pnm -outfile {out} {ref:cj-s2x2-scans-33x17.jpg}"
+
+[[ref]]
+name = "cj-s1x1-scans-33x17.jpg"
+file = "cj-s1x1-scans-33x17.jpg"
+sha256 = "508a86aa8e2c5e2284a4db95116ddedb43c3556c74e3fd9041f6b6fcb23b5e92"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 1x1 -scans {ref:split-scans.txt} -quality 90 -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s1x1-scans-33x17.planes.ppm"
+file = "cj-s1x1-scans-33x17.planes.ppm"
+sha256 = "fcccbb82b538266ad0f5327044099b2e8dd35d82a9a5255528b9c5fb5fcadbd1"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s1x1-scans-33x17.ppm"
+file = "cj-s1x1-scans-33x17.ppm"
+sha256 = "50fcb9bc10a15af407302c49b986480a3098a74146e09014958f2ee87f361d19"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -pnm -outfile {out} {ref:cj-s1x1-scans-33x17.jpg}"
+
+[[ref]]
+name = "cj-s1x2-17x33.jpg"
+file = "cj-s1x2-17x33.jpg"
+sha256 = "abc670983fb03f3ff933fdaf891bb8b953f403ca0e21193cc37e29fa81f34cee"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 1x2 -quality 90 -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s1x2-17x33.planes.ppm"
+file = "cj-s1x2-17x33.planes.ppm"
+sha256 = "e549c04fc83c859b6071b1c273dfb514d96beb99b1424de0b0048132ae3f24cc"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s1x2-17x33.ppm"
+file = "cj-s1x2-17x33.ppm"
+sha256 = "c87b4202b121f24eab69976d81d9ba567a9ee93070cf18c11c7bffa3457c92f0"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -pnm -outfile {out} {ref:cj-s1x2-17x33.jpg}"
+
+[[ref]]
+name = "cj-s4x1-17x33.jpg"
+file = "cj-s4x1-17x33.jpg"
+sha256 = "c372c2545cc0918636b8d5cdf06c90a5e5f619146d5a8b7133ff0fdee60a5851"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 4x1 -quality 90 -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s4x1-17x33.planes.ppm"
+file = "cj-s4x1-17x33.planes.ppm"
+sha256 = "27c0ddce8c1780a72a46aed70de20fcd7dd362dd098dfe8c295e528e2b54d80a"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s4x1-17x33.ppm"
+file = "cj-s4x1-17x33.ppm"
+sha256 = "57e614798b7482b9cffe421c38e3c148d42dbbb64451c4a1d93f8e8e50acc5f2"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -pnm -outfile {out} {ref:cj-s4x1-17x33.jpg}"
+
+[[ref]]
+name = "cj-s2x2-scans-17x33.jpg"
+file = "cj-s2x2-scans-17x33.jpg"
+sha256 = "f73b3c4dc4f581b6b4205f8ed4bab0970a74b3a4aec07817038960234f4d6837"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 2x2 -scans {ref:split-scans.txt} -quality 90 -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s2x2-scans-17x33.planes.ppm"
+file = "cj-s2x2-scans-17x33.planes.ppm"
+sha256 = "acb5556bac82f1f5aef99fc336788455084148fe6de1e00e25f4e0028fe0d11e"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s2x2-scans-17x33.ppm"
+file = "cj-s2x2-scans-17x33.ppm"
+sha256 = "972454873dd659f08e3fcd67f28184808009aa609492a70ba8eb88a7be11d6fc"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -pnm -outfile {out} {ref:cj-s2x2-scans-17x33.jpg}"
+
+[[ref]]
+name = "cj-s1x1-scans-17x33.jpg"
+file = "cj-s1x1-scans-17x33.jpg"
+sha256 = "07a7f9127bdc1305cb3aadde49c9fa2b8f1d6eed98009f6e58e7dd4797d0f734"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -sample 1x1 -scans {ref:split-scans.txt} -quality 90 -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s1x1-scans-17x33.planes.ppm"
+file = "cj-s1x1-scans-17x33.planes.ppm"
+sha256 = "67174b36b32d52725c34c6c4221556b1d5cf17d781a1040eadc70dace1438844"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -nosmooth -dct int -pnm -outfile {out} {src}"
+
+[[ref]]
+name = "cj-s1x1-scans-17x33.ppm"
+file = "cj-s1x1-scans-17x33.ppm"
+sha256 = "d2b5c5d7254e0af6d7aeb667f986f96397ca605acc53c75c3cad2c6177d3a297"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -pnm -outfile {out} {ref:cj-s1x1-scans-17x33.jpg}"
+
+[[ref]]
+name = "cj-rgb-33x17.jpg"
+file = "cj-rgb-33x17.jpg"
+sha256 = "7656e38ad3575d3209db8643ef376a3945e4dcbe882d753017b50401992ecd5c"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -rgb -quality 95 -outfile {out} {src}"
+
+[[ref]]
+name = "cj-rgb-33x17.ppm"
+file = "cj-rgb-33x17.ppm"
+sha256 = "ea31b8449b370debf4088b1ea52ad0b8fcdfd4ab4c913342a63ac81f92ad65f3"
+kind = "tolerance"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "djpeg -pnm -outfile {out} {ref:cj-rgb-33x17.jpg}"
+
+[[ref]]
+name = "cj-photo-q50-256x160.jpg"
+file = "cj-photo-q50-256x160.jpg"
+sha256 = "3a09dd9e0e5a70b1153c2610050e1a4e084237194576a742b31dabbc952e9289"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -quality 50 -sample 2x2 -outfile {out} {src}"
+
+[[ref]]
+name = "cj-photo-q75-256x160.jpg"
+file = "cj-photo-q75-256x160.jpg"
+sha256 = "6ff7c946531a9f76a9f85d03be02688064f735253a89d83d2a0affd6dd7e9d6d"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -quality 75 -sample 2x2 -outfile {out} {src}"
+
+[[ref]]
+name = "cj-photo-q85-256x160.jpg"
+file = "cj-photo-q85-256x160.jpg"
+sha256 = "695892a1c98d9631cd10c92b6f45e919c8d383d3a041be3cc4feb175981613db"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -quality 85 -sample 2x2 -outfile {out} {src}"
+
+[[ref]]
+name = "cj-photo-q90-256x160.jpg"
+file = "cj-photo-q90-256x160.jpg"
+sha256 = "84151c4801000d7eff5e736f70fd7330c931a20d1cb2714db1ad5e20a1c0bbcc"
+kind = "fixture"
+tool = "libjpeg-turbo version 3.2.0 (build 20260701)"
+command = "cjpeg -quality 90 -sample 2x2 -outfile {out} {src}"
