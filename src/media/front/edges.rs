@@ -99,7 +99,9 @@ fn sps_look(codec: Codec, nal: &[u8]) -> Look {
     let vui = match codec {
         Codec::H264 => {
             let rbsp = crate::syntax::bits::unescape_rbsp(nal.get(1..)?);
-            let v = crate::syntax::h264::params::Sps::parse(&rbsp).ok()?.vui?;
+            let v = crate::syntax::h264::params::Sps::parse(&rbsp)
+                .unwrap_or_else(|e| panic!("an H.264 SPS that does not parse: {e}"))
+                .vui?;
             (
                 v.sar,
                 v.full_range,
@@ -110,7 +112,9 @@ fn sps_look(codec: Codec, nal: &[u8]) -> Look {
         }
         Codec::Hevc => {
             let rbsp = crate::syntax::bits::unescape_rbsp(nal.get(2..)?);
-            let v = crate::syntax::hevc::params::Sps::parse(&rbsp).ok()?.vui?;
+            let v = crate::syntax::hevc::params::Sps::parse(&rbsp)
+                .unwrap_or_else(|e| panic!("an HEVC SPS that does not parse: {e}"))
+                .vui?;
             (
                 v.sar,
                 v.full_range,
@@ -437,18 +441,42 @@ fn the_edge_fixtures_carry_the_looks_they_were_recorded_with() {
         let Some((sar, color)) = source_look(&fixture(f.name), codec, f.name) else {
             panic!("{}: no look", f.name);
         };
-        let full = f.color.contains(&"pc");
-        let anamorphic = f.sar == "8/9" || f.sar == "4/3";
+        let want_sar = f.sar.map_or((0, 0), |(x, y)| (x as u16, y as u16));
+        assert_eq!(sar, want_sar, "{}", f.name);
         assert_eq!(
-            anamorphic,
-            sar != (0, 0) && sar != (1, 1),
-            "{}: {sar:?}",
+            color.full_range,
+            f.tags == refs::Tags::Bt709Full,
+            "{}",
             f.name
         );
-        assert_eq!(color.full_range, full, "{}", f.name);
-        assert_eq!(color.described(), !f.color.is_empty(), "{}", f.name);
-        assert_eq!(decodes_clean(&fixture(f.name)), refs::FRAMES, "{}", f.name);
+        assert_eq!(color.described(), f.tags != refs::Tags::None, "{}", f.name);
+        let frames = lumas(&fixture(f.name));
+        assert_eq!(frames.len() as u64, refs::FRAMES, "{}", f.name);
+        let moving = frames.windows(2).filter(|w| w[0] != w[1]).count();
+        assert!(
+            moving * 2 >= frames.len(),
+            "{}: only {moving} of {} frames change, so a cut cannot be matched to its source",
+            f.name,
+            frames.len()
+        );
+        let first = match_source(&frames, &frames[1..2]);
+        assert_eq!(first.exact, 1, "{}", f.name);
     }
+}
+
+#[test]
+fn the_edge_source_is_the_one_recorded() {
+    let r = Refs::open(refs::AREA);
+    let bytes = refs::source_bytes();
+    r.assert_digest(refs::SOURCE, &crate::testref::sha256(&bytes));
+    let (w, h) = refs::SMALL;
+    let frame = (w * h * 3 / 2) as usize;
+    assert_eq!(bytes.len() as u64, frame as u64 * refs::FRAMES);
+    let distinct = bytes
+        .chunks_exact(frame)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    assert_eq!(distinct as u64, refs::FRAMES, "the source repeats a frame");
 }
 
 #[test]
@@ -518,14 +546,25 @@ fn a_cut_that_jumps_past_the_search_window_loses_its_match() {
 fn the_recorded_commands_tag_each_fixture_as_named() {
     for f in &refs::FIXTURES {
         let a = refs::args(f);
-        assert_eq!(a.last().map(String::as_str), Some("{out}"), "{}", f.name);
-        assert!(a.contains(&format!("setsar={}", f.sar)), "{}", f.name);
-        assert_eq!(a.iter().any(|s| s == "hvc1"), f.hevc, "{}", f.name);
-        assert_eq!(a.iter().any(|s| s == "libx265"), f.hevc, "{}", f.name);
-        assert_eq!(a.iter().any(|s| s == "libx264"), !f.hevc, "{}", f.name);
-        let tail = &a[a.len() - 1 - f.color.len()..a.len() - 1];
-        assert_eq!(tail, f.color, "{}", f.name);
-        assert!(a.contains(&refs::source()), "{}", f.name);
+        let has = |opt: &str, v: &str| a.windows(2).any(|w| w[0] == opt && w[1] == v);
+        assert!(a.contains(&"{src}".to_string()), "{}", f.name);
+        assert!(a.contains(&"{out}".to_string()), "{}", f.name);
+        assert_eq!(f.tool(), if f.hevc { "x265" } else { "x264" });
+        assert_eq!(has("--muxer", "mp4"), !f.hevc, "{}", f.name);
+        assert_eq!(f.out().ends_with(".mp4"), !f.hevc, "{}", f.name);
+        assert!(f.stream().ends_with(if f.hevc { ".265" } else { ".264" }));
+        assert!(has("--keyint", &refs::GOP.to_string()), "{}", f.name);
+        assert!(has("--bframes", "0"), "{}", f.name);
+        match f.sar {
+            Some((x, y)) => assert!(has("--sar", &format!("{x}:{y}")), "{}", f.name),
+            None => assert!(!a.iter().any(|s| s == "--sar"), "{}", f.name),
+        }
+        let tagged = f.tags != refs::Tags::None;
+        assert_eq!(has("--colorprim", "bt709"), tagged, "{}", f.name);
+        assert_eq!(has("--colormatrix", "bt709"), tagged, "{}", f.name);
+        let full = has("--range", "pc") || has("--range", "full");
+        assert_eq!(full, f.tags == refs::Tags::Bt709Full, "{}", f.name);
+        assert_eq!(a.iter().any(|s| s == "--range"), tagged, "{}", f.name);
     }
 }
 
@@ -552,8 +591,12 @@ fn length_prefixed_nals_split_and_stop_at_a_short_tail() {
     assert!(!is_sps(Codec::H264, got[1]));
     assert!(is_sps(Codec::Hevc, &[33 << 1, 1]));
     assert!(nals(&data, 0).is_empty());
-    assert_eq!(sps_look(Codec::H264, &[0x67]), None);
     assert_eq!(sps_look(Codec::Av1, &[0x67, 0, 0]), None);
+    assert_eq!(sps_look(Codec::H264, &[]), None);
+    let broken = std::panic::catch_unwind(|| sps_look(Codec::H264, &[0x67]));
+    assert!(broken.is_err(), "a corrupt SPS read as untagged");
+    let broken = std::panic::catch_unwind(|| sps_look(Codec::Hevc, &[33 << 1, 1]));
+    assert!(broken.is_err(), "a corrupt HEVC SPS read as untagged");
 }
 
 #[test]

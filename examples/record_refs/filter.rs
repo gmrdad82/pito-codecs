@@ -1,4 +1,5 @@
-use crate::{Def, FFMPEG, ff};
+use crate::testref;
+use crate::{Def, OURS, sha, tool, words};
 
 #[allow(dead_code)]
 #[path = "../../src/filter/refs.rs"]
@@ -8,166 +9,194 @@ mod refs;
 #[path = "../../src/media/front/refs.rs"]
 mod front;
 
-use refs::AREA;
-
-fn raw(pix_in: &str, (w, h): (u32, u32), vf: &str, pix_out: &str) -> Vec<String> {
-    let size = format!("{w}x{h}");
-    ff(&[
-        "-f", "rawvideo", "-pix_fmt", pix_in, "-s", &size, "-i", "{src}", "-vf", vf, "-f",
-        "rawvideo", "-pix_fmt", pix_out, "{out}",
-    ])
-}
-
-fn from_yuv(file: String, size: (u32, u32), vf: &str, pix_out: &str) -> Def {
-    Def::tolerance(AREA, file, FFMPEG, raw("yuv420p", size, vf, pix_out))
-        .from(move || Ok(refs::yuv_bytes(size, false)))
-}
-
-fn from_packed(file: String, pix_in: &str, vf: &str, bgr: bool) -> Def {
-    let size = refs::COLOUR_SIZE;
-    Def::tolerance(AREA, file, FFMPEG, raw(pix_in, size, vf, "yuv420p")).from(move || {
-        Ok(if bgr {
-            refs::bgra_bytes(size)
-        } else {
-            refs::rgba_bytes(size)
-        })
-    })
-}
-
-fn scales() -> Vec<Def> {
-    refs::SCALES
-        .iter()
-        .map(|&(kernel, w, h, deep)| {
-            let pix = refs::pix(deep);
-            let vf = format!("zscale=w={w}:h={h}:filter={kernel}:chromal=left:chromalin=left");
-            Def::tolerance(
-                AREA,
-                refs::scale_ref(kernel, w, h, deep),
-                FFMPEG,
-                raw(pix, refs::SCALE_SIZE, &vf, pix),
-            )
-            .from(move || Ok(refs::yuv_bytes(refs::SCALE_SIZE, deep)))
-        })
-        .collect()
-}
-
-fn colours() -> Vec<Def> {
-    let size = refs::COLOUR_SIZE;
-    let mut defs = Vec::new();
-    for (matrix, range) in refs::COLOURS {
-        defs.push(from_yuv(
-            refs::rgba_ref(matrix, range),
-            size,
-            &format!(
-                "scale=in_color_matrix={matrix}:in_range={range}:flags=neighbor+accurate_rnd+full_chroma_int"
-            ),
-            "rgba",
-        ));
-        defs.push(from_packed(
-            refs::yuv_ref(matrix, range),
-            "rgba",
-            &format!("scale=out_color_matrix={matrix}:out_range={range}:flags=area+accurate_rnd"),
-            false,
-        ));
-    }
-    defs.push(from_yuv(
-        refs::CONVERT_10BIT.into(),
-        size,
-        "colorspace=ispace=bt470bg:irange=tv:iprimaries=bt470bg:itrc=bt709:space=bt709:range=pc:primaries=bt470bg:trc=bt709:format=yuv420p10",
-        "yuv420p10le",
-    ));
-    defs
-}
-
-fn orders() -> Vec<Def> {
-    let size = refs::COLOUR_SIZE;
-    let mut defs = vec![
-        from_yuv(
-            refs::BGRA.into(),
-            size,
-            "scale=in_color_matrix=bt709:in_range=tv:flags=neighbor+accurate_rnd+full_chroma_int",
-            "bgra",
-        ),
-        from_packed(
-            refs::BGR0_TO_YUV.into(),
-            "bgr0",
-            "scale=out_color_matrix=bt709:out_range=tv:flags=area+accurate_rnd",
-            true,
-        ),
-    ];
-    for siting in refs::SITINGS {
-        defs.push(from_yuv(
-            refs::zscale_rgba_ref(siting),
-            size,
-            &format!(
-                "zscale=min=709:rin=limited:tin=709:pin=709:t=709:p=709:m=gbr:r=full:chromalin={siting}:filter=bilinear,format=gbrp"
-            ),
-            "rgba",
-        ));
-    }
-    defs.push(from_packed(
-        refs::RGBA_TO_YUV_LEFT.into(),
-        "rgba",
-        "format=gbrp,zscale=rin=full:tin=709:pin=709:m=709:r=limited:t=709:p=709:chromal=left:filter=bilinear,format=yuv420p",
-        false,
-    ));
-    defs.push(from_yuv(
-        refs::SCALE_CENTRE.into(),
-        refs::SCALE_SIZE,
-        &format!(
-            "zscale=w={}:h={}:filter=lanczos:chromal=center:chromalin=center",
-            refs::CENTRE_SIZE.0,
-            refs::CENTRE_SIZE.1
-        ),
-        "yuv420p",
-    ));
-    defs
-}
+use pito_codecs::media::Packet;
+use pito_codecs::mp4;
 
 fn loudness() -> Vec<Def> {
-    refs::loudness()
-        .into_iter()
-        .map(|(label, rate, seconds, sound)| {
-            let frames = refs::loudness_frames(rate, seconds);
-            let af = format!(
-                "asetnsamples=n={frames}:p=0,ebur128=peak=true:framelog=quiet:metadata=1,ametadata=mode=print:file={{out}}"
-            );
-            let args = ff(&[
-                "-f",
-                "f32le",
-                "-ar",
-                &rate.to_string(),
-                "-ac",
-                &refs::CHANNELS.to_string(),
-                "-i",
-                "{src}",
-                "-af",
-                &af,
-                "-f",
-                "null",
-                "-",
-            ]);
-            Def::exact(AREA, refs::loudness_ref(label), FFMPEG, args)
-                .from(move || Ok(refs::loudness_bytes(sound, rate, seconds)))
-        })
-        .collect()
+    let mut defs = Vec::new();
+    for (label, rate, seconds, sound) in refs::loudness() {
+        defs.push(Def::ours(
+            refs::AREA,
+            refs::loudness_input(label),
+            &format!("src/filter/refs.rs loudness_bytes(\"{label}\")"),
+            move || Ok(refs::loudness_bytes(sound, rate, seconds)),
+        ));
+        defs.push(
+            Def::exact(
+                refs::AREA,
+                refs::loudness_ref(label),
+                OURS,
+                words(&format!(
+                    "src/filter/refs.rs meter_text(meter_summary(\"{label}\"))"
+                )),
+            )
+            .from(move || {
+                let l = refs::meter_summary(sound, rate, seconds)?;
+                Ok(refs::meter_text(&l).into_bytes())
+            }),
+        );
+    }
+    defs
+}
+
+fn worked(file: &str) -> Result<Vec<u8>, String> {
+    let at = testref::root()
+        .join("tmp/record_refs")
+        .join(front::AREA)
+        .join(file);
+    std::fs::read(&at).map_err(|e| format!("{}: {e}", at.display()))
 }
 
 fn edges() -> Vec<Def> {
-    front::FIXTURES
-        .iter()
-        .map(|f| Def::fixture(front::AREA, f.name.into(), FFMPEG, ff_owned(front::args(f))))
-        .collect()
+    let mut defs = vec![Def::ours(
+        front::AREA,
+        front::SOURCE.into(),
+        "src/media/front/refs.rs source_bytes()",
+        || Ok(front::source_bytes()),
+    )];
+    for f in &front::FIXTURES {
+        let mut all = tool(f.tool(), &[]);
+        all.extend(front::args(f));
+        let made = if f.hevc {
+            Def::digest(front::AREA, f.out(), f.tool(), all, sha)
+        } else {
+            Def::fixture(front::AREA, f.out(), f.tool(), all)
+        };
+        defs.push(made.from(|| Ok(front::source_bytes())));
+        if f.hevc {
+            let stream = f.stream();
+            defs.push(
+                Def::fixture(
+                    front::AREA,
+                    f.name.into(),
+                    OURS,
+                    words(&format!(
+                        "examples/record_refs/filter.rs hevc_mp4(\"{stream}\")"
+                    )),
+                )
+                .from(move || hevc_mp4(&worked(&stream)?)),
+            );
+        }
+    }
+    defs
 }
 
-fn ff_owned(args: Vec<String>) -> Vec<String> {
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    ff(&args)
+fn annexb(data: &[u8]) -> Vec<&[u8]> {
+    let mut starts = Vec::new();
+    let mut i = 0;
+    while i + 3 <= data.len() {
+        if data[i..i + 3] == [0, 0, 1] {
+            starts.push(i + 3);
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    let mut out = Vec::new();
+    for (k, &s) in starts.iter().enumerate() {
+        let mut end = starts.get(k + 1).map_or(data.len(), |&n| n - 3);
+        while end > s && data[end - 1] == 0 {
+            end -= 1;
+        }
+        out.push(&data[s..end]);
+    }
+    out
+}
+
+fn kind(nal: &[u8]) -> u8 {
+    nal.first().map_or(63, |h| (h >> 1) & 0x3f)
+}
+
+fn unescape(nal: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(nal.len());
+    let mut zeros = 0;
+    for &b in nal {
+        if zeros >= 2 && b == 3 {
+            zeros = 0;
+            continue;
+        }
+        zeros = if b == 0 { zeros + 1 } else { 0 };
+        out.push(b);
+    }
+    out
+}
+
+fn hvcc(vps: &[&[u8]], sps: &[&[u8]], pps: &[&[u8]]) -> Result<Vec<u8>, String> {
+    let first = sps.first().ok_or("no SPS in the x265 stream")?;
+    let rbsp = unescape(first);
+    let ptl = rbsp
+        .get(3..15)
+        .ok_or("an SPS too short for its profile, tier and level")?;
+    let mut out = vec![1];
+    out.extend_from_slice(ptl);
+    out.extend_from_slice(&[0xf0, 0x00, 0xfc, 0xfd, 0xf8, 0xf8, 0, 0, 0x0f]);
+    out.push(3);
+    for (t, list) in [(32u8, vps), (33, sps), (34, pps)] {
+        out.push(0x80 | t);
+        let n = u16::try_from(list.len()).map_err(|_| "too many parameter sets")?;
+        out.extend_from_slice(&n.to_be_bytes());
+        for nal in list {
+            let len = u16::try_from(nal.len()).map_err(|_| "a parameter set over 64 KiB")?;
+            out.extend_from_slice(&len.to_be_bytes());
+            out.extend_from_slice(nal);
+        }
+    }
+    Ok(out)
+}
+
+fn hevc_mp4(stream: &[u8]) -> Result<Vec<u8>, String> {
+    let nals = annexb(stream);
+    let of = |t: u8| -> Vec<&[u8]> { nals.iter().copied().filter(|n| kind(n) == t).collect() };
+    let config = hvcc(&of(32), &of(33), &of(34))?;
+    let mut units: Vec<(Vec<u8>, bool)> = Vec::new();
+    for nal in &nals {
+        let t = kind(nal);
+        if t > 31 {
+            continue;
+        }
+        let first_slice = nal.get(2).is_some_and(|b| b & 0x80 != 0);
+        if first_slice || units.is_empty() {
+            units.push((Vec::new(), (16..=23).contains(&t)));
+        }
+        let Some((au, _)) = units.last_mut() else {
+            return Err("a slice with no access unit".into());
+        };
+        au.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+        au.extend_from_slice(nal);
+    }
+    if units.len() as u64 != front::FRAMES {
+        return Err(format!(
+            "the x265 stream holds {} pictures, not {}",
+            units.len(),
+            front::FRAMES
+        ));
+    }
+    let at = testref::scratch(front::AREA).join("hevc-mux.mp4");
+    let text = |e: pito_codecs::media::Error| e.to_string();
+    let (w, h) = front::SMALL;
+    let entry = mp4::SampleEntry::hevc(
+        mp4::HevcConfig::parse(&config).map_err(text)?,
+        w as u16,
+        h as u16,
+    );
+    let mut m = mp4::Writer::create(&at).map_err(text)?;
+    m.set_movie_timescale(1000);
+    let track = m
+        .add_track(mp4::TrackConfig::new(entry, front::FPS))
+        .map_err(text)?;
+    for (n, (data, keyframe)) in units.into_iter().enumerate() {
+        let packet = Packet {
+            data,
+            pts: n as i64,
+            dts: n as i64,
+            keyframe,
+        };
+        m.push_timed(track, &packet, 1).map_err(text)?;
+    }
+    m.finish_faststart().map_err(text)?;
+    std::fs::read(&at).map_err(|e| format!("{}: {e}", at.display()))
 }
 
 pub fn defs() -> Vec<Def> {
-    [scales(), colours(), orders(), loudness(), edges()]
-        .into_iter()
-        .flatten()
-        .collect()
+    [loudness(), edges()].into_iter().flatten().collect()
 }

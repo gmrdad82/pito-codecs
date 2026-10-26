@@ -6,15 +6,12 @@ pub const SIZE: (u32, u32) = (80, 60);
 pub const FRAMES: u64 = 6;
 pub const ALPHA_SIZE: (u32, u32) = (97, 61);
 
-pub const FFMPEG_GIFS: [(&str, &str); 3] = [
-    ("ff-global", "palettegen[p];[s1][p]paletteuse"),
+pub const MAGICK_ANIMS: [(&str, &str); 3] = [
+    ("im-global", "+dither|-colors|200|+remap"),
+    ("im-local", "-dither|FloydSteinberg|-colors|64"),
     (
-        "ff-local",
-        "palettegen=stats_mode=single[p];[s1][p]paletteuse=new=1:dither=bayer",
-    ),
-    (
-        "ff-rect",
-        "palettegen=max_colors=32[p];[s1][p]paletteuse=diff_mode=rectangle:dither=none",
+        "im-rect",
+        "-ordered-dither|o8x8,6|-colors|32|+remap|-layers|OptimizeFrame",
     ),
 ];
 

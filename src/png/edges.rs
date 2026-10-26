@@ -300,7 +300,7 @@ fn corrupted_and_truncated_files_never_panic() {
     }
 }
 
-fn like_ffmpeg(r: &Refs, case: &refs::Case) {
+fn like_magick(r: &Refs, case: &refs::Case) {
     let name = &case.name;
     r.assert_digest(&format!("{name}.png"), &testref::sha256(&case.file));
     let ours = decode(&case.file).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -314,14 +314,14 @@ fn like_ffmpeg(r: &Refs, case: &refs::Case) {
     for (i, (&o, w)) in ours.data.iter().zip(wide.chunks_exact(2)).enumerate() {
         assert!(
             o.abs_diff(w[0]) <= slack,
-            "{name}: byte {i} is {o}, ffmpeg's high byte {}",
+            "{name}: byte {i} is {o}, magick's high byte {}",
             w[0]
         );
     }
 }
 
 #[test]
-fn every_claimed_type_and_depth_decodes_like_ffmpeg() {
+fn every_claimed_type_and_depth_decodes_like_magick() {
     let r = Refs::open(refs::AREA);
     let cases = refs::claimed();
     assert_eq!(
@@ -329,12 +329,12 @@ fn every_claimed_type_and_depth_decodes_like_ffmpeg() {
         2 * CLAIMED.iter().map(|(_, d)| d.len()).sum::<usize>()
     );
     for case in &cases {
-        like_ffmpeg(&r, case);
+        like_magick(&r, case);
     }
 }
 
 #[test]
-fn transparency_keys_decode_like_ffmpeg() {
+fn transparency_keys_decode_like_magick() {
     let r = Refs::open(refs::AREA);
     for case in refs::keyed() {
         let name = &case.name;
@@ -343,16 +343,6 @@ fn transparency_keys_decode_like_ffmpeg() {
             ours.data.chunks_exact(4).any(|p| p[3] == 0),
             "{name}: key never hit"
         );
-        if case.sub_byte_grey() {
-            r.assert_digest(&format!("{name}.png"), &testref::sha256(&case.file));
-            let opaque: Vec<u8> = ours
-                .data
-                .chunks_exact(4)
-                .flat_map(|p| [p[0], p[1], p[2], 255])
-                .collect();
-            r.assert_digest(&format!("{name}.rgba"), &testref::sha256(&opaque));
-            continue;
-        }
-        like_ffmpeg(&r, &case);
+        like_magick(&r, &case);
     }
 }

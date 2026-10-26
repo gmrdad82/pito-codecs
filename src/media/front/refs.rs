@@ -9,66 +9,20 @@ pub const PIECE_FROM: f64 = 0.2;
 pub const PIECE_TO: f64 = 1.15;
 pub const SEARCH: usize = 4;
 pub const EDGE_PSNR: f64 = 30.0;
+pub const SOURCE: &str = "source.i420";
 
-pub const BT709_TV: [&str; 8] = [
-    "-color_primaries",
-    "bt709",
-    "-color_trc",
-    "bt709",
-    "-colorspace",
-    "bt709",
-    "-color_range",
-    "tv",
-];
-
-pub const FULL_709: [&str; 8] = [
-    "-color_primaries",
-    "bt709",
-    "-color_trc",
-    "bt709",
-    "-colorspace",
-    "bt709",
-    "-color_range",
-    "pc",
-];
-
-pub const X264: [&str; 14] = [
-    "-c:v",
-    "libx264",
-    "-preset",
-    "ultrafast",
-    "-crf",
-    "51",
-    "-g",
-    "5",
-    "-keyint_min",
-    "5",
-    "-sc_threshold",
-    "0",
-    "-pix_fmt",
-    "yuv420p",
-];
-
-pub const X265: [&str; 12] = [
-    "-c:v",
-    "libx265",
-    "-preset",
-    "ultrafast",
-    "-crf",
-    "51",
-    "-pix_fmt",
-    "yuv420p",
-    "-tag:v",
-    "hvc1",
-    "-x265-params",
-    "keyint=5:min-keyint=5:scenecut=0:open-gop=0:bframes=0:log-level=error",
-];
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tags {
+    None,
+    Bt709Tv,
+    Bt709Full,
+}
 
 pub struct Fixture {
     pub name: &'static str,
     pub hevc: bool,
-    pub sar: &'static str,
-    pub color: &'static [&'static str],
+    pub sar: Option<(u32, u32)>,
+    pub tags: Tags,
 }
 
 pub const HEVC_TAGGED: &str = "hevc-tagged.mp4";
@@ -81,52 +35,159 @@ pub const FIXTURES: [Fixture; 5] = [
     Fixture {
         name: HEVC_TAGGED,
         hevc: true,
-        sar: "4/3",
-        color: &BT709_TV,
+        sar: Some((4, 3)),
+        tags: Tags::Bt709Tv,
     },
     Fixture {
         name: HEVC_UNTAGGED,
         hevc: true,
-        sar: "0",
-        color: &[],
+        sar: None,
+        tags: Tags::None,
     },
     Fixture {
         name: HEVC_ANAMORPHIC_FULL,
         hevc: true,
-        sar: "8/9",
-        color: &FULL_709,
+        sar: Some((8, 9)),
+        tags: Tags::Bt709Full,
     },
     Fixture {
         name: H264_UNTAGGED,
         hevc: false,
-        sar: "0",
-        color: &[],
+        sar: None,
+        tags: Tags::None,
     },
     Fixture {
         name: H264_ANAMORPHIC_FULL,
         hevc: false,
-        sar: "8/9",
-        color: &FULL_709,
+        sar: Some((8, 9)),
+        tags: Tags::Bt709Full,
     },
 ];
 
-pub fn source() -> String {
-    format!(
-        "smptebars=size={}x{}:rate={FPS}:duration={}",
-        SMALL.0,
-        SMALL.1,
-        FRAMES as f64 / f64::from(FPS)
-    )
+impl Fixture {
+    pub fn tool(&self) -> &'static str {
+        if self.hevc { "x265" } else { "x264" }
+    }
+
+    pub fn stream(&self) -> String {
+        let ext = if self.hevc { "265" } else { "264" };
+        format!("{}.{ext}", self.name.trim_end_matches(".mp4"))
+    }
+
+    pub fn out(&self) -> String {
+        if self.hevc {
+            self.stream()
+        } else {
+            self.name.into()
+        }
+    }
+}
+
+pub fn source_bytes() -> Vec<u8> {
+    let mut out = Vec::new();
+    for n in 0..FRAMES {
+        let f = crate::testref::yuv_frame(SMALL.0, SMALL.1, n, 0);
+        for p in &f.planes {
+            for row in p.data.chunks(p.stride.max(1)).take(p.height) {
+                out.extend_from_slice(&row[..p.width.min(row.len())]);
+            }
+        }
+    }
+    out
 }
 
 pub fn args(f: &Fixture) -> Vec<String> {
-    let mut a: Vec<String> = ["-f", "lavfi", "-i"].map(String::from).to_vec();
-    a.push(source());
-    a.push("-vf".into());
-    a.push(format!("setsar={}", f.sar));
-    let codec: &[&str] = if f.hevc { &X265 } else { &X264 };
-    a.extend(codec.iter().chain(f.color).map(|s| s.to_string()));
-    a.push("{out}".into());
+    let size = format!("{}x{}", SMALL.0, SMALL.1);
+    let gop = GOP.to_string();
+    let fps = FPS.to_string();
+    let mut a: Vec<String> = if f.hevc {
+        [
+            "--input",
+            "{src}",
+            "--input-res",
+            &size,
+            "--input-csp",
+            "i420",
+            "--fps",
+            &fps,
+            "--frames",
+            &FRAMES.to_string(),
+            "--preset",
+            "ultrafast",
+            "--crf",
+            "51",
+            "--keyint",
+            &gop,
+            "--min-keyint",
+            &gop,
+            "--no-scenecut",
+            "--no-open-gop",
+            "--bframes",
+            "0",
+            "--frame-threads",
+            "1",
+            "--no-info",
+            "--log-level",
+            "error",
+        ]
+        .map(String::from)
+        .to_vec()
+    } else {
+        [
+            "--demuxer",
+            "raw",
+            "--input-csp",
+            "i420",
+            "--input-res",
+            &size,
+            "--fps",
+            &fps,
+            "--frames",
+            &FRAMES.to_string(),
+            "--preset",
+            "ultrafast",
+            "--crf",
+            "51",
+            "--keyint",
+            &gop,
+            "--min-keyint",
+            &gop,
+            "--scenecut",
+            "0",
+            "--bframes",
+            "0",
+            "--threads",
+            "1",
+            "--quiet",
+        ]
+        .map(String::from)
+        .to_vec()
+    };
+    if let Some((x, y)) = f.sar {
+        a.extend(["--sar".into(), format!("{x}:{y}")]);
+    }
+    let range = match (f.tags, f.hevc) {
+        (Tags::None, _) => None,
+        (Tags::Bt709Tv, true) => Some("limited"),
+        (Tags::Bt709Tv, false) => Some("tv"),
+        (Tags::Bt709Full, true) => Some("full"),
+        (Tags::Bt709Full, false) => Some("pc"),
+    };
+    if let Some(range) = range {
+        for opt in ["--colorprim", "--transfer", "--colormatrix"] {
+            a.extend([opt.into(), "bt709".into()]);
+        }
+        a.extend(["--range".into(), range.into()]);
+        if !f.hevc {
+            a.extend(["--input-range".into(), range.into()]);
+        }
+    }
+    if f.hevc {
+        a.extend(["--output".into(), "{out}".into()]);
+    } else {
+        a.extend(["--muxer".into(), "mp4".into(), "-o".into(), "{out}".into()]);
+        a.push("{src}".into());
+    }
     a
 }
 

@@ -2,9 +2,7 @@ use super::super::huffman::HuffmanTable;
 use super::*;
 use crate::testref::{self, Refs};
 
-#[allow(dead_code)]
-#[path = "../refs.rs"]
-mod refs;
+use crate::jpeg::tests::refs;
 
 use refs::{FORMATS, SIZES, photo, rgb24};
 
@@ -30,6 +28,11 @@ fn ours(file: &[u8]) -> Vec<u8> {
         .iter()
         .flat_map(|p| p.cropped())
         .collect()
+}
+
+fn djpeg_planes(r: &Refs, name: &str, size: (u32, u32), sampling: (usize, usize)) -> Vec<u8> {
+    let ppm = r.bytes(&refs::planes(name));
+    refs::planes_of(&refs::ppm_pixels(&ppm), size, sampling)
 }
 
 fn max_diff(a: &[u8], b: &[u8]) -> u8 {
@@ -362,7 +365,7 @@ fn our_encoder_decodes_back_at_every_size() {
         let name = refs::ours(refs::OUR_Q95, w, h);
         let file = super::super::encode(&photo(w, h), refs::OUR_Q95).unwrap();
         r.assert_digest(&format!("{name}.jpg"), &testref::sha256(&file));
-        let d = max_diff(&ours(&file), &r.bytes(&format!("{name}.yuv")));
+        let d = max_diff(&ours(&file), &djpeg_planes(&r, &name, (w, h), (2, 2)));
         assert!(d <= 1, "q95 {w}x{h}: off by {d}");
     }
 }
@@ -393,36 +396,36 @@ fn a_flat_colour_comes_back_flat() {
 }
 
 #[test]
-fn ffmpeg_files_decode_within_one_of_ffmpeg() {
+fn cjpeg_files_decode_within_one_of_djpeg() {
     let r = Refs::open(refs::AREA);
     let mut worst = 0;
-    for (pix_fmt, sampling) in FORMATS {
+    for (pix_fmt, _, sampling) in FORMATS {
         for (w, h) in SIZES {
-            let name = refs::ff(pix_fmt, w, h);
+            let name = refs::base(pix_fmt, w, h);
             let file = r.bytes(&format!("{name}.jpg"));
             let i = info(&file).unwrap();
             assert_eq!((i.width, i.height), (w, h));
             let chroma = &decode_planes(&file).unwrap().planes[1];
             assert_eq!((chroma.fx, chroma.fy), sampling, "{pix_fmt}");
-            let d = max_diff(&ours(&file), &r.bytes(&format!("{name}.yuv")));
+            let d = max_diff(&ours(&file), &djpeg_planes(&r, &name, (w, h), sampling));
             assert!(d <= 1, "{pix_fmt} {w}x{h}: off by {d}");
             worst = worst.max(d);
             let rgba = decode(&file).unwrap();
             assert_eq!((rgba.width, rgba.height), (w, h));
         }
     }
-    eprintln!("ffmpeg baseline: max difference {worst}");
+    eprintln!("cjpeg against djpeg: max difference {worst}");
 }
 
 #[test]
-fn our_encoder_decodes_within_one_of_ffmpeg() {
+fn our_encoder_decodes_within_one_of_djpeg() {
     let r = Refs::open(refs::AREA);
     let mut worst = 0;
     for (w, h) in SIZES {
         let name = refs::ours(refs::OUR_Q80, w, h);
         let file = super::super::encode(&photo(w, h), refs::OUR_Q80).unwrap();
         r.assert_digest(&format!("{name}.jpg"), &testref::sha256(&file));
-        let d = max_diff(&ours(&file), &r.bytes(&format!("{name}.yuv")));
+        let d = max_diff(&ours(&file), &djpeg_planes(&r, &name, (w, h), (2, 2)));
         assert!(d <= 1, "{w}x{h}: off by {d}");
         worst = worst.max(d);
     }
@@ -433,11 +436,11 @@ fn our_encoder_decodes_within_one_of_ffmpeg() {
 fn progressive_and_restart_files_decode_like_their_baseline() {
     let r = Refs::open(refs::AREA);
     let mut worst = 0;
-    for (pix_fmt, _) in FORMATS {
+    for (pix_fmt, _, sampling) in FORMATS {
         for (w, h) in SIZES {
-            let name = refs::ff(pix_fmt, w, h);
+            let name = refs::base(pix_fmt, w, h);
             let want = ours(&r.bytes(&format!("{name}.jpg")));
-            let theirs = r.bytes(&format!("{name}.yuv"));
+            let theirs = djpeg_planes(&r, &name, (w, h), sampling);
             for (v, args) in refs::VARIANTS {
                 let file = r.bytes(&format!("{}.jpg", refs::variant(&name, v)));
                 let i = info(&file).unwrap();
@@ -688,13 +691,13 @@ fn grey_files(r: &Refs) -> Vec<(String, Vec<u8>)> {
 }
 
 #[test]
-fn grey_files_decode_within_one_of_ffmpeg() {
+fn grey_files_decode_within_one_of_djpeg() {
     let r = Refs::open(refs::AREA);
     let mut worst = 0;
     for (w, h) in SIZES {
         let g = refs::grey(w, h);
         let want = ours(&r.bytes(&format!("{g}.jpg")));
-        let d = max_diff(&want, &r.bytes(&format!("{g}.gray")));
+        let d = max_diff(&want, &refs::ppm_pixels(&r.bytes(&format!("{g}.pgm"))));
         assert!(d <= 1, "grey {w}x{h}: off by {d}");
         worst = worst.max(d);
         for (v, _) in refs::GREY_VARIANTS {
@@ -753,12 +756,12 @@ fn other_samplings_and_split_scans_decode_like_libjpeg() {
     let r = Refs::open(refs::AREA);
     let mut worst = (0, 0);
     for (w, h) in refs::CJPEG_SIZES {
-        for (v, _, _, ratio) in refs::SAMPLINGS {
+        for (v, _, ratio) in refs::SAMPLINGS {
             let name = refs::cj(v, w, h);
             let file = r.bytes(&format!("{name}.jpg"));
             let planes = decode_planes(&file).unwrap();
             assert_eq!((planes.planes[1].fx, planes.planes[1].fy), ratio, "{name}");
-            let d = max_diff(&ours(&file), &r.bytes(&format!("{name}.yuv")));
+            let d = max_diff(&ours(&file), &djpeg_planes(&r, &name, (w, h), ratio));
             assert!(d <= 1, "{name}: planes off by {d}");
             worst.0 = worst.0.max(d);
             let ppm = r.bytes(&format!("{name}.ppm"));
@@ -1148,4 +1151,48 @@ fn internal_guards_refuse_what_the_decoder_never_builds() {
     };
     let e = two.rgba().unwrap_err().0;
     assert!(e.contains("2 colour components"), "{e}");
+}
+
+#[test]
+fn an_rgb_tagged_copy_keeps_the_planes_and_skips_the_colour_transform() {
+    let r = Refs::open(refs::AREA);
+    for (pix_fmt, _, sampling) in FORMATS {
+        let name = refs::base(pix_fmt, 33, 17);
+        let file = r.bytes(&format!("{name}.jpg"));
+        let tagged = refs::as_rgb(&file).unwrap();
+        assert!(!decode_planes(&file).unwrap().rgb, "{name}");
+        let planes = decode_planes(&tagged).unwrap();
+        assert!(planes.rgb, "{name}: not RGB");
+        assert_eq!(
+            (planes.planes[1].fx, planes.planes[1].fy),
+            sampling,
+            "{name}"
+        );
+        assert_eq!(ours(&tagged), ours(&file), "{name}: planes changed");
+        assert!(tagged.windows(4).all(|w| w != b"JFIF"), "{name}: JFIF kept");
+        assert_eq!(tagged[2..2 + refs::ADOBE_RGB.len()], refs::ADOBE_RGB);
+    }
+    assert!(refs::as_rgb(b"GIF89a").is_err());
+    assert!(refs::as_rgb(&[0xff, 0xd8, 0xff, 0xe0, 0, 40, 0]).is_err());
+    assert!(refs::as_rgb(&[0xff, 0xd8, 1, 2]).is_err());
+}
+
+#[test]
+fn planes_come_back_from_a_replicated_picture() {
+    let (w, h) = (5u32, 3u32);
+    let mut pixels = Vec::new();
+    for y in 0..h as u8 {
+        for x in 0..w as u8 {
+            pixels.extend([10 * y + x, 100 + (x / 2) + 10 * y, 200 + (x / 2)]);
+        }
+    }
+    let got = refs::planes_of(&pixels, (w, h), (2, 2));
+    let luma: Vec<u8> = (0..3u8)
+        .flat_map(|y| (0..5u8).map(move |x| 10 * y + x))
+        .collect();
+    assert_eq!(&got[..15], &luma[..]);
+    assert_eq!(&got[15..21], &[100, 101, 102, 120, 121, 122]);
+    assert_eq!(&got[21..], &[200, 201, 202, 200, 201, 202]);
+    assert_eq!(refs::planes_of(&pixels, (w, h), (1, 1)).len(), 45);
+    assert!(refs::planes_of(&[], (w, h), (2, 2)).is_empty());
 }

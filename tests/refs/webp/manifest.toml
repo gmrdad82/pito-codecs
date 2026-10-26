@@ -1,0 +1,575 @@
+[[ref]]
+name = "ll_pattern.webp"
+file = "ll_pattern.webp"
+sha256 = "5a2978e8b4bdd724990bb1073fa756ced49f5158bed8ab65787d6a6754cee564"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 131x87 -depth 8 rgba:{src} -define webp:exact=true -define webp:lossless=true {out}"
+
+[[ref]]
+name = "ll_pattern.rgba"
+file = ""
+sha256 = "104247472dc9d03c5a06d09cdbd078ced6994309d6800b438ac7f51dfb1c1a93"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeRGBA of ll_pattern.webp"
+
+[[ref]]
+name = "ll_fast.webp"
+file = "ll_fast.webp"
+sha256 = "e3c10246eaf11bf7b2c7abc0daf0a56fe562449c7c3823ff4073c49e0a35bfe3"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 96x64 -depth 8 rgba:{src} -define webp:exact=true -define webp:lossless=true -define webp:method=0 {out}"
+
+[[ref]]
+name = "ll_fast.rgba"
+file = ""
+sha256 = "d2892df5f9eb4b1f821cbc06013f7d7714f0639440a36d881e5d249901deec74"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeRGBA of ll_fast.webp"
+
+[[ref]]
+name = "ll_best.webp"
+file = "ll_best.webp"
+sha256 = "0f651da6db0570256b4d36dfc1531c52d3c249f6635bd9fa5545565a1b13c232"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 120x90 -depth 8 rgba:{src} -define webp:exact=true -define webp:lossless=true -define webp:method=6 -quality 100 {out}"
+
+[[ref]]
+name = "ll_best.rgba"
+file = ""
+sha256 = "d3b8f274c45b170a1ddea24e45bfb919f1fd32efe1fe67743cb7cf27af05964e"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeRGBA of ll_best.webp"
+
+[[ref]]
+name = "ll_alpha.webp"
+file = "ll_alpha.webp"
+sha256 = "9f8c4a05f710dfd4e54c84092d14464bd76901cf92b5db83c349397dae2a83d8"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 100x60 -depth 8 rgba:{src} -define webp:exact=true -define webp:lossless=true {out}"
+
+[[ref]]
+name = "ll_alpha.rgba"
+file = ""
+sha256 = "be442ba9980ce8187a1ed7a8ba45ec7f16f07e68634851be49e1cf0104d756b2"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeRGBA of ll_alpha.webp"
+
+[[ref]]
+name = "ll_palette.webp"
+file = "ll_palette.webp"
+sha256 = "5d3a74f7a080ac176b486464d0106989048df39002f3a6c299f88839d67529f7"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 150x50 -depth 8 rgba:{src} -define webp:exact=true -define webp:lossless=true {out}"
+
+[[ref]]
+name = "ll_palette.rgba"
+file = ""
+sha256 = "77cc887b300e5d0e5b70ab3be4ad2884bc48442edeb566acec104918468da74a"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeRGBA of ll_palette.webp"
+
+[[ref]]
+name = "ll_odd.webp"
+file = "ll_odd.webp"
+sha256 = "1aab55223bbdf411262a9116650752e04b52bc29be68b3340353f785649ad697"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 97x61 -depth 8 rgba:{src} -define webp:exact=true -define webp:lossless=true -define webp:method=6 {out}"
+
+[[ref]]
+name = "ll_odd.rgba"
+file = ""
+sha256 = "a187271f2ad05c08b00df99d58dfddaa520dcc5a9d4ab41f32ed56339284f0e8"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeRGBA of ll_odd.webp"
+
+[[ref]]
+name = "anim_ll.webp"
+file = "anim_ll.webp"
+sha256 = "b3c76ccb4026dc593b7a851f1c724a9e5a749533e67fe7ca377923707ef262b6"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 96x64 -depth 8 rgba:{src} -delay 4 -loop 0 -define webp:lossless=true {out}"
+
+[[ref]]
+name = "anim_ll.rgba"
+file = ""
+sha256 = "5c614f04316cf7ac1c0b596302ed665bcc868bd5985dcd61e667b39809965d89"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick {ref:anim_ll.webp} -coalesce -depth 8 rgba:{out}"
+
+[[ref]]
+name = "our-ll-photo.webp"
+file = ""
+sha256 = "e408fa44fec278dfdcce77aa0a914a1b623b8526424b6bd2efc794f5c3dc2d34"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/webp/refs.rs encode_lossless(\"photo\")"
+
+[[ref]]
+name = "our-ll-photo.rgba"
+file = ""
+sha256 = "4c66aaa0081bb9a6dc10159dbbb70869b473eae3e7f5d6e53fc28e9b5894754f"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeRGBA of our-ll-photo.webp"
+
+[[ref]]
+name = "our-ll-alpha.webp"
+file = ""
+sha256 = "7d6eed2316c77929eb7939cf3fab349b87014f7161226a600200831557a99e3f"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/webp/refs.rs encode_lossless(\"alpha\")"
+
+[[ref]]
+name = "our-ll-alpha.rgba"
+file = ""
+sha256 = "6b692126e6984593d9b0c36ce1c95b4d03bcd28a843efd3d4f025f1ca554d0f3"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeRGBA of our-ll-alpha.webp"
+
+[[ref]]
+name = "lw-pattern.webp"
+file = "lw-pattern.webp"
+sha256 = "149382f4a1f44eb3f3a429a8f845c13b1c99f6cbf2178c4fe4687392278f356c"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 320x240 -depth 8 rgba:{src} -define webp:exact=true -quality 75 {out}"
+
+[[ref]]
+name = "lw-pattern.yuv420p"
+file = ""
+sha256 = "337f0ef38685763821860e0be1e92e88e443ec4a2f0703b34f3c6428ec250ed6"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeYUVInto of lw-pattern.webp, then the alpha of WebPDecodeRGBA"
+
+[[ref]]
+name = "our-pattern.webp"
+file = ""
+sha256 = "d8eac3e059daee03a1b98e0be98c0376d2aa43f28bd3adda7cd82d0ec9100a77"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/webp/refs.rs encode_lossy(\"pattern\")"
+
+[[ref]]
+name = "our-pattern.yuv420p"
+file = ""
+sha256 = "6dfa779598114393aa035100f823fe2c2dd2a9ee64e08743685fac3c007ffb8b"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeYUVInto of our-pattern.webp, then the alpha of WebPDecodeRGBA"
+
+[[ref]]
+name = "lw-noisy.webp"
+file = "lw-noisy.webp"
+sha256 = "d59388f975a942423e308e3d9eaa708f306a5cc74e5d085aa195707d78f4bdf9"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 200x120 -depth 8 rgba:{src} -define webp:exact=true -quality 90 {out}"
+
+[[ref]]
+name = "lw-noisy.yuv420p"
+file = ""
+sha256 = "eee6b342126546890c35d298577d46af94253bf37116aaf805bddea2e5240668"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeYUVInto of lw-noisy.webp, then the alpha of WebPDecodeRGBA"
+
+[[ref]]
+name = "our-noisy.webp"
+file = ""
+sha256 = "f6e35b7b16b35f846044cd66821c0bd6c23bd0a6e405a3165e39a3c3b8d51761"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/webp/refs.rs encode_lossy(\"noisy\")"
+
+[[ref]]
+name = "our-noisy.yuv420p"
+file = ""
+sha256 = "38b4b8ffcb3e9576cd1015b948e42a39d26127627728f37c1f6ee64872c1380b"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeYUVInto of our-noisy.webp, then the alpha of WebPDecodeRGBA"
+
+[[ref]]
+name = "lw-pattern5.webp"
+file = "lw-pattern5.webp"
+sha256 = "da26539ccc4682e3aa14e50d438cf00f82a8b28e5ce031eddf867d6da5c7afc9"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 127x61 -depth 8 rgba:{src} -define webp:exact=true -quality 20 {out}"
+
+[[ref]]
+name = "lw-pattern5.yuv420p"
+file = ""
+sha256 = "28d23656d04fa7df9d6eea1bf2f8f2e09929e7dad02ac295794f65b97b24f5ea"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeYUVInto of lw-pattern5.webp, then the alpha of WebPDecodeRGBA"
+
+[[ref]]
+name = "our-pattern5.webp"
+file = ""
+sha256 = "ce4e485c72a5a033a48b5d4ecf7aa7514ee469142409a74a27d898c701cd28d0"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/webp/refs.rs encode_lossy(\"pattern5\")"
+
+[[ref]]
+name = "our-pattern5.yuv420p"
+file = ""
+sha256 = "a4d9e0e0446e1b001b860e2205a90293276e1627840d30d8026e33f9629040ad"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeYUVInto of our-pattern5.webp, then the alpha of WebPDecodeRGBA"
+
+[[ref]]
+name = "lw-square.webp"
+file = "lw-square.webp"
+sha256 = "54f9cfbf735825319cd620f905b86bdf375faac4f7d6e0ce0f9eff7ef88adc34"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 64x64 -depth 8 rgba:{src} -define webp:exact=true -quality 100 {out}"
+
+[[ref]]
+name = "lw-square.yuv420p"
+file = ""
+sha256 = "30dd52906719fa5f18cc7280ee9061eb7a0e26b73948d52e0bff65c12cb1d22b"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeYUVInto of lw-square.webp, then the alpha of WebPDecodeRGBA"
+
+[[ref]]
+name = "our-square.webp"
+file = ""
+sha256 = "f7b297c16a9f289e3a67ece451bade3cf277124f3db9a679bdc9047e25742635"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/webp/refs.rs encode_lossy(\"square\")"
+
+[[ref]]
+name = "our-square.yuv420p"
+file = ""
+sha256 = "1acd0ba31541d64ece8198ac0618539d4251495d9a073aacb0b20fa5258eedc9"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeYUVInto of our-square.webp, then the alpha of WebPDecodeRGBA"
+
+[[ref]]
+name = "lw-tiny.webp"
+file = "lw-tiny.webp"
+sha256 = "3cb96742ca659f38f0b9486b5df0ef866620f609931fb7b60b470a72b8fde897"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 1x1 -depth 8 rgba:{src} -define webp:exact=true -quality 50 {out}"
+
+[[ref]]
+name = "lw-tiny.yuv420p"
+file = ""
+sha256 = "d43dd9bf3c895139fe135cb03b9101c5718b39967be69dc03e4494573927aa5e"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeYUVInto of lw-tiny.webp, then the alpha of WebPDecodeRGBA"
+
+[[ref]]
+name = "our-tiny.webp"
+file = ""
+sha256 = "a217024496518012ae66eab894088a9aa03bda27f5afd257bf169e5cab0f778f"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/webp/refs.rs encode_lossy(\"tiny\")"
+
+[[ref]]
+name = "our-tiny.yuv420p"
+file = ""
+sha256 = "dbd8ce36db4826f3c5e4e58a0c5ae245c250629f7bded7aedf9e3dde58d59616"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeYUVInto of our-tiny.webp, then the alpha of WebPDecodeRGBA"
+
+[[ref]]
+name = "lw-cell.webp"
+file = "lw-cell.webp"
+sha256 = "e0166d5632f20f3b6e83ddd57955a18f307fe6491360679be084c8d5612eb752"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 97x33 -depth 8 rgba:{src} -define webp:exact=true -quality 5 {out}"
+
+[[ref]]
+name = "lw-cell.yuv420p"
+file = ""
+sha256 = "459445e5f874a21b1eda25f20c78a0fa02332f122e21897728a94a0c5523eda0"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeYUVInto of lw-cell.webp, then the alpha of WebPDecodeRGBA"
+
+[[ref]]
+name = "our-cell.webp"
+file = ""
+sha256 = "97b217c87b796da281d3d04e175b039486739aaa9feae9e3a61091445b2dab52"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/webp/refs.rs encode_lossy(\"cell\")"
+
+[[ref]]
+name = "our-cell.yuv420p"
+file = ""
+sha256 = "6213d61c1579d37e2de1b0b03996e58e69e4b71ff5e5dd0dd857c6bf51fe8d8f"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeYUVInto of our-cell.webp, then the alpha of WebPDecodeRGBA"
+
+[[ref]]
+name = "lw-big.webp"
+file = "lw-big.webp"
+sha256 = "f892aaaf2207d7e4209796f0eb722b020c4db0409618869faa300f383ea51d18"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 352x240 -depth 8 rgba:{src} -define webp:exact=true -quality 50 {out}"
+
+[[ref]]
+name = "lw-big.yuv420p"
+file = ""
+sha256 = "260bd9b726e808e818c2ba9614634888aee639b8fa89a08cd12e1abfa2f158f1"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeYUVInto of lw-big.webp, then the alpha of WebPDecodeRGBA"
+
+[[ref]]
+name = "our-big.webp"
+file = ""
+sha256 = "55f177814b9465752fa5d351f0c59fc528905ab87acee6517131d757cd185a82"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/webp/refs.rs encode_lossy(\"big\")"
+
+[[ref]]
+name = "our-big.yuv420p"
+file = ""
+sha256 = "0a170195563cc86a4b7158a71ba2535c9d6a70dd7d472efd1fce96f7ea6ad9ba"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeYUVInto of our-big.webp, then the alpha of WebPDecodeRGBA"
+
+[[ref]]
+name = "lw-lossy-alpha.webp"
+file = "lw-lossy-alpha.webp"
+sha256 = "747d3e6fee107fa35cd19acbed868c44c5ec58b2269ba1369e4c7a6d85050e3a"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 320x180 -depth 8 rgba:{src} -define webp:exact=true -quality 85 {out}"
+
+[[ref]]
+name = "lw-lossy-alpha.yuva420p"
+file = ""
+sha256 = "faa5e7da37ff491535b5e3f9a60eb01f53548dffd924ca6f364470d30c66f1da"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeYUVInto of lw-lossy-alpha.webp, then the alpha of WebPDecodeRGBA"
+
+[[ref]]
+name = "lossy-alpha.webp"
+file = ""
+sha256 = "6bbab9aa4c55ca62adcb7320f5aa6a322ff16652d57558f23f3ba540ff407004"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/webp/refs.rs encode_alpha()"
+
+[[ref]]
+name = "lossy-alpha.yuva420p"
+file = ""
+sha256 = "bdefed664fe21c09ba67e356afb94ca9967c01b3fe62568706cee4cb9dda03cc"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeYUVInto of lossy-alpha.webp, then the alpha of WebPDecodeRGBA"
+
+[[ref]]
+name = "lw-anim-0.webp"
+file = "lw-anim-0.webp"
+sha256 = "2bd3964009a4cd1702ba781360c1e0ef46e764f95a47fc1485241125ffcbd7b7"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 160x96 -depth 8 rgba:{src} -define webp:exact=true -quality 80 {out}"
+
+[[ref]]
+name = "lw-anim-0.yuv420p"
+file = ""
+sha256 = "8c07bbd79220e9db6a365523ab160b8444aa644b177bfe71ab38062dbfb4d57b"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeYUVInto of lw-anim-0.webp, then the alpha of WebPDecodeRGBA"
+
+[[ref]]
+name = "lw-anim-1.webp"
+file = "lw-anim-1.webp"
+sha256 = "90abc4fc1283a59ad5511facc145dfc0250aef70661c99308119b1cb15cb9986"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 160x96 -depth 8 rgba:{src} -define webp:exact=true -quality 80 {out}"
+
+[[ref]]
+name = "lw-anim-1.yuv420p"
+file = ""
+sha256 = "e8c789e9e3f0a231951c87bf72ca04f2b78f42d620e57237f216cb2bc1b5c137"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeYUVInto of lw-anim-1.webp, then the alpha of WebPDecodeRGBA"
+
+[[ref]]
+name = "lw-anim-2.webp"
+file = "lw-anim-2.webp"
+sha256 = "626327910f00601ca6a9ed1c6cee661d315a56be34f69ae851df9f431faaaab4"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 160x96 -depth 8 rgba:{src} -define webp:exact=true -quality 80 {out}"
+
+[[ref]]
+name = "lw-anim-2.yuv420p"
+file = ""
+sha256 = "d7586b4e78887939f3c2343e911b51d7d072a753107233234004402e94ccc657"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeYUVInto of lw-anim-2.webp, then the alpha of WebPDecodeRGBA"
+
+[[ref]]
+name = "lw-anim-3.webp"
+file = "lw-anim-3.webp"
+sha256 = "65736e560200426e4920955492fc968369ac53d681df5bac3cb27ae93f9393dd"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 160x96 -depth 8 rgba:{src} -define webp:exact=true -quality 80 {out}"
+
+[[ref]]
+name = "lw-anim-3.yuv420p"
+file = ""
+sha256 = "474f80936b237f3308fd05786601d308d9f71ef1b20ec301c47943c83a4d6e15"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeYUVInto of lw-anim-3.webp, then the alpha of WebPDecodeRGBA"
+
+[[ref]]
+name = "lw-anim-4.webp"
+file = "lw-anim-4.webp"
+sha256 = "05e570c4d68b54e380b4c8f0bf7c1f77943dfaba7e3ab21df1a05e24d525aeff"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 160x96 -depth 8 rgba:{src} -define webp:exact=true -quality 80 {out}"
+
+[[ref]]
+name = "lw-anim-4.yuv420p"
+file = ""
+sha256 = "6c6f60203206bda0ec819dcc638052d4761892a38fc31d59ab47500cbd863692"
+kind = "bit-exact"
+tool = "libwebp.so.7.2.0 1.6.0"
+command = "examples/record_refs: libwebp WebPDecodeYUVInto of lw-anim-4.webp, then the alpha of WebPDecodeRGBA"
+
+[[ref]]
+name = "vpx-a.ivf"
+file = "vpx-a.ivf"
+sha256 = "55937eb595385b84467099af4633367244b54806445f340adcc350f8222d58b0"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp8 --i420 -w 352 -h 240 --fps=1/1 --limit=1 --passes=1 --threads=1 --profile=0 --token-parts=0 --sharpness=0 --min-q=30 --max-q=63 --target-bitrate=50 --ivf --disable-warning-prompt -q -o {out} {src}"
+
+[[ref]]
+name = "vpx-a.yuv"
+file = ""
+sha256 = "b9f93817192e568210f101d33c37673dd50b76465ba61a52930c392c3119b09a"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --i420 --rawvideo --limit=1 -o {out} {ref:vpx-a.ivf}"
+
+[[ref]]
+name = "vpx-b.ivf"
+file = "vpx-b.ivf"
+sha256 = "c0ef11b80595f2c38bb5799a36f78aabb95bd1daa2203f3778335b854c70f853"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp8 --i420 -w 352 -h 240 --fps=1/1 --limit=1 --passes=1 --threads=1 --profile=0 --token-parts=3 --sharpness=0 --min-q=50 --max-q=63 --target-bitrate=50 --ivf --disable-warning-prompt -q -o {out} {src}"
+
+[[ref]]
+name = "vpx-b.yuv"
+file = ""
+sha256 = "668aa3fe25d408a5e6293b5977f1a956b87679cf6f7abb67591146d09220f2cc"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --i420 --rawvideo --limit=1 -o {out} {ref:vpx-b.ivf}"
+
+[[ref]]
+name = "vpx-c.ivf"
+file = "vpx-c.ivf"
+sha256 = "8ee7b8684acfbf5147e913c25c992c1532e3e6225034a0a7ce53cbca38464fc3"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp8 --i420 -w 352 -h 240 --fps=1/1 --limit=1 --passes=1 --threads=1 --profile=0 --token-parts=2 --sharpness=3 --min-q=50 --max-q=63 --target-bitrate=50 --ivf --disable-warning-prompt -q -o {out} {src}"
+
+[[ref]]
+name = "vpx-c.yuv"
+file = ""
+sha256 = "c02dde58b00d750cc8bb05af2c32be43c6b8146a22bd8c6cea6815d07630aa27"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --i420 --rawvideo --limit=1 -o {out} {ref:vpx-c.ivf}"
+
+[[ref]]
+name = "vpx-d.ivf"
+file = "vpx-d.ivf"
+sha256 = "00dc8ab7779ab28e34bb9e8b00915ee5e2f49632d7c341051f522fd58376b94e"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp8 --i420 -w 352 -h 240 --fps=1/1 --limit=1 --passes=1 --threads=1 --profile=1 --token-parts=0 --sharpness=0 --min-q=50 --max-q=63 --target-bitrate=50 --ivf --disable-warning-prompt -q -o {out} {src}"
+
+[[ref]]
+name = "vpx-d.yuv"
+file = ""
+sha256 = "8a3f3175d67d4f32431fe260fe6581ee5415188498ab08ba55add20cb23b2470"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --i420 --rawvideo --limit=1 -o {out} {ref:vpx-d.ivf}"
+
+[[ref]]
+name = "vpx-e.ivf"
+file = "vpx-e.ivf"
+sha256 = "21d6c075cb4f5fa5fb66bab2421db8f3205cc0bf876b7eac54fa7f6ba2919db6"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp8 --i420 -w 320 -h 240 --fps=1/1 --limit=1 --passes=1 --threads=1 --profile=1 --token-parts=3 --sharpness=6 --min-q=40 --max-q=63 --target-bitrate=50 --ivf --disable-warning-prompt -q -o {out} {src}"
+
+[[ref]]
+name = "vpx-e.yuv"
+file = ""
+sha256 = "d5c4238de7ea6a900055db75694f1221bcab71f8eb26402f54e041c93a6bf689"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --i420 --rawvideo --limit=1 -o {out} {ref:vpx-e.ivf}"
+
+[[ref]]
+name = "vpx-f.ivf"
+file = "vpx-f.ivf"
+sha256 = "41daf4204ec777a3516e9417bd99cf4aaae4630bf9b9f92b9ea6c7f429db1a6b"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp8 --i420 -w 98 -h 62 --fps=1/1 --limit=1 --passes=1 --threads=1 --profile=3 --token-parts=1 --sharpness=2 --min-q=60 --max-q=63 --target-bitrate=50 --ivf --disable-warning-prompt -q -o {out} {src}"
+
+[[ref]]
+name = "vpx-f.yuv"
+file = ""
+sha256 = "8648d044854945522ba559894f02581fc0f57069466d51e1c2f4912a8c1693c4"
+kind = "bit-exact"
+tool = "vp9    - WebM Project VP9 Decoder v1.17.0"
+command = "vpxdec --i420 --rawvideo --limit=1 -o {out} {ref:vpx-f.ivf}"

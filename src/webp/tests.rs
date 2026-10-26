@@ -77,7 +77,7 @@ fn animation_decode_matches_libwebp() {
 }
 
 #[test]
-fn lossless_encode_decodes_exactly_in_libwebp_and_ffmpeg() {
+fn lossless_encode_decodes_exactly_in_libwebp() {
     let r = Refs::open(refs::AREA);
     let lib = lib();
     for (name, img) in &refs::lossless_cases() {
