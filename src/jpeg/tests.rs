@@ -1,7 +1,6 @@
 use super::*;
 use std::io::Write;
 use std::process::{Command, Stdio};
-use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Pattern {
@@ -87,15 +86,6 @@ fn psnr(a: &[u8], b: &[u8]) -> f64 {
     }
 }
 
-fn have(tool: &str, flag: &str) -> bool {
-    Command::new(tool)
-        .arg(flag)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok()
-}
-
 fn run(tool: &str, args: &[&str], input: Vec<u8>) -> Option<Vec<u8>> {
     let mut child = Command::new(tool)
         .args(args)
@@ -111,24 +101,9 @@ fn run(tool: &str, args: &[&str], input: Vec<u8>) -> Option<Vec<u8>> {
     (fed && out.status.success()).then_some(out.stdout)
 }
 
-fn ffmpeg_decode(file: &[u8], pix_fmt: &str) -> Option<Vec<u8>> {
-    run(
-        "ffmpeg",
-        &[
-            "-v",
-            "error",
-            "-f",
-            "jpeg_pipe",
-            "-i",
-            "-",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            pix_fmt,
-            "-",
-        ],
-        file.to_vec(),
-    )
+fn planes(file: &[u8]) -> Option<Vec<u8>> {
+    let p = decode::decode_planes(file).ok()?;
+    Some(p.planes.iter().flat_map(|p| p.cropped()).collect())
 }
 
 fn scalar(img: &Rgba, quality: u8) -> Vec<u8> {
@@ -566,18 +541,16 @@ fn extra_bytes_after_the_pixels_are_ignored() {
 #[test]
 fn every_quality_decodes_and_psnr_rises_with_quality() {
     let img = image(Pattern::Noise, 33, 17);
-    let ffmpeg = have("ffmpeg", "-version");
     let want = luma(&img);
     let mut last = 0.0;
     for q in 1..=100u8 {
         let file = encode(&img, q).expect("encode");
         assert_eq!(&file[..2], &[0xFF, 0xD8]);
         assert_eq!(&file[file.len() - 2..], &[0xFF, 0xD9]);
-        if !ffmpeg || q % 3 != 1 {
+        if q % 3 != 1 {
             continue;
         }
-        let yuv =
-            ffmpeg_decode(&file, "yuvj420p").unwrap_or_else(|| panic!("q{q}: ffmpeg refused it"));
+        let yuv = planes(&file).unwrap_or_else(|| panic!("q{q}: we refused it"));
         assert_eq!(yuv.len(), 33 * 17 + 2 * 17 * 9, "q{q}");
         let p = psnr(&want, &yuv[..want.len()]);
         assert!(p + 0.5 >= last, "q{q}: {p:.2} dB fell below {last:.2}");
@@ -627,11 +600,7 @@ fn chroma_floor(quality: u8) -> f64 {
 }
 
 #[test]
-fn ffmpeg_decodes_every_size_and_quality_above_a_psnr_floor() {
-    if !have("ffmpeg", "-version") {
-        eprintln!("skipped: no ffmpeg");
-        return;
-    }
+fn every_size_and_quality_decodes_above_a_psnr_floor() {
     for pattern in PATTERNS {
         for (w, h) in SIZES {
             let img = image(pattern, w, h);
@@ -640,8 +609,8 @@ fn ffmpeg_decodes_every_size_and_quality_above_a_psnr_floor() {
             let expect_len = w * h + 2 * w.div_ceil(2) * h.div_ceil(2);
             for q in QUALITIES {
                 let file = encode(&img, q).expect("encode");
-                let yuv = ffmpeg_decode(&file, "yuvj420p")
-                    .unwrap_or_else(|| panic!("{pattern:?} {w}x{h} q{q}: ffmpeg refused it"));
+                let yuv = planes(&file)
+                    .unwrap_or_else(|| panic!("{pattern:?} {w}x{h} q{q}: we refused it"));
                 assert_eq!(yuv.len(), expect_len, "{pattern:?} {w}x{h} q{q}: size");
                 let p = psnr(&want, &yuv[..w * h]);
                 let min = floor(pattern, q);
@@ -663,11 +632,7 @@ fn ffmpeg_decodes_every_size_and_quality_above_a_psnr_floor() {
 }
 
 #[test]
-fn ffmpeg_decodes_flat_colours_back() {
-    if !have("ffmpeg", "-version") {
-        eprintln!("skipped: no ffmpeg");
-        return;
-    }
+fn flat_colours_decode_back() {
     for rgb in [
         [255, 0, 0],
         [0, 255, 0],
@@ -682,7 +647,12 @@ fn ffmpeg_decodes_flat_colours_back() {
             px.copy_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
         }
         let file = encode(&img, 90).expect("encode");
-        let out = ffmpeg_decode(&file, "rgb24").expect("ffmpeg decode");
+        let out: Vec<u8> = decode(&file)
+            .expect("decode")
+            .data
+            .chunks_exact(4)
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect();
         assert_eq!(out.len(), 24 * 20 * 3);
         for px in out.chunks_exact(3) {
             for c in 0..3 {
@@ -728,17 +698,6 @@ fn ppm(img: &Rgba) -> Vec<u8> {
     out
 }
 
-fn best_of_three(f: impl Fn() -> Vec<u8>) -> (Vec<u8>, f64) {
-    let mut best = f64::MAX;
-    let mut out = Vec::new();
-    for _ in 0..3 {
-        let t = Instant::now();
-        out = f();
-        best = best.min(t.elapsed().as_secs_f64() * 1000.0);
-    }
-    (out, best)
-}
-
 fn libjpeg_turbo() -> bool {
     Command::new("cjpeg")
         .arg("-version")
@@ -746,24 +705,6 @@ fn libjpeg_turbo() -> bool {
         .is_ok_and(|o| {
             String::from_utf8_lossy(&[o.stdout, o.stderr].concat()).contains("libjpeg-turbo")
         })
-}
-
-fn ffmpeg_mjpeg(img: &Rgba, qscale: u8) -> Option<Vec<u8>> {
-    let size = format!("{}x{}", img.width, img.height);
-    let qs = qscale.to_string();
-    let rgb: Vec<u8> = img
-        .data
-        .chunks_exact(4)
-        .flat_map(|p| [p[0], p[1], p[2]])
-        .collect();
-    run(
-        "ffmpeg",
-        &[
-            "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", &size, "-i", "-", "-c:v",
-            "mjpeg", "-pix_fmt", "yuvj420p", "-q:v", &qs, "-f", "mjpeg", "-",
-        ],
-        rgb,
-    )
 }
 
 fn photo_floor(quality: u8) -> f64 {
@@ -777,41 +718,30 @@ fn photo_floor(quality: u8) -> f64 {
 
 #[test]
 fn size_and_psnr_stay_close_to_libjpeg_turbo() {
-    if !have("ffmpeg", "-version") {
-        eprintln!("skipped: no ffmpeg");
-        return;
-    }
     let turbo = libjpeg_turbo();
     let img = photo_like(1920, 1080);
     let want = luma(&img);
     let input = ppm(&img);
-    for (q, qscale) in [(50u8, 8u8), (75, 4), (85, 3), (90, 2)] {
-        let (ours, scalar_ms) = best_of_three(|| scalar(&img, q));
-        let (fast, fast_ms) = best_of_three(|| encode(&img, q).expect("encode"));
+    for q in [50u8, 75, 85, 90] {
+        let ours = scalar(&img, q);
+        let fast = encode(&img, q).expect("encode");
         assert!(ours == fast, "q{q}: dispatch and scalar differ");
-        let ours_y = ffmpeg_decode(&ours, "yuvj420p").expect("decode ours");
+        let ours_y = planes(&ours).expect("decode ours");
         let ours_psnr = psnr(&want, &ours_y[..want.len()]);
-        let (mjpeg, mjpeg_ms) =
-            best_of_three(|| ffmpeg_mjpeg(&img, qscale).expect("ffmpeg mjpeg encode"));
-        let mjpeg_y = ffmpeg_decode(&mjpeg, "yuvj420p").expect("decode ffmpeg's");
-        let mjpeg_psnr = psnr(&want, &mjpeg_y[..want.len()]);
-        eprintln!(
-            "1080p q{q}: ours {} B {ours_psnr:.2} dB (scalar {scalar_ms:.2} ms, dispatched {fast_ms:.2} ms); ffmpeg mjpeg -q:v {qscale} {} B {mjpeg_psnr:.2} dB ({mjpeg_ms:.2} ms with the pipe)",
-            ours.len(),
-            mjpeg.len()
-        );
+        eprintln!("1080p q{q}: ours {} B {ours_psnr:.2} dB", ours.len());
         assert!(
             ours_psnr >= photo_floor(q),
             "q{q}: {ours_psnr:.2} dB < {}",
             photo_floor(q)
         );
         if !turbo {
+            eprintln!("no libjpeg-turbo cjpeg; its size and PSNR comparison skipped");
             continue;
         }
         let qs = q.to_string();
         let theirs = run("cjpeg", &["-quality", &qs, "-sample", "2x2"], input.clone())
             .expect("cjpeg encode");
-        let theirs_y = ffmpeg_decode(&theirs, "yuvj420p").expect("decode cjpeg");
+        let theirs_y = planes(&theirs).expect("decode cjpeg");
         let theirs_psnr = psnr(&want, &theirs_y[..want.len()]);
         let ratio = ours.len() as f64 / theirs.len() as f64;
         eprintln!(

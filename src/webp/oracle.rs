@@ -1,8 +1,6 @@
 use crate::media::Rgba;
 use libloading::{Library, Symbol};
 use std::ffi::{c_float, c_int, c_void};
-use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::LazyLock;
 
 pub struct Libwebp {
@@ -219,111 +217,6 @@ impl Libwebp {
             Some(frames)
         }
     }
-}
-
-pub fn dir() -> PathBuf {
-    let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/fixtures/webp");
-    std::fs::create_dir_all(&d).expect("fixture dir");
-    d
-}
-
-pub fn ffmpeg(args: &[&str]) -> bool {
-    let ok = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y"])
-        .args(args)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !ok {
-        eprintln!("ffmpeg {args:?} failed or is missing; check skipped");
-    }
-    ok
-}
-
-pub fn source(lavfi: &str, width: u32, height: u32, frames: usize) -> Option<Vec<Rgba>> {
-    let out = Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-nostdin",
-            "-f",
-            "lavfi",
-            "-i",
-        ])
-        .arg(format!(
-            "{lavfi}{}size={width}x{height}",
-            if lavfi.contains('=') { ':' } else { '=' }
-        ))
-        .args([
-            "-frames:v",
-            &frames.to_string(),
-            "-pix_fmt",
-            "rgba",
-            "-f",
-            "rawvideo",
-            "-",
-        ])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        eprintln!("ffmpeg source {lavfi} failed; check skipped");
-        return None;
-    }
-    let n = width as usize * height as usize * 4;
-    Some(
-        out.stdout
-            .chunks_exact(n)
-            .map(|c| Rgba {
-                width,
-                height,
-                data: c.to_vec(),
-            })
-            .collect(),
-    )
-}
-
-pub fn ffmpeg_decode(path: &Path) -> Option<Vec<Rgba>> {
-    let (w, h) = {
-        let out = Command::new("ffprobe")
-            .args([
-                "-v",
-                "error",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=width,height",
-                "-of",
-                "csv=p=0",
-            ])
-            .arg(path)
-            .output()
-            .ok()?;
-        let s = String::from_utf8_lossy(&out.stdout);
-        let mut it = s.trim().split(',').map(|v| v.parse::<u32>().ok());
-        (it.next()??, it.next()??)
-    };
-    let out = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
-        .arg(path)
-        .args(["-pix_fmt", "rgba", "-f", "rawvideo", "-"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        eprintln!("ffmpeg could not decode {}", path.display());
-        return None;
-    }
-    let n = w as usize * h as usize * 4;
-    Some(
-        out.stdout
-            .chunks_exact(n)
-            .map(|c| Rgba {
-                width: w,
-                height: h,
-                data: c.to_vec(),
-            })
-            .collect(),
-    )
 }
 
 pub fn psnr(a: &[u8], b: &[u8]) -> f64 {
