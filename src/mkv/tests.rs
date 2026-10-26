@@ -1,117 +1,19 @@
 use super::*;
 use crate::media::Codec;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use crate::testref::Refs;
+use std::path::PathBuf;
+
+#[allow(dead_code)]
+#[path = "refs.rs"]
+mod refs;
+
+use refs::Packets;
 
 fn dir() -> PathBuf {
-    let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp/mkv");
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    crate::testref::scratch(refs::AREA)
 }
 
-fn tools() -> bool {
-    ["ffmpeg", "ffprobe"].iter().all(|t| {
-        Command::new(t)
-            .arg("-version")
-            .output()
-            .is_ok_and(|o| o.status.success())
-    })
-}
-
-fn sources(seconds: u32) -> Vec<String> {
-    vec![
-        "-f".into(),
-        "lavfi".into(),
-        "-i".into(),
-        format!("testsrc2=size=320x240:rate=30:duration={seconds}"),
-        "-f".into(),
-        "lavfi".into(),
-        "-i".into(),
-        format!("sine=frequency=440:sample_rate=48000:duration={seconds}"),
-    ]
-}
-
-const H264: &[&str] = &[
-    "-c:v", "libx264", "-bf", "2", "-g", "30", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k",
-];
-const VP9: &[&str] = &[
-    "-c:v",
-    "libvpx-vp9",
-    "-g",
-    "30",
-    "-deadline",
-    "realtime",
-    "-cpu-used",
-    "8",
-    "-b:v",
-    "300k",
-    "-c:a",
-    "libopus",
-    "-b:a",
-    "64k",
-];
-
-fn generate(name: &str, args: &[&str]) -> PathBuf {
-    crate::fixture::once(&dir().join(name), |tmp| {
-        let st = Command::new("ffmpeg")
-            .args(["-v", "error", "-y"])
-            .args(sources(6))
-            .args(args)
-            .arg(tmp)
-            .status()
-            .unwrap();
-        assert!(st.success());
-    })
-}
-
-fn streamed(name: &str) -> PathBuf {
-    crate::fixture::once(&dir().join(name), |tmp| {
-        let out = Command::new("ffmpeg")
-            .args(["-v", "error"])
-            .args(sources(6))
-            .args(H264)
-            .args(["-f", "matroska", "pipe:1"])
-            .stdout(Stdio::piped())
-            .output()
-            .unwrap();
-        assert!(out.status.success());
-        std::fs::write(tmp, out.stdout).unwrap();
-    })
-}
-
-type Packets = Vec<Vec<(i64, u32, bool)>>;
-
-fn ffprobe_packets(path: &Path) -> Packets {
-    let out = Command::new("ffprobe")
-        .args([
-            "-v",
-            "error",
-            "-show_entries",
-            "packet=stream_index,pts,size,flags",
-            "-of",
-            "csv=p=0",
-        ])
-        .arg(path)
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    let mut streams: Packets = Vec::new();
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let f: Vec<&str> = line.split(',').collect();
-        let s: usize = f[0].parse().unwrap();
-        if streams.len() <= s {
-            streams.resize(s + 1, Vec::new());
-        }
-        streams[s].push((
-            f[1].parse().unwrap(),
-            f[2].parse().unwrap(),
-            f[3].contains('K'),
-        ));
-    }
-    streams
-}
-
-fn ours<S: ByteSource>(r: &Reader<S>) -> Packets {
+fn ours<S: ByteSource>(r: &Reader<S>) -> Vec<Vec<(i64, u32, bool)>> {
     r.tracks
         .iter()
         .map(|t| {
@@ -123,63 +25,134 @@ fn ours<S: ByteSource>(r: &Reader<S>) -> Packets {
         .collect()
 }
 
-fn decodes_clean(path: &Path) {
-    let out = Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
-        .arg(path)
-        .args(["-f", "null", "-"])
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    assert!(
-        out.stderr.is_empty(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+fn in_ms<S: ByteSource>(r: &Reader<S>) -> Vec<Vec<(i64, u32, bool)>> {
+    r.tracks
+        .iter()
+        .map(|t| {
+            let (num, den) = (f64::from(t.time_base.num), f64::from(t.time_base.den));
+            t.samples
+                .iter()
+                .map(|s| {
+                    let ms = (s.pts as f64 * num * 1000.0 / den).round() as i64;
+                    (ms, s.size, s.keyframe)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn span_seconds<S: ByteSource>(r: &Reader<S>) -> f64 {
+    let t = &r.tracks[r.video().unwrap()];
+    let mut pts: Vec<i64> = t.samples.iter().map(|s| s.pts).collect();
+    pts.sort_unstable();
+    pts.dedup();
+    let step = pts.windows(2).map(|w| w[1] - w[0]).min().unwrap_or(0);
+    let end = pts.last().copied().unwrap_or(0) + step;
+    end as f64 * f64::from(t.time_base.num) / f64::from(t.time_base.den)
+}
+
+fn timed<S: ByteSource>(r: &Reader<S>) -> Packets {
+    let t = &r.tracks[r.video().unwrap()];
+    refs::normalized(
+        t.samples
+            .iter()
+            .map(|s| {
+                (
+                    (t.seconds(s.pts) * 1000.0).round() as i64,
+                    s.size,
+                    s.keyframe,
+                )
+            })
+            .collect(),
+    )
+}
+
+fn twin(r: &Refs, file: &str) -> Packets {
+    let bytes = r.bytes(file);
+    if file.ends_with(".ivf") {
+        return refs::normalized(refs::ivf_packets(&bytes));
+    }
+    if file.ends_with(".flv") {
+        return refs::normalized(refs::flv_packets(&bytes));
+    }
+    let m = crate::mp4::Reader::new(bytes).unwrap();
+    let v = m.video().unwrap();
+    let t = &m.tracks[v];
+    refs::normalized(
+        (0..t.samples.len())
+            .map(|k| {
+                let at = t.seconds(t.presentation(k).unwrap());
+                let s = t.samples[k];
+                ((at * 1000.0).round() as i64, s.size, s.keyframe)
+            })
+            .collect(),
+    )
+}
+
+fn same_packets(ours: &Packets, theirs: &Packets, what: &str) {
+    assert_eq!(ours.len(), theirs.len(), "{what}");
+    for (k, (a, b)) in ours.iter().zip(theirs).enumerate() {
+        assert_eq!((a.1, a.2), (b.1, b.2), "{what}: packet {k}");
+        assert!(
+            (a.0 - b.0).abs() <= 1,
+            "{what}: packet {k} at {} ms, not {} ms",
+            a.0,
+            b.0
+        );
+    }
+}
+
+fn streamed<S: ByteSource>(r: &Reader<S>) -> Vec<Vec<(i64, u32, bool)>> {
+    let mut out = vec![Vec::new(); r.tracks.len()];
+    let mut stream = r.stream();
+    let mut data = Vec::new();
+    while let Some(b) = stream.next_into(&mut data).unwrap() {
+        out[b.track].push((b.pts, data.len() as u32, b.keyframe));
+    }
+    out
 }
 
 #[test]
-fn reader_matches_ffprobe_and_streams_and_seeks() {
-    if !tools() {
-        return;
-    }
-    let files = [
-        generate("h264.mkv", H264),
-        generate("vp9.webm", VP9),
-        streamed("piped.mkv"),
-    ];
-    for path in &files {
-        let r = Reader::open(path).unwrap();
-        assert!(r.warnings.is_empty(), "{path:?}: {:?}", r.warnings);
-        assert_eq!(ours(&r), ffprobe_packets(path), "{path:?}");
-        assert_eq!(r.is_webm(), path.extension().unwrap() == "webm");
+fn reader_matches_its_muxers_own_twin_and_streams_and_seeks() {
+    let refs_dir = Refs::open(refs::AREA);
+    let seconds = f64::from(refs::SECONDS);
+    for (file, other) in refs::FOREIGN {
+        let path = refs_dir.path(file);
+        let r = Reader::open(&path).unwrap();
+        assert!(r.warnings.is_empty(), "{file}: {:?}", r.warnings);
+        let mine = timed(&r);
+        assert_eq!(mine.len() as u32, refs::FPS * refs::SECONDS, "{file}");
+        same_packets(
+            &mine,
+            &twin(&refs_dir, other),
+            &format!("{file} against {other}"),
+        );
+        assert_eq!(r.is_webm(), file.ends_with(".webm"));
         let codecs: Vec<_> = r.tracks.iter().map(|t| t.codec()).collect();
         if r.is_webm() {
-            assert_eq!(codecs, [Some(Codec::Vp9), Some(Codec::Opus)]);
+            assert_eq!(codecs, [Some(Codec::Vp9)]);
+        } else {
+            assert_eq!(codecs, [Some(Codec::H264)]);
         }
         let v = r.video().unwrap();
-        assert_eq!((r.tracks[v].width, r.tracks[v].height), (320, 240));
-        assert!((r.duration_seconds() - 6.0).abs() < 0.1);
+        assert_eq!((r.tracks[v].width, r.tracks[v].height), refs::SIZE);
+        assert!((r.duration_seconds() - seconds).abs() < 0.1, "{file}");
+        assert_eq!(streamed(&r), ours(&r), "{file}");
 
-        let mut streamed: Packets = vec![Vec::new(); r.tracks.len()];
-        let mut stream = r.stream();
         let mut data = Vec::new();
-        while let Some(b) = stream.next_into(&mut data).unwrap() {
-            streamed[b.track].push((b.pts, data.len() as u32, b.keyframe));
-        }
-        assert_eq!(streamed, ours(&r), "{path:?}");
-
         let lazy = Reader::with_options(
-            std::fs::File::open(path).unwrap(),
+            std::fs::File::open(&path).unwrap(),
             ReadOptions { index: false },
         )
         .unwrap();
-        for seconds in [0.0, 2.5, 4.0, 5.9] {
-            let want = r.tracks[v].keyframe_at(r.tracks[v].ticks(seconds)).unwrap();
+        let mut keys = Vec::new();
+        for at in [0.0, 0.5, 1.0, seconds - 0.1] {
+            let want = r.tracks[v].keyframe_at(r.tracks[v].ticks(at)).unwrap();
             let want = r.tracks[v].samples[want];
+            keys.push(want.pts);
             for reader in [&r, &lazy] {
                 let mut s = reader.stream();
-                let landed = s.seek(v, seconds).unwrap();
+                let landed = s.seek(v, at).unwrap();
                 assert!((landed - r.tracks[v].seconds(want.pts)).abs() < 1e-9);
                 let b = loop {
                     let b = s.next_into(&mut data).unwrap().unwrap();
@@ -187,58 +160,22 @@ fn reader_matches_ffprobe_and_streams_and_seeks() {
                         break b;
                     }
                 };
-                assert_eq!((b.pts, b.keyframe), (want.pts, true), "{path:?} {seconds}");
+                assert_eq!((b.pts, b.keyframe), (want.pts, true), "{file} {at}");
             }
         }
+        keys.dedup();
+        assert_eq!(
+            keys.len(),
+            4,
+            "{file}: the seeks land on distinct keyframes"
+        );
     }
 }
 
 #[test]
-fn writer_output_reads_back_in_ffmpeg() {
-    if !tools() {
-        return;
-    }
-    for (src, webm) in [
-        (generate("h264.mkv", H264), false),
-        (generate("vp9.webm", VP9), true),
-    ] {
-        let r = Reader::open(&src).unwrap();
-        let out = dir().join(format!("ours.{}", if webm { "webm" } else { "mkv" }));
-        let mut w = Writer::create_with(
-            &out,
-            Options {
-                webm,
-                ..Options::default()
-            },
-        )
-        .unwrap();
-        for t in &r.tracks {
-            w.add_track(TrackConfig::from_track(t)).unwrap();
-        }
-        let mut order: Vec<(u64, usize, usize)> = r
-            .tracks
-            .iter()
-            .enumerate()
-            .flat_map(|(k, t)| {
-                t.samples
-                    .iter()
-                    .enumerate()
-                    .map(move |(i, s)| (s.offset, k, i))
-            })
-            .collect();
-        order.sort_unstable();
-        for (_, k, i) in order {
-            w.push(k, &r.packet(k, i).unwrap()).unwrap();
-        }
-        w.finish().unwrap();
-        assert_eq!(ffprobe_packets(&out), ffprobe_packets(&src), "{out:?}");
-        decodes_clean(&out);
-        let back = Reader::open(&out).unwrap();
-        assert_eq!(back.is_webm(), webm);
-        assert!(!back.cues.is_empty());
-        assert!((back.duration_seconds() - r.duration_seconds()).abs() < 0.05);
-    }
-    let h264 = Reader::open(generate("h264.mkv", H264)).unwrap();
+fn the_webm_writer_refuses_h264() {
+    let refs_dir = Refs::open(refs::AREA);
+    let h264 = Reader::open(refs_dir.path("h264.mkv")).unwrap();
     let mut w = Writer::new(std::io::Cursor::new(Vec::new()), Options::webm());
     assert!(
         w.add_track(TrackConfig::from_track(&h264.tracks[0]))
@@ -246,144 +183,236 @@ fn writer_output_reads_back_in_ffmpeg() {
     );
 }
 
-#[test]
-fn mp4_to_mkv() {
-    if !tools() {
-        return;
-    }
-    let mp4 = dir().join("bframes.mp4");
-    crate::fixture::once(&mp4, |tmp| {
-        let st = Command::new("ffmpeg")
-            .args(["-v", "error", "-y"])
-            .args(sources(4))
-            .args(H264)
-            .arg(tmp)
-            .status()
-            .unwrap();
-        assert!(st.success());
-    });
-    let out = dir().join("from-mp4.mkv");
-    remux_mp4(&mp4, &out).unwrap();
-    decodes_clean(&out);
-    let a = ffprobe_packets(&mp4);
-    let b = ffprobe_packets(&out);
-    assert_eq!(a.len(), b.len());
-    for (x, y) in a.iter().zip(&b) {
-        let sizes = |p: &Vec<(i64, u32, bool)>| p.iter().map(|q| (q.1, q.2)).collect::<Vec<_>>();
-        assert_eq!(sizes(x), sizes(y));
-    }
-}
+#[cfg(all(
+    feature = "h264",
+    feature = "hevc",
+    feature = "aac",
+    feature = "gpu",
+    feature = "filter",
+    feature = "vp9",
+    feature = "opus"
+))]
+mod decoded {
+    use super::*;
+    use crate::media::{Choice, Frame, Prefs, decode_video};
+    use crate::testref::{AudioCodec, Clip, Digest, VideoCodec};
+    use std::path::Path;
 
-#[test]
-fn remux_cuts_keyframe_to_keyframe() {
-    if !tools() {
-        return;
+    fn frames(path: &Path) -> Vec<Frame> {
+        let cpu = Prefs {
+            decode: Choice::Cpu,
+            ..Prefs::default()
+        };
+        decode_video(path, 0.0, None, &cpu)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+            .collect::<crate::media::Result<_>>()
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
     }
-    for (src, ext) in [
-        (generate("h264.mkv", H264), "mkv"),
-        (generate("vp9.webm", VP9), "webm"),
-    ] {
-        for (snap, keys, start) in [(Snap::Outward, 3, 2.2), (Snap::Inward, 1, 3.0)] {
-            let out = dir().join(format!("cut-{snap:?}.{ext}"));
-            let span = remux(&src, &out, 2.2, 4.5, snap).unwrap();
-            assert!((span.start - start).abs() < 0.01, "{span:?}");
-            decodes_clean(&out);
-            let r = Reader::open(&out).unwrap();
-            assert_eq!(r.is_webm(), ext == "webm");
-            let v = r.video().unwrap();
-            assert_eq!(r.tracks[v].keyframes().len(), keys);
-            let first = r
+
+    fn digest(frames: &[Frame]) -> String {
+        let mut d = Digest::new();
+        for f in frames {
+            d.frame(f);
+        }
+        d.hex()
+    }
+
+    #[test]
+    fn writer_output_keeps_every_packet_and_frame() {
+        let refs_dir = Refs::open(refs::AREA);
+        for (file, other, webm) in [
+            ("h264.mkv", "h264.flv", false),
+            ("vp9.webm", "vp9.ivf", true),
+        ] {
+            let src = refs_dir.path(file);
+            let r = Reader::open(&src).unwrap();
+            let out = dir().join(format!("ours.{}", if webm { "webm" } else { "mkv" }));
+            let mut w = Writer::create_with(
+                &out,
+                Options {
+                    webm,
+                    ..Options::default()
+                },
+            )
+            .unwrap();
+            for t in &r.tracks {
+                w.add_track(TrackConfig::from_track(t)).unwrap();
+            }
+            let mut order: Vec<(u64, usize, usize)> = r
                 .tracks
                 .iter()
-                .filter_map(|t| t.samples.iter().map(|s| s.pts).min())
-                .min();
-            assert!(first.unwrap().abs() <= 30, "{first:?}");
-            assert_eq!(ffprobe_packets(&out), ours(&r));
+                .enumerate()
+                .flat_map(|(k, t)| {
+                    t.samples
+                        .iter()
+                        .enumerate()
+                        .map(move |(i, s)| (s.offset, k, i))
+                })
+                .collect();
+            order.sort_unstable();
+            for (_, k, i) in order {
+                w.push(k, &r.packet(k, i).unwrap()).unwrap();
+            }
+            w.finish().unwrap();
+            let back = Reader::open(&out).unwrap();
+            assert_eq!(in_ms(&back), in_ms(&r), "{file}");
+            same_packets(&timed(&back), &twin(&refs_dir, other), file);
+            assert_eq!(back.is_webm(), webm);
+            assert!(!back.cues.is_empty());
+            let span = span_seconds(&r);
+            let d = back.duration_seconds();
+            assert!(
+                (d - span).abs() < 0.002,
+                "{file}: {d} s against the source's {span} s"
+            );
+            let want = frames(&src);
+            let got = frames(&out);
+            assert_eq!(got.len(), want.len(), "{file}");
+            assert_eq!(digest(&got), digest(&want), "{file}");
         }
     }
-}
 
-struct Counted {
-    file: std::fs::File,
-    read: std::sync::atomic::AtomicU64,
-}
-
-impl ByteSource for Counted {
-    fn len(&self) -> u64 {
-        self.file.len()
+    #[test]
+    fn mp4_to_mkv() {
+        let mp4 = Clip {
+            b_frames: 2,
+            ..Clip::new((160, 120), (30, 1), 60)
+        }
+        .make(refs::AREA, "bframes.mp4");
+        let out = dir().join("from-mp4.mkv");
+        remux_mp4(&mp4, &out).unwrap();
+        let a = crate::mp4::Reader::open(&mp4).unwrap();
+        let b = Reader::open(&out).unwrap();
+        assert_eq!(a.tracks.len(), b.tracks.len());
+        assert!(
+            a.tracks[a.video().unwrap()]
+                .samples
+                .iter()
+                .any(|s| s.pts != s.dts),
+            "the clip has no reordered frames"
+        );
+        for (x, y) in a.tracks.iter().zip(&b.tracks) {
+            let theirs: Vec<(u32, bool)> = x.samples.iter().map(|s| (s.size, s.keyframe)).collect();
+            let mine: Vec<(u32, bool)> = y.samples.iter().map(|s| (s.size, s.keyframe)).collect();
+            assert_eq!(mine, theirs);
+        }
+        let want = frames(&mp4);
+        let got = frames(&out);
+        assert_eq!(got.len(), 60);
+        assert_eq!(digest(&got), digest(&want));
     }
 
-    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
-        self.read
-            .fetch_add(buf.len() as u64, std::sync::atomic::Ordering::Relaxed);
-        self.file.read_at(offset, buf)
+    fn cut_source(ext: &str) -> PathBuf {
+        let clip = Clip::new((160, 120), (30, 1), 180);
+        let clip = if ext == "webm" {
+            Clip {
+                video: Some(VideoCodec::Vp9),
+                audio: Some(AudioCodec::Opus),
+                kbps: 64,
+                ..clip
+            }
+        } else {
+            clip
+        };
+        clip.make(refs::AREA, &format!("cut-src.{ext}"))
     }
-}
 
-#[test]
-fn cues_open_and_seek_late_without_a_walk() {
-    if !tools() {
-        return;
+    #[test]
+    fn remux_cuts_keyframe_to_keyframe() {
+        for ext in ["mkv", "webm"] {
+            let src = cut_source(ext);
+            for (snap, keys, start) in [(Snap::Outward, 3, 2.2), (Snap::Inward, 1, 3.0)] {
+                let out = dir().join(format!("cut-{snap:?}.{ext}"));
+                let span = remux(&src, &out, 2.2, 4.5, snap).unwrap();
+                assert!((span.start - start).abs() < 0.01, "{span:?}");
+                let r = Reader::open(&out).unwrap();
+                assert_eq!(r.is_webm(), ext == "webm");
+                let v = r.video().unwrap();
+                assert_eq!(r.tracks[v].keyframes().len(), keys);
+                let first = r
+                    .tracks
+                    .iter()
+                    .filter_map(|t| t.samples.iter().map(|s| s.pts).min())
+                    .min();
+                assert!(first.unwrap().abs() <= 30, "{first:?}");
+                assert_eq!(streamed(&r), ours(&r), "{ext} {snap:?}");
+                assert_eq!(
+                    frames(&out).len(),
+                    r.tracks[v].samples.len(),
+                    "{ext} {snap:?}"
+                );
+            }
+        }
     }
-    let path = dir().join("long.mkv");
-    if !path.exists() {
-        let tmp = dir().join(format!(".{}-long.mkv", std::process::id()));
-        let st = Command::new("ffmpeg")
-            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
-            .arg("testsrc2=size=320x240:rate=30:duration=120")
-            .args(H264)
-            .args(["-an", "-b:v", "800k"])
-            .arg(&tmp)
-            .status()
-            .unwrap();
-        assert!(st.success());
-        std::fs::rename(&tmp, &path).unwrap();
+
+    struct Counted {
+        file: std::fs::File,
+        read: std::sync::atomic::AtomicU64,
     }
-    let full = Reader::open(&path).unwrap();
-    let v = full.video().unwrap();
-    let file = std::fs::File::open(&path).unwrap();
-    let len = file.metadata().unwrap().len();
-    let lazy = Reader::with_options(
-        Counted {
-            file,
-            read: 0.into(),
-        },
-        ReadOptions { index: false },
-    )
-    .unwrap();
-    assert!(!lazy.cues.is_empty());
-    let mut s = lazy.stream();
-    let mut data = Vec::new();
-    s.seek(v, 110.0).unwrap();
-    let b = s.next_into(&mut data).unwrap().unwrap();
-    let t = &full.tracks[v];
-    let want = t.samples[t.keyframe_at(t.ticks(110.0)).unwrap()];
-    assert_eq!((b.pts, b.keyframe), (want.pts, true));
-    assert_eq!(
-        data,
-        full.read(v, t.samples.iter().position(|x| x.pts == want.pts).unwrap())
-            .unwrap()
-    );
-    let read = lazy
-        .source()
-        .read
-        .load(std::sync::atomic::Ordering::Relaxed);
-    assert!(read < len / 4, "read {read} of {len}");
-    let walked: Vec<i64> = t
-        .samples
-        .iter()
-        .filter(|s| s.keyframe)
-        .map(|s| s.pts)
-        .collect();
-    assert!(walked.len() > 2);
-    assert_eq!(lazy.cue_keys(), Some(&walked[..]));
-    let mut sparse = Reader::open_with(&path, ReadOptions { index: false }).unwrap();
-    let mut n = 0;
-    sparse.cues.retain(|_| {
-        n += 1;
-        n % 2 == 1
-    });
-    assert_eq!(sparse.cue_keys(), None);
+
+    impl ByteSource for Counted {
+        fn len(&self) -> u64 {
+            self.file.len()
+        }
+
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+            self.read
+                .fetch_add(buf.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            self.file.read_at(offset, buf)
+        }
+    }
+
+    #[test]
+    fn cues_open_and_seek_late_without_a_walk() {
+        let path = Clip::new((128, 96), (15, 1), 1800)
+            .video_only()
+            .make(refs::AREA, "long.mkv");
+        let full = Reader::open(&path).unwrap();
+        let v = full.video().unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let len = file.metadata().unwrap().len();
+        let lazy = Reader::with_options(
+            Counted {
+                file,
+                read: 0.into(),
+            },
+            ReadOptions { index: false },
+        )
+        .unwrap();
+        assert!(!lazy.cues.is_empty());
+        let mut s = lazy.stream();
+        let mut data = Vec::new();
+        s.seek(v, 110.0).unwrap();
+        let b = s.next_into(&mut data).unwrap().unwrap();
+        let t = &full.tracks[v];
+        let want = t.samples[t.keyframe_at(t.ticks(110.0)).unwrap()];
+        assert_eq!((b.pts, b.keyframe), (want.pts, true));
+        assert_eq!(
+            data,
+            full.read(v, t.samples.iter().position(|x| x.pts == want.pts).unwrap())
+                .unwrap()
+        );
+        let read = lazy
+            .source()
+            .read
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert!(read < len / 4, "read {read} of {len}");
+        let walked: Vec<i64> = t
+            .samples
+            .iter()
+            .filter(|s| s.keyframe)
+            .map(|s| s.pts)
+            .collect();
+        assert!(walked.len() > 2);
+        assert_eq!(lazy.cue_keys(), Some(&walked[..]));
+        let mut sparse = Reader::open_with(&path, ReadOptions { index: false }).unwrap();
+        let mut n = 0;
+        sparse.cues.retain(|_| {
+            n += 1;
+            n % 2 == 1
+        });
+        assert_eq!(sparse.cue_keys(), None);
+    }
 }
 
 #[test]

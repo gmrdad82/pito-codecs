@@ -1,0 +1,703 @@
+[[ref]]
+name = "claimed-c0-d1-i0.png"
+file = ""
+sha256 = "3db6272be6b9c6565740731e04a5820b8575bc0f7a3c3770730f7241aca87cd8"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c0-d1-i0\")"
+
+[[ref]]
+name = "claimed-c0-d1-i0.rgba"
+file = ""
+sha256 = "c0afafa051c9282bfa87388fa423da138d5c2c99405b7502e30da69cf44370d8"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c0-d1-i0.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "claimed-c0-d1-i1.png"
+file = ""
+sha256 = "1a34df7b80cbc5e2aa73278777d4bfad7c696f518f1aff4b14f1117a78dc509d"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c0-d1-i1\")"
+
+[[ref]]
+name = "claimed-c0-d1-i1.rgba"
+file = ""
+sha256 = "c8c4a8e4b469dcee90b9c445f602153a2b2308c2006c0dce21589dc2eebc2397"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c0-d1-i1.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "claimed-c0-d2-i0.png"
+file = ""
+sha256 = "4bcab999f4014bc82372e29c2e475ee1ad01351e31f90bbf8725d648cd5cfac1"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c0-d2-i0\")"
+
+[[ref]]
+name = "claimed-c0-d2-i0.rgba"
+file = ""
+sha256 = "685cc2ffa3d5903051fd8165336878beadef50dfb99b9a4452a06a760b064b12"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c0-d2-i0.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "claimed-c0-d2-i1.png"
+file = ""
+sha256 = "7849e08583ff28133f1e9c423cc3d0ec2f43b76b489876ac59d6c76cc34355b3"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c0-d2-i1\")"
+
+[[ref]]
+name = "claimed-c0-d2-i1.rgba"
+file = ""
+sha256 = "9636714e455a36458357e75164e8151fadc85460416a1aed5329f71ddcbac81a"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c0-d2-i1.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "claimed-c0-d4-i0.png"
+file = ""
+sha256 = "1914747b29c736d281432ac8731f1a33dff448efce762fec06db3235aa615628"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c0-d4-i0\")"
+
+[[ref]]
+name = "claimed-c0-d4-i0.rgba"
+file = ""
+sha256 = "db58e9c41434900270040e1a7ed302d0db561379dfa9842675ed833693fa0512"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c0-d4-i0.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "claimed-c0-d4-i1.png"
+file = ""
+sha256 = "55f177c43dbbd49a3cd9b95e897935a0f7ba8266484e050e97e4a84f17a64732"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c0-d4-i1\")"
+
+[[ref]]
+name = "claimed-c0-d4-i1.rgba"
+file = ""
+sha256 = "3207ffdac72274b50b2f758a2eceba3bafd9a89c8b7470e99b506605607955e5"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c0-d4-i1.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "claimed-c0-d8-i0.png"
+file = ""
+sha256 = "5225de9231b90771cccd7e68095011f20f4c334815ceedda455b40d27bb2ba41"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c0-d8-i0\")"
+
+[[ref]]
+name = "claimed-c0-d8-i0.rgba"
+file = ""
+sha256 = "7708d7f9ed9ffbf897012750d018f1ed4ef5180c68233879d230a94d1d54c7d1"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c0-d8-i0.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "claimed-c0-d8-i1.png"
+file = ""
+sha256 = "79bf7092ccb624d0323c0163d10d4263ec2be0c1cab67d4362d42cd965843db0"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c0-d8-i1\")"
+
+[[ref]]
+name = "claimed-c0-d8-i1.rgba"
+file = ""
+sha256 = "9f66989f81c5c5f13b06d1bcf33a593f77c04c7266d5329fe0a62308518136e4"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c0-d8-i1.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "claimed-c0-d16-i0.png"
+file = ""
+sha256 = "4b3a25f3b8a2e7d724454f2ef0d3628695422b1e991a8b95be9ae8fa73249430"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c0-d16-i0\")"
+
+[[ref]]
+name = "claimed-c0-d16-i0.rgba64"
+file = "claimed-c0-d16-i0.rgba64"
+sha256 = "e6b2559653099df71ad077cece40292f81bd3584e3e39482f83131e94c7f05db"
+kind = "tolerance"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c0-d16-i0.png} -depth 16 -endian MSB rgba:{out}"
+
+[[ref]]
+name = "claimed-c0-d16-i1.png"
+file = ""
+sha256 = "fee79d111b7c392dab250f12346d0004de11030f7eae93fe3d927bb8145776e4"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c0-d16-i1\")"
+
+[[ref]]
+name = "claimed-c0-d16-i1.rgba64"
+file = "claimed-c0-d16-i1.rgba64"
+sha256 = "6d47cd38957318d9ed6d4b7dd8ad6488f5477d0b47840201fccdcabc30e83ea1"
+kind = "tolerance"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c0-d16-i1.png} -depth 16 -endian MSB rgba:{out}"
+
+[[ref]]
+name = "claimed-c2-d8-i0.png"
+file = ""
+sha256 = "05b43bf23e1aaa1f0a682b38248cb8332271bbc283f2040adfb4f5f1ffc3b50a"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c2-d8-i0\")"
+
+[[ref]]
+name = "claimed-c2-d8-i0.rgba"
+file = ""
+sha256 = "cb545d06c5b301560215939c53ecaddf2120aa4b4b8dc5091e79d614a7c02879"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c2-d8-i0.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "claimed-c2-d8-i1.png"
+file = ""
+sha256 = "6f70e8d552efda558e62efaef75ef8dddb146387524be619db11bc6f1578c92a"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c2-d8-i1\")"
+
+[[ref]]
+name = "claimed-c2-d8-i1.rgba"
+file = ""
+sha256 = "edde4cf371f83e6a838f1015e49c4502c0cd8ae053d12f2286c3c96bed3911a1"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c2-d8-i1.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "claimed-c2-d16-i0.png"
+file = ""
+sha256 = "4719d896e9d6eb1757361d9cde57b6cd3cc95b519b2842e7fd8784dc39f08e86"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c2-d16-i0\")"
+
+[[ref]]
+name = "claimed-c2-d16-i0.rgba64"
+file = "claimed-c2-d16-i0.rgba64"
+sha256 = "fd4c83d938dfa8650f2749062042f76fa7dc81861da08c99c3c8e2ffbdea093e"
+kind = "tolerance"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c2-d16-i0.png} -depth 16 -endian MSB rgba:{out}"
+
+[[ref]]
+name = "claimed-c2-d16-i1.png"
+file = ""
+sha256 = "62a070ec0b982c440090c33cc33aeee71887ae99770c0e97209d45cfc3ebaf33"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c2-d16-i1\")"
+
+[[ref]]
+name = "claimed-c2-d16-i1.rgba64"
+file = "claimed-c2-d16-i1.rgba64"
+sha256 = "52a2106f4185a6a6245adace17fd83a94a6afe59e468d75c32d227ca138ed075"
+kind = "tolerance"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c2-d16-i1.png} -depth 16 -endian MSB rgba:{out}"
+
+[[ref]]
+name = "claimed-c3-d1-i0.png"
+file = ""
+sha256 = "b563ee4c241b5b5d29939cdf2062a79762c43fe9a806c3747c7bd008e2039906"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c3-d1-i0\")"
+
+[[ref]]
+name = "claimed-c3-d1-i0.rgba"
+file = ""
+sha256 = "a546e070e1292b973f41d3a4ea66b8dfaad56591139b56d4ef4a8e94ba834ee6"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c3-d1-i0.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "claimed-c3-d1-i1.png"
+file = ""
+sha256 = "331a04f0eb7aace9ef21bc76960563ece02a2147bf2ef813985e7e78a56ca354"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c3-d1-i1\")"
+
+[[ref]]
+name = "claimed-c3-d1-i1.rgba"
+file = ""
+sha256 = "d153538916b62d2c73adab6f57e2026828513861041cede7cb884971cc962df8"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c3-d1-i1.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "claimed-c3-d2-i0.png"
+file = ""
+sha256 = "43390beb23deb7d1db1d24342ae5900184b692bf1c42972b7085fa9f884c5d12"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c3-d2-i0\")"
+
+[[ref]]
+name = "claimed-c3-d2-i0.rgba"
+file = ""
+sha256 = "69cecc71ae7ec5a5b1df645725803e0f12ba393630723bfb42c51a42e351a72d"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c3-d2-i0.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "claimed-c3-d2-i1.png"
+file = ""
+sha256 = "93602802c17f0426e80376aa290ff1629b95aa03d2429b6a1972b992a8bd3764"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c3-d2-i1\")"
+
+[[ref]]
+name = "claimed-c3-d2-i1.rgba"
+file = ""
+sha256 = "a15660f6304994ffc76a7d5eefe6b81ecfb89b905f2498ac1e54e704f9f2c65b"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c3-d2-i1.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "claimed-c3-d4-i0.png"
+file = ""
+sha256 = "b844057f114fd0b8b0a920116edf1e6e7c49ac92ac019826e9849f809e09ecdf"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c3-d4-i0\")"
+
+[[ref]]
+name = "claimed-c3-d4-i0.rgba"
+file = ""
+sha256 = "e250fc341a8006eceef5d8e65a094112cf1591191491a3835afb246b4b4af84c"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c3-d4-i0.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "claimed-c3-d4-i1.png"
+file = ""
+sha256 = "6e396c6e250486923b3fa8562dbe6e26b541981651d80dd39cbd12db39b83e63"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c3-d4-i1\")"
+
+[[ref]]
+name = "claimed-c3-d4-i1.rgba"
+file = ""
+sha256 = "1e7d8cdcd0fa177718aab02c923feb3f26ac912f21c49154d485f935799e4bac"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c3-d4-i1.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "claimed-c3-d8-i0.png"
+file = ""
+sha256 = "d111438f4bfe1564efca21a615285c8325686691af3f6730664404f48f6bd732"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c3-d8-i0\")"
+
+[[ref]]
+name = "claimed-c3-d8-i0.rgba"
+file = ""
+sha256 = "6c45870126b9000ed263c2f8a2d5a0de813eb3af23078990a69d2927a4dd9192"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c3-d8-i0.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "claimed-c3-d8-i1.png"
+file = ""
+sha256 = "72145e5a96c2f3654a900ba452f8bf3953307e1eb9aa287fc9ce897db4b2e2b4"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c3-d8-i1\")"
+
+[[ref]]
+name = "claimed-c3-d8-i1.rgba"
+file = ""
+sha256 = "8785a4bd1dcfc674a890e71dcaa0d43114892f97d2ed95b3360794d72d5beb81"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c3-d8-i1.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "claimed-c4-d8-i0.png"
+file = ""
+sha256 = "702b70a4e3aece1bceba5508bfcc06f014cfd658e829659ed7a5d7bc2cb86af7"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c4-d8-i0\")"
+
+[[ref]]
+name = "claimed-c4-d8-i0.rgba"
+file = ""
+sha256 = "c645e4f7860490f6e272610c3b1f1b119b23f588c729d88de777b69457a96d5c"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c4-d8-i0.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "claimed-c4-d8-i1.png"
+file = ""
+sha256 = "2b3431868a61befa3645a5cadc4211e54f31f80f9813164dd092edfc2c9ae76b"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c4-d8-i1\")"
+
+[[ref]]
+name = "claimed-c4-d8-i1.rgba"
+file = ""
+sha256 = "27437622e0f4a272c86309c53f0004b6a78148acb8d62dbbb1bb9dfbc1256444"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c4-d8-i1.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "claimed-c4-d16-i0.png"
+file = ""
+sha256 = "137030acd47096b9d7084fe527a2b00c2f051877ee4a6f312aba0c2946c27a9f"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c4-d16-i0\")"
+
+[[ref]]
+name = "claimed-c4-d16-i0.rgba64"
+file = "claimed-c4-d16-i0.rgba64"
+sha256 = "71edd04c1f7b565b7924379cb79c73dd72d1ae4d0e8c0d4c88cff6119fe9a8ae"
+kind = "tolerance"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c4-d16-i0.png} -depth 16 -endian MSB rgba:{out}"
+
+[[ref]]
+name = "claimed-c4-d16-i1.png"
+file = ""
+sha256 = "110944138f7c5627754d80f57bad08f2985a11f7d497233f795f5d003d166ca0"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c4-d16-i1\")"
+
+[[ref]]
+name = "claimed-c4-d16-i1.rgba64"
+file = "claimed-c4-d16-i1.rgba64"
+sha256 = "6351c98c558307daf5168c36ad55218948a3fbffe07077b1c2e382ad8bf86902"
+kind = "tolerance"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c4-d16-i1.png} -depth 16 -endian MSB rgba:{out}"
+
+[[ref]]
+name = "claimed-c6-d8-i0.png"
+file = ""
+sha256 = "e070649cfef7e3fc5f19a7db5d4d12d48ffb1832d7c23e1196f9ff6942ba1d28"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c6-d8-i0\")"
+
+[[ref]]
+name = "claimed-c6-d8-i0.rgba"
+file = ""
+sha256 = "84577e711c937b12aa9b8d5e755c969d155ab75dae89e08648920401128f00de"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c6-d8-i0.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "claimed-c6-d8-i1.png"
+file = ""
+sha256 = "d27f9a016f4294e642d7076e8ec071002763f2fb30ba265f82574fdb38e3500e"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c6-d8-i1\")"
+
+[[ref]]
+name = "claimed-c6-d8-i1.rgba"
+file = ""
+sha256 = "acd1976e304bc67522f51a3c7e1614631a770e5047cdb74327bdd90dd06cee4f"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c6-d8-i1.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "claimed-c6-d16-i0.png"
+file = ""
+sha256 = "bfe65ec768be168319d0086faddf440b41ab55fe2f750e4678289a0eb60b2252"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c6-d16-i0\")"
+
+[[ref]]
+name = "claimed-c6-d16-i0.rgba64"
+file = "claimed-c6-d16-i0.rgba64"
+sha256 = "766069da12632557e488f4838a87249bef6c9ac3c9834f2cca8f036a355782e6"
+kind = "tolerance"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c6-d16-i0.png} -depth 16 -endian MSB rgba:{out}"
+
+[[ref]]
+name = "claimed-c6-d16-i1.png"
+file = ""
+sha256 = "d47047d47bbf8253f63483693065b0c140582b63d31e8eb68098d6b26ee00060"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"claimed-c6-d16-i1\")"
+
+[[ref]]
+name = "claimed-c6-d16-i1.rgba64"
+file = "claimed-c6-d16-i1.rgba64"
+sha256 = "603cffe5305b6ef1a7a6d1165fede02358c079bc2712759f79bb40c98c6c3d69"
+kind = "tolerance"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:claimed-c6-d16-i1.png} -depth 16 -endian MSB rgba:{out}"
+
+[[ref]]
+name = "trns-c0-d1-i0.png"
+file = ""
+sha256 = "74107f359eeaa6692a79b3fb6604fd92e028e94b6ab21895e81710432fc076e8"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"trns-c0-d1-i0\")"
+
+[[ref]]
+name = "trns-c0-d1-i0.rgba"
+file = ""
+sha256 = "5aae9fac021e630669a84872ba746acf0f7485a3e7dce3fa2483dac2fbc98aa8"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:trns-c0-d1-i0.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "trns-c0-d1-i1.png"
+file = ""
+sha256 = "f393360224af2a2be91755dad87b11da27358d30f4e2308a5a8ccb494c966d99"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"trns-c0-d1-i1\")"
+
+[[ref]]
+name = "trns-c0-d1-i1.rgba"
+file = ""
+sha256 = "0d415afea470d6d3bd394131dea678c48ec48b61b76ed0ef2cdb7aff41811116"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:trns-c0-d1-i1.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "trns-c0-d2-i0.png"
+file = ""
+sha256 = "cf2b36014e544ba6b7412b54ad62da12b2f5fc7ff061c4bd838906ae6eae16af"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"trns-c0-d2-i0\")"
+
+[[ref]]
+name = "trns-c0-d2-i0.rgba"
+file = ""
+sha256 = "c889c7e6e93146dab33ee089ef951403aac67ba4caf814d46312b181cd133538"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:trns-c0-d2-i0.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "trns-c0-d2-i1.png"
+file = ""
+sha256 = "60c0ac5537fd603a86b37868f157a840dd31261dac3e9afe502c3afb80fd01d8"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"trns-c0-d2-i1\")"
+
+[[ref]]
+name = "trns-c0-d2-i1.rgba"
+file = ""
+sha256 = "9ab25c73cd9b3aade206eecaa765974fe4a8abb7ff407886ec8c37e45bee8e1f"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:trns-c0-d2-i1.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "trns-c0-d4-i0.png"
+file = ""
+sha256 = "a48c2a1fc6df04ab37e5bccb80630ef56f5ae9d3a630f09b46329694a0b10d36"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"trns-c0-d4-i0\")"
+
+[[ref]]
+name = "trns-c0-d4-i0.rgba"
+file = ""
+sha256 = "b301ae9ae8da3fdb0604d87c4bd429a2ea93aa3a2a06570cdcccdee8fe6851ce"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:trns-c0-d4-i0.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "trns-c0-d4-i1.png"
+file = ""
+sha256 = "a795eff625ff9a56150c397b29c295538d786f2a6f80a08155c277888ab890c1"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"trns-c0-d4-i1\")"
+
+[[ref]]
+name = "trns-c0-d4-i1.rgba"
+file = ""
+sha256 = "a426b7a871a653c41110ea5393b6a029d7d2f2ef8ee1494a879f31003b29406d"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:trns-c0-d4-i1.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "trns-c0-d8-i0.png"
+file = ""
+sha256 = "dc7b700000f80610355dd0539c6b75ca968903998405cb7845f2bb2d36e47790"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"trns-c0-d8-i0\")"
+
+[[ref]]
+name = "trns-c0-d8-i0.rgba"
+file = ""
+sha256 = "7bda782b7647d0795fdb1e9d21d14641023c33bec40f88a8cdbe81140b10688f"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:trns-c0-d8-i0.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "trns-c0-d8-i1.png"
+file = ""
+sha256 = "614e2c31d1469ef92be22c331e463c9062ea97470a53bafd3416cc61553535c5"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"trns-c0-d8-i1\")"
+
+[[ref]]
+name = "trns-c0-d8-i1.rgba"
+file = ""
+sha256 = "70dba87df2b8ecf69d88f954e8b3488c6d2500f8cd2694e6a89dfc9dd42e7a8a"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:trns-c0-d8-i1.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "trns-c0-d16-i0.png"
+file = ""
+sha256 = "53cfa1932d6adc25ed7e4f9b602b8aa91be865a5d987e3de6aa38bb7974d0cfe"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"trns-c0-d16-i0\")"
+
+[[ref]]
+name = "trns-c0-d16-i0.rgba64"
+file = "trns-c0-d16-i0.rgba64"
+sha256 = "656c94f79b0f7f2452ac068b576cb92fb8cf07d5daf20f14632750c655122749"
+kind = "tolerance"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:trns-c0-d16-i0.png} -depth 16 -endian MSB rgba:{out}"
+
+[[ref]]
+name = "trns-c0-d16-i1.png"
+file = ""
+sha256 = "3bcc83c9f84f9791805c023f8d31fd4bc485e0d5c92bd0f7ff6cc4a882a3a46d"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"trns-c0-d16-i1\")"
+
+[[ref]]
+name = "trns-c0-d16-i1.rgba64"
+file = "trns-c0-d16-i1.rgba64"
+sha256 = "6569100d092242168f02b7d7450976537b8b1dc278f50647e830917e0ceac6c9"
+kind = "tolerance"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:trns-c0-d16-i1.png} -depth 16 -endian MSB rgba:{out}"
+
+[[ref]]
+name = "trns-c2-d8-i0.png"
+file = ""
+sha256 = "dfb5a28c9f9874b09a10be40ddc79de975de81382401b02444ab4e04fd78c622"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"trns-c2-d8-i0\")"
+
+[[ref]]
+name = "trns-c2-d8-i0.rgba"
+file = ""
+sha256 = "b000b72f6ad2f4236eb3a39b6b0e384c89885c00ddb81b514ede83b91a75c381"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:trns-c2-d8-i0.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "trns-c2-d8-i1.png"
+file = ""
+sha256 = "ceafa60091c3d8ed7875a3f46fc5b29ffbad201223698a8feb5b4102f03ce4e8"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"trns-c2-d8-i1\")"
+
+[[ref]]
+name = "trns-c2-d8-i1.rgba"
+file = ""
+sha256 = "1237acc64857b7edc61e6805cda3e97e044da33d7deab8c079fcce9d551b462b"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:trns-c2-d8-i1.png} -depth 8 rgba:{out}"
+
+[[ref]]
+name = "trns-c2-d16-i0.png"
+file = ""
+sha256 = "80e8bd99ba19e9f20dd652e12c6c695965b0ae53233c599adcc924e7e12892f0"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"trns-c2-d16-i0\")"
+
+[[ref]]
+name = "trns-c2-d16-i0.rgba64"
+file = "trns-c2-d16-i0.rgba64"
+sha256 = "a0d6693b53e6f525e991f644013fc9eb8d93595ea165dfd1967bb8d5276319d4"
+kind = "tolerance"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:trns-c2-d16-i0.png} -depth 16 -endian MSB rgba:{out}"
+
+[[ref]]
+name = "trns-c2-d16-i1.png"
+file = ""
+sha256 = "9884fe791f45cb69d9547433510ab889efd72552ae519d5aa037d4abd31ae4fb"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/png/refs.rs file_of(\"trns-c2-d16-i1\")"
+
+[[ref]]
+name = "trns-c2-d16-i1.rgba64"
+file = "trns-c2-d16-i1.rgba64"
+sha256 = "ff2650f62763b841dd7a14476a2324956e789310898842f1bca5510c7b1a4c62"
+kind = "tolerance"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick png:{ref:trns-c2-d16-i1.png} -depth 16 -endian MSB rgba:{out}"

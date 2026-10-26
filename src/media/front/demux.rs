@@ -134,6 +134,18 @@ fn readable(head: &[u8], len: u64) -> Result<()> {
     Ok(())
 }
 
+fn put_nal(out: &mut Vec<u8>, nal: &[u8], n: usize) -> Result<()> {
+    if (nal.len() as u64) >> (8 * n) != 0 {
+        return Err(Error::Invalid(format!(
+            "a {}-byte NAL does not fit the stream's {n}-byte lengths",
+            nal.len()
+        )));
+    }
+    out.extend_from_slice(&(nal.len() as u64).to_be_bytes()[8 - n..]);
+    out.extend_from_slice(nal);
+    Ok(())
+}
+
 fn mp4_track(r: &Reader, i: usize) -> Result<&Track> {
     r.tracks
         .get(i)
@@ -369,6 +381,72 @@ impl Demux {
         }
     }
 
+    pub fn read_decodable(&self, track: usize, i: usize, buf: &mut Vec<u8>) -> Result<()> {
+        self.read_into(track, i, buf)?;
+        let Demux::Mp4(r) = self else {
+            return Ok(());
+        };
+        let Some(t) = r.tracks.get(track).filter(|t| t.entries.len() > 1) else {
+            return Ok(());
+        };
+        let Some(s) = t.samples.get(i) else {
+            return Ok(());
+        };
+        let own = t.entries.get(s.entry as usize).map(|e| &e.codec);
+        let key = s.keyframe;
+        let (stream, sample, sets): (u8, u8, Vec<&[u8]>) = match (t.config(), own) {
+            (Some(CodecConfig::Avc(first)), Some(CodecConfig::Avc(c))) => (
+                first.length_size,
+                c.length_size,
+                c.sps
+                    .iter()
+                    .chain(&c.pps)
+                    .filter(|_| key)
+                    .map(Vec::as_slice)
+                    .collect(),
+            ),
+            (Some(CodecConfig::Hevc(first)), Some(CodecConfig::Hevc(c))) => (
+                first.length_size,
+                c.length_size,
+                c.arrays
+                    .iter()
+                    .filter(|_| key)
+                    .flat_map(|a| a.nalus.iter().map(Vec::as_slice))
+                    .collect(),
+            ),
+            _ => return Ok(()),
+        };
+        let n = usize::from(stream.clamp(1, 4));
+        let m = usize::from(sample.clamp(1, 4));
+        if sets.is_empty() && n == m {
+            return Ok(());
+        }
+        let mut head = Vec::new();
+        for nal in sets {
+            put_nal(&mut head, nal, n)?;
+        }
+        if n == m {
+            buf.splice(0..0, head);
+            return Ok(());
+        }
+        let mut at = 0;
+        while at < buf.len() {
+            let len = buf
+                .get(at..at + m)
+                .ok_or_else(|| Error::Invalid(format!("sample {i}: a NAL length is cut short")))?
+                .iter()
+                .fold(0usize, |v, &b| v << 8 | usize::from(b));
+            let end = (at + m).saturating_add(len);
+            let nal = buf.get(at + m..end).ok_or_else(|| {
+                Error::Invalid(format!("sample {i}: a {len}-byte NAL runs past the sample"))
+            })?;
+            put_nal(&mut head, nal, n)?;
+            at = end;
+        }
+        *buf = head;
+        Ok(())
+    }
+
     pub fn seconds(&self, track: usize, ticks: i64) -> f64 {
         match self {
             Demux::Mp4(r) => r.tracks.get(track).map_or(0.0, |t| t.seconds(ticks)),
@@ -383,12 +461,12 @@ impl Demux {
         let (key, pts) = match self {
             Demux::Mp4(r) => {
                 let t = mp4_track(r, track)?;
-                let at = t.sample_at(t.ticks(from)).unwrap_or(0);
+                let at = t.sample_at(t.shown_at(from)).unwrap_or(0);
                 (t.keyframe_before(at), t.presentation(at).unwrap_or(shift))
             }
             Demux::Mkv(r) => {
                 let t = mkv_track(r.indexed_for(track)?, track)?;
-                let at = t.sample_at(t.ticks(from)).unwrap_or(0);
+                let at = t.sample_at(t.shown_at(from)).unwrap_or(0);
                 (
                     t.keyframe_before(at),
                     t.samples.get(at).map_or(shift, |s| s.pts),
@@ -1017,6 +1095,82 @@ mod tests {
         assert_eq!(foreign(&ts, u64::MAX), None);
         assert!(readable(&ts, u64::MAX).is_ok());
         assert_eq!(foreign(&ts, 1000), Some("MPEG-TS"));
+    }
+
+    #[test]
+    fn samples_of_a_second_entry_reach_the_decoder_in_the_streams_length_size() {
+        let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/test/demux");
+        std::fs::create_dir_all(&d).unwrap();
+        let path = d.join(format!("{}-lengths.mp4", std::process::id()));
+        let first = AvcConfig::new(vec![vec![0x67, 1, 2]], vec![vec![0x68, 3]]);
+        let mut second = AvcConfig::new(vec![vec![0x67, 9, 9, 9]], vec![vec![0x68, 8]]);
+        second.length_size = 2;
+        let mut w = crate::mp4::Writer::create(&path).unwrap();
+        let t = w
+            .add_track(crate::mp4::TrackConfig::new(
+                crate::mp4::SampleEntry::h264(first, 64, 48),
+                1000,
+            ))
+            .unwrap();
+        let e = w
+            .add_entry(t, crate::mp4::SampleEntry::h264(second, 64, 48))
+            .unwrap();
+        let samples: [(&[u8], bool); 5] = [
+            (&[0, 0, 0, 2, 0x65, 1], true),
+            (&[0, 0, 0, 1, 0x41], false),
+            (&[0, 3, 0x65, 7, 7, 0, 1, 0x06], true),
+            (&[0, 2, 0x41, 5], false),
+            (&[0, 9, 0x41], false),
+        ];
+        for (k, (data, key)) in samples.iter().enumerate() {
+            if k == 2 {
+                w.use_entry(t, e).unwrap();
+            }
+            w.push_sample(t, data, k as i64 * 40, k as i64 * 40, 40, *key)
+                .unwrap();
+        }
+        w.finish().unwrap();
+        let demux = Demux::open(&path).unwrap();
+        let read = |k: usize| {
+            let mut buf = Vec::new();
+            demux.read_decodable(0, k, &mut buf).unwrap();
+            buf
+        };
+        let got: Vec<Vec<u8>> = (0..4).map(read).collect();
+        let mut buf = Vec::new();
+        let overrun = demux
+            .read_decodable(0, 4, &mut buf)
+            .unwrap_err()
+            .to_string();
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            overrun.contains("sample 4: a 9-byte NAL runs past"),
+            "{overrun}"
+        );
+        assert_eq!(
+            got[0],
+            [
+                0, 0, 0, 3, 0x67, 1, 2, 0, 0, 0, 2, 0x68, 3, 0, 0, 0, 2, 0x65, 1
+            ]
+        );
+        assert_eq!(got[1], [0, 0, 0, 1, 0x41]);
+        assert_eq!(
+            got[2],
+            [
+                0, 0, 0, 4, 0x67, 9, 9, 9, 0, 0, 0, 2, 0x68, 8, 0, 0, 0, 3, 0x65, 7, 7, 0, 0, 0, 1,
+                0x06
+            ]
+        );
+        assert_eq!(got[3], [0, 0, 0, 2, 0x41, 5]);
+    }
+
+    #[test]
+    fn a_nal_too_long_for_the_streams_length_size_is_refused() {
+        let mut out = Vec::new();
+        assert!(put_nal(&mut out, &[7; 300], 1).is_err());
+        assert!(out.is_empty());
+        put_nal(&mut out, &[7; 255], 1).unwrap();
+        assert_eq!((out[0], out.len()), (255, 256));
     }
 
     #[cfg(all(feature = "vp9", feature = "gpu"))]

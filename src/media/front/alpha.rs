@@ -343,7 +343,7 @@ impl AlphaVideo {
                 t.codec_name()
             )));
         }
-        let at = t.ticks(from.max(0.0) + start);
+        let at = t.shown_at(from.max(0.0) + start);
         let last = t.samples.partition_point(|s| s.pts <= at);
         let first = t.keyframe_before(last.saturating_sub(1));
         let (width, height) = t
@@ -499,10 +499,64 @@ pub(super) fn shown(head: &Arc<mkv::Reader>, from: f64) -> Result<f64> {
         .video()
         .and_then(|v| r.tracks.get(v))
         .ok_or_else(|| Error::Invalid("no video track".to_string()))?;
-    let at = t.ticks(from.max(0.0) + start);
+    let at = t.shown_at(from.max(0.0) + start);
     let last = t.samples.partition_point(|s| s.pts <= at);
     let first = t.keyframe_before(last.saturating_sub(1));
     Ok(t.samples
         .get(first)
         .map_or(from.max(0.0), |s| (t.seconds(s.pts) - start).max(0.0)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_half_tick_tie_shows_the_earlier_frame() {
+        let mut enc = vp9::Encoder::new(vp9::EncoderConfig {
+            width: 64,
+            height: 64,
+            gop: 2,
+            threads: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        let mut packets = Vec::new();
+        for i in 0..4 {
+            let mut f = Frame::new(PixelFormat::Yuv420p8, 64, 64, i, TimeBase::new(1, 30));
+            for p in &mut f.planes {
+                p.data.fill(40 + 30 * i as u8);
+            }
+            packets.extend(enc.encode(&f).unwrap());
+        }
+        packets.extend(enc.flush().unwrap());
+        let keys: Vec<bool> = packets.iter().map(|p| p.keyframe).collect();
+        assert_eq!(keys, [true, false, true, false]);
+        let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/test/alpha");
+        std::fs::create_dir_all(&d).unwrap();
+        let path = d.join(format!("{}-tie.webm", std::process::id()));
+        let mut w = mkv::Writer::create(&path).unwrap();
+        let t = w
+            .add_track(mkv::TrackConfig::vp9(64, 64, TimeBase::new(1, 1000)))
+            .unwrap();
+        for (p, pts) in packets.iter().zip([0, 62, 63, 94]) {
+            w.push_sample(t, &p.data, pts, Some(31), p.keyframe)
+                .unwrap();
+        }
+        w.finish().unwrap();
+        let head = mkv_head(&path).unwrap().unwrap();
+        let tie = shown(&head, 0.0625).unwrap();
+        let past = shown(&head, 0.0626).unwrap();
+        let frames = |from: f64| {
+            decode_alpha(&path, from)
+                .unwrap()
+                .map(Result::unwrap)
+                .count()
+        };
+        let (at_tie, past_tie) = (frames(0.0625), frames(0.0626));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(tie, 0.0);
+        assert!((past - 0.063).abs() < 1e-9, "{past}");
+        assert_eq!((at_tie, past_tie), (3, 2));
+    }
 }

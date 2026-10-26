@@ -75,7 +75,13 @@ pub mod png;
 pub mod jpeg;
 
 #[cfg(test)]
+extern crate self as pito_codecs;
+
+#[cfg(test)]
 mod fixture;
+
+#[cfg(test)]
+mod testref;
 
 #[cfg(test)]
 mod fixture_tests;

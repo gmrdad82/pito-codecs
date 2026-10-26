@@ -79,49 +79,9 @@ fn decoded(path: &Path) -> Rgba {
     match path.extension().and_then(|e| e.to_str()) {
         Some("png") => pito_codecs::png::decode(&data).unwrap(),
         Some("webp") => pito_codecs::webp::decode(&data).unwrap(),
-        Some("jpg") => ffmpeg_rgba(path).expect("ffmpeg reads the JPEG"),
+        Some("jpg") => pito_codecs::jpeg::decode(&data).unwrap(),
         other => panic!("no decoder for {other:?}"),
     }
-}
-
-fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg")
-        .arg("-version")
-        .output()
-        .is_ok_and(|o| o.status.success())
-}
-
-fn ffmpeg_rgba(path: &Path) -> Option<Rgba> {
-    let out = Command::new("ffmpeg")
-        .args([
-            "-v",
-            "error",
-            "-i",
-            s(path),
-            "-f",
-            "image2pipe",
-            "-c:v",
-            "pam",
-            "-pix_fmt",
-            "rgba",
-            "-",
-        ])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let end = out.stdout.windows(7).position(|w| w == b"ENDHDR\n")? + 7;
-    let head = String::from_utf8_lossy(&out.stdout[..end]).into_owned();
-    let value = |key: &str| -> Option<u32> {
-        head.lines()
-            .find_map(|l| l.strip_prefix(key))
-            .and_then(|v| v.trim().parse().ok())
-    };
-    let mut img = Rgba::new(value("WIDTH ")?, value("HEIGHT ")?);
-    let body = out.stdout.get(end..end + img.data.len())?;
-    img.data.copy_from_slice(body);
-    Some(img)
 }
 
 fn psnr(a: &Rgba, b: &Rgba) -> f64 {
@@ -359,10 +319,6 @@ fn a_lower_webp_quality_writes_smaller_files() {
 
 #[test]
 fn jpeg_frames_open_with_the_right_numbers_close_to_the_png_frames() {
-    if !have_ffmpeg() {
-        eprintln!("skipped: no ffmpeg to read the JPEG frames back");
-        return;
-    }
     let (png, _, _) = extract("jpeg-ref", &["--every", "2s"]);
     for format in ["jpeg", "jpg"] {
         let (out, got, json) = extract(
@@ -389,10 +345,6 @@ fn jpeg_frames_open_with_the_right_numbers_close_to_the_png_frames() {
 
 #[test]
 fn a_lower_jpeg_quality_writes_smaller_files() {
-    if !have_ffmpeg() {
-        eprintln!("skipped: no ffmpeg to read the JPEG frames back");
-        return;
-    }
     let (low, _, _) = extract(
         "jpeg-low",
         &["--every", "5s", "--format", "jpeg", "--quality", "5"],
@@ -725,10 +677,6 @@ fn alpha_webm_frames_keep_their_alpha_and_jpeg_flattens_onto_black() {
     }
     let jpeg = take("jpeg");
     assert_eq!(&fs::read(&jpeg).unwrap()[..2], &[0xff, 0xd8]);
-    if !have_ffmpeg() {
-        eprintln!("skipped the pixel check: no ffmpeg to read the JPEG back");
-        return;
-    }
     let img = decoded(&jpeg);
     let left = at(&img, 40);
     assert!(

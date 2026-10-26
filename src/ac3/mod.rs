@@ -7,7 +7,10 @@ mod block;
 mod eac3;
 mod header;
 mod imdct;
+#[cfg(not(test))]
 mod tables;
+#[cfg(test)]
+use tests::refs::tables;
 
 pub use header::frame_len;
 

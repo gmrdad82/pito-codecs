@@ -1,0 +1,39 @@
+[[ref]]
+name = "h264.mkv"
+file = "h264.mkv"
+sha256 = "42befa57de38ef2e5d9147233262d73374c901d99ee3157f3968f94f7895e8ad"
+kind = "fixture"
+tool = "x264 0.165.3222 b35605a"
+command = "x264 --demuxer y4m --muxer mkv --threads 1 --preset ultrafast --no-scenecut --quiet --no-progress --bframes 2 --keyint 7 --min-keyint 7 --crf 40 -o {out} {src}"
+
+[[ref]]
+name = "h264.flv"
+file = "h264.flv"
+sha256 = "4d01c125f342d316c88870f6d1c16b0a5ab1da8ab1fc0e6e36eb77734bcbc3a2"
+kind = "fixture"
+tool = "x264 0.165.3222 b35605a"
+command = "x264 --demuxer y4m --muxer flv --threads 1 --preset ultrafast --no-scenecut --quiet --no-progress --bframes 2 --keyint 7 --min-keyint 7 --crf 40 -o {out} {src}"
+
+[[ref]]
+name = "vp9.webm"
+file = "vp9.webm"
+sha256 = "046a9f13b2caf651a47069f305e9bdc59e8e046a668d8b5702034672f3594c86"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --disable-warning-prompt --debug --rt --cpu-used=8 --threads=1 --lag-in-frames=0 --end-usage=cbr --target-bitrate=40 --kf-min-dist=7 --kf-max-dist=7 --webm --quiet -o {out} {src}"
+
+[[ref]]
+name = "vp9.ivf"
+file = "vp9.ivf"
+sha256 = "17564b95730ebf2a85995a19263d96aa385618f80e38d77d2dca58358fbb9c40"
+kind = "fixture"
+tool = "vp9    - WebM Project VP9 Encoder v1.17.0 (default)"
+command = "vpxenc --codec=vp9 --disable-warning-prompt --debug --rt --cpu-used=8 --threads=1 --lag-in-frames=0 --end-usage=cbr --target-bitrate=40 --kf-min-dist=7 --kf-max-dist=7 --ivf --quiet -o {out} {src}"
+
+[[ref]]
+name = "piped.mkv"
+file = "piped.mkv"
+sha256 = "42befa57de38ef2e5d9147233262d73374c901d99ee3157f3968f94f7895e8ad"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: {ref:h264.mkv} with its Segment and Cluster sizes unknown and its SeekHead and Cues voided, as a live writer leaves it"

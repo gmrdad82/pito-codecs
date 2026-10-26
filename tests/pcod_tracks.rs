@@ -4,9 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use pito_codecs::media::{Prefs, Rgba, audio_pcm_range};
+use pito_codecs::media::{Prefs, Probe, Rgba, audio_pcm_range, probe};
 use pito_codecs::mp4::{
-    Brand, CodecConfig, Edit, FourCc, Options, Reader, Track, TrackConfig, Writer,
+    AudioParams, Brand, CodecConfig, Edit, FourCc, Options, PcmConfig, Reader, SampleEntry, Track,
+    TrackConfig, Writer,
 };
 
 const RATE: u32 = 48_000;
@@ -159,23 +160,8 @@ fn shown(track: &Track, movie_ts: u32) -> f64 {
         / f64::from(movie_ts)
 }
 
-fn ffprobe(path: &Path, entries: &str) -> Option<Vec<String>> {
-    let out = Command::new("ffprobe")
-        .args(["-v", "error", "-show_entries", entries, "-of", "csv=p=0"])
-        .arg(path)
-        .output()
-        .ok()
-        .filter(|o| o.status.success());
-    if out.is_none() {
-        eprintln!("skip: no ffprobe to cross-check {}", path.display());
-    }
-    out.map(|o| {
-        text(&o.stdout)
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect()
-    })
+fn probed(path: &Path) -> Probe {
+    probe(path, &Prefs::default()).unwrap()
 }
 
 fn snr_db(reference: &[f32], decoded: &[f32]) -> f64 {
@@ -222,9 +208,9 @@ fn no_audio_copies_the_video_byte_for_byte_with_the_index_first() {
     assert_eq!(b.tracks[vb].samples.len(), 48);
     same_samples(&a, va, &b, vb, 48);
     index_first(&copy);
-    if let Some(types) = ffprobe(&copy, "stream=codec_type") {
-        assert_eq!(types, ["video"]);
-    }
+    let p = probed(&copy);
+    assert!(p.video_codec.is_some(), "{p:?}");
+    assert!(p.audio.is_empty(), "{p:?}");
 
     let encoded = out.join("encoded.mp4");
     ok(&run(&[s(&src), s(&encoded), "--no-audio", "--crf", "30"]));
@@ -290,13 +276,10 @@ fn add_audio_keeps_the_first_track_and_adds_a_titled_bed_cut_to_the_video() {
     let n = frames.min(96_000) * 2;
     let snr = snr_db(&music[..n], &decoded.samples[..n]);
     assert!(snr > 40.0, "snr {snr:.2} dB");
-    if let Some(titles) = ffprobe(&mixed, "stream_tags=name") {
-        assert_eq!(titles, ["Voice", "Music"]);
-    }
-    if let Some(d) = ffprobe(&mixed, "format=duration") {
-        let d: f64 = d[0].parse().unwrap();
-        assert!((d - 2.0).abs() < 0.05, "{d}");
-    }
+    let p = probed(&mixed);
+    let titles: Vec<Option<&str>> = p.audio.iter().map(|a| a.title.as_deref()).collect();
+    assert_eq!(titles, [Some("Voice"), Some("Music")]);
+    assert!((p.duration - 2.0).abs() < 0.05, "{}", p.duration);
     no_partials(&out);
 }
 
@@ -363,10 +346,8 @@ fn add_audio_cuts_the_video_to_a_shorter_wav() {
     let n = decoded.frames().min(48_000) * 2;
     let snr = snr_db(&music[..n], &decoded.samples[..n]);
     assert!(snr > 25.0, "snr {snr:.2} dB");
-    if let Some(d) = ffprobe(&mixed, "format=duration") {
-        let d: f64 = d[0].parse().unwrap();
-        assert!((d - 1.0).abs() < 0.05, "{d}");
-    }
+    let d = probed(&mixed).duration;
+    assert!((d - 1.0).abs() < 0.05, "{d}");
 }
 
 #[test]
@@ -581,21 +562,85 @@ fn add_audio_on_two_audio_tracks_keeps_the_first_says_so_and_writes_a_manifest()
     no_partials(&out);
 }
 
+fn pcm_entry() -> SampleEntry {
+    let mut raw = vec![0; 6];
+    raw.extend_from_slice(&1u16.to_be_bytes());
+    raw.extend_from_slice(&[0; 8]);
+    raw.extend_from_slice(&2u16.to_be_bytes());
+    raw.extend_from_slice(&16u16.to_be_bytes());
+    raw.extend_from_slice(&[0; 4]);
+    raw.extend_from_slice(&(RATE << 16).to_be_bytes());
+    SampleEntry {
+        format: FourCc(*b"sowt"),
+        codec: CodecConfig::Pcm(PcmConfig {
+            bits: 16,
+            float: false,
+            big_endian: false,
+            signed: true,
+            channels: 2,
+            sample_rate: f64::from(RATE),
+        }),
+        video: None,
+        audio: Some(AudioParams {
+            channels: 2,
+            sample_size: 16,
+            sample_rate: f64::from(RATE),
+            ..AudioParams::default()
+        }),
+        bitrate: None,
+        raw,
+    }
+}
+
+fn pcm_mov(src: &Path, out: &Path) {
+    let r = Reader::open(src).unwrap();
+    let mut w = Writer::create_with(
+        out,
+        Options {
+            brand: Brand::Mov,
+            reserve: 0,
+        },
+    )
+    .unwrap();
+    w.set_movie_timescale(1000);
+    let v = r.video().unwrap();
+    let ov = w
+        .add_track(TrackConfig::from_track(&r.tracks[v]).unwrap())
+        .unwrap();
+    let mut data = Vec::new();
+    for (n, x) in r.tracks[v].samples.iter().enumerate() {
+        r.read_into(v, n, &mut data).unwrap();
+        w.push_sample(ov, &data, x.pts, x.dts, x.duration, x.keyframe)
+            .unwrap();
+    }
+    let oa = w.add_track(TrackConfig::new(pcm_entry(), RATE)).unwrap();
+    let block = 1024usize;
+    for k in 0..(2 * RATE as usize).div_ceil(block) {
+        let pcm: Vec<u8> = (k * block..(k + 1) * block)
+            .flat_map(|i| {
+                let t = i as f64 / f64::from(RATE);
+                let v = (0.25 * (std::f64::consts::TAU * 330.0 * t).sin() * 32767.0) as i16;
+                [v, v / 2].into_iter().flat_map(i16::to_le_bytes)
+            })
+            .collect();
+        let at = (k * block) as i64;
+        w.push_sample(oa, &pcm, at, at, block as u32, true).unwrap();
+    }
+    w.finish().unwrap();
+}
+
 #[test]
 fn add_audio_refuses_to_copy_pcm_audio_into_an_mp4_and_keeps_it_in_a_mov() {
     let out = dir("add-pcm");
     let src = source(&out);
     let mov = out.join("pcm.mov");
-    let made = Command::new("ffmpeg")
-        .args(["-v", "error", "-y", "-i"])
-        .arg(&src)
-        .args(["-c:v", "copy", "-c:a", "pcm_s16le"])
-        .arg(&mov)
-        .status();
-    if !made.is_ok_and(|s| s.success()) {
-        eprintln!("skip: no ffmpeg to make a PCM MOV");
-        return;
-    }
+    pcm_mov(&src, &mov);
+    let made = Reader::open(&mov).unwrap();
+    let pcm = made.audio()[0];
+    assert!(matches!(
+        made.tracks[pcm].entries[0].codec,
+        CodecConfig::Pcm(_)
+    ));
     let bed = out.join("bed.wav");
     tone(&bed, 1.0, 440.0);
     let mp4 = out.join("out.mp4");

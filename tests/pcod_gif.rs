@@ -1,15 +1,24 @@
 #![cfg(feature = "cli")]
 
+#[path = "../src/testref.rs"]
+mod testref;
+
+#[allow(dead_code)]
+#[path = "../src/pcod/refs.rs"]
+mod refs;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use pito_codecs::gif::{Dither, EncodeOptions, PaletteMode, encode};
+use pito_codecs::gif::{EncodeOptions, encode};
 use pito_codecs::media::{Prefs, Rgba, probe};
+use refs::numbered_at;
+use testref::Refs;
 
-const WIDTH: u32 = 384;
-const HEIGHT: u32 = 240;
-const DELAYS: [u16; 6] = [7, 1, 13, 4, 25, 3];
+const WIDTH: u32 = refs::GIF_SIZE.0;
+const HEIGHT: u32 = refs::GIF_SIZE.1;
+const DELAYS: [u16; 6] = refs::GIF_DELAYS;
 const SHOWN: [u64; 6] = [7, 1, 13, 4, 25, 3];
 const CLEAR: usize = 3;
 
@@ -56,21 +65,6 @@ fn numbered(n: u32, clear: bool) -> Rgba {
     numbered_at(WIDTH, HEIGHT, n, clear)
 }
 
-fn numbered_at(width: u32, height: u32, n: u32, clear: bool) -> Rgba {
-    let block = width / 8;
-    let mut img = Rgba::new(width, height);
-    for (i, px) in img.data.chunks_exact_mut(4).enumerate() {
-        let bit = (i as u32 % width) / block;
-        let on = n >> bit & 1 == 1;
-        px.copy_from_slice(&match (on, clear) {
-            (true, _) => [255, 255, 255, 255],
-            (false, true) => [0, 0, 0, 0],
-            (false, false) => [0, 0, 0, 255],
-        });
-    }
-    img
-}
-
 fn number_of(img: &Rgba) -> u32 {
     let y = img.height / 2;
     let block = img.width / 8;
@@ -82,12 +76,7 @@ fn number_of(img: &Rgba) -> u32 {
 }
 
 fn opts() -> EncodeOptions {
-    EncodeOptions {
-        dither: Dither::None,
-        palette: PaletteMode::Global,
-        diff: false,
-        ..EncodeOptions::default()
-    }
+    refs::gif_options()
 }
 
 fn frames() -> Vec<Rgba> {
@@ -375,45 +364,17 @@ fn frames_drawn_as_changes_over_the_last_come_out_whole_in_stills() {
 }
 
 #[test]
-fn the_tick_model_matches_ffmpegs_fps_filter() {
-    if Command::new("ffmpeg").arg("-version").output().is_err() {
-        eprintln!("pcod_gif: no ffmpeg here, so the fps filter oracle is skipped");
-        return;
-    }
-    let d = dir("ffmpeg");
-    let gif = d.join("opaque.gif");
+fn the_tick_model_rounds_each_frames_start_to_the_nearest_tick() {
+    let r = Refs::open(refs::AREA);
+    let gif = refs::ticks_gif().unwrap();
+    r.assert_digest(refs::GIF_TICKS, &testref::sha256(&gif));
     let source: Vec<Rgba> = (0..DELAYS.len())
         .map(|i| numbered(i as u32 + 1, false))
         .collect();
-    fs::write(&gif, encode(&source, &DELAYS, opts()).unwrap()).unwrap();
-    for rate in [10u64, 30] {
-        let o = Command::new("ffmpeg")
-            .args(["-v", "error", "-i"])
-            .arg(&gif)
-            .args([
-                "-vf",
-                &format!("fps={rate}"),
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                "rgba",
-                "-",
-            ])
-            .output()
-            .unwrap();
-        assert!(o.status.success(), "{}", text(&o.stderr));
-        let size = (WIDTH * HEIGHT * 4) as usize;
-        assert_eq!(o.stdout.len() % size, 0);
-        let numbers: Vec<usize> = o
-            .stdout
-            .chunks_exact(size)
-            .map(|frame| {
-                let mut img = Rgba::new(WIDTH, HEIGHT);
-                img.data.copy_from_slice(frame);
-                number_of(&img) as usize - 1
-            })
-            .collect();
-        assert_eq!(numbers, expected(rate), "fps={rate}");
+    assert!(gif == encode(&source, &DELAYS, opts()).unwrap());
+    assert_eq!(DELAYS.map(u64::from), SHOWN);
+    for (rate, picks) in refs::GIF_TICKS_AT {
+        assert_eq!(expected(rate), picks, "fps={rate}");
     }
 }
 

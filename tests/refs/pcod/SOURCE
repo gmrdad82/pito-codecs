@@ -1,0 +1,13 @@
+These files are part of this repository and under its MIT licence (see LICENSE at the root).
+
+Their inputs are synthetic: src/testref.rs and examples/record_refs draw every picture and generate every sound with plain arithmetic, so no recorded picture or sound is in them. examples/record_refs made them; run `cargo run --release --example record_refs -- pcod` to make them again. manifest.toml gives, for every file and reference, its sha256, the tool and version that made it and the exact command.
+
+Tools:
+- LAME 64bits version 4.0 (https://lame.sourceforge.io)
+- Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org
+- flac 1.5.0
+- libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7
+- libvorbisfile.so.3.3.8 Xiph.Org libVorbis 1.3.7
+- pito-codecs 2.1.0
+- x264 0.165.3222 b35605a
+- x265 [info]: HEVC encoder version 4.3

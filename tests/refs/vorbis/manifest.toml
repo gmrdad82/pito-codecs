@@ -1,0 +1,647 @@
+[[ref]]
+name = "mono_22k_q0.ogg"
+file = "mono_22k_q0.ogg"
+sha256 = "ebed1cb5de3cb01b5dc90d70408ab29ea20f66222d2df162b9b93cba4010c35b"
+kind = "fixture"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisenc VBR quality 0, our Ogg pages"
+
+[[ref]]
+name = "mono_22k_q0.info.txt"
+file = "mono_22k_q0.info.txt"
+sha256 = "51a11fb9c37740ff28f88e1c20a1c0e7fc6787654e2103b700bb80d12f3f4ed6"
+kind = "bit-exact"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: the rate, channels, nominal bitrate and tags libvorbisenc set"
+
+[[ref]]
+name = "mono_22k_q0.ogg.vorbisfile.f32"
+file = ""
+sha256 = "3d5990fb03ffd398a74c9fb65d36383f420bc0bb10d8c64ad4489d9c6e2fd132"
+kind = "bit-exact"
+tool = "libvorbisfile.so.3.3.8 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisfile ov_read_float of mono_22k_q0.ogg, channels in WAVE order"
+
+[[ref]]
+name = "mono_22k_q0.ogg.every.f32"
+file = "mono_22k_q0.ogg.every.f32"
+sha256 = "4a985e8fb684c5f0bd0b3671b56445e0f5dc2adf06821a3511285a57f2cbdfd1"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: every 29th frame of mono_22k_q0.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "mono_22k_q0.ogg.head.f32"
+file = "mono_22k_q0.ogg.head.f32"
+sha256 = "533c41cdd7df41784186ec9ff28686249f7d64f8bad4b8b8af6cc99d7fd36600"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the first 256 frames of mono_22k_q0.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "stereo_44k_q3.ogg"
+file = "stereo_44k_q3.ogg"
+sha256 = "c6fb6f134e45c05c7116be0f9ef65440782d91aaafe655bdb72aa3b27f7bf959"
+kind = "fixture"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisenc VBR quality 0.3, our Ogg pages"
+
+[[ref]]
+name = "stereo_44k_q3.info.txt"
+file = "stereo_44k_q3.info.txt"
+sha256 = "25d848255bab26586ae54f89e9c567d4093daecf6cb8ec44c8b18f9672de0aa6"
+kind = "bit-exact"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: the rate, channels, nominal bitrate and tags libvorbisenc set"
+
+[[ref]]
+name = "stereo_44k_q3.ogg.vorbisfile.f32"
+file = ""
+sha256 = "7422450e455467b4199497b607e9ec61bd2e0a5b8ce5917e5b035073e2a0f31a"
+kind = "bit-exact"
+tool = "libvorbisfile.so.3.3.8 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisfile ov_read_float of stereo_44k_q3.ogg, channels in WAVE order"
+
+[[ref]]
+name = "stereo_44k_q3.ogg.every.f32"
+file = "stereo_44k_q3.ogg.every.f32"
+sha256 = "848a04eeec2428e95a8a6868ae3726d3803f44238a34fb88dc9d3db1eb218c0c"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: every 119th frame of stereo_44k_q3.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "stereo_44k_q3.ogg.head.f32"
+file = "stereo_44k_q3.ogg.head.f32"
+sha256 = "05361ccb607e3192dee0d421b99c936a700ad8f335c7936232dac584ed7caae2"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the first 128 frames of stereo_44k_q3.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "stereo_48k_q9.ogg"
+file = "stereo_48k_q9.ogg"
+sha256 = "f9f4832d9cf0be165015a4c8fa6b8ab982ad722313bcc4b7aba945e37e71b638"
+kind = "fixture"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisenc VBR quality 0.9, our Ogg pages"
+
+[[ref]]
+name = "stereo_48k_q9.info.txt"
+file = "stereo_48k_q9.info.txt"
+sha256 = "b9d2f758ddd717afa86675cf8df56cc93ead6ed0aeb16c662fbf6b43b2db06cb"
+kind = "bit-exact"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: the rate, channels, nominal bitrate and tags libvorbisenc set"
+
+[[ref]]
+name = "stereo_48k_q9.ogg.vorbisfile.f32"
+file = ""
+sha256 = "449918d3ba496026e2df1b728d8f17159687e500d7a452591e2bd83291c426ad"
+kind = "bit-exact"
+tool = "libvorbisfile.so.3.3.8 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisfile ov_read_float of stereo_48k_q9.ogg, channels in WAVE order"
+
+[[ref]]
+name = "stereo_48k_q9.ogg.every.f32"
+file = "stereo_48k_q9.ogg.every.f32"
+sha256 = "55aa273171781b6958b06f6080f58ab95965d9b96cf6f420ad8f6e1cb4f5dde8"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: every 39th frame of stereo_48k_q9.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "stereo_48k_q9.ogg.head.f32"
+file = "stereo_48k_q9.ogg.head.f32"
+sha256 = "6ee175e529decf71fa174c6a33246ea4a1417cab669215975298a87f06b998b7"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the first 128 frames of stereo_48k_q9.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "stereo_32k_qm1.ogg"
+file = "stereo_32k_qm1.ogg"
+sha256 = "98ba04c41897aa0d91e24250d9f5c4b62b797cdb14584064b42725959061e499"
+kind = "fixture"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisenc VBR quality -0.1, our Ogg pages"
+
+[[ref]]
+name = "stereo_32k_qm1.info.txt"
+file = "stereo_32k_qm1.info.txt"
+sha256 = "21a0c187445a61b163007312ec7cdd094fa64445f76b66cfcc353995478cdff2"
+kind = "bit-exact"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: the rate, channels, nominal bitrate and tags libvorbisenc set"
+
+[[ref]]
+name = "stereo_32k_qm1.ogg.vorbisfile.f32"
+file = ""
+sha256 = "1edae98ee4fdb910dead30689ab7446422903a844645795380e7ab93b2d98a0e"
+kind = "bit-exact"
+tool = "libvorbisfile.so.3.3.8 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisfile ov_read_float of stereo_32k_qm1.ogg, channels in WAVE order"
+
+[[ref]]
+name = "stereo_32k_qm1.ogg.every.f32"
+file = "stereo_32k_qm1.ogg.every.f32"
+sha256 = "9923f39957515160ed50b789ea02cae6356af04b7f5aa01e4e05671cbd5f5513"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: every 85th frame of stereo_32k_qm1.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "stereo_32k_qm1.ogg.head.f32"
+file = "stereo_32k_qm1.ogg.head.f32"
+sha256 = "d2c19123cc1f4738a9d07ca21b34f7e3da6525c09e5af25f3604acdcccfcc986"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the first 128 frames of stereo_32k_qm1.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "surround_22k_q1.ogg"
+file = "surround_22k_q1.ogg"
+sha256 = "a17408777f71b87621831b64696e7e91e5d504218367d0ac373972c7f8a1db7c"
+kind = "fixture"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisenc VBR quality 0.1, our Ogg pages"
+
+[[ref]]
+name = "surround_22k_q1.info.txt"
+file = "surround_22k_q1.info.txt"
+sha256 = "202af684125737d96658c0ce566920ccaeffcc37dcdb6058973e25fc4adbcd49"
+kind = "bit-exact"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: the rate, channels, nominal bitrate and tags libvorbisenc set"
+
+[[ref]]
+name = "surround_22k_q1.ogg.vorbisfile.f32"
+file = ""
+sha256 = "fb714ac8068e20424e5cfcf391038fe35af3396d5114fcc74d53bb6993851be8"
+kind = "bit-exact"
+tool = "libvorbisfile.so.3.3.8 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisfile ov_read_float of surround_22k_q1.ogg, channels in WAVE order"
+
+[[ref]]
+name = "surround_22k_q1.ogg.every.f32"
+file = "surround_22k_q1.ogg.every.f32"
+sha256 = "02cf46c52c62db2e06d47d7487d4cb6519e698130f8f013592b04afe8658851a"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: every 105th frame of surround_22k_q1.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "surround_22k_q1.ogg.head.f32"
+file = "surround_22k_q1.ogg.head.f32"
+sha256 = "8a3efbc784a45bd30d019a2c1918aecafc165b18dca255586abd24e3615f469d"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the first 42 frames of surround_22k_q1.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "c3_44k_q0.ogg"
+file = "c3_44k_q0.ogg"
+sha256 = "5dfe193b08887782d640881d9b59e1df7d11f2f2d39ac4c1fef1ae8a6e75cbea"
+kind = "fixture"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisenc VBR quality 0, our Ogg pages"
+
+[[ref]]
+name = "c3_44k_q0.info.txt"
+file = "c3_44k_q0.info.txt"
+sha256 = "24d9cc67deca35977f4bef6782396f7dac66e11cfa7ae4aa768840f9934604bf"
+kind = "bit-exact"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: the rate, channels, nominal bitrate and tags libvorbisenc set"
+
+[[ref]]
+name = "c3_44k_q0.ogg.vorbisfile.f32"
+file = ""
+sha256 = "a5cb6772bb3fd57e08a4015c712400525837b49a142a298ff6c07c27200d50c4"
+kind = "bit-exact"
+tool = "libvorbisfile.so.3.3.8 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisfile ov_read_float of c3_44k_q0.ogg, channels in WAVE order"
+
+[[ref]]
+name = "c3_44k_q0.ogg.every.f32"
+file = "c3_44k_q0.ogg.every.f32"
+sha256 = "c6cb9581f4b9a5390be90987343d9c73ca6d767f1626d52d70e7648d0b751b27"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: every 69th frame of c3_44k_q0.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "c3_44k_q0.ogg.head.f32"
+file = "c3_44k_q0.ogg.head.f32"
+sha256 = "6d55f8be1dd13c3de29cf31a0af661154b8ac1845cdd7a6f823654753af59076"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the first 85 frames of c3_44k_q0.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "quad_44k_q0.ogg"
+file = "quad_44k_q0.ogg"
+sha256 = "ecb21b3f78512b398958fcb249de09c502ec4a04417431d6ee54973c5dca1217"
+kind = "fixture"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisenc VBR quality 0, our Ogg pages"
+
+[[ref]]
+name = "quad_44k_q0.info.txt"
+file = "quad_44k_q0.info.txt"
+sha256 = "6ab6e65cb3c93939cb261e99dd101798401eedc5bef6048b229fa2b256cb4e5b"
+kind = "bit-exact"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: the rate, channels, nominal bitrate and tags libvorbisenc set"
+
+[[ref]]
+name = "quad_44k_q0.ogg.vorbisfile.f32"
+file = ""
+sha256 = "e68c1d021b2fe90dfa454bc754b2df99b3dc7cba2df8316bdfeb64bc9cc3f639"
+kind = "bit-exact"
+tool = "libvorbisfile.so.3.3.8 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisfile ov_read_float of quad_44k_q0.ogg, channels in WAVE order"
+
+[[ref]]
+name = "quad_44k_q0.ogg.every.f32"
+file = "quad_44k_q0.ogg.every.f32"
+sha256 = "45c9dd17872ec9f64cd344687db858ddb134c080de8896dca07dc64a6df97d06"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: every 93th frame of quad_44k_q0.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "quad_44k_q0.ogg.head.f32"
+file = "quad_44k_q0.ogg.head.f32"
+sha256 = "09b060751bafb3e7eeda405e6a6bc366db6fa4957f688633e7eee387b01c5169"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the first 64 frames of quad_44k_q0.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "c5_48k_q0.ogg"
+file = "c5_48k_q0.ogg"
+sha256 = "b57b81e9b974f8317ec12dd3d6633b5172e83c58234c8176c4a1d0aa50b30124"
+kind = "fixture"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisenc VBR quality 0, our Ogg pages"
+
+[[ref]]
+name = "c5_48k_q0.info.txt"
+file = "c5_48k_q0.info.txt"
+sha256 = "7b196e84f8a47b493073c240ae73ce362f130d708bb58a948140f9ff506c399f"
+kind = "bit-exact"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: the rate, channels, nominal bitrate and tags libvorbisenc set"
+
+[[ref]]
+name = "c5_48k_q0.ogg.vorbisfile.f32"
+file = ""
+sha256 = "cf7f4fff12b756a87f74d1b1df11aa155a1e66ba2c64f74ac21115ed2941d8e6"
+kind = "bit-exact"
+tool = "libvorbisfile.so.3.3.8 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisfile ov_read_float of c5_48k_q0.ogg, channels in WAVE order"
+
+[[ref]]
+name = "c5_48k_q0.ogg.every.f32"
+file = "c5_48k_q0.ogg.every.f32"
+sha256 = "2bfc77b9e0bd9ba797147521c516b0bfc3fab0208c0da0e595b1861bfc9a1e58"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: every 125th frame of c5_48k_q0.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "c5_48k_q0.ogg.head.f32"
+file = "c5_48k_q0.ogg.head.f32"
+sha256 = "90be87fb3bc2305e1f7b29225737546cdcbe2c4f362d0cdfbd66f6cbe530ee01"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the first 51 frames of c5_48k_q0.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "c61_48k_q0.ogg"
+file = "c61_48k_q0.ogg"
+sha256 = "81031477285bbd805e86fbc80f7482f1fab2e8a33fbd567b3daab20b86679647"
+kind = "fixture"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisenc VBR quality 0, our Ogg pages"
+
+[[ref]]
+name = "c61_48k_q0.info.txt"
+file = "c61_48k_q0.info.txt"
+sha256 = "e09db8340c42d602bc5f76c88c7199fca49ba3a0252860bfcf0d8bfffad83c17"
+kind = "bit-exact"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: the rate, channels, nominal bitrate and tags libvorbisenc set"
+
+[[ref]]
+name = "c61_48k_q0.ogg.vorbisfile.f32"
+file = ""
+sha256 = "943b20be31fe675ea656380be21274e5fc891eb3527c4598c958967750f0c53a"
+kind = "bit-exact"
+tool = "libvorbisfile.so.3.3.8 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisfile ov_read_float of c61_48k_q0.ogg, channels in WAVE order"
+
+[[ref]]
+name = "c61_48k_q0.ogg.every.f32"
+file = "c61_48k_q0.ogg.every.f32"
+sha256 = "b9f5fcfb20ea0141a5b5fccbf3666ceb533387c827ce8601008d4cd86755f988"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: every 127th frame of c61_48k_q0.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "c61_48k_q0.ogg.head.f32"
+file = "c61_48k_q0.ogg.head.f32"
+sha256 = "c4b4123c894a2c129b3d228f1f25857a478e314efea63a490b9bb576214ecd0c"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the first 36 frames of c61_48k_q0.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "c71_48k_q0.ogg"
+file = "c71_48k_q0.ogg"
+sha256 = "d2140b25abd5c021a0b573431ad6181fdb43b1cc4604243b4b949f20fdcf7781"
+kind = "fixture"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisenc VBR quality 0, our Ogg pages"
+
+[[ref]]
+name = "c71_48k_q0.info.txt"
+file = "c71_48k_q0.info.txt"
+sha256 = "dff02d7c112cf063598aecc1bc046b6732ea0594e182af1de685280bc6279a28"
+kind = "bit-exact"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: the rate, channels, nominal bitrate and tags libvorbisenc set"
+
+[[ref]]
+name = "c71_48k_q0.ogg.vorbisfile.f32"
+file = ""
+sha256 = "9d5a3b013bea134a5b62d20d246ad2cc32d41da8023cb366e860b80788c2dcca"
+kind = "bit-exact"
+tool = "libvorbisfile.so.3.3.8 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisfile ov_read_float of c71_48k_q0.ogg, channels in WAVE order"
+
+[[ref]]
+name = "c71_48k_q0.ogg.every.f32"
+file = "c71_48k_q0.ogg.every.f32"
+sha256 = "296da41e5c6d230d8af6e3dc53ef9bf77e5d24c713f93921bf16754949db85f5"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: every 127th frame of c71_48k_q0.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "c71_48k_q0.ogg.head.f32"
+file = "c71_48k_q0.ogg.head.f32"
+sha256 = "11597901c96d4bb8a595dc04e98f6c0d643adeb5d8091cc3c398ddbacd3889a3"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the first 32 frames of c71_48k_q0.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "long_96k.ogg"
+file = ""
+sha256 = "884e0c7893de9c0ac4d4f274185c9ce3a61837d7639c5ee6a287ba2a0a2557c3"
+kind = "bit-exact"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisenc VBR quality -0.1, our Ogg pages"
+
+[[ref]]
+name = "long_96k.ogg.vorbisfile.f32"
+file = ""
+sha256 = "085408df4d3ccb3f0cd8e1e471ecb7a4494449ab170e9886c7c154d54510fd3d"
+kind = "bit-exact"
+tool = "libvorbisfile.so.3.3.8 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisfile ov_read_float of long_96k.ogg, channels in WAVE order"
+
+[[ref]]
+name = "high_88k.ogg"
+file = ""
+sha256 = "ea31dd7737a5cdb145ad5b56f02777d6c12d20de0fd9ad1c935217adb402f6e4"
+kind = "bit-exact"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisenc VBR quality -0.1, our Ogg pages"
+
+[[ref]]
+name = "high_88k.ogg.vorbisfile.f32"
+file = ""
+sha256 = "cf8c5576ca0bfd9bb6b9fdc91d34c58b130896e3be657a32479e64d1a3efccc2"
+kind = "bit-exact"
+tool = "libvorbisfile.so.3.3.8 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisfile ov_read_float of high_88k.ogg, channels in WAVE order"
+
+[[ref]]
+name = "long_96k.webm"
+file = "long_96k.webm"
+sha256 = "982e97beaab89339ad1ec61dad39111660e1fc8d948cf0bc088a8583682085bf"
+kind = "fixture"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: the libvorbisenc packets of long_96k.ogg in our webm writer, DiscardPadding on the last block"
+
+[[ref]]
+name = "long_96k.webm.every.f32"
+file = "long_96k.webm.every.f32"
+sha256 = "da165def7f00993c121daa95b17910081e6d200a7b27d422ac309cf3d9bdd11a"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: every 127th frame of long_96k.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "long_96k.webm.tail.f32"
+file = "long_96k.webm.tail.f32"
+sha256 = "b06beb521f553258744179d6b7c81ba7844f2d2f74f7d36107703a3710da3293"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the last 128 frames of long_96k.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "long_96k.webm.seam.f32"
+file = "long_96k.webm.seam.f32"
+sha256 = "26273d7462d3b3e57d2a6ad4d035735cbcb397a9b1ff6f3c136fee8872035fdb"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: frames 230336 to 230464 of long_96k.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "high_88k.mkv"
+file = "high_88k.mkv"
+sha256 = "63a51b7a39deaeaae841faf435d9986ddfb7e81af8e3b1098f18c9c3afff75fa"
+kind = "fixture"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: the libvorbisenc packets of high_88k.ogg in our mkv writer, DiscardPadding on the last block"
+
+[[ref]]
+name = "high_88k.mkv.every.f32"
+file = "high_88k.mkv.every.f32"
+sha256 = "07317b41c57e80b1e2d9cd2850b972870307f3f7b46f25d7af43936ba6228267"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: every 127th frame of high_88k.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "high_88k.mkv.tail.f32"
+file = "high_88k.mkv.tail.f32"
+sha256 = "c3d81538d605cfd95bc2e35e6e6e9994a5bec16f48a8164d20dd6691a924f3a7"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the last 128 frames of high_88k.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "stereo_44k_q3_copy.mkv"
+file = "stereo_44k_q3_copy.mkv"
+sha256 = "9aa21fffb4ad612ab2ce1d2cde15010db20bbeee39bf9900477e8912a8d486c0"
+kind = "fixture"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: the libvorbisenc packets of stereo_44k_q3.ogg in our mkv writer, DiscardPadding on the last block"
+
+[[ref]]
+name = "stereo_44k_q3_copy.mkv.every.f32"
+file = "stereo_44k_q3_copy.mkv.every.f32"
+sha256 = "848a04eeec2428e95a8a6868ae3726d3803f44238a34fb88dc9d3db1eb218c0c"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: every 119th frame of stereo_44k_q3.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "stereo_44k_q3_copy.mkv.tail.f32"
+file = "stereo_44k_q3_copy.mkv.tail.f32"
+sha256 = "f44864a65af07fcff5477969f6f0853dee11425b5b1ad7e29218e8c1462a5cb9"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the last 128 frames of stereo_44k_q3.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "mono_22k_q0.webm"
+file = "mono_22k_q0.webm"
+sha256 = "94a8b67476a2cae0aaccdc70e10a746cd5bf57f03b0a49c349c35aaca16e49e0"
+kind = "fixture"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: the libvorbisenc packets of mono_22k_q0.ogg in our webm writer, DiscardPadding on the last block"
+
+[[ref]]
+name = "mono_22k_q0.webm.every.f32"
+file = "mono_22k_q0.webm.every.f32"
+sha256 = "4a985e8fb684c5f0bd0b3671b56445e0f5dc2adf06821a3511285a57f2cbdfd1"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: every 29th frame of mono_22k_q0.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "mono_22k_q0.webm.tail.f32"
+file = "mono_22k_q0.webm.tail.f32"
+sha256 = "a94e9d1872c735bfa7fe4c49d969a6afba83f0be43a7d1249515591fcdfae873"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the last 256 frames of mono_22k_q0.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "surround_22k_q1.mkv"
+file = "surround_22k_q1.mkv"
+sha256 = "87b8f0b6e8fd44395678419bf870b42d37d2ccb7baa93d2b49358c2fbab8c38f"
+kind = "fixture"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: the libvorbisenc packets of surround_22k_q1.ogg in our mkv writer, DiscardPadding on the last block"
+
+[[ref]]
+name = "surround_22k_q1.mkv.every.f32"
+file = "surround_22k_q1.mkv.every.f32"
+sha256 = "02cf46c52c62db2e06d47d7487d4cb6519e698130f8f013592b04afe8658851a"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: every 105th frame of surround_22k_q1.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "surround_22k_q1.mkv.tail.f32"
+file = "surround_22k_q1.mkv.tail.f32"
+sha256 = "5a4d7a87744fd6f64c528187f336cc7b7f5ca1a6f5d88fa237fb858c157cb96f"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the last 42 frames of surround_22k_q1.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "stereo_44k_q3.mp4"
+file = "stereo_44k_q3.mp4"
+sha256 = "95f7d1bc13532994827d59235eecc2d368e15843bbb1ce1b2991b41fceff9b09"
+kind = "fixture"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: the libvorbisenc packets of stereo_44k_q3.ogg in our mp4 writer, the priming span edited out"
+
+[[ref]]
+name = "stereo_44k_q3.mp4.every.f32"
+file = "stereo_44k_q3.mp4.every.f32"
+sha256 = "848a04eeec2428e95a8a6868ae3726d3803f44238a34fb88dc9d3db1eb218c0c"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: every 119th frame of stereo_44k_q3.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "stereo_44k_q3.mp4.head.f32"
+file = "stereo_44k_q3.mp4.head.f32"
+sha256 = "05361ccb607e3192dee0d421b99c936a700ad8f335c7936232dac584ed7caae2"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the first 128 frames of stereo_44k_q3.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "surround_22k_q1.mp4"
+file = "surround_22k_q1.mp4"
+sha256 = "519afceebfdb931936509c62398bb71b2005f348ba924cd07289027a236ca3d1"
+kind = "fixture"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: the libvorbisenc packets of surround_22k_q1.ogg in our mp4 writer, the priming span edited out"
+
+[[ref]]
+name = "surround_22k_q1.mp4.every.f32"
+file = "surround_22k_q1.mp4.every.f32"
+sha256 = "02cf46c52c62db2e06d47d7487d4cb6519e698130f8f013592b04afe8658851a"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: every 105th frame of surround_22k_q1.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "surround_22k_q1.mp4.head.f32"
+file = "surround_22k_q1.mp4.head.f32"
+sha256 = "8a3efbc784a45bd30d019a2c1918aecafc165b18dca255586abd24e3615f469d"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the first 42 frames of surround_22k_q1.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "cut_short.webm"
+file = ""
+sha256 = "e386e28e806f88f14c9cb2958486b6bd53fe7f9a0dbc1b537079fbb89887bdb9"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/vorbis/refs.rs cut_short(long_96k.webm)"
+
+[[ref]]
+name = "cut_short.ogg"
+file = ""
+sha256 = "2be49c57736f978b8a5ba5cfc8ba234c63f978eaf2e382d94b45dea196db6c19"
+kind = "bit-exact"
+tool = "libvorbisenc.so.2.0.12 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: our Ogg pages of the libvorbisenc packets left in cut_short.webm"
+
+[[ref]]
+name = "cut_short.ogg.vorbisfile.f32"
+file = ""
+sha256 = "77946573bb9494908299ab7dba126a06033bf7cac0cf4110ea59822a8c2f3f4a"
+kind = "bit-exact"
+tool = "libvorbisfile.so.3.3.8 Xiph.Org libVorbis 1.3.7"
+command = "examples/record_refs: libvorbisfile ov_read_float of cut_short.ogg, channels in WAVE order"
+
+[[ref]]
+name = "cut_short.webm.every.f32"
+file = "cut_short.webm.every.f32"
+sha256 = "675045d9974c3fa21a58bde6cff6b82815f227384661abf84d71a9bcd286c6d8"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: every 127th frame of cut_short.ogg.vorbisfile.f32"
+
+[[ref]]
+name = "cut_short.webm.tail.f32"
+file = "cut_short.webm.tail.f32"
+sha256 = "28a6374ef62cb7486c30d58cebd24fbc27f0d7a0ebcfb8ac43bd6ead361365bf"
+kind = "tolerance"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: the last 128 frames of cut_short.ogg.vorbisfile.f32"

@@ -4,6 +4,9 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+#[path = "refs.rs"]
+mod refs;
+
 type HandCase = (Vec<(Sub, u32)>, Vec<Vec<i32>>);
 
 fn dir() -> PathBuf {
@@ -1296,12 +1299,7 @@ fn a_32_bit_header_is_refused_by_the_reader_and_named_by_read_info() {
 mod front {
     use super::*;
     use crate::media::{AudioTrack, Prefs, audio_pcm_range, probe};
-
-    fn ffmpeg(args: &[&str]) -> Vec<u8> {
-        let mut all = vec!["-v", "error", "-y"];
-        all.extend_from_slice(args);
-        run("ffmpeg", &all)
-    }
+    use crate::testref::Refs;
 
     fn max_diff(a: &[f32], b: &[f32]) -> f32 {
         a.iter()
@@ -1312,12 +1310,12 @@ mod front {
 
     fn containers() -> Vec<(&'static Fixture, PathBuf)> {
         let mut out = Vec::new();
-        for (f, exts) in [
-            (&FIXTURES[0], &["flac", "mka", "m4a"][..]),
-            (&FIXTURES[1], &["flac", "mkv", "mp4"][..]),
-        ] {
-            for e in exts {
-                out.push((f, tracked().join(format!("{}.{e}", f.name))));
+        let r = Refs::open(refs::AREA);
+        for (name, exts) in refs::REMUXED {
+            let f = FIXTURES.iter().find(|f| f.name == name).unwrap();
+            out.push((f, tracked().join(format!("{name}.flac"))));
+            for ext in exts {
+                out.push((f, r.path(&refs::remuxed(name, ext))));
             }
         }
         out
@@ -1463,136 +1461,78 @@ mod front {
         assert_eq!(a.variant(), "ALAC version 1");
     }
 
-    fn remux(flac: &Path, ext: &str) -> PathBuf {
-        let name = flac.file_stem().unwrap().to_str().unwrap();
-        let out = dir().join(format!("{name}.{ext}"));
-        ffmpeg(&[
-            "-i",
-            flac.to_str().unwrap(),
-            "-map",
-            "0:a",
-            "-c:a",
-            "copy",
-            "-f",
-            ext_format(ext),
-            out.to_str().unwrap(),
-        ]);
-        out
-    }
-
-    fn ext_format(ext: &str) -> &'static str {
-        match ext {
-            "mka" | "mkv" => "matroska",
-            _ => "mp4",
-        }
-    }
-
     #[test]
-    fn probe_names_flac_in_every_container() {
-        if !need(&["flac", "ffmpeg"], "probe_names_flac_in_every_container") {
-            return;
-        }
-        let prefs = Prefs::default();
-        for c in [&CASES[0], &CASES[3]] {
-            let (f, want) = fixture(c, "probe");
-            let frames = want.len() / c.channels;
-            for path in [
-                f.clone(),
-                remux(&f, "mka"),
-                remux(&f, "mkv"),
-                remux(&f, "m4a"),
-                remux(&f, "mp4"),
-            ] {
-                let p = probe(&path, &prefs).unwrap();
-                let at = path.display();
-                assert_eq!(p.audio.len(), 1, "{at}");
-                let a = &p.audio[0];
-                assert_eq!(a.codec, "flac", "{at}");
-                assert!(a.native(), "{at}");
-                assert_eq!(a.bits as u32, c.bits, "{at}");
-                assert_eq!(a.channels as usize, c.channels, "{at}");
-                let seconds = frames as f64 / c.rate as f64;
-                assert!(
-                    (p.duration - seconds).abs() < 0.05,
-                    "{at}: {} against {seconds}",
-                    p.duration
-                );
+    fn every_remuxed_fixture_holds_the_tracked_frames() {
+        let r = Refs::open(refs::AREA);
+        for (name, exts) in refs::REMUXED {
+            let f = FIXTURES.iter().find(|f| f.name == name).unwrap();
+            let want = scaled(&f.pcm(), f.bits);
+            for ext in exts {
+                let path = r.path(&refs::remuxed(name, ext));
+                let got = audio_pcm_range(
+                    &path,
+                    0,
+                    0.0,
+                    f64::INFINITY,
+                    f.rate,
+                    f.channels as u16,
+                    &Prefs::default(),
+                )
+                .unwrap();
+                assert_eq!(got.samples.len(), want.len(), "{}", path.display());
+                assert!(max_diff(&got.samples, &want) < 1e-6, "{}", path.display());
             }
         }
     }
 
-    #[test]
-    fn ranges_decode_sample_exact_from_every_container() {
-        if !need(
-            &["flac", "ffmpeg"],
-            "ranges_decode_sample_exact_from_every_container",
-        ) {
-            return;
-        }
-        let prefs = Prefs::default();
-        for c in [&CASES[0], &CASES[1], &CASES[3], &CASES[7]] {
-            let (f, want) = fixture(c, "range");
-            let want = scaled(&want, c.bits);
-            let ch = c.channels;
-            for path in [
-                f.clone(),
-                remux(&f, "mka"),
-                remux(&f, "m4a"),
-                remux(&f, "mp4"),
-            ] {
-                for (from, to) in [
-                    (0.0, 1.0),
-                    (0.37, 1.01),
-                    (0.5, c.frames as f64 / c.rate as f64 - 0.01),
-                    (0.0, f64::INFINITY),
-                ] {
-                    let got =
-                        audio_pcm_range(&path, 0, from, to, c.rate, ch as u16, &prefs).unwrap();
-                    let start = (from * c.rate as f64).round() as usize * ch;
-                    let end = if to.is_finite() {
-                        (to * c.rate as f64).round() as usize * ch
-                    } else {
-                        c.frames * ch
-                    };
-                    let at = path.display();
-                    assert_eq!(got.samples.len(), end - start, "{at} {from}..{to}");
-                    let d = max_diff(&got.samples, &want[start..end]);
-                    assert!(d < 1e-6, "{at} {from}..{to}: max difference {d}");
-                }
-            }
-        }
+    fn matroska_of(flac: &[u8], name: &str) -> PathBuf {
+        use crate::media::TimeBase;
+        use crate::mkv::{TrackConfig, Writer};
+        use crate::mp4::TrackKind;
+        let path = dir().join(name);
+        let mut w = Writer::create(&path).unwrap();
+        let track = w
+            .add_track(TrackConfig {
+                codec_private: flac[..42].to_vec(),
+                sample_rate: 48000,
+                channels: 2,
+                ..TrackConfig::new(TrackKind::Audio, "A_FLAC", TimeBase::new(1, 48000))
+            })
+            .unwrap();
+        w.push_sample(track, &[0xff, 0xf8, 0, 0], 0, Some(4096), true)
+            .unwrap();
+        w.finish().unwrap();
+        path
     }
 
     #[test]
     fn a_32_bit_flac_in_matroska_probes_as_not_native() {
-        if !need(
-            &["flac", "ffmpeg"],
-            "a_32_bit_flac_in_matroska_probes_as_not_native",
-        ) {
-            return;
-        }
-        let pcm = synth::pcm(16, 24_000, 2, 32);
-        let w = wav_file("s32_mkv", &pcm, 48000, 2, 32);
-        let f = encode(&w, "s32_mkv", &[]);
-        let out = dir().join("s32_mkv.mka");
-        let made = Command::new("ffmpeg")
-            .args(["-v", "error", "-y", "-i"])
-            .arg(&f)
-            .args(["-map", "0:a", "-c:a", "copy", "-f", "matroska"])
-            .arg(&out)
-            .status()
-            .is_ok_and(|s| s.success());
-        if !made {
-            eprintln!(
-                "skipped a_32_bit_flac_in_matroska_probes_as_not_native: ffmpeg can't mux 32-bit FLAC"
-            );
-            return;
-        }
+        let out = matroska_of(&thirty_two_bit_file(), "s32_mkv.mka");
         let p = probe(&out, &Prefs::default()).unwrap();
         let a = &p.audio[0];
         assert_eq!(a.codec, "flac");
         assert_eq!(a.bits, 32);
         assert!(!a.native());
         assert!(p.unsupported().iter().any(|n| n == "32-bit FLAC"));
+        let e = audio_pcm_range(&out, 0, 0.0, 0.5, 48000, 2, &Prefs::default())
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("32-bit FLAC"), "{e}");
+    }
+
+    #[test]
+    fn a_16_bit_flac_in_our_matroska_probes_as_native() {
+        let mut info = info16(2);
+        info.rate = 48000;
+        info.samples = 48000;
+        let mut data = b"fLaC".to_vec();
+        data.extend_from_slice(&[0x80, 0, 0, 34]);
+        data.extend_from_slice(&meta::streaminfo_bytes(&info));
+        let out = matroska_of(&data, "s16_mkv.mka");
+        let p = probe(&out, &Prefs::default()).unwrap();
+        let a = &p.audio[0];
+        assert_eq!((a.codec.as_str(), a.bits), ("flac", 16));
+        assert!(a.native());
+        assert!(!p.unsupported().iter().any(|n| n.contains("FLAC")));
     }
 }

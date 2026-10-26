@@ -3,467 +3,37 @@ use crate::media::{Frame, Packet, PixelFormat};
 use crate::syntax::bits::{annexb_nals, unescape_rbsp};
 use crate::syntax::hevc::params::{Pps, ScalingList, Sps};
 use crate::syntax::hevc::slice::{NalHeader, SliceHeader};
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use crate::testref::{Digest, Refs};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-pub(super) struct Fixture {
-    name: &'static str,
-    source: &'static str,
-    width: u32,
-    height: u32,
-    frames: u32,
-    filter: &'static str,
-    ten_bit: bool,
-    args: &'static [&'static str],
+#[allow(dead_code)]
+#[path = "refs.rs"]
+mod refs;
+
+use refs::X265;
+
+fn stream(r: &Refs, f: &X265) -> Vec<u8> {
+    r.bytes(&refs::stream(f.name))
 }
 
-const NOISE: &str = "noise=alls=12:allf=t+u";
-
-const fn fx(
-    name: &'static str,
-    source: &'static str,
-    (width, height): (u32, u32),
-    frames: u32,
-    filter: &'static str,
-    ten_bit: bool,
-    args: &'static [&'static str],
-) -> Fixture {
-    Fixture {
-        name,
-        source,
-        width,
-        height,
-        frames,
-        filter,
-        ten_bit,
-        args,
+fn format_of(f: &X265) -> PixelFormat {
+    if f.ten_bit {
+        PixelFormat::Yuv420p10
+    } else {
+        PixelFormat::Yuv420p8
     }
 }
 
-const CIF: (u32, u32) = (352, 288);
-
-const CONFORMANCE: &[Fixture] = &[
-    fx(
-        "intra_main10",
-        "testsrc2",
-        CIF,
-        3,
-        NOISE,
-        true,
-        &["-x265-params", "keyint=1"],
-    ),
-    fx(
-        "medium",
-        "testsrc2",
-        CIF,
-        20,
-        NOISE,
-        false,
-        &["-preset", "medium"],
-    ),
-    fx(
-        "slow_main10",
-        "mandelbrot",
-        CIF,
-        12,
-        NOISE,
-        true,
-        &["-preset", "slow"],
-    ),
-    fx(
-        "bframes",
-        "testsrc2",
-        CIF,
-        30,
-        NOISE,
-        false,
-        &["-x265-params", "bframes=8:b-pyramid=1:ref=4"],
-    ),
-    fx(
-        "weightp_main10",
-        "testsrc2",
-        CIF,
-        20,
-        "fade=in:0:18",
-        true,
-        &["-x265-params", "weightp=1:weightb=1"],
-    ),
-    fx(
-        "open_gop",
-        "testsrc2",
-        CIF,
-        40,
-        NOISE,
-        false,
-        &[
-            "-x265-params",
-            "keyint=12:min-keyint=12:open-gop=1:bframes=3",
-        ],
-    ),
-    fx(
-        "tools",
-        "testsrc2",
-        CIF,
-        12,
-        NOISE,
-        false,
-        &[
-            "-x265-params",
-            "slices=4:scaling-list=default:tskip=1:rect=1:amp=1",
-        ],
-    ),
-    fx(
-        "lossless",
-        "testsrc2",
-        (176, 144),
-        6,
-        NOISE,
-        false,
-        &["-x265-params", "lossless=1"],
-    ),
-    fx(
-        "odd_1918x1078",
-        "testsrc2",
-        (1918, 1078),
-        3,
-        NOISE,
-        false,
-        &["-preset", "veryfast"],
-    ),
-];
-
-const BENCH: &[Fixture] = &[
-    fx(
-        "bench_1080p",
-        "testsrc2",
-        (1920, 1080),
-        120,
-        "noise=alls=3:allf=t",
-        false,
-        &["-preset", "fast", "-crf", "22"],
-    ),
-    fx(
-        "bench_1440p",
-        "testsrc2",
-        (2560, 1440),
-        90,
-        "noise=alls=3:allf=t",
-        false,
-        &["-preset", "fast", "-crf", "22"],
-    ),
-    fx(
-        "bench_4k",
-        "testsrc2",
-        (3840, 2160),
-        60,
-        "noise=alls=3:allf=t",
-        false,
-        &["-preset", "fast", "-crf", "22"],
-    ),
-    fx(
-        "bench_4k_main10",
-        "testsrc2",
-        (3840, 2160),
-        60,
-        "noise=alls=3:allf=t",
-        true,
-        &["-preset", "fast", "-crf", "22"],
-    ),
-];
-
-pub(super) fn ffmpeg(context: &str) -> bool {
-    let ok = Command::new("ffmpeg")
-        .arg("-version")
-        .output()
-        .is_ok_and(|o| o.status.success());
-    if !ok {
-        eprintln!("SKIPPED ({context}): ffmpeg not found");
+fn digest(frames: &[Frame]) -> String {
+    let mut d = Digest::new();
+    for f in frames {
+        d.frame(f);
     }
-    ok
+    d.hex()
 }
 
-pub(super) fn scratch(name: &str) -> PathBuf {
-    static N: AtomicUsize = AtomicUsize::new(0);
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/fixtures/hevc");
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.join(format!(
-        ".{}-{}-{name}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    ))
-}
-
-fn final_path(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tmp/fixtures/hevc")
-        .join(name)
-}
-
-fn ff(args: &[&str], input: &Path, mid: &[&str], output: &Path) {
-    let out = Command::new("ffmpeg")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args(["-hide_banner", "-loglevel", "error", "-y"])
-        .args(args)
-        .arg("-i")
-        .arg(input)
-        .args(mid)
-        .arg(output)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "ffmpeg failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-fn pix_fmt(ten_bit: bool) -> &'static str {
-    if ten_bit { "yuv420p10le" } else { "yuv420p" }
-}
-
-fn libx265(context: &str) -> bool {
-    static HAS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let ok = *HAS.get_or_init(|| {
-        Command::new("ffmpeg")
-            .args(["-hide_banner", "-encoders"])
-            .output()
-            .is_ok_and(|o| {
-                o.status.success()
-                    && String::from_utf8_lossy(&o.stdout)
-                        .split_whitespace()
-                        .any(|w| w == "libx265")
-            })
-    });
-    if !ok {
-        eprintln!("SKIPPED ({context}): this ffmpeg has no libx265 encoder");
-    }
-    ok
-}
-
-const SCALING_FILE: &str = "@scaling-list";
-
-const X265_RECON: &str = "@x265-recon";
-
-fn x265_cli(context: &str) -> bool {
-    let ok = Command::new("x265")
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success());
-    if !ok {
-        eprintln!("SKIPPED ({context}): no x265 command for its own reconstruction");
-    }
-    ok
-}
-
-fn x265_recon(f: &Fixture, hevc: &Path, yuv: &Path) -> bool {
-    if hevc.exists() && yuv.exists() {
-        return true;
-    }
-    if !x265_cli(f.name) {
-        return false;
-    }
-    crate::fixture::once_all(&[hevc, yuv], |parts| {
-        let raw = scratch(&format!("{}.raw.yuv", f.name));
-        let (tmp_hevc, tmp_yuv) = (&parts[0], &parts[1]);
-        let mut src = format!(
-            "{}=size={}x{}:rate=25,format={}",
-            f.source,
-            f.width,
-            f.height,
-            pix_fmt(f.ten_bit)
-        );
-        if !f.filter.is_empty() {
-            src = format!("{src},{}", f.filter);
-        }
-        let frames = f.frames.to_string();
-        ff(
-            &["-f", "lavfi"],
-            Path::new(&src),
-            &[
-                "-frames:v",
-                &frames,
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                pix_fmt(f.ten_bit),
-            ],
-            &raw,
-        );
-        let depth = if f.ten_bit { "10" } else { "8" };
-        let mut cmd = Command::new("x265");
-        cmd.args(["--log-level", "error", "--input"])
-            .arg(&raw)
-            .args(["--input-res", &format!("{}x{}", f.width, f.height)])
-            .args(["--fps", "25", "--frames", &frames])
-            .args([
-                "--input-depth",
-                depth,
-                "--output-depth",
-                depth,
-                "--recon-depth",
-                depth,
-            ]);
-        for kv in f.args[1..].iter().flat_map(|a| a.split(':')) {
-            let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
-            cmd.arg(format!("--{k}"));
-            if !v.is_empty() {
-                cmd.arg(v);
-            }
-        }
-        let out = cmd
-            .arg("--recon")
-            .arg(tmp_yuv)
-            .arg("-o")
-            .arg(tmp_hevc)
-            .output()
-            .unwrap();
-        let _ = std::fs::remove_file(&raw);
-        assert!(
-            out.status.success(),
-            "{}: x265 failed: {}",
-            f.name,
-            String::from_utf8_lossy(&out.stderr)
-        );
-    });
-    true
-}
-
-fn scaling_list_text() -> String {
-    let sizes = [("4X4", 16), ("8X8", 64), ("16X16", 64), ("32X32", 64)];
-    let lists = [
-        "INTRA{}_LUMA",
-        "INTRA{}_CHROMAU",
-        "INTRA{}_CHROMAV",
-        "INTER{}_LUMA",
-        "INTER{}_CHROMAU",
-        "INTER{}_CHROMAV",
-    ];
-    let mut text = String::new();
-    for (s, (size, n)) in sizes.iter().enumerate() {
-        for (l, list) in lists.iter().enumerate() {
-            let name = list.replace("{}", size);
-            let seed = if l == 5 { 4 } else { l };
-            let coeffs: Vec<String> = (0..*n)
-                .map(|i| (8 + s * 3 + seed * 2 + (i * (seed + 1)) % 23).to_string())
-                .collect();
-            text += &format!("{name} =\n{}\n", coeffs.join(","));
-            if s >= 2 {
-                text += &format!("{name}_DC =\n{}\n", 10 + s + seed);
-            }
-        }
-    }
-    text
-}
-
-fn scaling_list_file() {
-    let path = final_path("scaling_list.txt");
-    let text = scaling_list_text();
-    if std::fs::read_to_string(&path).ok().as_deref() != Some(&text[..]) {
-        let tmp = scratch("scaling_list.txt");
-        std::fs::write(&tmp, &text).unwrap();
-        std::fs::rename(&tmp, &path).unwrap();
-    }
-}
-
-fn cache_name(f: &Fixture) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    (
-        f.source, f.width, f.height, f.frames, f.filter, f.ten_bit, f.args,
-    )
-        .hash(&mut h);
-    if f.args.iter().any(|a| a.contains(SCALING_FILE)) {
-        scaling_list_text().hash(&mut h);
-    }
-    format!("{}-{:016x}", f.name, h.finish())
-}
-
-fn ensure(f: &Fixture) -> Option<(PathBuf, PathBuf)> {
-    if !ffmpeg(f.name) || !libx265(f.name) {
-        return None;
-    }
-    let cached = cache_name(f);
-    let hevc = final_path(&format!("{cached}.hevc"));
-    let yuv = final_path(&format!("{cached}.yuv"));
-    if f.args.first() == Some(&X265_RECON) {
-        return x265_recon(f, &hevc, &yuv).then_some((hevc, yuv));
-    }
-    crate::fixture::once(&hevc, |tmp| {
-        let mut src = format!(
-            "{}=size={}x{}:rate=25,format={}",
-            f.source,
-            f.width,
-            f.height,
-            pix_fmt(f.ten_bit)
-        );
-        if !f.filter.is_empty() {
-            src = format!("{src},{}", f.filter);
-        }
-        let frames = f.frames.to_string();
-        let mut mid = vec![
-            "-frames:v",
-            &frames,
-            "-c:v",
-            "libx265",
-            "-pix_fmt",
-            pix_fmt(f.ten_bit),
-        ];
-        let params;
-        let mut args = f.args.to_vec();
-        if let Some(i) = args.iter().position(|a| *a == "-x265-params") {
-            let mut given = args[i + 1].to_string();
-            if given.contains(SCALING_FILE) {
-                scaling_list_file();
-                given = given.replace(SCALING_FILE, "tmp/fixtures/hevc/scaling_list.txt");
-            }
-            params = format!("{given}:log-level=error");
-            args[i + 1] = &params;
-        } else {
-            args.extend(["-x265-params", "log-level=error"]);
-        }
-        mid.extend(args);
-        mid.extend(["-f", "hevc"]);
-        ff(&["-f", "lavfi"], Path::new(&src), &mid, tmp);
-    });
-    crate::fixture::once(&yuv, |tmp| {
-        ff(
-            &[],
-            &hevc,
-            &[
-                "-fps_mode",
-                "passthrough",
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                pix_fmt(f.ten_bit),
-            ],
-            tmp,
-        );
-    });
-    if !decodes_clean(&hevc) {
-        eprintln!(
-            "SKIPPED ({}): this ffmpeg's libx265 wrote a stream its own decoder rejects",
-            f.name
-        );
-        return None;
-    }
-    Some((hevc, yuv))
-}
-
-fn decodes_clean(hevc: &Path) -> bool {
-    let out = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-i"])
-        .arg(hevc)
-        .args(["-f", "null", "-"])
-        .output()
-        .unwrap();
-    out.status.success() && out.stderr.is_empty()
-}
-
-pub(super) fn access_units(data: &[u8]) -> Vec<&[u8]> {
+fn access_units(data: &[u8]) -> Vec<&[u8]> {
     let mut starts = Vec::new();
     let mut i = 0;
     while i + 3 <= data.len() {
@@ -518,32 +88,13 @@ fn decode_units(dec: &mut Decoder, units: &[Vec<u8>]) -> Vec<Frame> {
     out
 }
 
-fn compare(name: &str, frames: &[Frame], reference: &[u8], f: &Fixture) {
-    let format = if f.ten_bit {
-        PixelFormat::Yuv420p10
-    } else {
-        PixelFormat::Yuv420p8
-    };
-    let size = (f.width * f.height) as usize * 3 / 2 * format.bytes_per_sample();
-    assert_eq!(frames.len(), reference.len() / size, "{name}: frame count");
-    for (i, (frame, want)) in frames.iter().zip(reference.chunks(size)).enumerate() {
+fn check_shape(name: &str, frames: &[Frame], f: &X265) {
+    for (i, frame) in frames.iter().enumerate() {
         assert_eq!(
             (frame.format, frame.width, frame.height),
-            (format, f.width, f.height),
+            (format_of(f), f.size.0, f.size.1),
             "{name}: frame {i}"
         );
-        let got: Vec<u8> = frame
-            .planes
-            .iter()
-            .flat_map(|p| p.data.iter().copied())
-            .collect();
-        if got != want {
-            let k = got.iter().zip(want).position(|(a, b)| a != b).unwrap_or(0);
-            panic!(
-                "{name}: frame {i} differs from ffmpeg at byte {k} of {}",
-                got.len()
-            );
-        }
     }
     let mut pts: Vec<i64> = frames.iter().map(|f| f.pts).collect();
     pts.sort_unstable();
@@ -551,59 +102,69 @@ fn compare(name: &str, frames: &[Frame], reference: &[u8], f: &Fixture) {
     assert_eq!(pts.len(), frames.len(), "{name}: pts lost in reordering");
 }
 
+fn compare(r: &Refs, name: &str, frames: &[Frame], f: &X265) {
+    assert_eq!(frames.len() as u64, f.frames, "{name}: frame count");
+    check_shape(name, frames, f);
+    r.assert_digest(&refs::recon(f.name), &digest(frames));
+}
+
 #[test]
-fn bit_exact_against_ffmpeg() {
-    for f in CONFORMANCE {
-        let Some((hevc, yuv)) = ensure(f) else {
-            continue;
-        };
-        let data = std::fs::read(hevc).unwrap();
-        let reference = std::fs::read(yuv).unwrap();
-        let units: Vec<Vec<u8>> = access_units(&data)
-            .into_iter()
-            .map(<[u8]>::to_vec)
-            .collect();
+fn bit_exact_against_the_x265_reconstruction() {
+    let r = Refs::open(refs::AREA);
+    for f in &refs::CONFORMANCE {
+        let units = units_of(&stream(&r, f));
         for threads in [1, 4] {
             let frames = decode_units(&mut Decoder::with_threads(threads), &units);
-            compare(
-                &format!("{} ({threads} threads)", f.name),
-                &frames,
-                &reference,
-                f,
-            );
+            compare(&r, &format!("{} ({threads} threads)", f.name), &frames, f);
         }
     }
 }
 
-fn hvcc_box(mp4: &[u8]) -> &[u8] {
-    let at = mp4.windows(4).position(|w| w == b"hvcC").unwrap();
-    let size = u32::from_be_bytes(mp4[at - 4..at].try_into().unwrap()) as usize;
-    &mp4[at + 4..at - 4 + size]
+fn parameter_sets(data: &[u8], kind: u8) -> Vec<Vec<u8>> {
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    for nal in annexb_nals(data) {
+        if (nal[0] >> 1) & 0x3f == kind && !out.iter().any(|n| n == nal) {
+            out.push(nal.to_vec());
+        }
+    }
+    out
 }
 
 #[test]
-fn hvcc_matches_ffmpeg_and_drives_length_prefixed_decode() {
-    for f in [&CONFORMANCE[1], &CONFORMANCE[0]] {
-        let Some((hevc, yuv)) = ensure(f) else { return };
-        let mp4 = scratch(&format!("{}.mp4", f.name));
-        ff(&[], &hevc, &["-c", "copy", "-tag:v", "hvc1"], &mp4);
-        let theirs = Hvcc::parse(hvcc_box(&std::fs::read(&mp4).unwrap())).unwrap();
-        std::fs::remove_file(&mp4).unwrap();
-        let data = std::fs::read(&hevc).unwrap();
+fn hvcc_carries_the_x265_parameter_sets_and_drives_length_prefixed_decode() {
+    let r = Refs::open(refs::AREA);
+    for name in refs::HVCC {
+        let f = refs::find(name).unwrap();
+        let data = stream(&r, f);
         let ours = Hvcc::parse(&Hvcc::from_annexb(&data).unwrap().to_bytes()).unwrap();
+        let intra = f.params.split(':').any(|p| p == "keyint=1");
+        let (profile, depth) = match (intra, f.ten_bit) {
+            (true, true) => (4, 10),
+            (true, false) => (4, 8),
+            (false, true) => (2, 10),
+            (false, false) => (1, 8),
+        };
         assert_eq!(
-            (ours.profile, ours.chroma_format, ours.bit_depth_luma),
-            (theirs.profile, theirs.chroma_format, theirs.bit_depth_luma),
-            "{}",
-            f.name
+            (
+                ours.profile_idc(),
+                ours.chroma_format,
+                ours.bit_depth_luma,
+                ours.bit_depth_chroma
+            ),
+            (profile, 1, depth, depth),
+            "{name}"
         );
         assert_eq!(
             (&ours.vps, &ours.sps, &ours.pps),
-            (&theirs.vps, &theirs.sps, &theirs.pps),
-            "{}",
-            f.name
+            (
+                &parameter_sets(&data, 32),
+                &parameter_sets(&data, 33),
+                &parameter_sets(&data, 34)
+            ),
+            "{name}"
         );
-        assert_eq!((ours.width, ours.height), (f.width, f.height));
+        assert_eq!(ours.nal_length_size, 4, "{name}");
+        assert_eq!((ours.width, ours.height), f.size);
         let units: Vec<Vec<u8>> = access_units(&data)
             .into_iter()
             .map(|au| {
@@ -618,14 +179,9 @@ fn hvcc_matches_ffmpeg_and_drives_length_prefixed_decode() {
                 sample
             })
             .collect();
-        let mut dec = Decoder::from_hvcc(&theirs.to_bytes()).unwrap();
+        let mut dec = Decoder::from_hvcc(&ours.to_bytes()).unwrap();
         let frames = decode_units(&mut dec, &units);
-        compare(
-            &format!("{} via hvcC", f.name),
-            &frames,
-            &std::fs::read(yuv).unwrap(),
-            f,
-        );
+        compare(&r, &format!("{name} via hvcC"), &frames, f);
     }
 }
 
@@ -638,10 +194,10 @@ fn xorshift(seed: &mut u64) -> u64 {
 
 #[test]
 fn damaged_streams_fail_without_panics() {
-    for f in [&CONFORMANCE[1], &CONFORMANCE[3], &CONFORMANCE[0]] {
-        let Some((hevc, _)) = ensure(f) else { return };
-        let data = std::fs::read(hevc).unwrap();
-        let mut seed = 0x1234_5678_9abc_def0u64 ^ f.name.len() as u64;
+    let r = Refs::open(refs::AREA);
+    for name in ["medium", "bframes", "intra_main10"] {
+        let data = stream(&r, refs::find(name).unwrap());
+        let mut seed = 0x1234_5678_9abc_def0u64 ^ name.len() as u64;
         for round in 0..8 {
             let mut d = data.clone();
             for _ in 0..(1 + round * 3) {
@@ -683,7 +239,6 @@ fn decode_speed() {
         .map(|n| n.get())
         .unwrap_or(1)
         .min(16);
-    let only = std::env::var("HEVC_BENCH").ok();
     let threads: Vec<usize> = match std::env::var("HEVC_THREADS")
         .ok()
         .and_then(|t| t.parse().ok())
@@ -692,30 +247,13 @@ fn decode_speed() {
         None => vec![1, cores],
     };
     if let Ok(file) = std::env::var("HEVC_FILE") {
-        let data = std::fs::read(&file).unwrap();
-        if std::env::var_os("HEVC_CHECK").is_some() {
-            check_file(&file, &data);
-        }
-        time_units(&file, &data, &threads);
+        time_units(&file, &std::fs::read(&file).unwrap(), &threads);
         return;
     }
-    for f in BENCH
-        .iter()
-        .filter(|f| only.as_deref().is_none_or(|o| o == f.name))
-    {
-        let Some((hevc, yuv)) = ensure(f) else { return };
-        let data = std::fs::read(hevc).unwrap();
-        let units: Vec<Vec<u8>> = access_units(&data)
-            .into_iter()
-            .map(<[u8]>::to_vec)
-            .collect();
-        compare(
-            f.name,
-            &decode_units(&mut Decoder::new(), &units),
-            &std::fs::read(yuv).unwrap(),
-            f,
-        );
-        time_units(f.name, &data, &threads);
+    let only = std::env::var("HEVC_BENCH").ok();
+    let r = Refs::open(refs::AREA);
+    for f in refs::all().filter(|f| only.as_deref().is_none_or(|o| o == f.name)) {
+        time_units(f.name, &stream(&r, f), &threads);
     }
 }
 
@@ -746,180 +284,12 @@ fn time_units(name: &str, data: &[u8], threads: &[usize]) {
     }
 }
 
-fn check_file(file: &str, data: &[u8]) {
-    let units: Vec<Vec<u8>> = access_units(data).into_iter().map(<[u8]>::to_vec).collect();
-    let frames = decode_units(&mut Decoder::new(), &units);
-    let Some(first) = frames.first() else {
-        panic!("{file}: no frames");
-    };
-    let pix = if first.format == PixelFormat::Yuv420p10 {
-        "yuv420p10le"
-    } else {
-        "yuv420p"
-    };
-    let out = Command::new("ffmpeg")
-        .args([
-            "-v", "error", "-i", file, "-f", "rawvideo", "-pix_fmt", pix, "-",
-        ])
-        .output()
-        .unwrap();
-    let mut at = 0;
-    for (i, f) in frames.iter().enumerate() {
-        for p in &f.planes {
-            let n = p.width * p.height * if pix == "yuv420p" { 1 } else { 2 };
-            let ours: Vec<u8> = p
-                .data
-                .chunks(p.stride)
-                .flat_map(|r| &r[..n / p.height])
-                .copied()
-                .collect();
-            assert!(
-                out.stdout.get(at..at + n) == Some(&ours[..]),
-                "{file}: frame {i} differs from ffmpeg"
-            );
-            at += n;
-        }
-    }
-    assert_eq!(
-        at,
-        out.stdout.len(),
-        "{file}: frame count differs from ffmpeg"
-    );
-    println!("{file}: {} frames bit-exact against ffmpeg", frames.len());
-}
-
-const SMALL: (u32, u32) = (128, 96);
-
-const FEATURES: &[Fixture] = &[
-    fx(
-        "wpp_crop_66x70",
-        "testsrc2",
-        (66, 70),
-        10,
-        NOISE,
-        false,
-        &["-x265-params", "ctu=16:bframes=3"],
-    ),
-    fx(
-        "wpp_slices_main10",
-        "testsrc2",
-        SMALL,
-        8,
-        NOISE,
-        true,
-        &["-x265-params", "ctu=16:slices=3"],
-    ),
-    fx(
-        "long_b_runs",
-        "testsrc2",
-        SMALL,
-        34,
-        NOISE,
-        false,
-        &["-x265-params", "bframes=16:b-pyramid=1:b-adapt=0:ref=6"],
-    ),
-    fx(
-        "pyramid_weightb_main10",
-        "testsrc2",
-        SMALL,
-        20,
-        "fade=in:0:16",
-        true,
-        &[
-            "-x265-params",
-            "bframes=8:b-pyramid=1:ref=5:weightp=1:weightb=1",
-        ],
-    ),
-    fx(
-        "weightp_8bit",
-        "testsrc2",
-        SMALL,
-        12,
-        "fade=in:0:10",
-        false,
-        &["-x265-params", "bframes=2:weightp=1:weightb=1"],
-    ),
-    fx(
-        "scaling_tskip_main10",
-        "testsrc2",
-        SMALL,
-        8,
-        NOISE,
-        true,
-        &["-x265-params", "scaling-list=default:tskip=1:rdoq-level=0"],
-    ),
-    fx(
-        "cu_qp_chroma_offsets",
-        "testsrc2",
-        SMALL,
-        8,
-        NOISE,
-        false,
-        &[
-            X265_RECON,
-            "ctu=16:aq-mode=3:qg-size=8:cbqpoffs=-4:crqpoffs=5",
-        ],
-    ),
-    fx(
-        "intra_tools",
-        "mandelbrot",
-        SMALL,
-        8,
-        NOISE,
-        false,
-        &[
-            "-x265-params",
-            "constrained-intra=1:signhide=0:temporal-mvp=0:strong-intra-smoothing=0:max-merge=1:sao=0:deblock=-6,6:amp=1:rect=1:tu-intra-depth=4:tu-inter-depth=4",
-        ],
-    ),
-    fx(
-        "cu_lossless",
-        "testsrc2",
-        SMALL,
-        6,
-        NOISE,
-        false,
-        &["-x265-params", "cu-lossless=1"],
-    ),
-    fx(
-        "one_ctb_no_deblock",
-        "testsrc2",
-        (64, 64),
-        6,
-        NOISE,
-        false,
-        &["-x265-params", "ctu=64:no-deblock=1"],
-    ),
-    fx(
-        "scaling_list_file",
-        "testsrc2",
-        SMALL,
-        6,
-        NOISE,
-        false,
-        &["-x265-params", "scaling-list=@scaling-list:rdoq-level=0"],
-    ),
-];
-
-const OPEN_GOP_CUT: Fixture = fx(
-    "open_gop_cut",
-    "testsrc2",
-    SMALL,
-    30,
-    NOISE,
-    false,
-    &[
-        "-x265-params",
-        "keyint=8:min-keyint=8:open-gop=1:bframes=3:repeat-headers=1",
-    ],
-);
-
 fn units_of(data: &[u8]) -> Vec<Vec<u8>> {
     access_units(data).into_iter().map(<[u8]>::to_vec).collect()
 }
 
-fn feature(name: &str) -> &'static Fixture {
-    FEATURES
+fn feature(name: &str) -> &'static X265 {
+    refs::FEATURES
         .iter()
         .find(|f| f.name == name)
         .unwrap_or_else(|| panic!("no feature fixture named {name}"))
@@ -932,12 +302,11 @@ struct Facts {
     explicit_weights: bool,
 }
 
-fn facts(hevc: &Path) -> Facts {
-    let data = std::fs::read(hevc).unwrap();
+fn facts(data: &[u8]) -> Facts {
     let (mut sps, mut pps): (Option<Arc<Sps>>, Option<Arc<Pps>>) = (None, None);
     let (mut slices, mut max_slices, mut explicit_weights) = (0, 0, false);
     let mut prev: Option<SliceHeader> = None;
-    for nal in annexb_nals(&data) {
+    for nal in annexb_nals(data) {
         let hdr = NalHeader::parse(nal).unwrap();
         let rbsp = unescape_rbsp(&nal[2..]);
         match hdr.nal_type {
@@ -1035,38 +404,25 @@ fn assert_feature(name: &str, x: &Facts) {
 }
 
 #[test]
-fn feature_streams_bit_exact_against_ffmpeg() {
-    for f in FEATURES {
-        let Some((hevc, yuv)) = ensure(f) else {
-            continue;
-        };
-        assert_feature(f.name, &facts(&hevc));
-        let units = units_of(&std::fs::read(hevc).unwrap());
-        let reference = std::fs::read(yuv).unwrap();
+fn feature_streams_bit_exact_against_the_x265_reconstruction() {
+    let r = Refs::open(refs::AREA);
+    for f in &refs::FEATURES {
+        let data = stream(&r, f);
+        assert_feature(f.name, &facts(&data));
+        let units = units_of(&data);
         for threads in [1, 4] {
             let frames = decode_units(&mut Decoder::with_threads(threads), &units);
-            compare(
-                &format!("{} ({threads} threads)", f.name),
-                &frames,
-                &reference,
-                f,
-            );
+            compare(&r, &format!("{} ({threads} threads)", f.name), &frames, f);
         }
     }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[test]
-fn scalar_path_bit_exact_against_ffmpeg() {
-    for f in CONFORMANCE
-        .iter()
-        .chain(FEATURES)
-        .chain(std::iter::once(&OPEN_GOP_CUT))
-    {
-        let Some((hevc, yuv)) = ensure(f) else {
-            continue;
-        };
-        let units = units_of(&std::fs::read(hevc).unwrap());
+fn scalar_path_bit_exact_against_the_x265_reconstruction() {
+    let r = Refs::open(refs::AREA);
+    for f in refs::all() {
+        let units = units_of(&stream(&r, f));
         super::simd::force_off(true);
         let before = super::simd::forced_checks();
         let frames = decode_units(&mut Decoder::with_threads(1), &units);
@@ -1077,38 +433,18 @@ fn scalar_path_bit_exact_against_ffmpeg() {
             "{}: the one-thread decode never asked for SIMD on the test's thread, so the scalar path was not forced",
             f.name
         );
-        compare(
-            &format!("{} (scalar)", f.name),
-            &frames,
-            &std::fs::read(yuv).unwrap(),
-            f,
-        );
-    }
-}
-
-fn first_vcl_type(au: &[u8]) -> Option<u8> {
-    annexb_nals(au)
-        .into_iter()
-        .map(|n| (n[0] >> 1) & 0x3f)
-        .find(|&t| t < 32)
-}
-
-struct Scratch(Vec<PathBuf>);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        for p in &self.0 {
-            let _ = std::fs::remove_file(p);
-        }
+        compare(&r, &format!("{} (scalar)", f.name), &frames, f);
     }
 }
 
 #[test]
 fn open_gop_cut_at_a_cra_drops_its_rasl_pictures() {
-    let f = &OPEN_GOP_CUT;
-    let Some((hevc, _)) = ensure(f) else { return };
-    let data = std::fs::read(hevc).unwrap();
+    let r = Refs::open(refs::AREA);
+    let f = &refs::OPEN_GOP_CUT;
+    let data = stream(&r, f);
     let aus = access_units(&data);
+    let whole = decode_units(&mut Decoder::with_threads(1), &units_of(&data));
+    compare(&r, "open_gop_cut", &whole, f);
     let cra = (1..aus.len())
         .find(|&i| first_vcl_type(aus[i]) == Some(21))
         .expect("open_gop_cut: no CRA after the first picture");
@@ -1119,39 +455,29 @@ fn open_gop_cut_at_a_cra_drops_its_rasl_pictures() {
         .filter(|t| matches!(t, Some(8 | 9)))
         .count();
     assert!(rasl > 0, "open_gop_cut: the cut CRA leads no RASL pictures");
-    let tail = scratch("open_gop_cut_tail.hevc");
-    let yuv = scratch("open_gop_cut_tail.yuv");
-    let _guard = Scratch(vec![tail.clone(), yuv.clone()]);
-    std::fs::write(&tail, aus[cra..].concat()).unwrap();
-    ff(
-        &[],
-        &tail,
-        &[
-            "-fps_mode",
-            "passthrough",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            pix_fmt(false),
-        ],
-        &yuv,
-    );
-    let reference = std::fs::read(&yuv).unwrap();
     let units: Vec<Vec<u8>> = aus[cra..].iter().map(|au| au.to_vec()).collect();
     for threads in [1, 4] {
+        let name = format!("open_gop_cut ({threads} threads)");
         let frames = decode_units(&mut Decoder::with_threads(threads), &units);
         assert_eq!(
             frames.len(),
             units.len() - rasl,
-            "open_gop_cut ({threads} threads): RASL pictures of the first CRA were output"
+            "{name}: RASL pictures of the first CRA were output"
         );
-        compare(
-            &format!("open_gop_cut ({threads} threads)"),
-            &frames,
-            &reference,
-            f,
+        check_shape(&name, &frames, f);
+        assert_eq!(
+            digest(&frames),
+            digest(&whole[whole.len() - frames.len()..]),
+            "{name}: the pictures from the CRA on differ from the whole stream's"
         );
     }
+}
+
+fn first_vcl_type(au: &[u8]) -> Option<u8> {
+    annexb_nals(au)
+        .into_iter()
+        .map(|n| (n[0] >> 1) & 0x3f)
+        .find(|&t| t < 32)
 }
 
 fn decode_errors(units: &[Vec<u8>], threads: usize) -> Vec<String> {
@@ -1170,9 +496,9 @@ fn decode_errors(units: &[Vec<u8>], threads: usize) -> Vec<String> {
 
 #[test]
 fn truncated_nal_units_are_errors_not_panics() {
+    let r = Refs::open(refs::AREA);
     let f = feature("wpp_slices_main10");
-    let Some((hevc, _)) = ensure(f) else { return };
-    let data = std::fs::read(hevc).unwrap();
+    let data = stream(&r, f);
     let mut units = units_of(&data);
     units.truncate(4);
     let head = annexb_nals(&units[0])
@@ -1217,10 +543,10 @@ fn truncated_nal_units_are_errors_not_panics() {
 
 #[test]
 fn a_dropped_reference_picture_is_replaced_without_a_panic() {
+    let r = Refs::open(refs::AREA);
     for name in ["long_b_runs", "pyramid_weightb_main10"] {
         let f = feature(name);
-        let Some((hevc, _)) = ensure(f) else { continue };
-        let mut units = units_of(&std::fs::read(hevc).unwrap());
+        let mut units = units_of(&stream(&r, f));
         assert!(
             matches!(first_vcl_type(&units[0]), Some(16..=21)),
             "{name}: the stream does not start at an IRAP"
@@ -1255,10 +581,80 @@ fn a_dropped_reference_picture_is_replaced_without_a_panic() {
             for (i, frame) in frames.iter().enumerate() {
                 assert_eq!(
                     (frame.format, frame.width, frame.height),
-                    (format, f.width, f.height),
+                    (format, f.size.0, f.size.1),
                     "{what}: picture {i}"
                 );
             }
         }
     }
+}
+
+#[test]
+fn the_x265_sources_are_what_the_recorder_feeds_x265() {
+    for f in refs::all() {
+        let (w, h) = (f.size.0 as usize, f.size.1 as usize);
+        let samples = w * h + 2 * w.div_ceil(2) * h.div_ceil(2);
+        let bytes = refs::source_bytes(f);
+        let depth = if f.ten_bit { 2 } else { 1 };
+        assert_eq!(
+            bytes.len(),
+            samples * depth * f.frames as usize,
+            "{}",
+            f.name
+        );
+        assert_eq!(refs::source(f.name).unwrap(), bytes, "{}", f.name);
+        if f.ten_bit {
+            assert!(
+                bytes
+                    .chunks_exact(2)
+                    .all(|s| u16::from_le_bytes([s[0], s[1]]) <= 1023),
+                "{}: a sample above 10 bits",
+                f.name
+            );
+        }
+    }
+    assert!(refs::source("nothing").is_err());
+    assert!(refs::find("nothing").is_err());
+    assert_eq!(
+        (refs::stream("a"), refs::recon("a")),
+        ("a.hevc".into(), "a.yuv".into())
+    );
+}
+
+#[test]
+fn a_faded_source_starts_black() {
+    let f = refs::find("weightp_8bit").unwrap();
+    assert!(f.fade > 0 && !f.ten_bit);
+    let (w, h) = (f.size.0 as usize, f.size.1 as usize);
+    let bytes = refs::source_bytes(f);
+    let luma = w * h;
+    let chroma = (w / 2) * (h / 2);
+    assert!(bytes[..luma].iter().all(|&v| v == 16));
+    assert!(bytes[luma..luma + 2 * chroma].iter().all(|&v| v == 128));
+    let ten = refs::find("weightp_main10").unwrap();
+    let first = refs::source_bytes(ten);
+    assert!(
+        first[..2 * ten.size.0 as usize * ten.size.1 as usize]
+            .chunks_exact(2)
+            .all(|s| u16::from_le_bytes([s[0], s[1]]) >> 2 == 16)
+    );
+}
+
+#[test]
+fn x265_params_become_cli_flags() {
+    assert_eq!(
+        refs::x265_cli("a=1:b:c=-4"),
+        ["--a", "1", "--b", "--c", "-4"]
+    );
+    assert!(refs::x265_cli("").is_empty());
+}
+
+#[test]
+fn the_scaling_list_file_is_the_recorded_one() {
+    let r = Refs::open(refs::AREA);
+    let text = refs::scaling_list_text();
+    r.assert_digest(refs::SCALING_LIST, &crate::testref::sha256(text.as_bytes()));
+    assert_eq!(text.lines().count(), 72);
+    assert!(text.starts_with("INTRA4X4_LUMA =\n"));
+    assert!(text.contains("INTER32X32_CHROMAV_DC =\n"));
 }

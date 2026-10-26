@@ -1,189 +1,13 @@
-use super::crc::crc;
-use super::inflate::adler32;
 use super::tests::expected;
-use super::{XORIG, XSPC, YORIG, YSPC, decode, info};
+use super::{decode, info};
 use crate::media::Error;
-use std::io::Write;
-use std::process::{Command, Stdio};
+use crate::testref::{self, Refs};
 
-struct Lcg(u32);
+#[allow(dead_code)]
+#[path = "refs.rs"]
+mod refs;
 
-impl Lcg {
-    fn byte(&mut self) -> u8 {
-        self.0 = self.0.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        (self.0 >> 24) as u8
-    }
-    fn bytes(&mut self, n: usize) -> Vec<u8> {
-        (0..n).map(|_| self.byte()).collect()
-    }
-}
-
-fn chunk(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
-    let mut c = (body.len() as u32).to_be_bytes().to_vec();
-    c.extend_from_slice(kind);
-    c.extend_from_slice(body);
-    c.extend_from_slice(&crc(&[kind, body]).to_be_bytes());
-    c
-}
-
-fn stored(data: &[u8]) -> Vec<u8> {
-    let mut z = vec![0x78, 0x01];
-    let mut blocks = data.chunks(65_535).peekable();
-    if blocks.peek().is_none() {
-        z.extend_from_slice(&[1, 0, 0, 0xFF, 0xFF]);
-    }
-    while let Some(b) = blocks.next() {
-        let n = b.len() as u16;
-        z.push(blocks.peek().is_none() as u8);
-        z.extend_from_slice(&n.to_le_bytes());
-        z.extend_from_slice(&(!n).to_le_bytes());
-        z.extend_from_slice(b);
-    }
-    z.extend_from_slice(&adler32(data).to_be_bytes());
-    z
-}
-
-fn paeth(a: u8, b: u8, c: u8) -> u8 {
-    let p = a as i16 + b as i16 - c as i16;
-    let (pa, pb, pc) = (
-        (p - a as i16).abs(),
-        (p - b as i16).abs(),
-        (p - c as i16).abs(),
-    );
-    if pa <= pb && pa <= pc {
-        a
-    } else if pb <= pc {
-        b
-    } else {
-        c
-    }
-}
-
-fn filtered(kind: u8, line: &[u8], prev: &[u8], bpp: usize) -> Vec<u8> {
-    let mut out = vec![kind];
-    for i in 0..line.len() {
-        let a = if i >= bpp { line[i - bpp] } else { 0 };
-        let b = prev[i];
-        let c = if i >= bpp { prev[i - bpp] } else { 0 };
-        let pred = match kind {
-            0 => 0,
-            1 => a,
-            2 => b,
-            3 => ((a as u16 + b as u16) / 2) as u8,
-            _ => paeth(a, b, c),
-        };
-        out.push(line[i].wrapping_sub(pred));
-    }
-    out
-}
-
-fn samples(color: u8) -> usize {
-    match color {
-        0 | 3 => 1,
-        4 => 2,
-        2 => 3,
-        _ => 4,
-    }
-}
-
-struct Image {
-    w: u32,
-    h: u32,
-    color: u8,
-    depth: u8,
-    interlaced: bool,
-    key: Vec<u8>,
-}
-
-impl Image {
-    fn new(w: u32, h: u32, color: u8, depth: u8, interlaced: bool) -> Self {
-        Image {
-            w,
-            h,
-            color,
-            depth,
-            interlaced,
-            key: Vec::new(),
-        }
-    }
-
-    fn ihdr(&self) -> Vec<u8> {
-        let mut b = self.w.to_be_bytes().to_vec();
-        b.extend_from_slice(&self.h.to_be_bytes());
-        b.extend_from_slice(&[self.depth, self.color, 0, 0, self.interlaced as u8]);
-        b
-    }
-
-    fn rows(&self, rng: &mut Lcg) -> Vec<u8> {
-        let bits = samples(self.color) * self.depth as usize;
-        let bpp = bits.div_ceil(8);
-        let (w, h) = (self.w as usize, self.h as usize);
-        let passes: Vec<(usize, usize)> = if self.interlaced {
-            (0..7)
-                .map(|p| {
-                    (
-                        w.saturating_sub(XORIG[p]).div_ceil(XSPC[p]),
-                        h.saturating_sub(YORIG[p]).div_ceil(YSPC[p]),
-                    )
-                })
-                .collect()
-        } else {
-            vec![(w, h)]
-        };
-        let mut out = Vec::new();
-        for (pw, ph) in passes {
-            if pw == 0 || ph == 0 {
-                continue;
-            }
-            let stride = (pw * bits).div_ceil(8);
-            let mut prev = vec![0u8; stride];
-            for y in 0..ph {
-                let mut line = rng.bytes(stride);
-                if self.color == 3 && self.depth == 8 {
-                    line.iter_mut().for_each(|v| *v %= 200);
-                }
-                if out.is_empty() && y == 0 {
-                    line[..self.key.len()].copy_from_slice(&self.key);
-                }
-                out.extend(filtered((y % 5) as u8, &line, &prev, bpp));
-                prev = line;
-            }
-        }
-        out
-    }
-
-    fn file(&self, rng: &mut Lcg, before_idat: &[Vec<u8>]) -> Vec<u8> {
-        let rows = self.rows(rng);
-        self.wrap(&rows, before_idat)
-    }
-
-    fn wrap(&self, rows: &[u8], before_idat: &[Vec<u8>]) -> Vec<u8> {
-        let z = stored(rows);
-        let mut f = super::SIGNATURE.to_vec();
-        f.extend(chunk(b"IHDR", &self.ihdr()));
-        for c in before_idat {
-            f.extend_from_slice(c);
-        }
-        let third = z.len() / 3;
-        f.extend(chunk(b"IDAT", &z[..third]));
-        f.extend(chunk(b"IDAT", &[]));
-        f.extend(chunk(b"IDAT", &z[third..]));
-        f.extend(chunk(b"IEND", &[]));
-        f
-    }
-}
-
-fn palette(rng: &mut Lcg) -> Vec<u8> {
-    chunk(b"PLTE", &rng.bytes(200 * 3))
-}
-
-const CLAIMED: [(u8, &[u8]); 5] = [
-    (0, &[1, 2, 4, 8, 16]),
-    (2, &[8, 16]),
-    (3, &[1, 2, 4, 8]),
-    (4, &[8, 16]),
-    (6, &[8, 16]),
-];
+use refs::{CLAIMED, Image, Lcg, SIGNATURE, chunk, palette, stored};
 
 const SIZES: [(u32, u32); 5] = [(1, 1), (2, 3), (5, 1), (9, 7), (17, 11)];
 
@@ -327,7 +151,7 @@ fn header_and_layout_faults_are_refused_by_name() {
     let mut rng = Lcg(5);
     let rgb = Image::new(4, 4, 2, 8, false);
     let with = |ihdr: &[u8], rest: &[Vec<u8>]| {
-        let mut f = super::SIGNATURE.to_vec();
+        let mut f = SIGNATURE.to_vec();
         f.extend(chunk(b"IHDR", ihdr));
         for c in rest {
             f.extend_from_slice(c);
@@ -402,7 +226,7 @@ fn header_and_layout_faults_are_refused_by_name() {
             with(&ihdr(4, 5, 2, 8, 0, 0, 0), &[idat.clone(), end.clone()]),
         ),
         ("first chunk is not", {
-            let mut f = super::SIGNATURE.to_vec();
+            let mut f = SIGNATURE.to_vec();
             f.extend(chunk(b"IHDX", &ihdr(4, 4, 2, 8, 0, 0, 0)));
             f
         }),
@@ -427,7 +251,7 @@ fn header_and_layout_faults_are_refused_by_name() {
 fn palette_indices_past_the_palette_are_opaque_black() {
     let img = Image::new(4, 1, 3, 8, false);
     let rows = vec![0u8, 0, 1, 2, 3];
-    let mut f = super::SIGNATURE.to_vec();
+    let mut f = SIGNATURE.to_vec();
     f.extend(chunk(b"IHDR", &img.ihdr()));
     f.extend(chunk(b"PLTE", &[10, 20, 30, 40, 50, 60]));
     f.extend(chunk(b"tRNS", &[7]));
@@ -476,113 +300,49 @@ fn corrupted_and_truncated_files_never_panic() {
     }
 }
 
-fn ffmpeg_raw(file: &[u8], pix_fmt: &str) -> Option<Vec<u8>> {
-    let mut child = Command::new("ffmpeg")
-        .args([
-            "-v", "error", "-f", "png_pipe", "-i", "-", "-f", "rawvideo", "-pix_fmt", pix_fmt, "-",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    child.stdin.take()?.write_all(file).ok()?;
-    let out = child.wait_with_output().ok()?;
-    out.status.success().then_some(out.stdout)
-}
-
-fn like_ffmpeg(file: &[u8], color: u8, depth: u8, name: &str) {
-    let ours = decode(file).unwrap_or_else(|e| panic!("{name}: {e}"));
-    if depth < 16 {
-        let want = ffmpeg_raw(file, "rgba").unwrap_or_else(|| panic!("{name}: ffmpeg failed"));
-        assert!(ours.data == want, "{name}: differs from ffmpeg");
+fn like_magick(r: &Refs, case: &refs::Case) {
+    let name = &case.name;
+    r.assert_digest(&format!("{name}.png"), &testref::sha256(&case.file));
+    let ours = decode(&case.file).unwrap_or_else(|e| panic!("{name}: {e}"));
+    if !case.wide() {
+        r.assert_digest(&format!("{name}.rgba"), &testref::sha256(&ours.data));
         return;
     }
-    let wide = ffmpeg_raw(file, "rgba64be").unwrap_or_else(|| panic!("{name}: ffmpeg failed"));
+    let wide = r.bytes(&format!("{name}.rgba64"));
     assert_eq!(wide.len(), ours.data.len() * 2, "{name}: sizes");
-    let slack = if matches!(color, 0 | 4) { 1 } else { 0 };
+    let slack = if matches!(case.color, 0 | 4) { 1 } else { 0 };
     for (i, (&o, w)) in ours.data.iter().zip(wide.chunks_exact(2)).enumerate() {
         assert!(
             o.abs_diff(w[0]) <= slack,
-            "{name}: byte {i} is {o}, ffmpeg's high byte {}",
+            "{name}: byte {i} is {o}, magick's high byte {}",
             w[0]
         );
     }
 }
 
 #[test]
-fn every_claimed_type_and_depth_decodes_like_ffmpeg() {
-    if Command::new("ffmpeg").arg("-version").output().is_err() {
-        return;
-    }
-    let mut rng = Lcg(99);
-    for (color, depths) in CLAIMED {
-        for &depth in depths {
-            for interlaced in [false, true] {
-                let img = Image::new(17, 11, color, depth, interlaced);
-                let extra = if color == 3 {
-                    vec![palette(&mut rng), chunk(b"tRNS", &rng.bytes(64))]
-                } else {
-                    vec![]
-                };
-                let file = img.file(&mut rng, &extra);
-                let name = format!("colour {color} depth {depth} interlaced {interlaced}");
-                like_ffmpeg(&file, color, depth, &name);
-            }
-        }
+fn every_claimed_type_and_depth_decodes_like_magick() {
+    let r = Refs::open(refs::AREA);
+    let cases = refs::claimed();
+    assert_eq!(
+        cases.len(),
+        2 * CLAIMED.iter().map(|(_, d)| d.len()).sum::<usize>()
+    );
+    for case in &cases {
+        like_magick(&r, case);
     }
 }
 
 #[test]
-fn transparency_keys_decode_like_ffmpeg() {
-    if Command::new("ffmpeg").arg("-version").output().is_err() {
-        return;
-    }
-    let mut rng = Lcg(31);
-    let cases: [(u8, u8, Vec<u8>); 7] = [
-        (0, 1, vec![0, 1]),
-        (0, 2, vec![0, 2]),
-        (0, 4, vec![0, 9]),
-        (0, 8, vec![0, 77]),
-        (0, 16, vec![0x12, 0x34]),
-        (2, 8, vec![0, 7, 0, 7, 0, 7]),
-        (2, 16, vec![0x10, 0x20, 0x30, 0x40, 0x50, 0x60]),
-    ];
-    for (color, depth, key) in cases {
-        for interlaced in [false, true] {
-            let mut img = Image::new(13, 9, color, depth, interlaced);
-            if depth >= 8 {
-                img.key = if depth == 16 {
-                    key.clone()
-                } else {
-                    key.iter().skip(1).step_by(2).copied().collect()
-                };
-            }
-            let file = img.file(&mut rng, &[chunk(b"tRNS", &key)]);
-            let name = format!("tRNS colour {color} depth {depth} interlaced {interlaced}");
-            assert!(
-                decode(&file)
-                    .unwrap()
-                    .data
-                    .chunks_exact(4)
-                    .any(|p| p[3] == 0),
-                "{name}: key never hit"
-            );
-            if color == 0 && depth < 8 {
-                let want =
-                    ffmpeg_raw(&file, "rgba").unwrap_or_else(|| panic!("{name}: ffmpeg failed"));
-                let ours = decode(&file).unwrap();
-                assert_eq!(ours.data.len(), want.len(), "{name}");
-                for (a, b) in ours.data.chunks_exact(4).zip(want.chunks_exact(4)) {
-                    assert_eq!(
-                        (&a[..3], b[3]),
-                        (&b[..3], 255),
-                        "{name}: ffmpeg keeps sub-byte grey opaque"
-                    );
-                }
-                continue;
-            }
-            like_ffmpeg(&file, color, depth, &name);
-        }
+fn transparency_keys_decode_like_magick() {
+    let r = Refs::open(refs::AREA);
+    for case in refs::keyed() {
+        let name = &case.name;
+        let ours = decode(&case.file).unwrap();
+        assert!(
+            ours.data.chunks_exact(4).any(|p| p[3] == 0),
+            "{name}: key never hit"
+        );
+        like_magick(&r, &case);
     }
 }

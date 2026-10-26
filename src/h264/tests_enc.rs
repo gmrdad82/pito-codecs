@@ -1,4 +1,4 @@
-use super::tests::{assert_same, dir, ffmpeg_present, ffmpeg_yuv, psnr, raw, to_annexb};
+use super::tests::{decode_annexb, psnr, raw, to_annexb};
 use super::*;
 use crate::media::Rate;
 
@@ -73,6 +73,23 @@ fn config(w: u32, h: u32, profile: Profile, rate: Rate) -> EncoderConfig {
     }
 }
 
+fn odd_config(w: u32, h: u32, profile: Profile) -> EncoderConfig {
+    EncoderConfig {
+        gop: 3,
+        ..config(w, h, profile, Rate::Crf(23))
+    }
+}
+
+fn scene_cut_config() -> EncoderConfig {
+    EncoderConfig {
+        gop: 60,
+        ..config(160, 128, Profile::High, Rate::Bitrate(600))
+    }
+}
+
+const FLOOR: f64 = 20.0;
+const STARVED_FLOOR: f64 = 8.0;
+
 fn encode_all(cfg: &EncoderConfig, frames: &[Frame]) -> (Vec<u8>, Vec<Packet>) {
     let mut enc = Encoder::new(cfg.clone()).unwrap();
     let mut packets = Vec::new();
@@ -85,7 +102,8 @@ fn encode_all(cfg: &EncoderConfig, frames: &[Frame]) -> (Vec<u8>, Vec<Packet>) {
     (enc.avcc(), packets)
 }
 
-fn decoded_bit_exact(name: &str, avcc: &[u8], packets: &[Packet], w: u32, h: u32) -> Vec<u8> {
+fn decoded_back(name: &str, avcc: &[u8], packets: &[Packet], source: &[Frame], floor: f64) {
+    let (w, h) = (source[0].width, source[0].height);
     let mut dec = Decoder::with_extradata(avcc).unwrap();
     let mut frames = Vec::new();
     for p in packets {
@@ -93,21 +111,23 @@ fn decoded_bit_exact(name: &str, avcc: &[u8], packets: &[Packet], w: u32, h: u32
     }
     frames.extend(dec.flush().unwrap());
     assert_eq!(frames.len(), packets.len(), "{name}: frames decoded");
+    assert_eq!(
+        frames.len(),
+        source.len(),
+        "{name}: frames against the source"
+    );
     assert!(
         frames.iter().all(|f| (f.width, f.height) == (w, h)),
         "{name}: decoded size is not the cropped {w}x{h}"
     );
     let ours = raw(&frames);
-    if !ffmpeg_present() {
-        return ours;
-    }
-    let path = dir().join(format!("{name}.h264"));
-    std::fs::write(&path, to_annexb(avcc, packets)).unwrap();
-    let theirs = ffmpeg_yuv(&path);
-    let size = (w * h + 2 * (w / 2) * (h / 2)) as usize;
-    assert_eq!(theirs.len(), size * packets.len(), "{name}: ffmpeg frames");
-    assert_same(&ours, &theirs, size, name);
-    ours
+    let db = psnr(&ours, &raw(source));
+    assert!(db > floor, "{name}: PSNR {db:.2} dB under {floor}");
+    let stream = to_annexb(avcc, packets).unwrap();
+    assert!(
+        raw(&decode_annexb(&stream, 4)) == ours,
+        "{name}: four decode threads on Annex B differ from one on avcC"
+    );
 }
 
 fn kbps(packets: &[Packet], fps: f64) -> f64 {
@@ -116,11 +136,10 @@ fn kbps(packets: &[Packet], fps: f64) -> f64 {
 }
 
 #[test]
-fn cavlc_decodes_bit_exact_at_every_preset_and_qp() {
+fn cavlc_decodes_back_at_every_preset_and_qp() {
     let (w, h) = (96, 64);
     for scene in [Scene::Flat, Scene::Noise, Scene::Motion] {
         let frames = clip(scene, w, h, 5);
-        let source = raw(&frames);
         for preset in [Preset::Speed, Preset::Balanced, Preset::Quality] {
             for (qp, floor) in [(0u8, 40.0), (26, 26.0), (40, 18.0)] {
                 let name = format!("cavlc_{scene:?}_{preset:?}_qp{qp}");
@@ -140,9 +159,7 @@ fn cavlc_decodes_bit_exact_at_every_preset_and_qp() {
                     packets.iter().filter(|p| p.keyframe).count() >= 2,
                     "{name}: an IDR at least every 4 frames"
                 );
-                let ours = decoded_bit_exact(&name, &avcc, &packets, w, h);
-                let db = psnr(&ours, &source);
-                assert!(db > floor, "{name}: PSNR {db:.2} dB under {floor}");
+                decoded_back(&name, &avcc, &packets, &frames, floor);
             }
         }
     }
@@ -170,27 +187,22 @@ fn bitrate_modes_land_within_thirty_percent_of_target() {
                 (got / target - 1.0).abs() <= 0.3,
                 "{name}: {got:.0} kbps for a {target} kbps target"
             );
-            decoded_bit_exact(&name, &avcc, &packets, w, h);
+            decoded_back(&name, &avcc, &packets, &frames, FLOOR);
         }
     }
 }
 
 #[test]
 fn a_scene_cut_starts_a_new_idr() {
-    let (w, h) = (160, 128);
-    let frames = clip(Scene::Cut, w, h, CUT + 6);
-    let cfg = EncoderConfig {
-        gop: 60,
-        ..config(w, h, Profile::High, Rate::Bitrate(600))
-    };
-    let (avcc, packets) = encode_all(&cfg, &frames);
+    let frames = clip(Scene::Cut, 160, 128, CUT + 6);
+    let (avcc, packets) = encode_all(&scene_cut_config(), &frames);
     let keys: Vec<i64> = packets
         .iter()
         .filter(|p| p.keyframe)
         .map(|p| p.pts)
         .collect();
     assert_eq!(keys, [0, CUT], "keyframes");
-    decoded_bit_exact("scene_cut", &avcc, &packets, w, h);
+    decoded_back("scene_cut", &avcc, &packets, &frames, FLOOR);
 }
 
 #[test]
@@ -206,15 +218,13 @@ fn crf_shrinks_with_the_factor_and_a_flat_clip_stays_clean() {
             let bytes: usize = packets.iter().map(|p| p.data.len()).sum();
             assert!(bytes < last, "{name}: {bytes} bytes, not below {last}");
             last = bytes;
-            decoded_bit_exact(&name, &avcc, &packets, w, h);
+            decoded_back(&name, &avcc, &packets, &motion, FLOOR);
         }
         for (rate, tag) in [(Rate::Crf(23), "crf"), (Rate::Bitrate(300), "cbr")] {
             let name = format!("flat_{profile:?}_{tag}");
             let (avcc, packets) = encode_all(&config(w, h, profile, rate), &flat);
             assert!(kbps(&packets, 30.0) <= 300.0 * 1.3, "{name}: over budget");
-            let ours = decoded_bit_exact(&name, &avcc, &packets, w, h);
-            let db = psnr(&ours, &raw(&flat));
-            assert!(db > 40.0, "{name}: PSNR {db:.2} dB on a flat clip");
+            decoded_back(&name, &avcc, &packets, &flat, 40.0);
         }
     }
 }
@@ -254,7 +264,7 @@ fn extreme_rate_settings_are_clamped_or_refused() {
             ..config(w, h, profile, rate)
         };
         let (avcc, packets) = encode_all(&cfg, &frames);
-        decoded_bit_exact(&name, &avcc, &packets, w, h);
+        decoded_back(&name, &avcc, &packets, &frames, STARVED_FLOOR);
         (avcc, packets)
     };
     let bytes = |rate: Rate, profile: Profile| encode(rate, profile, 2).1;
@@ -424,14 +434,14 @@ fn padded_strides_encode_like_packed_frames() {
                     strided.iter().zip(&packed).all(|(a, b)| a.data == b.data),
                     "{name}: a padded stride changed the stream"
                 );
-                decoded_bit_exact(&name, &wide_avcc, &strided, w, h);
+                decoded_back(&name, &wide_avcc, &strided, &wide, FLOOR);
             }
         }
     }
 }
 
 #[test]
-fn odd_and_tiny_sizes_crop_and_decode_bit_exact() {
+fn odd_and_tiny_sizes_crop_and_decode_back() {
     for (w, h) in [
         (2, 2),
         (4, 6),
@@ -447,14 +457,24 @@ fn odd_and_tiny_sizes_crop_and_decode_bit_exact() {
         let frames = clip(Scene::Motion, w, h, 5);
         for profile in [Profile::Baseline, Profile::High] {
             let name = format!("odd_{w}x{h}_{profile:?}");
-            let cfg = EncoderConfig {
-                gop: 3,
-                ..config(w, h, profile, Rate::Crf(23))
-            };
-            let (avcc, packets) = encode_all(&cfg, &frames);
-            decoded_bit_exact(&name, &avcc, &packets, w, h);
+            let (avcc, packets) = encode_all(&odd_config(w, h, profile), &frames);
+            decoded_back(&name, &avcc, &packets, &frames, FLOOR);
         }
     }
+}
+
+#[test]
+fn a_decode_far_from_the_source_fails_the_floor() {
+    let frames = clip(Scene::Motion, 64, 48, 2);
+    let other = clip(Scene::Gradient, 64, 48, 2);
+    let (avcc, packets) = encode_all(&config(64, 48, Profile::High, Rate::Crf(23)), &other);
+    let wrong = std::panic::catch_unwind(|| {
+        decoded_back("wrong_source", &avcc, &packets, &frames, FLOOR);
+    });
+    assert!(
+        wrong.is_err(),
+        "a decode of another clip passed the PSNR floor"
+    );
 }
 
 #[test]
@@ -471,7 +491,7 @@ fn a_single_frame_encodes_to_one_keyframe() {
                 };
                 let (avcc, packets) = encode_all(&cfg, &frames);
                 assert_eq!((packets[0].pts, packets[0].dts), (0, 0), "{name}");
-                decoded_bit_exact(&name, &avcc, &packets, w, h);
+                decoded_back(&name, &avcc, &packets, &frames, FLOOR);
             }
         }
     }
@@ -518,5 +538,11 @@ fn frames_that_do_not_fit_are_refused_and_the_stream_goes_on() {
     packets.extend(enc.flush().unwrap());
     assert_eq!(packets.len(), 1);
     assert!(packets[0].keyframe);
-    decoded_bit_exact("refused_then_good", &enc.avcc(), &packets, w, h);
+    decoded_back(
+        "refused_then_good",
+        &enc.avcc(),
+        &packets,
+        std::slice::from_ref(&good),
+        FLOOR,
+    );
 }

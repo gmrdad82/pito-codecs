@@ -1,0 +1,63 @@
+[[ref]]
+name = "r128-tone.f32"
+file = ""
+sha256 = "0443b09b78b5839df98178a9fdfb37de02443db1480fe61ac774323d4e61af1d"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/filter/refs.rs loudness_bytes(\"tone\")"
+
+[[ref]]
+name = "r128-tone.txt"
+file = "r128-tone.txt"
+sha256 = "c027609bb5e5117eb9604c9b5d65c9d6d85fb80f6459768a261359e4e3e62308"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/filter/refs.rs meter_text(meter_summary(\"tone\"))"
+
+[[ref]]
+name = "r128-steps.f32"
+file = ""
+sha256 = "e5ecc78d64396b04b1fd772abc7bde7bb1a7e17bedafc1a3c150a0a8266e9aea"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/filter/refs.rs loudness_bytes(\"steps\")"
+
+[[ref]]
+name = "r128-steps.txt"
+file = "r128-steps.txt"
+sha256 = "7d2736fdc64090d30d3f9627cebbad94bb684abbf3413459d9102143ecd1ea0d"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/filter/refs.rs meter_text(meter_summary(\"steps\"))"
+
+[[ref]]
+name = "r128-pink.f32"
+file = ""
+sha256 = "fe6499f4e11823d47b74ecb60bf9b84bc7b0545eb49895f477c6c2471bd553ac"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/filter/refs.rs loudness_bytes(\"pink\")"
+
+[[ref]]
+name = "r128-pink.txt"
+file = "r128-pink.txt"
+sha256 = "729ecf75b6cb83ee9a201b381ee5cb1b5827df63701890fdae26df637f34958b"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/filter/refs.rs meter_text(meter_summary(\"pink\"))"
+
+[[ref]]
+name = "r128-white.f32"
+file = ""
+sha256 = "663d9970e5bc886e359520cfd5bdc70eec493439b0657c293fc97a3242e373ed"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/filter/refs.rs loudness_bytes(\"white\")"
+
+[[ref]]
+name = "r128-white.txt"
+file = "r128-white.txt"
+sha256 = "378040df8282a6c8283652f9094b6ad7d3d074020883e35ea2272b06c77bcec4"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/filter/refs.rs meter_text(meter_summary(\"white\"))"

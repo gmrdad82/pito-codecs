@@ -1,0 +1,79 @@
+[[ref]]
+name = "s16-mono.m4a"
+file = "s16-mono.m4a"
+sha256 = "6fc9bb072ccad176ba5737308097edf33e0a3b240617ec18c1f59727c1eec70a"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/alac/refs.rs writer, Options { order: 30, mix_res: 0, shift: false, verbatim: false }, Iso"
+
+[[ref]]
+name = "s16-stereo.m4a"
+file = "s16-stereo.m4a"
+sha256 = "c13bbaeed74bf8f3e761cafb472480e8bfabb3d5d689601dd4d635574bdcec9e"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/alac/refs.rs writer, Options { order: 16, mix_res: 2, shift: false, verbatim: false }, Iso"
+
+[[ref]]
+name = "s24-stereo.mov"
+file = "s24-stereo.mov"
+sha256 = "025643fbdc5d61b6cb6247dd2e850321bb987dc20df66804498e43fd5dac3838"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/alac/refs.rs writer, Options { order: 12, mix_res: 3, shift: true, verbatim: false }, QtWave"
+
+[[ref]]
+name = "s24-stereo-96k.mov"
+file = "s24-stereo-96k.mov"
+sha256 = "fa35760ee0c91bc6d7a2182ace4008a22e96210a6828513e9ef0f8698e1301f9"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/alac/refs.rs writer, Options { order: 8, mix_res: 1, shift: true, verbatim: false }, QtV2"
+
+[[ref]]
+name = "s24-mono-96k.m4a"
+file = "s24-mono-96k.m4a"
+sha256 = "c23d6d5a4e2bc70934ea30ac30147cca43fca498a27a30df3b74e130772e6e11"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/alac/refs.rs writer, Options { order: 6, mix_res: 0, shift: true, verbatim: false }, Iso"
+
+[[ref]]
+name = "s16-stereo.mkv"
+file = "s16-stereo.mkv"
+sha256 = "1824662e76889c8830c8a3f0906a1d3786d5d01f378ba9d52b755fc6e1d5ef25"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/alac/refs.rs writer, Options { order: 4, mix_res: 0, shift: false, verbatim: false }, Matroska"
+
+[[ref]]
+name = "s24-stereo-order8.mkv"
+file = "s24-stereo-order8.mkv"
+sha256 = "ef63a0d78561df3bd8d3501bf7d5dbd8c33cea5b0b20424124c6149bcd898f9b"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/alac/refs.rs writer, Options { order: 8, mix_res: 2, shift: true, verbatim: false }, Matroska"
+
+[[ref]]
+name = "s16-stereo-order4.m4a"
+file = "s16-stereo-order4.m4a"
+sha256 = "603e40d4ff68481c5ff441d217e6302bf598ae164949689005ec4ee30c1abcd1"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/alac/refs.rs writer, Options { order: 4, mix_res: 2, shift: false, verbatim: false }, Iso"
+
+[[ref]]
+name = "s16-5.1.m4a"
+file = "s16-5.1.m4a"
+sha256 = "27697058a923c4af310cd1f8d4eda8b7654861d521f6d3b87ab81421bb4dc769"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/alac/refs.rs writer, Options { order: 8, mix_res: 2, shift: false, verbatim: false }, Iso"
+
+[[ref]]
+name = "s24-mono-verbatim.mov"
+file = "s24-mono-verbatim.mov"
+sha256 = "7c8c5a601aa9c9e979f3221402e5a434886e52e697f73a9c884b96194daabe08"
+kind = "fixture"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/alac/refs.rs writer, Options { order: 0, mix_res: 0, shift: false, verbatim: true }, QtWave"

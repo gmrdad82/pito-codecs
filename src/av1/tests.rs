@@ -1,7 +1,11 @@
 use std::path::PathBuf;
-use std::process::Command;
 
 use super::parser::{FrameType, ObuAction, ObuType, Parser};
+use crate::testref::Refs;
+
+#[allow(dead_code)]
+#[path = "refs.rs"]
+pub(super) mod refs;
 
 #[derive(Default, Debug)]
 pub(super) struct Stats {
@@ -115,30 +119,7 @@ fn stream_features_in_tmp() {
 
 #[test]
 fn parser_refuses_corrupt_units_without_panicking() {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp/av1-parser");
-    std::fs::create_dir_all(&dir).unwrap();
-    let ivf = dir.join("corrupt.ivf");
-    let made = Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-        ])
-        .arg("testsrc2=size=352x288:rate=30")
-        .args(["-frames:v", "8", "-c:v", "libaom-av1", "-cpu-used", "8"])
-        .args(["-tile-columns", "1", "-f", "ivf"])
-        .arg(&ivf)
-        .output()
-        .is_ok_and(|o| o.status.success());
-    if !made {
-        eprintln!("SKIPPED: no ffmpeg with libaom-av1");
-        return;
-    }
-    let data = std::fs::read(&ivf).unwrap();
+    let data = Refs::open(refs::AREA).bytes(&refs::ivf("corrupt"));
     let units = ivf_frames(&data);
     let mut clean = Parser::default();
     let mut stats = Stats::default();
@@ -200,32 +181,8 @@ pub(super) fn obus(unit: &[u8]) -> Vec<(u8, std::ops::Range<usize>)> {
     out
 }
 
-pub(super) fn small_stream(tag: &str) -> Option<Vec<u8>> {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp/av1-parser");
-    std::fs::create_dir_all(&dir).ok()?;
-    let ivf = crate::fixture::unique(&dir.join(format!("{tag}.ivf")));
-    let made = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi"])
-        .args(["-i", "testsrc2=size=64x64:rate=30", "-frames:v", "3"])
-        .args([
-            "-pix_fmt",
-            "yuv420p",
-            "-c:v",
-            "libaom-av1",
-            "-cpu-used",
-            "8",
-        ])
-        .args(["-f", "ivf"])
-        .arg(&ivf)
-        .output()
-        .is_ok_and(|o| o.status.success());
-    let data = std::fs::read(&ivf).ok();
-    let _ = std::fs::remove_file(&ivf);
-    if !made {
-        eprintln!("SKIPPED: no ffmpeg with libaom-av1");
-        return None;
-    }
-    data
+pub(super) fn small_stream() -> Vec<u8> {
+    Refs::open(refs::AREA).bytes(&refs::ivf("small"))
 }
 
 pub(super) fn payload_start(unit: &[u8], r: &std::ops::Range<usize>) -> usize {
@@ -299,9 +256,7 @@ fn obus_splits_units_and_stops_at_a_short_one() {
 
 #[test]
 fn parser_refuses_every_truncated_obu() {
-    let Some(data) = small_stream("parser-truncated") else {
-        return;
-    };
+    let data = small_stream();
     let units = ivf_frames(&data);
     assert_eq!(units.len(), 3);
     let mut clean = Parser::default();
@@ -332,9 +287,7 @@ fn parser_refuses_every_truncated_obu() {
 
 #[test]
 fn parser_refuses_an_out_of_range_profile() {
-    let Some(data) = small_stream("parser-profile") else {
-        return;
-    };
+    let data = small_stream();
     let unit = ivf_frames(&data)[0].to_vec();
     let (r, payload) = sequence_payload(&unit).unwrap();
     let mut good = Parser::default();
@@ -351,9 +304,7 @@ fn parser_refuses_an_out_of_range_profile() {
 
 #[test]
 fn parser_refuses_a_frame_before_its_sequence_header() {
-    let Some(data) = small_stream("parser-order") else {
-        return;
-    };
+    let data = small_stream();
     let unit = ivf_frames(&data)[0];
     let without: Vec<u8> = obus(unit)
         .into_iter()
@@ -367,4 +318,66 @@ fn parser_refuses_a_frame_before_its_sequence_header() {
     let mut stats = Stats::default();
     walk(&mut Parser::default(), unit, &mut stats).unwrap();
     assert_eq!(stats.shown, 1);
+}
+
+#[test]
+fn every_recorded_stream_parses_to_its_frame_count_and_size() {
+    let r = Refs::open(refs::AREA);
+    for s in refs::BIT_EXACT.iter().chain(refs::PARSER.iter()) {
+        let data = r.bytes(&refs::ivf(s.name));
+        let mut parser = Parser::default();
+        let mut stats = Stats::default();
+        for unit in ivf_frames(&data) {
+            walk(&mut parser, unit, &mut stats).unwrap_or_else(|e| panic!("{}: {e}", s.name));
+        }
+        assert_eq!(
+            (stats.shown + stats.existing) as u64,
+            s.frames,
+            "{}: {stats:?}",
+            s.name
+        );
+        assert!(stats.keys >= 1, "{}: no key frame", s.name);
+        let seq = parser.sequence().unwrap();
+        let max = (
+            u32::from(seq.max_frame_width_minus_1) + 1,
+            u32::from(seq.max_frame_height_minus_1) + 1,
+        );
+        assert_eq!(max, s.size, "{}: sequence size", s.name);
+    }
+}
+
+#[test]
+fn refs_name_each_stream_once_and_size_sources_to_their_frames() {
+    let all: Vec<&refs::Stream> = refs::BIT_EXACT.iter().chain(refs::PARSER.iter()).collect();
+    for (i, s) in all.iter().enumerate() {
+        assert!(
+            all[..i].iter().all(|o| o.name != s.name),
+            "{} twice",
+            s.name
+        );
+        assert!(std::ptr::eq(refs::find(s.name), *s));
+        assert!(
+            [refs::AOM, refs::SVT, refs::RAV1E_TOOL].contains(&s.encoder),
+            "{}",
+            s.name
+        );
+        assert!(matches!(s.bits, 8 | 10), "{}", s.name);
+        let (w, h) = (s.size.0 as usize, s.size.1 as usize);
+        let frame = w * h + 2 * w.div_ceil(2) * h.div_ceil(2);
+        let bytes = refs::source_bytes(s);
+        assert_eq!(bytes.len(), frame * s.frames as usize, "{}", s.name);
+        if s.frames > 1 {
+            assert_ne!(bytes[..frame], bytes[frame..2 * frame], "{}: still", s.name);
+        }
+    }
+    let screen = refs::source_bytes(refs::find("screen_8"));
+    let motion = refs::source_bytes(refs::find("compound_8"));
+    let colors = |b: &[u8]| {
+        let mut seen = [false; 256];
+        b[..128 * 96]
+            .iter()
+            .for_each(|&v| seen[usize::from(v)] = true);
+        seen.iter().filter(|&&s| s).count()
+    };
+    assert!(colors(&screen) < colors(&motion) / 2);
 }

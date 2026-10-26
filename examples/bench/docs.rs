@@ -5,11 +5,11 @@ use std::path::Path;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::reference::Reference;
+
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
-const SUB: &str = "RYZEN 9 9950X, RADEON RX 9060 XT (VA-API), FFMPEG 9.0.1";
 const US: &str = "PITO-CODECS";
-const FF: &str = "FFMPEG 9.0.1";
 const NOW: &str = "2026-10-14";
 const RES: [&str; 2] = ["1080", "1440"];
 const LIMIT: f64 = 0.05;
@@ -128,6 +128,44 @@ fn fixed(label: &str, ours: f64, other: f64) -> Bar {
 struct Docs<'a> {
     rows: &'a Rows,
     out: &'a Path,
+    sub: String,
+    ff: String,
+}
+
+fn short_cpu(cpu: &str) -> &str {
+    let cpu = cpu.trim().trim_end_matches(" Processor");
+    match cpu.rsplit_once(' ') {
+        Some((head, last)) if last.ends_with("-Core") => head,
+        _ => cpu,
+    }
+}
+
+fn gpu_api(os: &str) -> Option<&'static str> {
+    let os = os.trim().to_lowercase();
+    [
+        ("linux", "VA-API"),
+        ("darwin", "VIDEOTOOLBOX"),
+        ("macos", "VIDEOTOOLBOX"),
+        ("windows", "MEDIA FOUNDATION"),
+    ]
+    .into_iter()
+    .find(|(name, _)| os.starts_with(name))
+    .map(|(_, api)| api)
+}
+
+pub fn ffmpeg_names(r: &Reference) -> (String, String) {
+    let ff = format!("FFMPEG {}", r.version());
+    let gpu = r.gpu.trim().to_uppercase();
+    let gpu = match gpu_api(&r.os) {
+        Some(api) => format!("{gpu} ({api})"),
+        None => gpu,
+    };
+    let sub = format!(
+        "{}, {gpu}, {ff} RECORDED {}",
+        short_cpu(&r.cpu).to_uppercase(),
+        r.date
+    );
+    (sub, ff)
 }
 
 impl Docs<'_> {
@@ -164,9 +202,9 @@ impl Docs<'_> {
             title,
             unit,
             better,
-            subtitle: SUB,
+            subtitle: &self.sub,
             date: &self.rows.date,
-            parties: vec![Party { name: US }, Party { name: FF }],
+            parties: vec![Party { name: US }, Party { name: &self.ff }],
             groups: Vec::new(),
             suffix: None,
             notes: None,
@@ -486,10 +524,17 @@ impl Docs<'_> {
     }
 }
 
-pub fn charts(results: &Path, out: &Path) -> Res<()> {
+pub fn charts(results: &Path, out: &Path, reference: &Reference) -> Res<()> {
     let rows = Rows::read(results)?;
     fs::create_dir_all(out)?;
-    Docs { rows: &rows, out }.all()
+    let (sub, ff) = ffmpeg_names(reference);
+    Docs {
+        rows: &rows,
+        out,
+        sub,
+        ff,
+    }
+    .all()
 }
 
 pub fn check(new: &Path, baseline: &Path) -> Res<()> {

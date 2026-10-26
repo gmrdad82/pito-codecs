@@ -1,0 +1,4 @@
+sample_rate=44100
+channels=3
+bit_rate=144000
+TAG:TITLE=c3_44k_q0

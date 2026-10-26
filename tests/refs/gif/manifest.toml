@@ -1,0 +1,159 @@
+[[ref]]
+name = "im-global.gif"
+file = "im-global.gif"
+sha256 = "a82b67ccfd66a07bac77c3fab4d66b3c87bd7a0945aeac0ca06e2e724019658c"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 80x60 -depth 8 rgba:{src} -alpha off -delay 10 -loop 0 +dither -colors 200 +remap {out}"
+
+[[ref]]
+name = "im-global.rgba"
+file = ""
+sha256 = "ba5e97aeeb7d779c3d8d6c2ade525ab25a870e4e7b49469057ecff44281b3577"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick {ref:im-global.gif} -coalesce -alpha on -depth 8 rgba:{out}"
+
+[[ref]]
+name = "im-local.gif"
+file = "im-local.gif"
+sha256 = "bafe492d997f750c75ee9206a48c0a55a35df76c829b402040c23a361c8b50fd"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 80x60 -depth 8 rgba:{src} -alpha off -delay 10 -loop 0 -dither FloydSteinberg -colors 64 {out}"
+
+[[ref]]
+name = "im-local.rgba"
+file = ""
+sha256 = "53086c7be83c35e32c5d1331966be4102fd054557593eb76545272f96927597b"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick {ref:im-local.gif} -coalesce -alpha on -depth 8 rgba:{out}"
+
+[[ref]]
+name = "im-rect.gif"
+file = "im-rect.gif"
+sha256 = "5cb82383f98813a01622a3ae06dba225c86f69a280ade40eceab232b80c1a0b1"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 80x60 -depth 8 rgba:{src} -alpha off -delay 10 -loop 0 -ordered-dither o8x8,6 -colors 32 +remap -layers OptimizeFrame {out}"
+
+[[ref]]
+name = "im-rect.rgba"
+file = ""
+sha256 = "99c8d5506f724219a549b3fbbff2878f593d0ec89e6a6e4eb4be8dc872d96eb3"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick {ref:im-rect.gif} -coalesce -alpha on -depth 8 rgba:{out}"
+
+[[ref]]
+name = "our-global-fs.gif"
+file = ""
+sha256 = "23864a12bd906855932b657f76ccabc85d9e8992eb4219cf3704c48982314778"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/gif/refs.rs encode_ours(\"our-global-fs\")"
+
+[[ref]]
+name = "our-global-fs.rgba"
+file = ""
+sha256 = "916867ce8e31fb29162744f0b42b9a1789464413b3508d7af52ca805675ce42e"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick {ref:our-global-fs.gif} -coalesce -alpha on -depth 8 rgba:{out}"
+
+[[ref]]
+name = "our-global-none.gif"
+file = ""
+sha256 = "78ae1352e0ae823e5d26196174c382d46611ab46339c4decd5af797555593212"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/gif/refs.rs encode_ours(\"our-global-none\")"
+
+[[ref]]
+name = "our-global-none.rgba"
+file = ""
+sha256 = "924656ab920df702d7fac9a17f217520ea4912434a23689d535ae26d6e8e9ea4"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick {ref:our-global-none.gif} -coalesce -alpha on -depth 8 rgba:{out}"
+
+[[ref]]
+name = "our-local-ordered.gif"
+file = ""
+sha256 = "1e19946d5079907464e8645d32c2b08bcc00362c2fd5608515a4e032ffaf0e1c"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/gif/refs.rs encode_ours(\"our-local-ordered\")"
+
+[[ref]]
+name = "our-local-ordered.rgba"
+file = ""
+sha256 = "116a42fb2b9d87ea8699c2ef662112d380a4b363bef3178cd6c3fb20f68b6204"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick {ref:our-local-ordered.gif} -coalesce -alpha on -depth 8 rgba:{out}"
+
+[[ref]]
+name = "alpha.gif"
+file = ""
+sha256 = "0690530f876fe6f8754b36daaa7d2111e78a66dc34545a364b212ce074c21e79"
+kind = "bit-exact"
+tool = "pito-codecs 2.1.0"
+command = "examples/record_refs: src/gif/refs.rs encode_alpha()"
+
+[[ref]]
+name = "alpha.rgba"
+file = ""
+sha256 = "267c9cdf7377e91c6631e7d46608b5e9aa6f9c7e5527ec76e9567ddfd80258e2"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick {ref:alpha.gif} -coalesce -alpha on -depth 8 rgba:{out}"
+
+[[ref]]
+name = "im-interlaced.gif"
+file = "im-interlaced.gif"
+sha256 = "6d634399e58556d20c04052c0728eac3003b7924c9c5a4423cdc2c4e760f1065"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -seed 7 -size 161x117 plasma: -colors 200 -interlace GIF {out}"
+
+[[ref]]
+name = "im-interlaced.rgba"
+file = ""
+sha256 = "de632f656b574963876301960732efc2cae20f84ab0e598a4c62809141a23c16"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick {ref:im-interlaced.gif} -coalesce -alpha on -depth 8 rgba:{out}"
+
+[[ref]]
+name = "im-dispose.gif"
+file = "im-dispose.gif"
+sha256 = "e4cf8a613aee7d429e3f7ce5513f32a51a9438c270bf48771767d35fb86a063d"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -size 120x90 xc:none -delay 7 -dispose Previous ( -size 120x90 xc:none -fill red -draw circle 40,40 40,15 ) -dispose Background ( -size 120x90 xc:none -fill blue -draw rectangle 50,20 110,80 ) -dispose None ( -size 120x90 gradient:yellow-green ) -loop 3 {out}"
+
+[[ref]]
+name = "im-dispose.rgba"
+file = ""
+sha256 = "e278fde504486d0f2f3156b0ccc8dcb8f2896dcab604dd8aae3f6a2463114096"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick {ref:im-dispose.gif} -coalesce -alpha on -depth 8 rgba:{out}"
+
+[[ref]]
+name = "im-87.gif"
+file = "im-87.gif"
+sha256 = "d9c55f6ff2518eec31d98abee91dffab127fabe98b796b5ec12840463ab4b04d"
+kind = "fixture"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick -seed 3 -size 64x48 plasma: GIF87:{out}"
+
+[[ref]]
+name = "im-87.rgba"
+file = ""
+sha256 = "f5615f8873cba661ac282d58da39399972cea7dfd148b9bd4358e683484ebd85"
+kind = "bit-exact"
+tool = "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64 c5d4ca8a0:20261014 https://imagemagick.org"
+command = "magick {ref:im-87.gif} -coalesce -alpha on -depth 8 rgba:{out}"

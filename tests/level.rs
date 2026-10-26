@@ -10,8 +10,10 @@
     feature = "vp9"
 ))]
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+#[path = "../src/testref.rs"]
+mod testref;
+
+use std::path::Path;
 
 use std::f64::consts::PI;
 
@@ -21,19 +23,30 @@ use pito_codecs::media::{
     LevelTarget, Prefs, level, level_pcm, measure_loudness, meter_loudness, plan_level_styled, wav,
 };
 use pito_codecs::mp4::Reader;
+use testref::{Clip, Sound};
 
-fn make(name: &str, args: &[&str]) -> Option<PathBuf> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/test-media");
-    std::fs::create_dir_all(&dir).ok()?;
-    let out = dir.join(name);
-    let ok = Command::new("ffmpeg")
-        .args(["-v", "error", "-y"])
-        .args(args)
-        .arg(&out)
-        .status()
-        .ok()?
-        .success();
-    ok.then_some(out)
+fn bursts(i: u64, ch: u16, rate: u32) -> f32 {
+    let t = i as f64 / f64::from(rate);
+    let v = if ch == 0 {
+        let burst = if t % 1.0 < 0.004 {
+            0.9 * (2.0 * PI * 3000.0 * t).sin()
+        } else {
+            0.0
+        };
+        0.03 * (2.0 * PI * 440.0 * t).sin() + burst
+    } else {
+        0.03 * (2.0 * PI * 660.0 * t).sin()
+    };
+    v as f32
+}
+
+fn level_clip() -> Clip {
+    Clip {
+        gop: 25,
+        sounds: vec![Sound::Fn(bursts)],
+        kbps: 192,
+        ..Clip::new((352, 240), (25, 1), 150)
+    }
 }
 
 fn video(path: &Path) -> Vec<(Vec<u8>, i64, i64, bool)> {
@@ -49,25 +62,7 @@ fn video(path: &Path) -> Vec<(Vec<u8>, i64, i64, bool)> {
 
 #[test]
 fn levelling_reaches_the_target_under_the_ceiling_and_copies_the_video() {
-    let picture = ["-f", "lavfi", "-i", "testsrc2=s=352x240:r=25:d=6"];
-    let sound = "aevalsrc=0.03*sin(2*PI*440*t)+if(lt(mod(t\\,1)\\,0.004)\\,0.9*sin(2*PI*3000*t)\\,0)|0.03*sin(2*PI*660*t):s=48000:d=6";
-    let encode = [
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-g",
-        "25",
-        "-pix_fmt",
-        "yuv420p",
-    ];
-    let mut args = picture.to_vec();
-    args.extend(["-f", "lavfi", "-i", sound]);
-    args.extend(encode);
-    args.extend(["-c:a", "aac", "-b:a", "192k", "-shortest"]);
-    let Some(input) = make("level-in.mp4", &args) else {
-        return;
-    };
+    let input = level_clip().make("level", "level-in.mp4");
     let output = input.with_file_name("level-out.mp4");
     let done = level(&input, &output, &LevelOptions::default(), |_| true).unwrap();
     assert_eq!(done.mode, LevelMode::Limited);
@@ -78,9 +73,7 @@ fn levelling_reaches_the_target_under_the_ceiling_and_copies_the_video() {
         assert!(a.true_peak <= target.true_peak, "{a:?}");
     }
     assert_eq!(video(&output), video(&input));
-    let mut silent = picture.to_vec();
-    silent.extend(encode);
-    let quiet = make("level-silent.mp4", &silent).unwrap();
+    let quiet = level_clip().video_only().make("level", "level-silent.mp4");
     let refused = level(
         &quiet,
         &output.with_file_name("level-none.mp4"),

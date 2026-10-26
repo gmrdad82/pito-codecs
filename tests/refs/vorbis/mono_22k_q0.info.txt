@@ -1,0 +1,4 @@
+sample_rate=22050
+channels=1
+bit_rate=24000
+TAG:TITLE=mono_22k_q0

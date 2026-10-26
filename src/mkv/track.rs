@@ -264,6 +264,10 @@ impl Track {
         (seconds * self.time_base.den as f64 / self.time_base.num as f64).round() as i64
     }
 
+    pub fn shown_at(&self, seconds: f64) -> i64 {
+        (seconds * self.time_base.den as f64 / self.time_base.num as f64 - 0.5).ceil() as i64
+    }
+
     pub fn nanos(&self, ticks: i64) -> i64 {
         (ticks as i128 * self.time_base.num as i128 * 1_000_000_000 / self.time_base.den as i128)
             as i64

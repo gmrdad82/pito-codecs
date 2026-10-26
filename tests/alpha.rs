@@ -10,109 +10,69 @@
     feature = "vp9"
 ))]
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+#[path = "../src/testref.rs"]
+mod testref;
 
-use pito_codecs::media::{
-    Canvas, Codec, ExportOptions, Prefs, Rgba, decode_alpha, export_rgba, first_frame, probe,
-};
+#[allow(dead_code)]
+#[path = "../src/vp9/refs_alpha.rs"]
+mod refs;
 
-const W: u32 = 192;
-const H: u32 = 108;
-const FRAMES: u64 = 24;
+#[allow(dead_code)]
+#[path = "../src/vp9/refs.rs"]
+mod vp9_refs;
 
-fn dir() -> PathBuf {
-    let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/test-media");
-    std::fs::create_dir_all(&d).unwrap();
-    d
+use std::path::Path;
+
+use pito_codecs::media::{Packet, Prefs, TimeBase, decode_alpha, first_frame, probe};
+use pito_codecs::mkv::{Options, TrackConfig, Writer};
+use testref::{Digest, Refs, sha256};
+
+struct Decoded {
+    colour: String,
+    alpha: String,
+    frames: usize,
+    alpha_planes: Vec<u8>,
 }
 
-fn libvpx() -> bool {
-    Command::new("ffmpeg")
-        .args(["-hide_banner", "-decoders"])
-        .output()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("libvpx-vp9"))
-}
-
-fn source(n: u64) -> Rgba {
-    let mut img = Rgba::new(W, H);
-    for y in 0..H as usize {
-        for x in 0..W as usize {
-            let o = (y * W as usize + x) * 4;
-            let cx = 40 + n as i64 * 4;
-            let d = ((x as i64 - cx).pow(2) + (y as i64 - 54).pow(2)) as f64;
-            img.data[o] = (x * 255 / W as usize) as u8;
-            img.data[o + 1] = (y * 255 / H as usize) as u8;
-            img.data[o + 2] = ((x + y + n as usize * 8) % 256) as u8;
-            img.data[o + 3] = (255.0 - d.sqrt() * 4.0).clamp(0.0, 255.0) as u8;
-        }
-    }
-    img
-}
-
-fn ours(path: &Path) -> (Vec<u8>, usize) {
-    let mut out = Vec::new();
-    let mut alpha = 0;
+fn ours(path: &Path) -> Decoded {
+    let (mut colour, mut alpha) = (Digest::new(), Digest::new());
+    let mut out = Decoded {
+        colour: String::new(),
+        alpha: String::new(),
+        frames: 0,
+        alpha_planes: Vec::new(),
+    };
     for got in decode_alpha(path, 0.0).unwrap() {
         let (f, a) = got.unwrap();
-        for p in &f.planes {
-            for y in 0..p.height {
-                out.extend_from_slice(&p.data[y * p.stride..y * p.stride + p.width]);
-            }
-        }
+        colour.frame(&f);
         let a = a.expect("every frame carries alpha");
-        alpha += 1;
+        out.frames += 1;
         for y in 0..a.height {
-            out.extend_from_slice(&a.data[y * a.stride..y * a.stride + a.width]);
+            let row = &a.data[y * a.stride..y * a.stride + a.width];
+            alpha.bytes(row);
+            out.alpha_planes.extend_from_slice(row);
         }
     }
-    (out, alpha)
-}
-
-fn libvpx_yuva(path: &Path) -> Vec<u8> {
-    let o = Command::new("ffmpeg")
-        .args(["-v", "error", "-c:v", "libvpx-vp9", "-i"])
-        .arg(path)
-        .args(["-f", "rawvideo", "-pix_fmt", "yuva420p", "-"])
-        .output()
-        .unwrap();
-    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    o.stdout
+    out.colour = colour.hex();
+    out.alpha = alpha.hex();
+    out
 }
 
 #[test]
-fn alpha_webm_round_trips_and_matches_libvpx_both_ways() {
-    let out = dir().join("alpha-round-trip.webm");
-    let opts = ExportOptions {
-        video: Codec::Vp9,
-        ..ExportOptions::default()
-    };
-    let canvas = Canvas {
-        width: W,
-        height: H,
-        fps: (24, 1),
-        frames: Some(FRAMES),
-    };
-    let done = export_rgba(
-        &out,
-        canvas,
-        true,
-        opts,
-        |n, _| Ok(Some(source(n))),
-        |_| true,
-    )
-    .unwrap();
-    assert_eq!(done.frames, FRAMES);
+fn our_alpha_webm_round_trips_and_vpxdec_decodes_both_its_streams_like_ours() {
+    let r = Refs::open(refs::AREA);
+    let (w, h) = refs::SIZE;
+    let out = testref::scratch(refs::AREA).join(format!("{}.webm", refs::OURS));
+    assert_eq!(refs::export_ours(&out).unwrap(), refs::FRAMES);
     assert!(probe(&out, &Prefs::default()).unwrap().alpha);
-    let (yuva, alpha) = ours(&out);
-    assert_eq!(alpha as u64, FRAMES);
-    let size = (W * H) as usize;
-    let frame = size * 5 / 2;
+    let got = ours(&out);
+    assert_eq!(got.frames as u64, refs::FRAMES);
+    let size = (w * h) as usize;
     let mut worst = f64::MAX;
-    for n in 0..FRAMES {
-        let at = n as usize * frame + size * 3 / 2;
-        let src = source(n);
-        let mse = yuva[at..at + size]
+    for n in 0..refs::FRAMES {
+        let at = n as usize * size;
+        let src = refs::source(n);
+        let mse = got.alpha_planes[at..at + size]
             .iter()
             .zip(src.data.chunks_exact(4))
             .map(|(&a, px)| (a as f64 - px[3] as f64).powi(2))
@@ -124,32 +84,98 @@ fn alpha_webm_round_trips_and_matches_libvpx_both_ways() {
     let still = first_frame(&out, 0, &Prefs::default()).unwrap();
     assert!(still.data.chunks_exact(4).any(|p| p[3] < 16));
     assert!(still.data.chunks_exact(4).any(|p| p[3] > 240));
-    if !libvpx() {
-        return;
+    r.assert_digest(
+        &format!("{}.webm", refs::OURS),
+        &sha256(&std::fs::read(&out).unwrap()),
+    );
+
+    let (colour, alpha) = refs::webm_streams(&out).unwrap();
+    assert_eq!((colour.len(), alpha.len()), (got.frames, got.frames));
+    r.assert_digest(
+        &vp9_refs::stream(refs::OURS),
+        &sha256(&vp9_refs::ivf(w, h, &colour)),
+    );
+    r.assert_digest(
+        &vp9_refs::alpha_stream(refs::OURS),
+        &sha256(&vp9_refs::ivf(w, h, &alpha)),
+    );
+    r.assert_digest(&vp9_refs::decoded(refs::OURS), &got.colour);
+    r.assert_digest(&vp9_refs::alpha_decoded(refs::OURS), &got.alpha);
+}
+
+fn mux(colour: &[u8], alpha: &[u8], out: &Path) {
+    let (w, h) = refs::SIZE;
+    let mut cfg = TrackConfig::vp9(w, h, TimeBase::new(1, 24));
+    cfg.alpha = true;
+    let mut writer = Writer::create_with(out, Options::webm()).unwrap();
+    let track = writer.add_track(cfg).unwrap();
+    let colour = vp9_refs::ivf_frames(colour);
+    let alpha = vp9_refs::ivf_frames(alpha);
+    assert_eq!(
+        colour.len(),
+        alpha.len(),
+        "one alpha frame per colour frame"
+    );
+    for (i, (c, a)) in colour.iter().zip(&alpha).enumerate() {
+        let packet = Packet {
+            data: c.to_vec(),
+            pts: i as i64,
+            dts: i as i64,
+            keyframe: pito_codecs::vp9::is_keyframe(c),
+        };
+        writer.push_alpha(track, &packet, Some(*a)).unwrap();
     }
-    assert!(
-        libvpx_yuva(&out) == yuva,
-        "libvpx reads our alpha WebM differently"
+    writer.finish().unwrap();
+}
+
+#[test]
+fn a_libvpx_alpha_pair_in_webm_decodes_bit_exact_with_vpxdec() {
+    let r = Refs::open(refs::AREA);
+    let out = testref::scratch(refs::AREA).join(format!("{}.webm", refs::LIBVPX));
+    mux(
+        &r.bytes(&vp9_refs::stream(refs::LIBVPX)),
+        &r.bytes(&vp9_refs::alpha_stream(refs::LIBVPX)),
+        &out,
     );
-    let theirs = dir().join("alpha-libvpx.webm");
-    let raw = dir().join("alpha-source.rgba");
-    let bytes: Vec<u8> = (0..FRAMES).flat_map(|n| source(n).data).collect();
-    std::fs::write(&raw, bytes).unwrap();
-    let made = Command::new("ffmpeg")
-        .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba"])
-        .args(["-s", &format!("{W}x{H}"), "-r", "24", "-i"])
-        .arg(&raw)
-        .args(["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-crf", "30"])
-        .args(["-b:v", "0", "-deadline", "good", "-cpu-used", "4"])
-        .arg(&theirs)
-        .status()
+    assert!(probe(&out, &Prefs::default()).unwrap().alpha);
+    let got = ours(&out);
+    assert_eq!(got.frames as u64, refs::LIBVPX_FRAMES);
+    r.assert_digest(&vp9_refs::decoded(refs::LIBVPX), &got.colour);
+    r.assert_digest(&vp9_refs::alpha_decoded(refs::LIBVPX), &got.alpha);
+}
+
+#[test]
+fn the_pinned_alpha_webm_is_what_the_recorder_makes() {
+    let r = Refs::open(refs::AREA);
+    let webm = refs::ours_webm().unwrap();
+    r.assert_digest(&format!("{}.webm", refs::OURS), &sha256(&webm));
+    let (w, h) = refs::SIZE;
+    let bytes = refs::source_bytes(refs::LIBVPX_FRAMES);
+    assert_eq!(
+        bytes.len() as u64,
+        u64::from(w * h * 4) * refs::LIBVPX_FRAMES
+    );
+    assert_eq!(
+        &bytes[..(w * h * 4) as usize],
+        refs::source(0).data.as_slice()
+    );
+}
+
+#[test]
+fn a_webm_with_no_alpha_or_no_file_is_refused() {
+    let dir = testref::scratch(refs::AREA);
+    assert!(refs::webm_streams(&dir.join("missing.webm")).is_err());
+    let bare = dir.join("bare.webm");
+    let (w, h) = refs::SIZE;
+    let mut writer = Writer::create_with(&bare, Options::webm()).unwrap();
+    let track = writer
+        .add_track(TrackConfig::vp9(w, h, TimeBase::new(1, 24)))
         .unwrap();
-    assert!(made.success());
-    assert!(probe(&theirs, &Prefs::default()).unwrap().alpha);
-    let (got, alpha) = ours(&theirs);
-    assert_eq!(alpha as u64, FRAMES);
-    assert!(
-        got == libvpx_yuva(&theirs),
-        "a libvpx alpha WebM decodes differently"
-    );
+    let r = Refs::open(refs::AREA);
+    let colour = r.bytes(&vp9_refs::stream(refs::LIBVPX));
+    let first = vp9_refs::ivf_frames(&colour)[0];
+    writer.push_sample(track, first, 0, Some(1), true).unwrap();
+    writer.finish().unwrap();
+    let e = refs::webm_streams(&bare).unwrap_err();
+    assert!(e.contains("has no alpha"), "{e}");
 }

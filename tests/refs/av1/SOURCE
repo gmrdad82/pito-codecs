@@ -1,0 +1,9 @@
+These files are part of this repository and under its MIT licence (see LICENSE at the root).
+
+Their inputs are synthetic: src/testref.rs and examples/record_refs draw every picture and generate every sound with plain arithmetic, so no recorded picture or sound is in them. examples/record_refs made them; run `cargo run --release --example record_refs -- av1` to make them again. manifest.toml gives, for every file and reference, its sha256, the tool and version that made it and the exact command.
+
+Tools:
+- 1.5.4
+- SVT-AV1 v4.2.0 (debug)
+- av1    - AOMedia Project AV1 Encoder v3.15.2 (default)
+- rav1e 0.8.1 (UNKNOWN) (release)

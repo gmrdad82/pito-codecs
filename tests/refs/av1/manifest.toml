@@ -1,0 +1,271 @@
+[[ref]]
+name = "grain_tiles_10bit.ivf"
+file = "grain_tiles_10bit.ivf"
+sha256 = "82be1b0d351b2809d132279072e24cf4ecf41fbba5b58ffb146a6fb174b8b4a9"
+kind = "fixture"
+tool = "av1    - AOMedia Project AV1 Encoder v3.15.2 (default)"
+command = "aomenc --ivf --quiet --limit=8 --bit-depth=10 --input-bit-depth=10 --cpu-used=8 --tile-columns=1 --tile-rows=0 --denoise-noise-level=20 --auto-alt-ref=1 --lag-in-frames=8 --end-usage=q --cq-level=32 -o {out} {src}"
+
+[[ref]]
+name = "grain_tiles_10bit.yuv"
+file = ""
+sha256 = "b69b3cec8ccb38360b4beae2ee2e7016bf03e7bd755a851da28abb78922438af"
+kind = "bit-exact"
+tool = "1.5.4"
+command = "dav1d --quiet --muxer yuv -i {ref:grain_tiles_10bit.ivf} -o {out}"
+
+[[ref]]
+name = "compound_8.ivf"
+file = "compound_8.ivf"
+sha256 = "61db13573bccb88617409c070bf7c5acf1512aea083e72fc16bc7de11c5fad36"
+kind = "fixture"
+tool = "av1    - AOMedia Project AV1 Encoder v3.15.2 (default)"
+command = "aomenc --ivf --quiet --limit=10 --bit-depth=8 --input-bit-depth=8 --cpu-used=2 --end-usage=q --cq-level=36 --lag-in-frames=8 --auto-alt-ref=1 --enable-masked-comp=1 --enable-interinter-wedge=1 --enable-diff-wtd-comp=1 --enable-dist-wtd-comp=1 --enable-interintra-comp=1 --enable-interintra-wedge=1 --enable-smooth-interintra=1 --enable-onesided-comp=1 --enable-obmc=1 --enable-dual-filter=1 --enable-global-motion=1 --enable-warped-motion=1 --enable-intra-edge-filter=1 --enable-filter-intra=1 --enable-cdef=1 -o {out} {src}"
+
+[[ref]]
+name = "compound_8.yuv"
+file = ""
+sha256 = "135af276f876810a241dcb6b771d671866863bcf979924d9f78e60625467fd09"
+kind = "bit-exact"
+tool = "1.5.4"
+command = "dav1d --quiet --muxer yuv -i {ref:compound_8.ivf} -o {out}"
+
+[[ref]]
+name = "compound_10.ivf"
+file = "compound_10.ivf"
+sha256 = "1f5546fc1197bd8070d4676f217082d390f55f8b74740e8b8701092ed1b1a1e4"
+kind = "fixture"
+tool = "av1    - AOMedia Project AV1 Encoder v3.15.2 (default)"
+command = "aomenc --ivf --quiet --limit=10 --bit-depth=10 --input-bit-depth=10 --cpu-used=2 --end-usage=q --cq-level=36 --lag-in-frames=8 --auto-alt-ref=1 --enable-masked-comp=1 --enable-interinter-wedge=1 --enable-diff-wtd-comp=1 --enable-dist-wtd-comp=1 --enable-interintra-comp=1 --enable-interintra-wedge=1 --enable-smooth-interintra=1 --enable-onesided-comp=1 --enable-obmc=1 --enable-dual-filter=1 --enable-global-motion=1 --enable-warped-motion=1 --enable-intra-edge-filter=1 --enable-filter-intra=1 --enable-cdef=1 -o {out} {src}"
+
+[[ref]]
+name = "compound_10.yuv"
+file = ""
+sha256 = "85310f9f7b7605d708886a1bf1320609820a627ac538b7d8338e9fb2185c3198"
+kind = "bit-exact"
+tool = "1.5.4"
+command = "dav1d --quiet --muxer yuv -i {ref:compound_10.ivf} -o {out}"
+
+[[ref]]
+name = "screen_8.ivf"
+file = "screen_8.ivf"
+sha256 = "202e9efc36fa5d45c08beb38a818968cef033b77c1852609470c0b77ff774e2d"
+kind = "fixture"
+tool = "av1    - AOMedia Project AV1 Encoder v3.15.2 (default)"
+command = "aomenc --ivf --quiet --limit=3 --bit-depth=8 --input-bit-depth=8 --cpu-used=1 --end-usage=q --cq-level=30 --kf-max-dist=1 --tune-content=screen --enable-palette=1 --enable-intrabc=1 --enable-cfl-intra=1 -o {out} {src}"
+
+[[ref]]
+name = "screen_8.yuv"
+file = ""
+sha256 = "80cc42f2fe97bf622496b22bfab1b51e15159d9d95610a31ce9b859755150491"
+kind = "bit-exact"
+tool = "1.5.4"
+command = "dav1d --quiet --muxer yuv -i {ref:screen_8.ivf} -o {out}"
+
+[[ref]]
+name = "screen_10.ivf"
+file = "screen_10.ivf"
+sha256 = "efbb66101526e2607b3ccae4e8f94608ad84035ac9b997aacc0ff57ec608604b"
+kind = "fixture"
+tool = "av1    - AOMedia Project AV1 Encoder v3.15.2 (default)"
+command = "aomenc --ivf --quiet --limit=2 --bit-depth=10 --input-bit-depth=10 --cpu-used=1 --end-usage=q --cq-level=30 --kf-max-dist=1 --tune-content=screen --enable-palette=1 --enable-intrabc=1 --enable-cfl-intra=1 -o {out} {src}"
+
+[[ref]]
+name = "screen_10.yuv"
+file = ""
+sha256 = "466e8a638b9b5ece277da4a91fdcaaecb7512c7f833986601509261b89d7c3e2"
+kind = "bit-exact"
+tool = "1.5.4"
+command = "dav1d --quiet --muxer yuv -i {ref:screen_10.ivf} -o {out}"
+
+[[ref]]
+name = "lossless_8.ivf"
+file = "lossless_8.ivf"
+sha256 = "5d7daf6aeffc5abdda18b4530128047e34b6f33e1364731473c57cc334478e0d"
+kind = "fixture"
+tool = "av1    - AOMedia Project AV1 Encoder v3.15.2 (default)"
+command = "aomenc --ivf --quiet --limit=2 --bit-depth=8 --input-bit-depth=8 --cpu-used=6 --lossless=1 -o {out} {src}"
+
+[[ref]]
+name = "lossless_8.yuv"
+file = ""
+sha256 = "db61fb7021066f3f3bf25f50cd71fad26452deaa37d57ba4f7d121037c72b3e5"
+kind = "bit-exact"
+tool = "1.5.4"
+command = "dav1d --quiet --muxer yuv -i {ref:lossless_8.ivf} -o {out}"
+
+[[ref]]
+name = "lossless_10.ivf"
+file = "lossless_10.ivf"
+sha256 = "38c9a3d34d1cdc9843b7faea61f133e5f56c8ffd2fed8de713e33c43bbf69918"
+kind = "fixture"
+tool = "av1    - AOMedia Project AV1 Encoder v3.15.2 (default)"
+command = "aomenc --ivf --quiet --limit=2 --bit-depth=10 --input-bit-depth=10 --cpu-used=6 --lossless=1 -o {out} {src}"
+
+[[ref]]
+name = "lossless_10.yuv"
+file = ""
+sha256 = "90d1afce9cae21edba167e812607fa5368040d8e79a0d17f4363915101870f64"
+kind = "bit-exact"
+tool = "1.5.4"
+command = "dav1d --quiet --muxer yuv -i {ref:lossless_10.ivf} -o {out}"
+
+[[ref]]
+name = "rav1e_8.ivf"
+file = "rav1e_8.ivf"
+sha256 = "21c006f48af025e733a237a4201a8757cdf478c623ff94f61c66449c4521f2a1"
+kind = "fixture"
+tool = "rav1e 0.8.1 (UNKNOWN) (release)"
+command = "rav1e {src} -o {out} -y --threads 1 --limit 6 --speed 6 --quantizer 120 --tiles 2"
+
+[[ref]]
+name = "rav1e_8.yuv"
+file = ""
+sha256 = "e039bf9ae35bad7c599676e113ffb3de35ea21f406735d13005d7c655f54b167"
+kind = "bit-exact"
+tool = "1.5.4"
+command = "dav1d --quiet --muxer yuv -i {ref:rav1e_8.ivf} -o {out}"
+
+[[ref]]
+name = "rav1e_10.ivf"
+file = "rav1e_10.ivf"
+sha256 = "21603a11a39d7d4b58a6a8bee64e05220263d9d3ccf1372182aff0cb057efebc"
+kind = "fixture"
+tool = "rav1e 0.8.1 (UNKNOWN) (release)"
+command = "rav1e {src} -o {out} -y --threads 1 --limit 6 --speed 6 --quantizer 120 --tiles 2"
+
+[[ref]]
+name = "rav1e_10.yuv"
+file = ""
+sha256 = "6bbfd4a7a88f308640c2d1811dc2c86fd08b465c044a31fdc791c3729035f361"
+kind = "bit-exact"
+tool = "1.5.4"
+command = "dav1d --quiet --muxer yuv -i {ref:rav1e_10.ivf} -o {out}"
+
+[[ref]]
+name = "superres_10.ivf"
+file = "superres_10.ivf"
+sha256 = "6a07be1cdbd31cdbcd0954a43ab15cdfc53ea9c4b6d4ff2640d914d0c6d40746"
+kind = "fixture"
+tool = "SVT-AV1 v4.2.0 (debug)"
+command = "SvtAv1EncApp -i {src} -b {out} --progress 0 -n 6 --input-depth 10 --preset 6 --crf 40 --superres-mode 1 --superres-denom 12 --superres-kf-denom 12 --enable-restoration 1"
+
+[[ref]]
+name = "superres_10.yuv"
+file = ""
+sha256 = "b19599db4acb122d4f2bce1d14fdf282c2b3c0a641c9f05f9ccb8dfd9bc79b13"
+kind = "bit-exact"
+tool = "1.5.4"
+command = "dav1d --quiet --muxer yuv -i {ref:superres_10.ivf} -o {out}"
+
+[[ref]]
+name = "superres_8.ivf"
+file = "superres_8.ivf"
+sha256 = "95dbd542fafcb2448a66d3731146c6e280cb4766964a7795a8e3bc7b21f74676"
+kind = "fixture"
+tool = "SVT-AV1 v4.2.0 (debug)"
+command = "SvtAv1EncApp -i {src} -b {out} --progress 0 -n 4 --input-depth 8 --preset 6 --crf 40 --superres-mode 1 --superres-denom 12 --superres-kf-denom 12 --enable-restoration 1"
+
+[[ref]]
+name = "superres_8.yuv"
+file = ""
+sha256 = "e2a9ff85656a396376f4c860130e434bb4acdf0e6dfba899de40414021a5ecca"
+kind = "bit-exact"
+tool = "1.5.4"
+command = "dav1d --quiet --muxer yuv -i {ref:superres_8.ivf} -o {out}"
+
+[[ref]]
+name = "resize_8.ivf"
+file = "resize_8.ivf"
+sha256 = "d197568968a8a27138ea49e1b2e63bd079c7e80106222c57bfb1c7239cdc8dd8"
+kind = "fixture"
+tool = "SVT-AV1 v4.2.0 (debug)"
+command = "SvtAv1EncApp -i {src} -b {out} --progress 0 -n 6 --input-depth 8 --preset 6 --crf 40 --resize-mode 1 --resize-denom 12 --resize-kf-denom 8"
+
+[[ref]]
+name = "resize_8.yuv"
+file = ""
+sha256 = "ac96d8bbe5437fb3d7b3f8330f301559b1b62a52ca80f9e1563f44e70360c633"
+kind = "bit-exact"
+tool = "1.5.4"
+command = "dav1d --quiet --muxer yuv -i {ref:resize_8.ivf} -o {out}"
+
+[[ref]]
+name = "svt_8.ivf"
+file = "svt_8.ivf"
+sha256 = "b92b90d326b8333c410bf2701403319696c1c9aa02e35ddc39966496df77bf07"
+kind = "fixture"
+tool = "SVT-AV1 v4.2.0 (debug)"
+command = "SvtAv1EncApp -i {src} -b {out} --progress 0 -n 8 --input-depth 8 --preset 4 --crf 40 --keyint 8 --scm 1"
+
+[[ref]]
+name = "svt_8.yuv"
+file = ""
+sha256 = "aa0463f177ffc5ffc31eade06b61a0349c23b266dd6088db8583a8a60afc0328"
+kind = "bit-exact"
+tool = "1.5.4"
+command = "dav1d --quiet --muxer yuv -i {ref:svt_8.ivf} -o {out}"
+
+[[ref]]
+name = "svt_10.ivf"
+file = "svt_10.ivf"
+sha256 = "772f1dcccea82891bc56fa3af718ff07bbe9e7e97dbf248220c8cc148abb6703"
+kind = "fixture"
+tool = "SVT-AV1 v4.2.0 (debug)"
+command = "SvtAv1EncApp -i {src} -b {out} --progress 0 -n 8 --input-depth 10 --preset 4 --crf 40 --keyint 8 --scm 1"
+
+[[ref]]
+name = "svt_10.yuv"
+file = ""
+sha256 = "285fe0dc666feb8017166636aa5b8b4509caa387c9389b7d75651f2f404d5233"
+kind = "bit-exact"
+tool = "1.5.4"
+command = "dav1d --quiet --muxer yuv -i {ref:svt_10.ivf} -o {out}"
+
+[[ref]]
+name = "screen_inter_10.ivf"
+file = "screen_inter_10.ivf"
+sha256 = "ea90bbbca658c1de7c5440ab2b1cf164e8c0ba9d8e3e7a9299cd54dd73c27dc7"
+kind = "fixture"
+tool = "av1    - AOMedia Project AV1 Encoder v3.15.2 (default)"
+command = "aomenc --ivf --quiet --limit=4 --bit-depth=10 --input-bit-depth=10 --cpu-used=2 --end-usage=q --cq-level=34 --tune-content=screen --enable-palette=1 --enable-intra-edge-filter=1 --enable-filter-intra=1 -o {out} {src}"
+
+[[ref]]
+name = "screen_inter_10.yuv"
+file = ""
+sha256 = "7e4901347adf27295c92f40f189d15da487eec93c628641ec13de8363b3d4b66"
+kind = "bit-exact"
+tool = "1.5.4"
+command = "dav1d --quiet --muxer yuv -i {ref:screen_inter_10.ivf} -o {out}"
+
+[[ref]]
+name = "vaapi_noisy.ivf"
+file = "vaapi_noisy.ivf"
+sha256 = "177f3c60e78ce7f2815a17bb354f300746e743ef76932a7bad0c9020d308af4f"
+kind = "fixture"
+tool = "av1    - AOMedia Project AV1 Encoder v3.15.2 (default)"
+command = "aomenc --ivf --quiet --limit=16 --bit-depth=8 --input-bit-depth=8 --cpu-used=8 --end-usage=q --cq-level=40 --tile-columns=1 -o {out} {src}"
+
+[[ref]]
+name = "vaapi_noisy.yuv"
+file = ""
+sha256 = "35880869c9d13a9e454e1df98fc57ecced300d81c39f68222a7a5e7929d34438"
+kind = "bit-exact"
+tool = "1.5.4"
+command = "dav1d --quiet --muxer yuv -i {ref:vaapi_noisy.ivf} -o {out}"
+
+[[ref]]
+name = "small.ivf"
+file = "small.ivf"
+sha256 = "0aa7fee2d170b089d5c15eec7704b3d7c6fccbb74b7b78020c44acad55eafe61"
+kind = "fixture"
+tool = "av1    - AOMedia Project AV1 Encoder v3.15.2 (default)"
+command = "aomenc --ivf --quiet --limit=3 --bit-depth=8 --input-bit-depth=8 --cpu-used=8 -o {out} {src}"
+
+[[ref]]
+name = "corrupt.ivf"
+file = "corrupt.ivf"
+sha256 = "431fad6696285ed44b4c55c4ea1ea2c609c1c0ca5ba3823a61e8149a67c87bb2"
+kind = "fixture"
+tool = "av1    - AOMedia Project AV1 Encoder v3.15.2 (default)"
+command = "aomenc --ivf --quiet --limit=8 --bit-depth=8 --input-bit-depth=8 --cpu-used=8 --tile-columns=1 -o {out} {src}"

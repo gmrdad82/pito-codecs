@@ -1,0 +1,4 @@
+sample_rate=22050
+channels=6
+bit_rate=182666
+TAG:TITLE=surround_22k_q1

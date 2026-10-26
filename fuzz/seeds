@@ -47,14 +47,30 @@ case "$target" in
   *) regressions "$target" ;;
 esac
 
-if ! command -v ffmpeg >/dev/null; then
-  echo "fuzz/seeds: no ffmpeg, only the regression inputs in $dir" >&2
+pcod=${PCOD:-target/release/pcod}
+if [ ! -x "$pcod" ]; then
+  echo "fuzz/seeds: no $pcod (cargo build --release --bin pcod), only the regression inputs in $dir" >&2
   exit 0
 fi
 
-ff() { ffmpeg -hide_banner -loglevel error -nostdin -y "$@" || echo "fuzz/seeds: skipped ${*: -1}" >&2; }
-video=(-f lavfi -i "testsrc2=size=96x64:rate=12" -t 0.5)
-audio=(-f lavfi -i "sine=frequency=440:sample_rate=48000" -t 0.5)
+synth() {
+  local name=$1
+  shift
+  "$pcod" synth "$dir/$name" --size 128x96 --fps 12 --duration 0.5 "$@" --force > /dev/null ||
+    echo "fuzz/seeds: skipped $name" >&2
+}
+
+convert() {
+  "$pcod" "$1" "$dir/$2" --force --no-progress > /dev/null || echo "fuzz/seeds: skipped $2" >&2
+}
+
+flat() {
+  local f
+  for f in "$@"; do
+    [ -f "$f" ] && cp "$f" "$dir/$(dirname "${f#tests/refs/}" | tr / -)-$(basename "$f")"
+  done
+  return 0
+}
 
 chunk_table() {
   [ -s "$1" ] || return 1
@@ -93,27 +109,18 @@ chunk_table() {
 }
 
 mp4_seeds() {
-  ff "${video[@]}" "${audio[@]}" -c:v libx264 -preset ultrafast -c:a aac -movflags +faststart "$dir/h264-aac.mp4"
+  synth h264-aac.mp4 --audio sine:440
+  synth h264-two-tracks.mov --audio sine:440,silence
   chunk_table "$dir/h264-aac.mp4" "$dir/chunk-table.mp4" || echo "fuzz/seeds: skipped chunk-table.mp4" >&2
-  ff "${video[@]}" -c:v libx264 -preset ultrafast -bf 2 -movflags frag_keyframe+empty_moov "$dir/fragmented.mp4"
-  ff "${video[@]}" "${audio[@]}" -c:v libx265 -preset ultrafast -tag:v hvc1 -c:a aac "$dir/hevc-aac.mp4"
-  ff "${audio[@]}" -c:a pcm_s16le -f mov "$dir/pcm.mov"
-  ff "${audio[@]}" -c:a pcm_s24be -f mov "$dir/pcm24.mov"
-  ff "${audio[@]}" -c:a libopus -strict -2 "$dir/opus.mp4"
-  ff "${video[@]}" -c:v libx264 -preset ultrafast -vf "transpose=1" -metadata:s:v rotate=90 "$dir/rotated.mp4"
-  ff "${video[@]}" "${audio[@]}" -c:v libx264 -preset ultrafast -c:a aac -movflags frag_keyframe+default_base_moof "$dir/fragmented-av.mp4"
-  ff "${audio[@]}" -ac 6 -c:a eac3 "$dir/eac3.mp4"
+  flat tests/refs/mp4/*.mp4 tests/refs/mp4/*.mov tests/refs/mp4/*.m4a tests/refs/media/*.mp4 \
+    tests/refs/join/*.mp4 tests/refs/pcod/*.mp4 tests/refs/pcod/*.m4a
 }
 
 mkv_seeds() {
-  ff "${video[@]}" "${audio[@]}" -c:v libx264 -preset ultrafast -c:a aac "$dir/h264-aac.mkv"
-  ff "${video[@]}" "${audio[@]}" -c:v libvpx-vp9 -deadline realtime -cpu-used 8 -c:a libopus "$dir/vp9-opus.webm"
-  ff "${video[@]}" "${audio[@]}" -c:v libx265 -preset ultrafast -c:a pcm_s16le "$dir/hevc-pcm.mkv"
-  ff "${audio[@]}" -c:a aac "$dir/aac.mka"
-  ff "${video[@]}" -c:v libx264 -preset ultrafast -bf 2 -reserve_index_space 0 -cues_to_front 1 "$dir/cues-front.mkv"
-  ff -f lavfi -i "testsrc2=size=96x64:rate=12,format=yuva420p,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='mod(X*5+N*9,256)'" -t 0.5 -c:v libvpx-vp9 -deadline realtime -cpu-used 8 -pix_fmt yuva420p "$dir/vp9-alpha.webm"
-  ff "${video[@]}" "${audio[@]}" -c:v libvpx-vp9 -deadline realtime -cpu-used 8 -c:a libopus -live 1 -f webm "$dir/live.webm"
-  ff "${audio[@]}" -ac 6 -c:a ac3 "$dir/ac3-51.mka"
+  synth h264-aac.mkv --audio sine:440
+  synth vp9-opus.webm --audio sine:440
+  flat tests/refs/mkv/*.mkv tests/refs/mkv/*.webm tests/refs/media/*.mkv tests/refs/media/*.webm \
+    tests/refs/pcod/*.webm
 }
 
 case "$target" in
@@ -128,32 +135,31 @@ case "$target" in
     mkv_seeds
     ;;
   h264)
-    ff "${video[@]}" -c:v libx264 -preset ultrafast -bf 2 -f h264 "$dir/cabac.h264"
-    ff "${video[@]}" -c:v libx264 -preset ultrafast -x264-params cabac=0:bframes=0 -f h264 "$dir/cavlc.h264"
+    flat tests/refs/h264/*.264 tests/refs/h264/*.h264
     ;;
   hevc)
-    ff "${video[@]}" -c:v libx265 -preset ultrafast -f hevc "$dir/x265.hevc"
-    ff "${video[@]}" -c:v libx265 -preset ultrafast -x265-params "bframes=0:wpp=1" -f hevc "$dir/x265-wpp.hevc"
-    ff -f lavfi -i "testsrc2=size=90x60:rate=12" -t 0.5 -c:v libx265 -preset ultrafast -f hevc "$dir/x265-window.hevc"
-    ff -f lavfi -i "color=gray:size=8192x4368:rate=1" -frames:v 1 -c:v libx265 -preset ultrafast -f hevc "$dir/above-level.hevc"
+    flat tests/refs/hevc/*.hevc tests/refs/hevc/*.265
     ;;
   vp9_ivf)
-    ff "${video[@]}" -c:v libvpx-vp9 -deadline realtime -cpu-used 8 -f ivf "$dir/vp9.ivf"
-    ff "${video[@]}" -c:v libvpx-vp9 -deadline realtime -cpu-used 8 -lag-in-frames 4 -auto-alt-ref 1 -f ivf "$dir/vp9-altref.ivf"
+    flat tests/refs/mkv/*.ivf tests/refs/vp9/*.ivf
     ;;
   aac_adts)
-    ff "${audio[@]}" -c:a aac -f adts "$dir/sine.aac"
-    ff -f lavfi -i "sine=frequency=440:sample_rate=48000" -t 0.5 -ac 2 -c:a aac -f adts "$dir/stereo.aac"
+    flat tests/refs/mp4/*.aac tests/refs/aac/*.aac
     ;;
   opus)
-    ff "${audio[@]}" -c:a libopus -f ogg "$dir/sine.opus"
-    ff -f lavfi -i "sine=frequency=440:sample_rate=48000" -t 0.5 -ac 2 -c:a libopus -f ogg "$dir/stereo.opus"
+    synth tone.mp4 --audio sine:440
+    convert "$dir/tone.mp4" stereo.opus
+    rm -f "$dir/tone.mp4"
+    flat tests/refs/opus/*.opus
     ;;
   pcm)
-    ff "${audio[@]}" -ac 2 -f s16le "$dir/raw.s16"
-    { printf '\x11\x02\x80\x0f\x00\x00'; cat "$dir/raw.s16"; } > "$dir/s16le-stereo.pcm"
-    { printf '\x2b\x01\xa0\x0f\x00\x00'; cat "$dir/raw.s16"; } > "$dir/f32be-mono.pcm"
-    rm -f "$dir/raw.s16"
+    synth tone.mp4 --audio sine:440
+    convert "$dir/tone.mp4" raw.s16
+    if [ -s "$dir/raw.s16" ]; then
+      { printf '\x11\x02\x80\x0f\x00\x00'; cat "$dir/raw.s16"; } > "$dir/s16le-stereo.pcm"
+      { printf '\x2b\x01\xa0\x0f\x00\x00'; cat "$dir/raw.s16"; } > "$dir/f32be-mono.pcm"
+    fi
+    rm -f "$dir/raw.s16" "$dir/tone.mp4"
     ;;
   *)
     echo "fuzz/seeds: unknown target $target" >&2

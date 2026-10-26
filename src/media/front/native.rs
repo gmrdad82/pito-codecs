@@ -216,6 +216,7 @@ pub struct Frames {
     dec: Decoder,
     next: usize,
     start: i64,
+    end: Option<i64>,
     queue: VecDeque<Frame>,
     gpu: VecDeque<GpuFrame>,
     shown: usize,
@@ -233,7 +234,7 @@ fn mkv_start(r: &crate::mkv::Reader, track: usize, from: f64) -> Result<(crate::
         .tracks
         .get(track)
         .ok_or_else(|| Error::Invalid(format!("no track {track}")))?;
-    let target = t.ticks(from.max(0.0));
+    let target = t.shown_at(from.max(0.0));
     let mut cur = crate::mkv::Cursor::new(r);
     cur.seek(r, track, from.max(0.0))?;
     let mut scan = cur.clone();
@@ -441,6 +442,13 @@ impl Frames {
         (dec, reason): (Decoder, Option<String>),
     ) -> Result<Frames> {
         let skip = skipper(&demux.stream(track)?);
+        let end = match &demux {
+            Demux::Mp4(r) => r.tracks.get(track).and_then(|t| t.edit_end).map(|e| {
+                let starts = demux.starts();
+                e.saturating_sub(starts.shift(track))
+            }),
+            Demux::Mkv(_) => None,
+        };
         let (next, start, cur) = match &demux {
             Demux::Mkv(r) => {
                 let starts = demux.starts();
@@ -460,6 +468,7 @@ impl Frames {
             dec,
             next,
             start,
+            end,
             queue: VecDeque::new(),
             gpu: VecDeque::new(),
             shown: 0,
@@ -498,7 +507,7 @@ impl Frames {
             while self.gpu.len() > self.shown.min(BEHIND) || (self.flushed && !self.gpu.is_empty())
             {
                 let Some(f) = self.gpu.pop_front() else { break };
-                if f.pts() >= self.start {
+                if self.shows(f.pts()) {
                     self.shown = self.shown.saturating_add(1);
                     return Ok(Some(f));
                 }
@@ -512,9 +521,13 @@ impl Frames {
         }
     }
 
+    fn shows(&self, pts: i64) -> bool {
+        pts >= self.start && self.end.is_none_or(|e| pts < e)
+    }
+
     fn next_queued(&mut self) -> Option<Frame> {
         while let Some(f) = self.queue.pop_front() {
-            if f.pts >= self.start {
+            if self.shows(f.pts) {
                 return Some(f);
             }
             self.dec.recycle(f);
@@ -532,7 +545,8 @@ impl Frames {
         let Some(s) = self.demux.sample(self.track, self.next) else {
             return Ok(None);
         };
-        self.demux.read_into(self.track, self.next, &mut self.buf)?;
+        self.demux
+            .read_decodable(self.track, self.next, &mut self.buf)?;
         Ok(Some(s))
     }
 
@@ -662,7 +676,7 @@ impl Packets<'_> {
                 let Some(s) = d.sample(*track, *next) else {
                     return Ok(None);
                 };
-                d.read_into(*track, *next, buf)?;
+                d.read_decodable(*track, *next, buf)?;
                 *next += 1;
                 Ok(Some(s))
             }
