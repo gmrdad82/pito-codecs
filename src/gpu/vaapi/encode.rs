@@ -12,6 +12,7 @@ use crate::media::{Codec, Error, Frame, Packet, Result, Rgba, TimeBase};
 const DEPTH: usize = 4;
 const REFERENCES: usize = 4;
 const PIC_INIT_QP: i32 = 26;
+const RATE_MIN_QP: u32 = 18;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
@@ -108,8 +109,7 @@ fn sar_fields(sar: (u16, u16)) -> (u8, u32, u32) {
 fn rate_control(rate: Rate) -> u32 {
     match rate {
         Rate::Crf(_) | Rate::Qp(_) => ffi::VA_RC_CQP,
-        Rate::Bitrate(_) => ffi::VA_RC_CBR,
-        Rate::Vbr { .. } => ffi::VA_RC_VBR,
+        Rate::Bitrate(_) | Rate::Vbr { .. } => ffi::VA_RC_CBR,
     }
 }
 
@@ -705,40 +705,33 @@ impl VaEncoder {
         };
         out.push(misc(ffi::VAEncMiscParameterTypeFrameRate, &fps));
 
-        if let Some((target, peak)) = self.bitrate() {
+        if let Some(bps) = self.bitrate() {
             let rc = ffi::VAEncMiscParameterRateControl {
-                bits_per_second: peak,
-                target_percentage: (u64::from(target) * 100 / u64::from(peak.max(1))).clamp(1, 100)
-                    as u32,
+                bits_per_second: bps,
+                target_percentage: 100,
                 window_size: 1000,
+                min_qp: RATE_MIN_QP,
                 ..Default::default()
             };
             out.push(misc(ffi::VAEncMiscParameterTypeRateControl, &rc));
             let hrd = ffi::VAEncMiscParameterHRD {
-                initial_buffer_fullness: peak,
-                buffer_size: peak,
+                initial_buffer_fullness: bps,
+                buffer_size: bps,
                 ..Default::default()
             };
             out.push(misc(ffi::VAEncMiscParameterTypeHRD, &hrd));
         }
     }
 
-    fn bitrate(&self) -> Option<(u32, u32)> {
+    fn bitrate(&self) -> Option<u32> {
         match self.config.rate {
-            Rate::Bitrate(kbps) => {
-                let bps = kbps.saturating_mul(1000);
-                Some((bps, bps))
-            }
-            Rate::Vbr { kbps, max_kbps } => Some((
-                kbps.saturating_mul(1000),
-                max_kbps.max(kbps).saturating_mul(1000),
-            )),
+            Rate::Bitrate(kbps) | Rate::Vbr { kbps, .. } => Some(kbps.saturating_mul(1000)),
             Rate::Crf(_) | Rate::Qp(_) => None,
         }
     }
 
     fn bits_per_second(&self) -> u32 {
-        self.bitrate().map_or(0, |(_, peak)| peak)
+        self.bitrate().unwrap_or(0)
     }
 
     fn h264_sequence(&self) -> headers::H264Sequence {

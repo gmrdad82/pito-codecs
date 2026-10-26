@@ -4,9 +4,7 @@ use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-use objc2_core_foundation::{
-    CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType,
-};
+use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_media::{
     CMSampleBuffer, CMTime, CMTimeFlags, CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
     CMVideoFormatDescriptionGetHEVCParameterSetAtIndex,
@@ -22,14 +20,13 @@ use objc2_video_toolbox::{
     VTCompressionSession, VTEncodeInfoFlags, VTPixelTransferSession, VTSessionSetProperty,
     kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AllowOpenGOP,
     kVTCompressionPropertyKey_AverageBitRate, kVTCompressionPropertyKey_ColorPrimaries,
-    kVTCompressionPropertyKey_DataRateLimits, kVTCompressionPropertyKey_ExpectedFrameRate,
-    kVTCompressionPropertyKey_MaxKeyFrameInterval, kVTCompressionPropertyKey_PixelAspectRatio,
-    kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_Quality,
-    kVTCompressionPropertyKey_RealTime, kVTCompressionPropertyKey_TransferFunction,
-    kVTCompressionPropertyKey_YCbCrMatrix, kVTEncodeFrameOptionKey_ForceKeyFrame,
-    kVTProfileLevel_H264_Baseline_AutoLevel, kVTProfileLevel_H264_High_AutoLevel,
-    kVTProfileLevel_H264_Main_AutoLevel, kVTProfileLevel_HEVC_Main_AutoLevel,
-    kVTProfileLevel_HEVC_Main10_AutoLevel,
+    kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
+    kVTCompressionPropertyKey_PixelAspectRatio, kVTCompressionPropertyKey_ProfileLevel,
+    kVTCompressionPropertyKey_Quality, kVTCompressionPropertyKey_RealTime,
+    kVTCompressionPropertyKey_TransferFunction, kVTCompressionPropertyKey_YCbCrMatrix,
+    kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_Baseline_AutoLevel,
+    kVTProfileLevel_H264_High_AutoLevel, kVTProfileLevel_H264_Main_AutoLevel,
+    kVTProfileLevel_HEVC_Main_AutoLevel, kVTProfileLevel_HEVC_Main10_AutoLevel,
     kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
 };
 
@@ -297,12 +294,15 @@ fn bits_per_second(kbps: u32) -> i32 {
     i32::try_from(u64::from(kbps) * 1000).unwrap_or(i32::MAX)
 }
 
-fn rate_limit(session: &VTCompressionSession, kbps: u32) {
-    let key = unsafe { kVTCompressionPropertyKey_DataRateLimits };
-    let bytes = CFNumber::new_i32(bits_per_second(kbps) / 8);
-    let seconds = CFNumber::new_f64(1.0);
-    let limits = CFArray::<CFType>::from_objects(&[bytes.as_ref(), seconds.as_ref()]);
-    let _ = set(session, key, limits.as_ref());
+fn constant_rate(session: &VTCompressionSession, kbps: u32) -> Result<()> {
+    let bps = CFNumber::new_i32(bits_per_second(kbps));
+    if let Some(key) = optional_key(c"kVTCompressionPropertyKey_ConstantBitRate")
+        && set(session, key, bps.as_ref()) == 0
+    {
+        return Ok(());
+    }
+    let average = unsafe { kVTCompressionPropertyKey_AverageBitRate };
+    require(set(session, average, bps.as_ref()), "the bitrate")
 }
 
 fn estimate(codec: Codec, config: &EncoderConfig, quality: u8) -> i32 {
@@ -430,15 +430,7 @@ fn pace(session: &VTCompressionSession, codec: Codec, config: &EncoderConfig) ->
                 }
             }
         }
-        Rate::Bitrate(kbps) => {
-            let bps = CFNumber::new_i32(bits_per_second(kbps));
-            require(set(session, average, bps.as_ref()), "the bitrate")?;
-        }
-        Rate::Vbr { kbps, max_kbps } => {
-            let bps = CFNumber::new_i32(bits_per_second(kbps));
-            require(set(session, average, bps.as_ref()), "the bitrate")?;
-            rate_limit(session, max_kbps.max(kbps));
-        }
+        Rate::Bitrate(kbps) | Rate::Vbr { kbps, .. } => constant_rate(session, kbps)?,
     }
     Ok(())
 }

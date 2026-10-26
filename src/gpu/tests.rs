@@ -666,8 +666,8 @@ fn mean_takes_a_clamped_range() {
     assert_eq!(mean(&db, 5..9), 0.0);
 }
 
-fn size_undershoot(codec: Codec, mean_db: f64) -> f64 {
-    if cfg!(target_os = "macos") && codec == Codec::Hevc && mean_db > 48.0 {
+fn size_undershoot(mean_db: f64) -> f64 {
+    if cfg!(target_os = "macos") && mean_db > 48.0 {
         0.2
     } else {
         0.1
@@ -675,14 +675,95 @@ fn size_undershoot(codec: Codec, mean_db: f64) -> f64 {
 }
 
 #[test]
-fn only_a_saturated_videotoolbox_hevc_encode_may_land_further_under() {
+fn only_a_saturated_videotoolbox_encode_may_land_further_under() {
     let mac = cfg!(target_os = "macos");
-    assert_eq!(
-        size_undershoot(Codec::Hevc, 50.0),
-        if mac { 0.2 } else { 0.1 }
-    );
-    assert_eq!(size_undershoot(Codec::Hevc, 44.0), 0.1);
-    assert_eq!(size_undershoot(Codec::H264, 50.0), 0.1);
+    assert_eq!(size_undershoot(50.0), if mac { 0.2 } else { 0.1 });
+    assert_eq!(size_undershoot(44.0), 0.1);
+}
+
+fn vbv_underflows(sizes: &[usize], max_kbps: u32, fps: f64) -> usize {
+    let cap = f64::from(max_kbps) * 1000.0;
+    let mut full = 0.9 * cap;
+    let mut under = 0;
+    for &s in sizes {
+        full -= s as f64 * 8.0;
+        if full < 0.0 {
+            under += 1;
+            full = 0.0;
+        }
+        full = (full + cap / fps).min(cap);
+    }
+    under
+}
+
+#[test]
+fn a_one_second_vbv_at_the_peak_counts_the_frames_that_drain_it() {
+    let at_peak = vec![1000 * 1000 / 8 / 30; 90];
+    assert_eq!(vbv_underflows(&at_peak, 1000, 30.0), 0);
+    let mut burst = at_peak.clone();
+    burst[40] = 1000 * 1000 / 8;
+    assert_eq!(vbv_underflows(&burst, 1000, 30.0), 1);
+    let doubled = vec![2 * 1000 * 1000 / 8 / 30; 60];
+    assert!(vbv_underflows(&doubled, 1000, 30.0) > 20);
+}
+
+#[test]
+#[cfg(all(feature = "h264", feature = "hevc"))]
+fn vbr_lands_on_its_average_and_stays_inside_its_peak() {
+    let (w, h, n) = (640, 360, 120);
+    let grainy = source_frames_with(w, h, n, PixelFormat::Yuv420p8, 3);
+    let fine = source_frames_with(w, h, n, PixelFormat::Yuv420p8, 1);
+    for codec in [Codec::H264, Codec::Hevc] {
+        if !has(codec, Direction::Encode) {
+            continue;
+        }
+        for (label, frames) in [("grainy", &grainy), ("fine", &fine)] {
+            for (kbps, max_kbps) in [(1500, 2250), (600, 1200)] {
+                let rate = Rate::Vbr { kbps, max_kbps };
+                let config = EncoderConfig {
+                    width: w,
+                    height: h,
+                    fps: (30, 1),
+                    profile: if codec == Codec::Hevc {
+                        Profile::Main
+                    } else {
+                        Profile::High
+                    },
+                    rate,
+                    gop: 60,
+                    b_frames: 0,
+                    bitstream: Bitstream::LengthPrefixed,
+                    ..Default::default()
+                };
+                let name = format!("{codec:?}-{rate:?} {label}");
+                let (packets, extradata, _) = encode_all(codec, &config, frames);
+                let decoded = cpu_decode(codec, &annexb_stream(codec, &packets, &extradata));
+                assert_eq!(decoded.len(), n, "{name}: frames decoded");
+                let db: Vec<f64> = decoded
+                    .iter()
+                    .zip(frames.iter())
+                    .map(|(a, b)| luma_psnr(a, b))
+                    .collect();
+                let all = mean(&db, 0..n);
+                let sizes: Vec<usize> = packets.iter().map(|p| p.data.len()).collect();
+                let target = f64::from(kbps) * 1000.0 / 8.0 * n as f64 / 30.0;
+                let off = sizes.iter().sum::<usize>() as f64 / target - 1.0;
+                let under = size_undershoot(all);
+                eprintln!("{name}: {:+.1} %, mean {all:.2} dB", off * 100.0);
+                assert!(
+                    off < 0.1 && off > -under,
+                    "{name}: {:.1} % off the average, within -{:.0} % to +10 %",
+                    off * 100.0,
+                    under * 100.0
+                );
+                assert_eq!(
+                    vbv_underflows(&sizes, max_kbps, 30.0),
+                    0,
+                    "{name}: frames past a 1 s VBV at {max_kbps} kb/s"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -731,7 +812,7 @@ fn per_frame_quality_holds_from_the_first_frame() {
                 let target = f64::from(kbps) * 1000.0 / 8.0 * n as f64 / 30.0;
                 let bytes: usize = packets.iter().map(|p| p.data.len()).sum();
                 let off = bytes as f64 / target - 1.0;
-                let under = size_undershoot(codec, all);
+                let under = size_undershoot(all);
                 assert!(
                     off < 0.1 && off > -under,
                     "{name}: {:.1} % off the target size, within -{:.0} % to +10 %",
