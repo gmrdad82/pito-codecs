@@ -1,7 +1,8 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
+use std::sync::OnceLock;
 
 #[path = "support/fail.rs"]
 mod fail;
@@ -27,7 +28,7 @@ mod video;
 #[path = "record_refs/vorbis.rs"]
 mod vorbis;
 
-use testref::{Entry, Kind, Manifest};
+use testref::{Entry, Kind, Manifest, Pin, Probe, Tools};
 
 pub struct Def {
     pub area: &'static str,
@@ -38,6 +39,7 @@ pub struct Def {
     pub tool: &'static str,
     pub args: Vec<String>,
     pub take: Take,
+    pub lib: Option<&'static str>,
 }
 
 pub type Make = Box<dyn Fn(&Path) -> Result<(), String>>;
@@ -64,6 +66,7 @@ impl Def {
             tool,
             args,
             take: Take::Keep,
+            lib: None,
         }
     }
 
@@ -100,6 +103,7 @@ impl Def {
             tool,
             args,
             take: Take::Digest(f),
+            lib: None,
         }
     }
 
@@ -112,6 +116,11 @@ impl Def {
         let mut d = Def::digest(area, name, OURS, words(what), sha);
         d.make = Some(Box::new(move |at| testref::write_atomic(at, &make()?)));
         d
+    }
+
+    pub fn library(mut self, name: &'static str) -> Def {
+        self.lib = Some(name);
+        self
     }
 
     pub fn from(mut self, make: impl Fn() -> Result<Vec<u8>, String> + 'static) -> Def {
@@ -137,6 +146,99 @@ pub fn ff(args: &[&str]) -> Vec<String> {
 
 pub fn words(text: &str) -> Vec<String> {
     vec![text.to_string()]
+}
+
+pub fn tool(name: &str, args: &[&str]) -> Vec<String> {
+    if let Err(e) = pins().and_then(|t| t.pin(name).map(|_| ())) {
+        panic!("{e}");
+    }
+    args.iter().map(|s| s.to_string()).collect()
+}
+
+pub fn lib_version(name: &str) -> Result<String, String> {
+    let pin = pins()?.pin(name)?;
+    let Probe::Library { path, call, int } = &pin.probe else {
+        return Err(format!("{name} is pinned as a command, not a library"));
+    };
+    let file = std::fs::canonicalize(path)
+        .map_err(|e| format!("{name}: {path}: {e}"))?
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let version = call_version(path, call, *int).map_err(|e| format!("{name}: {e}"))?;
+    pin.check(&testref::library_line(&file, &version))
+}
+
+fn pins() -> Result<&'static Tools, String> {
+    static TOOLS: OnceLock<Result<Tools, String>> = OnceLock::new();
+    TOOLS.get_or_init(Tools::load).as_ref().map_err(Clone::clone)
+}
+
+#[cfg(target_os = "linux")]
+fn call_version(path: &str, call: &str, int: bool) -> Result<String, String> {
+    use std::ffi::{CStr, c_char, c_int};
+    let lib = unsafe { libloading::Library::new(path) }.map_err(|e| format!("{path}: {e}"))?;
+    let missing = |e: libloading::Error| format!("{path} has no {call}: {e}");
+    if int {
+        let f = unsafe { lib.get::<unsafe extern "C" fn() -> c_int>(call.as_bytes()) }
+            .map_err(missing)?;
+        return Ok(testref::int_version(unsafe { f() }));
+    }
+    let f = unsafe { lib.get::<unsafe extern "C" fn() -> *const c_char>(call.as_bytes()) }
+        .map_err(missing)?;
+    let text = unsafe { f() };
+    if text.is_null() {
+        return Err(format!("{call} in {path} returned no string"));
+    }
+    Ok(unsafe { CStr::from_ptr(text) }
+        .to_string_lossy()
+        .into_owned())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn call_version(path: &str, _call: &str, _int: bool) -> Result<String, String> {
+    Err(format!("{path}: reference libraries load only on Linux"))
+}
+
+fn command_version(pin: &Pin) -> Result<String, String> {
+    let Probe::Command { run, find, upto } = &pin.probe else {
+        return Err(format!("{} is pinned as a library, not a command", pin.name));
+    };
+    let o = Command::new(&run[0])
+        .args(&run[1..])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("{} did not start: {e}", run[0]))?;
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let found = testref::version_line(&text, find, upto)
+        .ok_or_else(|| format!("`{}` printed no line with '{find}'", run.join(" ")))?;
+    pin.check(&found)
+}
+
+fn checked(area: &str, defs: &[&Def]) -> Result<BTreeMap<&'static str, String>, String> {
+    let mut lines = BTreeMap::new();
+    let wanted = defs.iter().flat_map(|d| {
+        let run = (d.tool != OURS).then_some((d.tool, false));
+        run.into_iter().chain(d.lib.map(|l| (l, true)))
+    });
+    for (name, lib) in wanted {
+        if lines.contains_key(name) {
+            continue;
+        }
+        let line = if lib {
+            lib_version(name)
+        } else {
+            pins()
+                .and_then(|t| t.pin(name))
+                .and_then(command_version)
+        };
+        lines.insert(name, line.map_err(|e| format!("{area} refused: {e}"))?);
+    }
+    Ok(lines)
 }
 
 fn table() -> Vec<Def> {
@@ -176,6 +278,7 @@ fn main() -> ExitCode {
 }
 
 fn record(area: &str, defs: &[&Def]) -> Result<(), Box<dyn Error>> {
+    let pinned = checked(area, defs)?;
     let work = testref::root().join("tmp/record_refs").join(area);
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work)?;
@@ -197,7 +300,10 @@ fn record(area: &str, defs: &[&Def]) -> Result<(), Box<dyn Error>> {
                 .as_ref()
                 .ok_or(format!("{label}: our own output needs make"))?;
             make(&out).map_err(|e| format!("{label}: {e}"))?;
-            format!("pito-codecs {}", env!("CARGO_PKG_VERSION"))
+            match d.lib {
+                Some(lib) => pinned[lib].clone(),
+                None => format!("pito-codecs {}", env!("CARGO_PKG_VERSION")),
+            }
         } else {
             if let Some(make) = &d.make {
                 make(&src).map_err(|e| format!("{label}: {e}"))?;
@@ -211,7 +317,7 @@ fn record(area: &str, defs: &[&Def]) -> Result<(), Box<dyn Error>> {
                 let why = String::from_utf8_lossy(&run.stderr);
                 return Err(format!("{label}: {} failed: {}", d.tool, why.trim()).into());
             }
-            version(d.tool)?
+            pinned[d.tool].clone()
         };
         tools.insert(tool.clone());
         let bytes = std::fs::read(&out)
@@ -324,20 +430,6 @@ fn expand(arg: &str, src: &Path, out: &Path, work: &Path, defs: &[&Def]) -> Stri
         s.replace_range(at..at + end + 1, &file);
     }
     s
-}
-
-fn version(tool: &str) -> Result<String, Box<dyn Error>> {
-    for flag in ["-version", "--version"] {
-        if let Ok(o) = Command::new(tool).arg(flag).output()
-            && o.status.success()
-        {
-            let text = String::from_utf8_lossy(&o.stdout);
-            if let Some(line) = text.lines().find(|l| !l.trim().is_empty()) {
-                return Ok(line.trim().to_string());
-            }
-        }
-    }
-    Err(format!("{tool} gives no version line").into())
 }
 
 fn tracked_bytes(skip: &str) -> Result<u64, Box<dyn Error>> {

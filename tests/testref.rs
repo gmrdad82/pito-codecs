@@ -3,7 +3,7 @@ mod testref;
 
 use std::path::PathBuf;
 
-use testref::{Diff, Digest, Entry, Kind, Manifest, Refs, Sound};
+use testref::{Diff, Digest, Entry, Kind, Manifest, Pin, Probe, Refs, Sound, Tools};
 
 fn entry(name: &str, file: &str, kind: Kind) -> Entry {
     Entry {
@@ -11,9 +11,8 @@ fn entry(name: &str, file: &str, kind: Kind) -> Entry {
         file: file.into(),
         sha256: testref::sha256(name.as_bytes()),
         kind,
-        tool: "ffmpeg version n9.0.2 Copyright (c) 2000-2026 the FFmpeg developers".into(),
-        command: "ffmpeg -i {ref:a.gif} -vf \"split[s0][s1]\" -f rawvideo {out}\twith\\slash"
-            .into(),
+        tool: "Version: ImageMagick 7.1.2-34 Q16-HDRI x86_64".into(),
+        command: "magick {ref:a.gif} -set \"label\" \"x[0]\" rgba:{out}\twith\\slash".into(),
     }
 }
 
@@ -137,7 +136,7 @@ fn a_missing_name_file_or_digest_fails_loudly() {
     let r3 = Refs::at(dir.clone(), "missing");
     let wrong = text(Box::new(move || r3.assert_digest("a.rgba", "00")));
     assert!(
-        wrong.contains("ours hashes to 00") && wrong.contains("ffmpeg -i"),
+        wrong.contains("ours hashes to 00") && wrong.contains("magick {ref:a.gif}"),
         "{wrong}"
     );
     let none = testref::scratch("testref-self").join("no-area");
@@ -424,4 +423,176 @@ mod clips {
         assert_eq!(leftovers, 0);
         assert!(!dir.join("clip.avi").exists() && !dir.join("vp9.mp4").exists());
     }
+}
+
+const PINS: &str = "# pins\n\n[x264]\nversion = \"x264 --version\"\nfind = \"x264 \"\nline = \"x264 0.165.3222 b35605a\"\n\n[dav1d]\nversion = \"dav1d   --version\"\nupto = \" - \"\nline = \"1.5.4\"\n\n[libwebp]\nlibrary = \"/usr/lib/libwebp.so.7\"\ncall = \"WebPGetEncoderVersion\"\nreturns = \"int\"\nline = \"libwebp.so.7.2.0 1.6.0\"\n\n[libopus]\nlibrary = \"/usr/lib/libopus.so.0\"\ncall = \"opus_get_version_string\"\nline = \"libopus.so.0.11.1 libopus 1.6.1\"\n";
+
+#[test]
+fn tool_pins_parse_commands_and_libraries() {
+    let t = Tools::parse(PINS).unwrap();
+    assert_eq!(t.pins.len(), 4);
+    assert_eq!(
+        t.pin("x264").unwrap(),
+        &Pin {
+            name: "x264".into(),
+            probe: Probe::Command {
+                run: vec!["x264".into(), "--version".into()],
+                find: "x264 ".into(),
+                upto: String::new(),
+            },
+            line: "x264 0.165.3222 b35605a".into(),
+        }
+    );
+    assert_eq!(
+        t.pin("dav1d").unwrap().probe,
+        Probe::Command {
+            run: vec!["dav1d".into(), "--version".into()],
+            find: String::new(),
+            upto: " - ".into(),
+        }
+    );
+    assert_eq!(
+        t.pin("libwebp").unwrap().probe,
+        Probe::Library {
+            path: "/usr/lib/libwebp.so.7".into(),
+            call: "WebPGetEncoderVersion".into(),
+            int: true,
+        }
+    );
+    assert!(matches!(
+        t.pin("libopus").unwrap().probe,
+        Probe::Library { int: false, .. }
+    ));
+    assert_eq!(Tools::parse("").unwrap(), Tools::default());
+}
+
+#[test]
+fn a_broken_pin_file_is_refused_with_its_reason() {
+    let cases: [(&str, &str); 11] = [
+        ("[x]\nline = \"1\"\n", "needs one of version or library"),
+        ("[x]\nversion = \"x -v\"\n", "has no line"),
+        (
+            "[x]\nversion = \"x\"\nlibrary = \"/l.so\"\nline = \"1\"\n",
+            "needs one of version or library",
+        ),
+        ("[x]\nlibrary = \"/l.so\"\nline = \"1\"\n", "a library needs call"),
+        (
+            "[x]\nlibrary = \"/l.so\"\ncall = \"v\"\nupto = \" \"\nline = \"1\"\n",
+            "find and upto go with version",
+        ),
+        (
+            "[x]\nlibrary = \"/l.so\"\ncall = \"v\"\nreturns = \"float\"\nline = \"1\"\n",
+            "not \"float\"",
+        ),
+        (
+            "[x]\nversion = \"x\"\ncall = \"v\"\nline = \"1\"\n",
+            "call and returns go with library",
+        ),
+        ("[x]\nversion = \"  \"\nline = \"1\"\n", "version is empty"),
+        ("line = \"1\"\n", "line 1: 'line' comes before any [tool]"),
+        ("[x]\nline = \"1\"\nline = \"2\"\n", "line 3: 'line' given twice"),
+        ("[a b]\nline = \"1\"\n", "line 1: '[a b]' is not a [tool] header"),
+    ];
+    for (text, want) in cases {
+        let err = Tools::parse(text).unwrap_err();
+        assert!(err.contains(want), "{text:?}: {err}");
+    }
+    let twice = "[x]\nversion = \"x\"\nline = \"1\"\n[x]\nversion = \"x\"\nline = \"1\"\n";
+    assert!(Tools::parse(twice).unwrap_err().contains("[x] given twice"));
+    assert!(
+        Tools::parse("[x]\nwhat = \"1\"\n")
+            .unwrap_err()
+            .contains("unknown key 'what'")
+    );
+    assert!(
+        Tools::parse(PINS)
+            .unwrap()
+            .pin("lame")
+            .unwrap_err()
+            .contains("lame is not pinned")
+    );
+}
+
+#[test]
+fn a_version_line_is_found_trimmed_and_checked_against_its_pin() {
+    let help = "Usage: vpxenc <options>\n\nIncluded encoders:\n\n    vp8    - WebM Project VP8 Encoder v1.17.0 \n    vp9    - WebM Project VP9 Encoder v1.17.0 (default)\n";
+    assert_eq!(
+        testref::version_line(help, "VP9 Encoder", "").as_deref(),
+        Some("vp9    - WebM Project VP9 Encoder v1.17.0 (default)")
+    );
+    assert_eq!(
+        testref::version_line("\n\n  1.5.4\n", "", "").as_deref(),
+        Some("1.5.4")
+    );
+    assert_eq!(testref::version_line("nothing here", "AV1", ""), None);
+    assert_eq!(testref::version_line("", "", ""), None);
+    let a52 = "a52dec-0.8.0 - by its authors\nusage";
+    assert_eq!(
+        testref::version_line(a52, "a52dec-", " - ").as_deref(),
+        Some("a52dec-0.8.0")
+    );
+    assert_eq!(
+        testref::version_line("rav1e 0.8.1", "rav1e", " - ").as_deref(),
+        Some("rav1e 0.8.1")
+    );
+    assert_eq!(testref::int_version(0x010600), "1.6.0");
+    assert_eq!(testref::int_version(0x0a0b0c), "10.11.12");
+    assert_eq!(
+        testref::library_line("libwebp.so.7.2.0", "1.6.0"),
+        "libwebp.so.7.2.0 1.6.0"
+    );
+    let t = Tools::parse(PINS).unwrap();
+    let pin = t.pin("x264").unwrap();
+    assert_eq!(
+        pin.check("x264 0.165.3222 b35605a").unwrap(),
+        "x264 0.165.3222 b35605a"
+    );
+    let err = pin.check("x264 0.164.3108 31e19f9").unwrap_err();
+    assert!(
+        err.contains("'x264 0.165.3222 b35605a'") && err.contains("'x264 0.164.3108 31e19f9'"),
+        "{err}"
+    );
+}
+
+#[test]
+fn the_tracked_pins_cover_every_reference_source() {
+    let t = Tools::load().unwrap();
+    let commands = [
+        "x264",
+        "x265",
+        "vpxenc",
+        "vpxdec",
+        "aomenc",
+        "SvtAv1EncApp",
+        "rav1e",
+        "dav1d",
+        "aomdec",
+        "flac",
+        "lame",
+        "mpg123",
+        "faac",
+        "faad",
+        "a52dec",
+        "cjpeg",
+        "djpeg",
+        "jpegtran",
+        "magick",
+    ];
+    for name in commands {
+        let pin = t.pin(name).unwrap();
+        let Probe::Command { run, .. } = &pin.probe else {
+            panic!("{name} should be pinned as a command");
+        };
+        assert_eq!(run[0], name);
+        assert!(!pin.line.is_empty(), "{name}");
+    }
+    for name in ["libopus", "libvorbisenc", "libvorbisfile", "libwebp"] {
+        let pin = t.pin(name).unwrap();
+        let Probe::Library { path, .. } = &pin.probe else {
+            panic!("{name} should be pinned as a library");
+        };
+        assert!(path.contains(name), "{name}: {path}");
+        assert!(pin.line.starts_with(name), "{name}: {}", pin.line);
+    }
+    assert_eq!(t.pins.len(), commands.len() + 4);
 }

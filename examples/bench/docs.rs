@@ -145,12 +145,29 @@ fn short_cpu(cpu: &str) -> &str {
     }
 }
 
+fn gpu_api(os: &str) -> Option<&'static str> {
+    let os = os.trim().to_lowercase();
+    [
+        ("linux", "VA-API"),
+        ("darwin", "VIDEOTOOLBOX"),
+        ("macos", "VIDEOTOOLBOX"),
+        ("windows", "MEDIA FOUNDATION"),
+    ]
+    .into_iter()
+    .find(|(name, _)| os.starts_with(name))
+    .map(|(_, api)| api)
+}
+
 pub fn ffmpeg_names(r: &Reference) -> (String, String) {
     let ff = format!("FFMPEG {}", r.version());
+    let gpu = r.gpu.trim().to_uppercase();
+    let gpu = match gpu_api(&r.os) {
+        Some(api) => format!("{gpu} ({api})"),
+        None => gpu,
+    };
     let sub = format!(
-        "{}, {} (VA-API), {ff} RECORDED {}",
+        "{}, {gpu}, {ff} RECORDED {}",
         short_cpu(&r.cpu).to_uppercase(),
-        r.gpu.trim().to_uppercase(),
         r.date
     );
     (sub, ff)

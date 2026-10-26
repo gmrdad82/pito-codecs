@@ -50,7 +50,8 @@ the inputs the reference was measured on, checked by size and sha256.
 --hash-inputs records the sha256 of the inputs in --out into the reference, without ffmpeg.
 --record-ffmpeg is the one path that runs ffmpeg: it times the ffmpeg on PATH on the
 bench's cases, makes the inputs, and rewrites the reference file; with --only it adds
-to a file recorded with the same ffmpeg build. Re-recording is the owner's call, made
+to a file recorded with the same ffmpeg build. --record-ffmpeg --quick records only
+the 1080p cases and inputs, so a later full bench reports every 1440p case as missing. Re-recording is the owner's call, made
 only on his word.";
 
 static QUICK: AtomicBool = AtomicBool::new(false);
@@ -920,8 +921,12 @@ impl Bench {
                         "ours_bytes".into(),
                         ours.iter().map(Vec::len).sum::<usize>() as f64,
                     );
-                    m.details
-                        .insert("ours_psnr_db".into(), psnr_of(codec, ours, &frames)?);
+                    match psnr_of(codec, ours, &frames) {
+                        Ok(p) => {
+                            m.details.insert("ours_psnr_db".into(), p);
+                        }
+                        Err(e) => m.note.push_str(&format!("; no PSNR: {e}")),
+                    }
                     return Ok(());
                 }
                 if let Some(p) = psnr(theirs, fmt, &raw, w, h) {
@@ -2780,7 +2785,12 @@ mod tests {
         let mut r = reference::tests::sample();
         r.cpu = "Apple M4".into();
         r.gpu = "Apple M4".into();
-        assert!(docs::ffmpeg_names(&r).0.starts_with("APPLE M4, APPLE M4 (VA-API)"));
+        r.os = "Darwin 25.1.0".into();
+        assert!(docs::ffmpeg_names(&r).0.starts_with("APPLE M4, APPLE M4 (VIDEOTOOLBOX), FFMPEG"));
+        r.os = "Windows 11".into();
+        assert!(docs::ffmpeg_names(&r).0.contains(" (MEDIA FOUNDATION), "));
+        r.os = "FreeBSD 15".into();
+        assert!(docs::ffmpeg_names(&r).0.starts_with("APPLE M4, APPLE M4, FFMPEG"));
     }
 
     #[test]

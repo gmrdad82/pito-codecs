@@ -191,6 +191,179 @@ impl Manifest {
     }
 }
 
+pub const TOOLS: &str = "TOOLS.toml";
+
+pub fn tools_path() -> PathBuf {
+    refs_dir().join(TOOLS)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Probe {
+    Command {
+        run: Vec<String>,
+        find: String,
+        upto: String,
+    },
+    Library { path: String, call: String, int: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pin {
+    pub name: String,
+    pub probe: Probe,
+    pub line: String,
+}
+
+impl Pin {
+    pub fn check(&self, found: &str) -> Result<String, String> {
+        if found == self.line {
+            Ok(self.line.clone())
+        } else {
+            Err(format!(
+                "{} is pinned at '{}' in tests/refs/{TOOLS} but this machine has '{found}'",
+                self.name, self.line
+            ))
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Tools {
+    pub pins: Vec<Pin>,
+}
+
+const TOOL_KEYS: [&str; 7] = [
+    "version", "find", "upto", "library", "call", "returns", "line",
+];
+
+type ToolFields = [Option<String>; 7];
+
+fn close_pin(name: String, fields: ToolFields, pins: &mut Vec<Pin>) -> Result<(), String> {
+    let [version, find, upto, library, call, returns, line] = fields;
+    let line = line.ok_or_else(|| format!("[{name}] has no line"))?;
+    let probe = match (version, library) {
+        (Some(v), None) => {
+            if call.is_some() || returns.is_some() {
+                return Err(format!("[{name}]: call and returns go with library"));
+            }
+            let run: Vec<String> = v.split_whitespace().map(str::to_string).collect();
+            if run.is_empty() {
+                return Err(format!("[{name}]: version is empty"));
+            }
+            Probe::Command {
+                run,
+                find: find.unwrap_or_default(),
+                upto: upto.unwrap_or_default(),
+            }
+        }
+        (None, Some(path)) => {
+            if find.is_some() || upto.is_some() {
+                return Err(format!("[{name}]: find and upto go with version"));
+            }
+            let call = call.ok_or_else(|| format!("[{name}]: a library needs call"))?;
+            let int = match returns.as_deref() {
+                None | Some("string") => false,
+                Some("int") => true,
+                Some(other) => {
+                    return Err(format!(
+                        "[{name}]: returns is \"string\" or \"int\", not \"{other}\""
+                    ));
+                }
+            };
+            Probe::Library { path, call, int }
+        }
+        _ => return Err(format!("[{name}] needs one of version or library")),
+    };
+    if pins.iter().any(|p| p.name == name) {
+        return Err(format!("[{name}] given twice"));
+    }
+    pins.push(Pin { name, probe, line });
+    Ok(())
+}
+
+impl Tools {
+    pub fn parse(text: &str) -> Result<Tools, String> {
+        let mut pins = Vec::new();
+        let mut open: Option<(String, ToolFields)> = None;
+        for (i, raw) in text.lines().enumerate() {
+            let line = raw.trim();
+            let at = |m: String| format!("line {}: {m}", i + 1);
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+                let name = name.trim();
+                let bad = name.is_empty()
+                    || !name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "-_".contains(c));
+                if bad {
+                    return Err(at(format!("'{line}' is not a [tool] header")));
+                }
+                if let Some((n, fields)) = open.take() {
+                    close_pin(n, fields, &mut pins).map_err(at)?;
+                }
+                open = Some((name.to_string(), Default::default()));
+                continue;
+            }
+            let (key, value) = line
+                .split_once('=')
+                .ok_or_else(|| at(format!("'{line}' is not key = \"value\"")))?;
+            let key = key.trim();
+            let slot = TOOL_KEYS
+                .iter()
+                .position(|k| *k == key)
+                .ok_or_else(|| at(format!("unknown key '{key}'")))?;
+            let (_, fields) = open
+                .as_mut()
+                .ok_or_else(|| at(format!("'{key}' comes before any [tool]")))?;
+            if fields[slot].is_some() {
+                return Err(at(format!("'{key}' given twice")));
+            }
+            fields[slot] = Some(unquote(value.trim()).map_err(at)?);
+        }
+        if let Some((n, fields)) = open {
+            close_pin(n, fields, &mut pins)?;
+        }
+        Ok(Tools { pins })
+    }
+
+    pub fn load() -> Result<Tools, String> {
+        let path = tools_path();
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Tools::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    pub fn pin(&self, name: &str) -> Result<&Pin, String> {
+        self.pins
+            .iter()
+            .find(|p| p.name == name)
+            .ok_or_else(|| format!("{name} is not pinned in tests/refs/{TOOLS}; add its table first"))
+    }
+}
+
+pub fn version_line(output: &str, find: &str, upto: &str) -> Option<String> {
+    let line = output
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .find(|l| l.contains(find))?;
+    let line = match line.find(upto) {
+        Some(at) if !upto.is_empty() => line[..at].trim_end(),
+        _ => line,
+    };
+    Some(line.to_string())
+}
+
+pub fn library_line(file: &str, version: &str) -> String {
+    format!("{file} {version}")
+}
+
+pub fn int_version(v: i32) -> String {
+    format!("{}.{}.{}", (v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff)
+}
+
 fn quote(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('"');

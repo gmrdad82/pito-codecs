@@ -4,11 +4,14 @@ mod testref;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-const ALLOWED: [&str; 4] = [
+const ALLOWED: [&str; 2] = ["examples/bench.rs", "examples/bench/"];
+
+const NEVER: [&str; 5] = [
     "examples/record_refs.rs",
     "examples/record_refs/",
-    "examples/bench.rs",
-    "examples/bench/",
+    "bin/",
+    "render/",
+    "fuzz/",
 ];
 
 fn tools() -> [String; 2] {
@@ -32,21 +35,29 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn rel(p: &Path) -> String {
-    p.strip_prefix(testref::root())
+fn rel(root: &Path, p: &Path) -> String {
+    p.strip_prefix(root)
         .unwrap_or(p)
         .to_string_lossy()
         .replace('\\', "/")
 }
 
-fn allowed(rel: &str) -> bool {
-    ALLOWED.iter().any(|a| {
+fn under(rel: &str, list: &[&str]) -> bool {
+    list.iter().any(|a| {
         if a.ends_with('/') {
             rel.starts_with(a)
         } else {
             rel == *a
         }
     })
+}
+
+fn allowed(rel: &str) -> bool {
+    under(rel, &ALLOWED)
+}
+
+fn never(rel: &str) -> bool {
+    under(rel, &NEVER)
 }
 
 pub fn spawns_in_rust(text: &str) -> Vec<usize> {
@@ -79,48 +90,83 @@ pub fn spawns_in_shell(text: &str) -> Vec<usize> {
         .collect()
 }
 
-fn offenders() -> Vec<String> {
-    let root = testref::root();
+fn names_tool(line: &str) -> bool {
+    let tools = tools();
+    line.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|w| tools.iter().any(|t| t.eq_ignore_ascii_case(w)))
+}
+
+pub fn names_in_text(text: &str) -> Vec<usize> {
+    text.lines()
+        .enumerate()
+        .filter(|(_, l)| names_tool(l))
+        .map(|(i, _)| i + 1)
+        .collect()
+}
+
+pub fn names_in_manifest(text: &str) -> Vec<usize> {
+    text.lines()
+        .enumerate()
+        .filter(|(_, l)| {
+            l.split_once('=')
+                .is_some_and(|(k, v)| matches!(k.trim(), "tool" | "command") && names_tool(v))
+        })
+        .map(|(i, _)| i + 1)
+        .collect()
+}
+
+fn offenders_in(root: &Path) -> Vec<String> {
     let mut files = Vec::new();
-    for d in ["src", "tests", "examples", "benches", "fuzz"] {
+    for d in ["src", "tests", "examples", "benches", "fuzz", "bin", "render"] {
         walk(&root.join(d), &mut files);
     }
-    let mut scripts = Vec::new();
-    walk(&root.join("bin"), &mut scripts);
     let mut found = Vec::new();
     for f in files {
-        let r = rel(&f);
-        if allowed(&r) || f.extension().is_none_or(|e| e != "rs") {
+        let r = rel(root, &f);
+        if allowed(&r) || r.starts_with("tests/refs/") {
             continue;
         }
         let Ok(text) = std::fs::read_to_string(&f) else {
             continue;
         };
-        found.extend(
+        let lines = if never(&r) {
+            names_in_text(&text)
+        } else if f.extension().is_some_and(|e| e == "rs") {
             spawns_in_rust(&text)
-                .into_iter()
-                .map(|l| format!("{r}:{l}")),
-        );
-    }
-    for f in scripts {
-        let Ok(text) = std::fs::read_to_string(&f) else {
+        } else {
             continue;
         };
+        found.extend(lines.into_iter().map(|l| format!("{r}:{l}")));
+    }
+    let Ok(areas) = std::fs::read_dir(root.join("tests/refs")) else {
+        return found;
+    };
+    let mut manifests: Vec<PathBuf> = areas
+        .flatten()
+        .map(|a| a.path().join(testref::MANIFEST))
+        .filter(|m| m.is_file())
+        .collect();
+    manifests.sort();
+    for m in manifests {
+        let Ok(text) = std::fs::read_to_string(&m) else {
+            continue;
+        };
+        let r = rel(root, &m);
         found.extend(
-            spawns_in_shell(&text)
+            names_in_manifest(&text)
                 .into_iter()
-                .map(|l| format!("{}:{l}", rel(&f))),
+                .map(|l| format!("{r}:{l}")),
         );
     }
     found
 }
 
 #[test]
-fn no_test_gate_or_pcod_path_runs_ffmpeg_or_ffprobe() {
-    let found = offenders();
+fn no_test_gate_recorder_or_manifest_runs_ffmpeg_or_ffprobe() {
+    let found = offenders_in(&testref::root());
     assert!(
         found.is_empty(),
-        "{} places still name ffmpeg or ffprobe as a program; record a reference with examples/record_refs instead:\n{}",
+        "{} places still name ffmpeg or ffprobe; record a reference with a tool pinned in tests/refs/TOOLS.toml instead:\n{}",
         found.len(),
         found.join("\n")
     );
@@ -144,13 +190,119 @@ fn the_scan_catches_every_way_of_naming_the_tool() {
 }
 
 #[test]
-fn only_the_recorder_and_the_bench_may_run_it() {
-    assert!(allowed("examples/record_refs.rs"));
-    assert!(allowed("examples/record_refs/gif.rs"));
+fn the_recorder_bin_render_and_fuzz_may_not_even_name_it() {
+    let [ff, probe] = tools();
+    let upper = ff.to_uppercase();
+    let text = format!(
+        "pub const {upper}: &str = \"x\";\nfn ok() {{}}\nlet a = {ff}_args();\n# {probe} once\nlet b = x264(\"--crf\");\n"
+    );
+    assert_eq!(names_in_text(&text), vec![1, 3, 4]);
+    assert!(names_in_text("x264 --crf 0\nff_owned(args)\nffmpegx\n").is_empty());
+}
+
+#[test]
+fn a_manifest_may_not_name_it_as_tool_or_command() {
+    let [ff, probe] = tools();
+    let text = format!(
+        "[[ref]]\nname = \"{ff}.yuv\"\nfile = \"\"\ntool = \"{ff} version n9\"\ncommand = \"x264 {{src}}\"\n\n[[ref]]\nname = \"b\"\ntool = \"x265 4.3\"\ncommand = \"{probe} -i {{src}}\"\n"
+    );
+    assert_eq!(names_in_manifest(&text), vec![4, 10]);
+    let clean = "[[ref]]\nname = \"a\"\ntool = \"x264 0.165.3222 b35605a\"\ncommand = \"x264 --crf 0 -o {out} {src}\"\n";
+    assert!(names_in_manifest(clean).is_empty());
+}
+
+#[test]
+fn only_the_bench_may_run_it_and_the_recorder_never() {
+    assert!(allowed("examples/bench.rs"));
     assert!(allowed("examples/bench/docs.rs"));
     assert!(!allowed("examples/bench_extra.rs"));
+    assert!(!allowed("examples/record_refs.rs"));
+    assert!(!allowed("examples/record_refs/gif.rs"));
     assert!(!allowed("tests/media.rs"));
     assert!(!allowed("src/gif/tests.rs"));
+    assert!(never("examples/record_refs.rs"));
+    assert!(never("examples/record_refs/containers/pcod.rs"));
+    assert!(never("bin/gate"));
+    assert!(never("render/terminal/clip.sh"));
+    assert!(never("fuzz/seeds"));
+    assert!(!never("examples/bench.rs"));
+    assert!(!never("src/gif/tests.rs"));
+}
+
+fn tree(name: &str, files: &[(&str, String)]) -> PathBuf {
+    let root = testref::scratch("no_ffmpeg-self").join(name);
+    let _ = std::fs::remove_dir_all(&root);
+    for (path, text) in files {
+        let p = root.join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, text).unwrap();
+    }
+    root
+}
+
+#[test]
+fn each_rule_fires_on_a_tree_with_file_and_line() {
+    let [ff, probe] = tools();
+    let root = tree(
+        "dirty",
+        &[
+            ("src/a.rs", format!("fn a() {{}}\nlet x = \"{ff}\";\n")),
+            ("examples/record_refs.rs", format!("pub fn {ff}() {{}}\n")),
+            (
+                "examples/record_refs/video.rs",
+                format!("fn v() {{}}\nconst P: &str = \"{probe}\";\n"),
+            ),
+            ("bin/gate", format!("#!/bin/sh\n# uses {ff}\n")),
+            ("render/terminal/clip.sh", format!("{ff} -i a b\n")),
+            ("fuzz/seeds", format!("set -e\n\n{probe} x\n")),
+            (
+                "tests/refs/h264/manifest.toml",
+                format!("[[ref]]\nname = \"a\"\ntool = \"{ff} version\"\n"),
+            ),
+            ("examples/bench.rs", format!("let f = \"{ff}\";\n")),
+            ("examples/bench/docs.rs", format!("let f = \"{probe}\";\n")),
+        ],
+    );
+    let found: BTreeSet<String> = offenders_in(&root).into_iter().collect();
+    let want: BTreeSet<String> = [
+        "src/a.rs:2",
+        "examples/record_refs.rs:1",
+        "examples/record_refs/video.rs:2",
+        "bin/gate:2",
+        "render/terminal/clip.sh:1",
+        "fuzz/seeds:3",
+        "tests/refs/h264/manifest.toml:3",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    assert_eq!(found, want);
+}
+
+#[test]
+fn a_clean_tree_passes() {
+    let root = tree(
+        "clean",
+        &[
+            ("src/a.rs", "let x = \"x264\";\n".to_string()),
+            (
+                "examples/record_refs.rs",
+                "pub fn tool(name: &str) {}\n".to_string(),
+            ),
+            ("bin/gate", "#!/bin/sh\ncargo fmt\n".to_string()),
+            ("render/terminal/clip.sh", "pcod clip a b\n".to_string()),
+            ("fuzz/seeds", "pcod synth x\n".to_string()),
+            (
+                "tests/refs/h264/manifest.toml",
+                "[[ref]]\nname = \"a\"\ntool = \"x264 0.165\"\ncommand = \"x264 {src}\"\n".into(),
+            ),
+            (
+                "tests/refs/TOOLS.toml",
+                "[x264]\nversion = \"x264 --version\"\nline = \"x264 0.165\"\n".into(),
+            ),
+        ],
+    );
+    assert_eq!(offenders_in(&root), Vec::<String>::new());
 }
 
 fn tracked() -> Vec<(String, PathBuf, u64)> {
@@ -161,9 +313,13 @@ fn tracked() -> Vec<(String, PathBuf, u64)> {
     for area in areas.flatten() {
         let path = area.path();
         let name = area.file_name().to_string_lossy().into_owned();
+        if name == testref::TOOLS {
+            continue;
+        }
         assert!(
             path.is_dir(),
-            "tests/refs/{name}: only area folders sit in tests/refs"
+            "tests/refs/{name}: only area folders and {} sit in tests/refs",
+            testref::TOOLS
         );
         let mut files = Vec::new();
         walk(&path, &mut files);
@@ -177,13 +333,14 @@ fn tracked() -> Vec<(String, PathBuf, u64)> {
 
 #[test]
 fn tracked_references_stay_inside_the_size_budget() {
+    let root = testref::root();
     let files = tracked();
     let total: u64 = files.iter().map(|(_, _, s)| s).sum();
     for (_, f, size) in &files {
         assert!(
             *size <= testref::FILE_BUDGET,
             "{} is {size} bytes, over the {} byte budget for one file",
-            rel(f),
+            rel(&root, f),
             testref::FILE_BUDGET
         );
     }
@@ -196,6 +353,7 @@ fn tracked_references_stay_inside_the_size_budget() {
 
 #[test]
 fn every_tracked_file_is_in_its_manifest_with_its_sha256() {
+    let root = testref::root();
     let files = tracked();
     let areas: BTreeSet<&str> = files.iter().map(|(a, _, _)| a.as_str()).collect();
     for area in areas {
@@ -219,7 +377,7 @@ fn every_tracked_file_is_in_its_manifest_with_its_sha256() {
             assert!(
                 listed.contains(name.as_str()),
                 "{} is not in its manifest",
-                rel(f)
+                rel(&root, f)
             );
         }
         for e in m.entries.iter().filter(|e| !e.file.is_empty()) {
@@ -235,6 +393,28 @@ fn every_tracked_file_is_in_its_manifest_with_its_sha256() {
                 !e.tool.is_empty() && !e.command.is_empty(),
                 "{area}/{}",
                 e.name
+            );
+        }
+    }
+}
+
+#[test]
+fn every_manifest_tool_line_is_pinned_or_ours() {
+    let tools = testref::Tools::load().unwrap();
+    for area in tracked()
+        .into_iter()
+        .map(|(a, _, _)| a)
+        .collect::<BTreeSet<_>>()
+    {
+        let m = testref::Manifest::load(&area).unwrap();
+        for e in &m.entries {
+            let pinned = tools.pins.iter().any(|p| p.line == e.tool);
+            assert!(
+                pinned || e.tool.starts_with("pito-codecs "),
+                "tests/refs/{area}: {} was made by '{}', which tests/refs/{} does not pin",
+                e.name,
+                e.tool,
+                testref::TOOLS
             );
         }
     }

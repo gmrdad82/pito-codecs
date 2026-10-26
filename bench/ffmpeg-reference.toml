@@ -14,13 +14,13 @@ driver = "Mesa Gallium driver 26.2.5-arch1.1 for AMD Radeon RX 9060 XT (radeonsi
 os = "Linux 7.2.8-9-omarchy"
 
 [inputs]
-"audio.f32" = 46080000
-"h264-1080.mp4" = 10044607
-"h264-1440.mp4" = 14283755
-"hevc-1080.mp4" = 4443352
-"hevc-1440.mp4" = 6039761
-"raw-1080.yuv" = 746496000
-"raw-1440.yuv" = 1327104000
+"audio.f32" = { bytes = 46080000, sha256 = "a3c8ed6fcb09e3871a24e7efd068815c7d61dfddadb453380fb7bd085c09b4aa" }
+"h264-1080.mp4" = { bytes = 10044607, sha256 = "8ca13ea3a76cbdd3679e1e1436e47743f1bd9edb6e317a44a11d38ba1f3a3730" }
+"h264-1440.mp4" = { bytes = 14283755, sha256 = "e5182e23f62103a6e6b3c9957ad168b107fdd3ba2dcb053b467af042372121f9" }
+"hevc-1080.mp4" = { bytes = 4443352, sha256 = "37fd3217a6578987f84086d23b018f06b2744d07e07a26c694b4d486f8acc963" }
+"hevc-1440.mp4" = { bytes = 6039761, sha256 = "74c3f1e2e2615bf1ebd7c8497c06cf8405534ce9f69db23e449f342238560dc6" }
+"raw-1080.yuv" = { bytes = 746496000, sha256 = "545ebf9a3b0549a171e976bafc9f6059d46a437a3e2bc0fa74c3504c5f61daae" }
+"raw-1440.yuv" = { bytes = 1327104000, sha256 = "74bc08b6e8e9089eb6446f118e94c70e2d806e4f32c7cdd119c63de190738263" }
 
 [cases."audio.aac.decode"]
 unit = "x realtime"

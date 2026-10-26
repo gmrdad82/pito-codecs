@@ -23,7 +23,13 @@ for target in x86_64-pc-windows-gnu aarch64-apple-darwin aarch64-unknown-linux-g
         echo "gate: skipping clippy for $target (its std is not installed)"
     fi
 done
-tests=(cargo nextest run --cargo-profile ci --all-targets --no-fail-fast)
+stubs="$PWD/tmp/gate-stubs"
+mkdir -p "$stubs"
+for tool in ff''mpeg ff''probe; do
+    printf '#!/bin/sh\necho "%s was spawned by a test" >&2\nexit 1\n' "$tool" >"$stubs/$tool"
+    chmod +x "$stubs/$tool"
+done
+tests=(env "PATH=$stubs:$PATH" cargo nextest run --cargo-profile ci --all-targets --no-fail-fast)
 if command -v prlimit >/dev/null 2>&1; then
     prlimit --core=1:1 -- "${tests[@]}"
 else

@@ -11,6 +11,41 @@ pub const FORMAT: i64 = 1;
 pub const PATH: &str = "bench/ffmpeg-reference.toml";
 const REMAKE: &str =
     "re-making the inputs is `bench --record-ffmpeg`, run only on the owner's word";
+pub const SHA_CACHE: &str = ".sha256-cache";
+
+fn stamp(path: &Path) -> Res<(u64, u128)> {
+    let m = fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let modified = m
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    Ok((m.len(), modified))
+}
+
+pub fn cached_sha256(dir: &Path, name: &str, fresh: bool) -> Res<String> {
+    let path = dir.join(name);
+    let (bytes, modified) = stamp(&path)?;
+    let cache = dir.join(SHA_CACHE);
+    let text = fs::read_to_string(&cache).unwrap_or_default();
+    let key = format!("{name}\t{bytes}\t{modified}\t");
+    let hit = text
+        .lines()
+        .find_map(|l| l.strip_prefix(&key))
+        .filter(|sha| modified > 0 && sha.len() == 64);
+    if let (Some(sha), false) = (hit, fresh) {
+        return Ok(sha.to_string());
+    }
+    let sha = sha256_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut lines: Vec<&str> = text
+        .lines()
+        .filter(|l| l.split('\t').next() != Some(name))
+        .collect();
+    let line = format!("{key}{sha}");
+    lines.push(&line);
+    let _ = fs::write(&cache, lines.join("\n") + "\n");
+    Ok(sha)
+}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Case {
@@ -382,7 +417,7 @@ impl Reference {
                 .into());
             }
             let path = dir.join(name);
-            let got = sha256_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let got = cached_sha256(dir, name, false)?;
             if got != want.sha256 {
                 return Err(format!(
                     "{} has sha256 {got}, the reference was measured on {}; {REMAKE}",
@@ -398,8 +433,7 @@ impl Reference {
     pub fn hash_inputs(&mut self, dir: &Path) -> Res<()> {
         self.sized(dir)?;
         for (name, i) in self.inputs.iter_mut() {
-            let path = dir.join(name);
-            i.sha256 = sha256_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            i.sha256 = cached_sha256(dir, name, true)?;
         }
         Ok(())
     }
@@ -628,6 +662,36 @@ pub mod tests {
         r.inputs.clear();
         let err = r.check_inputs(Path::new("tmp")).unwrap_err().to_string();
         assert_eq!(err, "the reference names no inputs");
+    }
+
+    #[test]
+    fn a_check_reuses_the_cached_sha256_until_the_file_changes() {
+        let dir = scratch("reference-cache");
+        let r = one_input(ABC);
+        let file = dir.join("a.mp4");
+        fs::write(&file, b"abc").unwrap();
+        let first = r.check_inputs(&dir);
+        let cache = fs::read_to_string(dir.join(SHA_CACHE)).unwrap_or_default();
+        let stale = cache.replace(ABC, &"0".repeat(64));
+        fs::write(dir.join(SHA_CACHE), &stale).unwrap();
+        let cached = r.check_inputs(&dir).unwrap_err().to_string();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        let touched = r.check_inputs(&dir);
+        let mut hashed = one_input("");
+        fs::write(dir.join(SHA_CACHE), &stale).unwrap();
+        hashed.hash_inputs(&dir).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(first.is_ok());
+        assert!(cache.starts_with("a.mp4\t3\t") && cache.trim_end().ends_with(ABC), "{cache}");
+        assert!(cached.contains(&format!("has sha256 {}", "0".repeat(64))), "{cached}");
+        assert!(touched.is_ok());
+        assert_eq!(hashed.inputs["a.mp4"].sha256, ABC);
     }
 
     #[test]
