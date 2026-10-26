@@ -294,11 +294,8 @@ impl Default for Mdct {
     }
 }
 
-#[cfg(not(test))]
 #[path = "tables.rs"]
-mod tables;
-#[cfg(test)]
-use crate::ac3::tables;
+pub(crate) mod tables;
 
 use tables::{
     BAPTAB, BNDSZ, BNDTAB, DBPBTAB, FASTDEC, FASTGAIN, FLOORTAB, HTH, LATAB, MASKTAB, SLOWDEC,
