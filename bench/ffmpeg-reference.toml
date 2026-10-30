@@ -1,6 +1,6 @@
 # ffmpeg's side of the bench, recorded once with `bench --record-ffmpeg`.
 # The bench reads every ffmpeg column from this file and never runs ffmpeg;
-# re-recording is the owner's call, made only on his word.
+# re-recording is run by hand.
 
 format = 1
 ffmpeg = "ffmpeg version n9.0.2 Copyright (c) 2000-2026 the FFmpeg developers"

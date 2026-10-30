@@ -51,8 +51,7 @@ the inputs the reference was measured on, checked by size and sha256.
 --record-ffmpeg is the one path that runs ffmpeg: it times the ffmpeg on PATH on the
 bench's cases, makes the inputs, and rewrites the reference file; with --only it adds
 to a file recorded with the same ffmpeg build. --record-ffmpeg --quick records only
-the 1080p cases and inputs, so a later full bench reports every 1440p case as missing. Re-recording is the owner's call, made
-only on his word.";
+the 1080p cases and inputs, so a later full bench reports every 1440p case as missing. Re-recording is run by hand.";
 
 static QUICK: AtomicBool = AtomicBool::new(false);
 static FFMPEG: OnceLock<PathBuf> = OnceLock::new();
@@ -2925,7 +2924,7 @@ mod tests {
         for flag in [
             "--record-ffmpeg",
             "--hash-inputs",
-            "owner's call",
+            "--record-ffmpeg is the one path that runs ffmpeg",
             "never runs ffmpeg",
         ] {
             assert!(USAGE.contains(flag), "{flag}");
