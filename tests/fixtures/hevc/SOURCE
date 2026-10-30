@@ -1,0 +1,3 @@
+cu_qp_delta_abs_overflow.bin is part of this repository and under its MIT licence (see LICENSE at the root).
+
+It is an HEVC Annex B stream the hevc fuzz target found: a small x265 stream with its SEI removed and its slice data damaged so that cu_qp_delta_abs carries a long Exp-Golomb prefix. Decoding it once overflowed the sum of that prefix; the decoder now refuses it as an invalid cu_qp_delta_abs.
