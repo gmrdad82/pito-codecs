@@ -9,8 +9,7 @@ type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
 pub const FORMAT: i64 = 1;
 pub const PATH: &str = "bench/ffmpeg-reference.toml";
-const REMAKE: &str =
-    "re-making the inputs is `bench --record-ffmpeg`, run only on the owner's word";
+const REMAKE: &str = "re-making the inputs is `bench --record-ffmpeg`, run by hand";
 pub const SHA_CACHE: &str = ".sha256-cache";
 
 fn stamp(path: &Path) -> Res<(u64, u128)> {
@@ -338,7 +337,7 @@ impl Reference {
 
     pub fn render(&self) -> String {
         let mut out = String::from(
-            "# ffmpeg's side of the bench, recorded once with `bench --record-ffmpeg`.\n# The bench reads every ffmpeg column from this file and never runs ffmpeg;\n# re-recording is the owner's call, made only on his word.\n\n",
+            "# ffmpeg's side of the bench, recorded once with `bench --record-ffmpeg`.\n# The bench reads every ffmpeg column from this file and never runs ffmpeg;\n# re-recording is run by hand.\n\n",
         );
         out.push_str(&format!("format = {FORMAT}\n"));
         for (k, v) in [
