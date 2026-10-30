@@ -7,5 +7,6 @@ node_modules/
 /CLAUDE.md
 /prompts
 /pito-app.toml
+/.dispatch
 /bin/install
 /dev
