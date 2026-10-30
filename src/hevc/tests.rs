@@ -658,3 +658,12 @@ fn the_scaling_list_file_is_the_recorded_one() {
     assert!(text.starts_with("INTRA4X4_LUMA =\n"));
     assert!(text.contains("INTER32X32_CHROMAV_DC =\n"));
 }
+
+#[test]
+fn a_long_cu_qp_delta_abs_suffix_is_an_error_not_an_overflow() {
+    let input = include_bytes!("../../tests/fixtures/hevc/cu_qp_delta_abs_overflow.bin");
+    let mut dec = Decoder::with_threads(1);
+    let err = dec.decode(&packet(input.to_vec(), 0)).unwrap_err();
+    assert!(err.to_string().contains("invalid cu_qp_delta_abs"), "{err}");
+    let _ = dec.flush();
+}

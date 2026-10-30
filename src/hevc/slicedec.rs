@@ -1623,7 +1623,7 @@ impl<'a, P: Pel> SliceDecoder<'a, P> {
                 while self.bypass() == 1 {
                     v += 1 << k;
                     k += 1;
-                    ensure!(k < 32, "invalid cu_qp_delta_abs");
+                    ensure!(k < 16, "invalid cu_qp_delta_abs");
                 }
                 v += self.bypass_bits(k) as i32;
             }
