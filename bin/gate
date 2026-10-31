@@ -12,6 +12,22 @@ case "${1:-}" in
         ;;
 esac
 
+partition=()
+shards="${DISPATCH_SHARDS:-}"
+if [ -n "$shards" ]; then
+    shard="${DISPATCH_SHARD:-}"
+    case "$shards$shard" in
+        *[!0-9]*) shards=0 ;;
+    esac
+    if [ "$shards" = 0 ] || [ -z "$shard" ] || [ "$((10#$shards))" -lt 1 ] || [ "$((10#$shard))" -lt 1 ] || [ "$((10#$shard))" -gt "$((10#$shards))" ]; then
+        echo "gate: DISPATCH_SHARD=${DISPATCH_SHARD:-} of DISPATCH_SHARDS=${DISPATCH_SHARDS} is not a shard" >&2
+        exit 2
+    fi
+    if [ "$((10#$shards))" -gt 1 ]; then
+        partition=(--partition "count:$((10#$shard))/$((10#$shards))")
+    fi
+fi
+
 sysroot="$(rustc --print sysroot)"
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
@@ -30,6 +46,9 @@ for tool in ff''mpeg ff''probe; do
     chmod +x "$stubs/$tool"
 done
 tests=(env "PATH=$stubs:$PATH" cargo nextest run --cargo-profile ci --all-targets --no-fail-fast)
+if [ "${#partition[@]}" -gt 0 ]; then
+    tests+=("${partition[@]}")
+fi
 if command -v prlimit >/dev/null 2>&1; then
     prlimit --core=1:1 -- "${tests[@]}"
 else
