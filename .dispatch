@@ -1,0 +1,13 @@
+name = "pito-codecs"
+
+[gate]
+fast = "cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo clippy --lib --no-default-features --features audio,mp3,opus,ac3 -- -D warnings"
+full = ".dev/bin/gate-full"
+
+[commands]
+release = ".dev/bin/release"
+deploy = ""
+
+[[test_track.jobs]]
+name = "full"
+command = ".dev/bin/gate-full"
