@@ -544,6 +544,52 @@ impl Sound {
         }
     }
 
+    pub fn sized_frames(&self, bytes: u32) -> Option<u64> {
+        match self {
+            Sound::Pcm(_) => self.pcm_frames(bytes),
+            Sound::Aac(_) => Some(1024),
+            _ => None,
+        }
+    }
+
+    pub fn packet_frames(&self, data: &[u8]) -> Option<u64> {
+        match self {
+            Sound::Pcm(_) | Sound::Aac(_) => self.sized_frames(u32::try_from(data.len()).ok()?),
+            #[cfg(feature = "ac3")]
+            Sound::Ac3(_) => crate::ac3::packet_frames(data),
+            #[cfg(feature = "opus")]
+            Sound::Opus(_) => {
+                let toc = *data.first()?;
+                let count = match toc & 3 {
+                    0 => 1,
+                    1 | 2 => 2,
+                    _ => usize::from(*data.get(1)? & 0x3f),
+                };
+                Some((crate::opus::Toc::parse(toc).frame_samples(self.rate()) * count) as u64)
+            }
+            #[cfg(feature = "mp3")]
+            Sound::Mp3(_) => crate::mp3::packet_frames(data),
+            #[cfg(feature = "flac")]
+            Sound::Flac(_) => None,
+            #[cfg(feature = "alac")]
+            Sound::Alac(_) => None,
+            #[cfg(feature = "vorbis")]
+            Sound::Vorbis(_) => None,
+        }
+    }
+
+    pub fn uncounted(&self) -> Option<&'static str> {
+        match self {
+            #[cfg(feature = "flac")]
+            Sound::Flac(_) => Some("FLAC"),
+            #[cfg(feature = "alac")]
+            Sound::Alac(_) => Some("ALAC"),
+            #[cfg(feature = "vorbis")]
+            Sound::Vorbis(_) => Some("Vorbis"),
+            _ => None,
+        }
+    }
+
     pub fn pre_roll(&self) -> f64 {
         match self {
             #[cfg(feature = "opus")]
