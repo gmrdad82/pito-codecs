@@ -1,15 +1,42 @@
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::{OnceLock, mpsc};
 
 use crate::aac::Resampler;
 
 use super::bare::{self, BareFeed};
 use super::base::{self as native, PAD, shape};
-use super::feed::Feed;
+use super::feed::{Count, Feed};
 use super::probe::probe;
 use super::route::Prefs;
 use super::sound::Sound;
 use crate::media::{AudioBuffer, Error, Result, Route};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Padding {
+    pub lead_frames: u64,
+    pub tail_frames: u64,
+    pub rate: u32,
+}
+
+impl Padding {
+    pub fn lead_seconds(&self) -> f64 {
+        self.lead_frames as f64 / f64::from(self.rate.max(1))
+    }
+
+    pub fn tail_seconds(&self) -> f64 {
+        self.tail_frames as f64 / f64::from(self.rate.max(1))
+    }
+
+    pub fn is_none(&self) -> bool {
+        self.lead_frames == 0 && self.tail_frames == 0
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Span {
+    padding: Padding,
+    content: u64,
+}
 
 pub struct AudioStream {
     pub route: Route,
@@ -30,7 +57,7 @@ impl std::fmt::Debug for AudioStream {
 
 enum Inner {
     Native(Box<Native>),
-    Mix(Vec<Part>),
+    Mix(Mix),
     Done,
 }
 
@@ -58,6 +85,12 @@ struct Native {
     fed: usize,
     out: Vec<f32>,
     drop: usize,
+    pre: usize,
+    pad: bool,
+    settled: bool,
+    fill: usize,
+    tail: usize,
+    span: OnceLock<Span>,
     sent: usize,
     start: usize,
     eof: bool,
@@ -69,7 +102,7 @@ pub fn audio_stream(
     from: f64,
     rate: u32,
     channels: u16,
-    _: &Prefs,
+    prefs: &Prefs,
 ) -> Result<AudioStream> {
     if rate == 0 || channels == 0 {
         return Err(Error::Invalid(format!(
@@ -79,7 +112,7 @@ pub fn audio_stream(
     if !from.is_finite() {
         return Err(Error::Invalid(format!("a stream from {from}")));
     }
-    let native = Native::open(path, track, from, rate, channels)?;
+    let native = Native::open(path, track, from, rate, channels, prefs.pad_audio)?;
     Ok(AudioStream {
         route: Route::Cpu,
         rate,
@@ -102,11 +135,15 @@ pub fn audio_mix_stream(
         return Err(Error::Invalid(format!("a stream from {from}")));
     }
     let mut parts = Vec::new();
+    let padded = Prefs {
+        pad_audio: true,
+        ..prefs.clone()
+    };
     for t in probe(path, prefs)?.audio {
         let gain = gains.get(t.index).copied().unwrap_or(1.0);
         if gain > 0.0 {
             parts.push(Part {
-                stream: audio_stream(path, t.index, from, rate, 2, prefs)?,
+                stream: audio_stream(path, t.index, from, rate, 2, &padded)?,
                 gain,
                 pending: Vec::new(),
                 at: 0,
@@ -114,12 +151,77 @@ pub fn audio_mix_stream(
             });
         }
     }
-    Ok(AudioStream {
+    let mut stream = AudioStream {
         route: Route::Cpu,
         rate,
         channels: 2,
-        inner: Inner::Mix(parts),
-    })
+        inner: Inner::Mix(Mix {
+            parts,
+            skip: 0,
+            left: None,
+        }),
+    };
+    if !prefs.pad_audio {
+        let span = stream.span()?;
+        if let Inner::Mix(m) = &mut stream.inner {
+            m.skip = span.padding.lead_frames;
+            m.left = Some(span.content.saturating_sub(span.padding.lead_frames));
+        }
+    }
+    Ok(stream)
+}
+
+struct Mix {
+    parts: Vec<Part>,
+    skip: u64,
+    left: Option<u64>,
+}
+
+impl Mix {
+    fn read(&mut self, rate: u32) -> Result<Option<AudioBuffer>> {
+        loop {
+            if self.left == Some(0) {
+                return Ok(None);
+            }
+            let Some(mut b) = mix(&mut self.parts, rate)? else {
+                return Ok(None);
+            };
+            let frames = b.frames() as u64;
+            let drop = self.skip.min(frames);
+            self.skip -= drop;
+            b.samples.drain(..drop as usize * 2);
+            if let Some(left) = self.left.as_mut() {
+                let keep = (*left).min(frames - drop);
+                *left -= keep;
+                b.samples.truncate(keep as usize * 2);
+            }
+            if !b.samples.is_empty() {
+                return Ok(Some(b));
+            }
+        }
+    }
+
+    fn span(&self) -> Result<Span> {
+        let mut lead = u64::MAX;
+        let mut content = 0u64;
+        let mut total = 0u64;
+        let mut rate = 0;
+        for p in &self.parts {
+            let s = p.stream.span()?;
+            rate = s.padding.rate;
+            lead = lead.min(s.padding.lead_frames);
+            content = content.max(s.content);
+            total = total.max(s.content + s.padding.tail_frames);
+        }
+        Ok(Span {
+            padding: Padding {
+                lead_frames: if self.parts.is_empty() { 0 } else { lead },
+                tail_frames: total.saturating_sub(content),
+                rate,
+            },
+            content,
+        })
+    }
 }
 
 fn mix(parts: &mut [Part], rate: u32) -> Result<Option<AudioBuffer>> {
@@ -200,10 +302,24 @@ impl Source {
             Source::Bare(f) => f.end(),
         }
     }
+
+    fn lead_total(&self) -> Option<usize> {
+        match self {
+            Source::Feed(f) => f.lead_total(),
+            Source::Bare(_) => Some(0),
+        }
+    }
 }
 
 impl Native {
-    fn open(path: &Path, track: usize, from: f64, rate: u32, channels: u16) -> Result<Native> {
+    fn open(
+        path: &Path,
+        track: usize,
+        from: f64,
+        rate: u32,
+        channels: u16,
+        pad_audio: bool,
+    ) -> Result<Native> {
         let start = (from.max(0.0) * rate as f64).round() as usize;
         let feed = match bare::sniff(path) {
             Some(kind) => {
@@ -217,7 +333,7 @@ impl Native {
                 let pad = Sound::open(&d, i)?.pre_roll().max(PAD);
                 let pad = start.min((pad * rate as f64).round() as usize);
                 let t0 = (start - pad) as f64 / rate as f64;
-                (Source::Feed(Feed::open(&d, i, t0)?), pad)
+                (Source::Feed(Feed::open_with(&d, i, t0, pad_audio)?), pad)
             }
         };
         let (feed, pad) = feed;
@@ -245,6 +361,12 @@ impl Native {
             fed: 0,
             out: Vec::new(),
             drop: pad,
+            pre: pad,
+            pad: pad_audio,
+            settled: pad_audio,
+            fill: 0,
+            tail: 0,
+            span: OnceLock::new(),
             sent: 0,
             start,
             eof: false,
@@ -268,6 +390,12 @@ impl Native {
     }
 
     fn keep(&mut self, buf: AudioBuffer) {
+        if !self.settled
+            && let Some(lead) = self.feed.lead_total()
+        {
+            self.drop = self.drop.saturating_sub(self.to_out(lead));
+            self.settled = true;
+        }
         let ch = self.channels as usize;
         let frames = buf.samples.len() / ch;
         let drop = self.drop.min(frames);
@@ -281,25 +409,37 @@ impl Native {
         let batch = self.feed.rate() as usize;
         self.raw.clear();
         let mut ended = false;
-        loop {
-            let have = self.fed + self.raw.len() / src_ch;
-            if let Some(w) = self.feed.want()
-                && have >= w
-            {
-                ended = true;
-                break;
+        if self.fill > 0 {
+            let n = self.fill.min(batch.max(1));
+            self.raw.resize(n * src_ch, 0.0);
+            self.fill -= n;
+            ended = self.fill == 0;
+        } else {
+            loop {
+                let have = self.fed + self.raw.len() / src_ch;
+                if let Some(w) = self.feed.want()
+                    && have >= w
+                {
+                    ended = true;
+                    break;
+                }
+                if self.raw.len() / src_ch >= batch {
+                    break;
+                }
+                if !self.feed.next(&mut self.raw)? {
+                    ended = true;
+                    break;
+                }
             }
-            if self.raw.len() / src_ch >= batch {
-                break;
+            if ended && let Some(w) = self.feed.want() {
+                let keep = w.saturating_sub(self.fed) * src_ch;
+                if self.pad && keep > self.raw.len() {
+                    self.fill = (keep - self.raw.len()) / src_ch;
+                    ended = self.fill == 0;
+                } else {
+                    self.raw.truncate(keep);
+                }
             }
-            if !self.feed.next(&mut self.raw)? {
-                ended = true;
-                break;
-            }
-        }
-        if ended && let Some(w) = self.feed.want() {
-            let keep = w.saturating_sub(self.fed) * src_ch;
-            self.raw.resize(keep, 0.0);
         }
         self.fed += self.raw.len() / src_ch;
         let mut buf = AudioBuffer::new(self.feed.rate(), self.feed.channels());
@@ -321,16 +461,91 @@ impl Native {
             if length > 0.0 {
                 let end = ((length * self.rate as f64).round() as usize).max(self.start);
                 let total = (end - self.start).saturating_sub(self.sent);
-                self.out.resize(total * self.channels as usize, 0.0);
+                let ch = self.channels as usize;
+                let have = self.out.len() / ch;
+                if have >= total {
+                    self.out.truncate(total * ch);
+                } else if self.pad {
+                    self.tail = total - have;
+                }
             }
         }
         Ok(())
+    }
+
+    fn to_out(&self, n: usize) -> usize {
+        (n as f64 * self.rate as f64 / self.feed.rate().max(1) as f64).round() as usize
+    }
+
+    fn resampled(&self, n: usize) -> usize {
+        let from = self.feed.rate().max(1) as u128;
+        (n as u128 * self.rate as u128).div_ceil(from) as usize
+    }
+
+    fn span(&self) -> Result<Span> {
+        if let Some(s) = self.span.get() {
+            return Ok(*s);
+        }
+        let c = match &self.feed {
+            Source::Bare(f) => Count {
+                lead: 0,
+                frames: usize::try_from(f.left()).unwrap_or(usize::MAX),
+                want: None,
+                end: f.end(),
+            },
+            Source::Feed(f) => f.count()?,
+        };
+        let lead = self.to_out(c.lead);
+        let total = (c.end > 0.0).then(|| {
+            ((c.end * self.rate as f64).round() as usize)
+                .max(self.start)
+                .saturating_sub(self.start)
+        });
+        let padded = match (c.want, total) {
+            (_, Some(t)) => t,
+            (Some(w), None) => self.resampled(w).saturating_sub(self.pre),
+            (None, None) => self
+                .resampled(c.lead.saturating_add(c.frames))
+                .saturating_sub(self.pre),
+        };
+        let fed = match c.want {
+            Some(w) => c.frames.min(w.saturating_sub(c.lead)),
+            None => c.frames,
+        };
+        let mut exact = self
+            .resampled(fed)
+            .saturating_sub(self.pre.saturating_sub(lead));
+        if let Some(t) = total {
+            exact = exact.min(t);
+        }
+        let held = match c.want {
+            Some(w) => c.lead.saturating_add(c.frames).min(w),
+            None => c.lead.saturating_add(c.frames),
+        };
+        let content = self.resampled(held).saturating_sub(self.pre).min(padded);
+        let lead = content.saturating_sub(exact);
+        let s = Span {
+            padding: Padding {
+                lead_frames: lead as u64,
+                tail_frames: padded.saturating_sub(content) as u64,
+                rate: self.rate,
+            },
+            content: content as u64,
+        };
+        let _ = self.span.set(s);
+        Ok(s)
     }
 
     fn read(&mut self) -> Result<Option<AudioBuffer>> {
         let block = self.rate as usize * self.channels as usize;
         while self.out.len() < block && !self.eof {
             self.pump()?;
+        }
+        if self.eof && self.tail > 0 && self.out.len() < block {
+            let ch = self.channels as usize;
+            let n = self.tail.min((block - self.out.len()) / ch);
+            self.out.resize(self.out.len() + n * ch, 0.0);
+            self.tail -= n;
         }
         if self.out.is_empty() {
             return Ok(None);
@@ -355,7 +570,7 @@ pub(super) fn native_stream(
             "a stream from {from} at {rate} Hz with {channels} channels"
         )));
     }
-    let n = Native::open(path, track, from, rate, channels)?;
+    let n = Native::open(path, track, from, rate, channels, true)?;
     Ok(AudioStream {
         route: Route::Cpu,
         rate,
@@ -365,10 +580,24 @@ pub(super) fn native_stream(
 }
 
 impl AudioStream {
+    pub fn padded(&self) -> Result<Padding> {
+        self.span().map(|s| s.padding)
+    }
+
+    fn span(&self) -> Result<Span> {
+        match &self.inner {
+            Inner::Native(n) => n.span(),
+            Inner::Mix(m) => m.span(),
+            Inner::Done => Err(Error::Invalid(
+                "the silence of a stream that has failed".to_string(),
+            )),
+        }
+    }
+
     fn read(&mut self) -> Result<Option<AudioBuffer>> {
         match &mut self.inner {
             Inner::Native(n) => n.read(),
-            Inner::Mix(parts) => mix(parts, self.rate),
+            Inner::Mix(m) => m.read(self.rate),
             Inner::Done => Ok(None),
         }
     }

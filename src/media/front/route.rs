@@ -20,6 +20,7 @@ pub struct Prefs {
     pub decode: Choice,
     pub encode: Choice,
     pub hevc_encode_fallback: Vec<Fallback>,
+    pub pad_audio: bool,
 }
 
 impl Default for Prefs {
@@ -28,6 +29,7 @@ impl Default for Prefs {
             decode: Choice::Auto,
             encode: Choice::Auto,
             hevc_encode_fallback: vec![Fallback::H264Gpu, Fallback::H264Cpu],
+            pad_audio: true,
         }
     }
 }
