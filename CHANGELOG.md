@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.16.4 — 2026-11-01
+
+### Added
+
+- `AudioStream::padded()` reports the silence a stream pads, lead and tail, as a `Padding` of frames at the stream's rate (with `lead_seconds()` and `tail_seconds()`): the lead where a track starts after the file does, the tail where a track's timeline runs past what its packets decode to. It counts the packets' frames itself (AAC, PCM, Opus, MP3, AC-3 and E-AC-3), once per stream.
+- `Prefs::pad_audio` (on by default): off, `audio_stream` decodes exactly the packets' frames, with no silence at either end, so a caller can refuse or trim a padded track itself. `audio_mix_stream` keeps its tracks aligned and trims the mix's own ends.
+
+### Fixed
+
+- A track whose timeline declares far more than its packets hold (hours of lead or tail) no longer pads it in one allocation: the silence comes out a block at a time.
+
 ## v1.16.3 — 2026-10-19
 
 ### Added

@@ -93,6 +93,39 @@ fn match_frame(b: &[u8], frame_bytes: usize) -> bool {
     true
 }
 
+pub fn packet_frames(data: &[u8]) -> Option<u64> {
+    let mut p = 0;
+    let mut frames = 0u64;
+    let mut free = 0;
+    let mut found = false;
+    while p + HDR_SIZE <= data.len() {
+        let rest = &data[p..];
+        let h = Head::at(rest, 0)?;
+        let size = if h.valid() {
+            match h.frame_bytes(0) {
+                0 => rest.len(),
+                fb => fb + h.padding(),
+            }
+        } else {
+            0
+        };
+        let (at, size) = if size != 0 && size <= rest.len() {
+            (0, size)
+        } else {
+            let (i, size) = find_frame(rest, &mut free);
+            if size == 0 || i + size > rest.len() {
+                break;
+            }
+            (i, size)
+        };
+        let h = Head::at(&rest[at..at + size], 0)?;
+        frames += h.frame_samples() as u64;
+        found = true;
+        p += at + size;
+    }
+    found.then_some(frames)
+}
+
 fn find_frame(mp3: &[u8], free_format_bytes: &mut usize) -> (usize, usize) {
     let n = mp3.len();
     for i in 0..n.saturating_sub(HDR_SIZE) {

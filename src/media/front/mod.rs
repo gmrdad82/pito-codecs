@@ -104,6 +104,8 @@ mod mux;
     feature = "vp9"
 ))]
 mod native;
+#[cfg(all(test, feature = "aac", feature = "mp4", feature = "mkv"))]
+mod padded;
 #[cfg(all(
     feature = "h264",
     feature = "hevc",
@@ -268,7 +270,9 @@ pub use sound::Pcm;
     feature = "vp9"
 ))]
 pub use still::{Seek, Stills, first_frame, frames_at, frames_at_seek};
-pub use stream::{AudioSpan, AudioStream, audio_mix_stream, audio_stream, decode_audio_span};
+pub use stream::{
+    AudioSpan, AudioStream, Padding, audio_mix_stream, audio_stream, decode_audio_span,
+};
 #[cfg(all(
     feature = "h264",
     feature = "hevc",

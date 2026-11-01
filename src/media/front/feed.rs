@@ -11,6 +11,14 @@ use crate::media::{Error, Result};
 const LEAD: f64 = 0.5;
 const TAIL: f64 = 10.0;
 const GAP: f64 = 0.001;
+const CHUNK: usize = 1 << 16;
+
+pub struct Count {
+    pub lead: usize,
+    pub frames: usize,
+    pub want: Option<usize>,
+    pub end: f64,
+}
 
 pub struct Feed {
     sound: Sound,
@@ -21,6 +29,9 @@ pub struct Feed {
     start: f64,
     origin: Option<f64>,
     lead: usize,
+    lead_total: Option<usize>,
+    pad: bool,
+    parked: Option<(usize, usize)>,
     skip: Option<usize>,
     skipped: usize,
     buf: Vec<u8>,
@@ -32,6 +43,7 @@ enum At {
     Indexed {
         d: Demux,
         i: usize,
+        first: usize,
         next: usize,
         count: usize,
         end: f64,
@@ -41,6 +53,10 @@ enum At {
 
 impl Feed {
     pub fn open(d: &Demux, i: usize, from: f64) -> Result<Feed> {
+        Feed::open_with(d, i, from, true)
+    }
+
+    pub fn open_with(d: &Demux, i: usize, from: f64, pad: bool) -> Result<Feed> {
         let sound = Sound::open(d, i)?;
         let starts = d.starts();
         let base = starts.file;
@@ -64,6 +80,7 @@ impl Feed {
                 let at = At::Indexed {
                     d: d.clone(),
                     i,
+                    first,
                     next: first,
                     count: t.samples.len(),
                     end: (lead + t.duration_seconds()).max(0.0),
@@ -86,6 +103,9 @@ impl Feed {
             start,
             origin,
             lead: 0,
+            lead_total: None,
+            pad,
+            parked: None,
             skip: None,
             skipped: 0,
             buf: Vec::new(),
@@ -94,9 +114,19 @@ impl Feed {
         };
         if feed.origin.is_none() {
             feed.skip = Some(feed.skip_from(start));
-            feed.lead = feed.lead_to(start);
+            feed.set_lead(start);
         }
         Ok(feed)
+    }
+
+    fn set_lead(&mut self, start: f64) {
+        let lead = self.lead_to(start);
+        self.lead_total = Some(lead);
+        self.lead = if self.pad { lead } else { 0 };
+    }
+
+    pub fn lead_total(&self) -> Option<usize> {
+        self.lead_total
     }
 
     fn lead_to(&self, start: f64) -> usize {
@@ -130,14 +160,105 @@ impl Feed {
     pub fn want(&self, to: f64) -> Option<usize> {
         let end = self.end();
         let to = if end > 0.0 { to.min(end) } else { to };
-        to.is_finite().then(|| {
-            ((to + self.base - self.from) * self.rate as f64)
-                .round()
-                .max(0.0) as usize
+        let lead = if self.pad {
+            0
+        } else {
+            self.lead_total.unwrap_or(0)
+        };
+        to.is_finite().then(|| self.reach(to).saturating_sub(lead))
+    }
+
+    fn reach(&self, to: f64) -> usize {
+        ((to + self.base - self.from) * self.rate as f64)
+            .round()
+            .max(0.0) as usize
+    }
+
+    fn uncounted(&self, n: usize) -> Error {
+        Error::Invalid(format!(
+            "audio packet {n} holds no frames our decoders read"
+        ))
+    }
+
+    pub fn count(&self) -> Result<Count> {
+        let mut frames = 0u64;
+        let mut first = None;
+        let (start, origin, end) = match &self.at {
+            At::Indexed {
+                d,
+                i,
+                first: f,
+                count,
+                ..
+            } => {
+                let mut buf = Vec::new();
+                for k in *f..*count {
+                    let size = match d {
+                        Demux::Mp4(r) => r
+                            .tracks
+                            .get(*i)
+                            .and_then(|t| t.samples.get(k))
+                            .map_or(0, |s| s.size),
+                        Demux::Mkv(_) => 0,
+                    };
+                    let n = match self.sound.sized_frames(size) {
+                        Some(n) => n,
+                        None => {
+                            d.read_into(*i, k, &mut buf)?;
+                            self.sound
+                                .packet_frames(&buf)
+                                .ok_or_else(|| self.uncounted(k))?
+                        }
+                    };
+                    frames += n;
+                }
+                (self.start, self.origin, self.end())
+            }
+            At::Mkv(l) => {
+                let (mut lazy, start, origin) =
+                    Lazy::open(l.r.clone(), l.i, self.from, &self.sound)?;
+                let mut k = 0;
+                while let Some(data) = lazy.take(&self.sound)? {
+                    let n = self
+                        .sound
+                        .packet_frames(&data)
+                        .ok_or_else(|| self.uncounted(k))?;
+                    first.get_or_insert(n);
+                    frames += n;
+                    k += 1;
+                    lazy.spare.push(data);
+                }
+                let end = match lazy.end(&self.sound) {
+                    e if e > 0.0 => (e - self.base).max(0.0),
+                    _ => 0.0,
+                };
+                (start, origin, end)
+            }
+        };
+        let start = match origin {
+            Some(o) => on_grid(start, o, first.unwrap_or(0) as f64 / self.rate as f64),
+            None => start,
+        };
+        let frames = usize::try_from(frames).unwrap_or(usize::MAX);
+        Ok(Count {
+            lead: self.lead_to(start),
+            frames: frames.saturating_sub(self.skip_from(start)),
+            want: (end > 0.0).then(|| self.reach(end)),
+            end,
         })
     }
 
     pub fn next(&mut self, out: &mut Vec<f32>) -> Result<bool> {
+        if self.lead > 0 {
+            let n = self.lead.min(CHUNK);
+            out.resize(out.len() + n * self.channels as usize, 0.0);
+            self.lead -= n;
+            return Ok(true);
+        }
+        if let Some((from, to)) = self.parked.take() {
+            out.extend_from_slice(self.pcm.get(from..to).unwrap_or_default());
+            return Ok(true);
+        }
         let data = match &mut self.at {
             At::Indexed {
                 d, i, next, count, ..
@@ -171,17 +292,17 @@ impl Feed {
                 };
                 let s = self.skip_from(start);
                 self.skip = Some(s);
-                self.lead = self.lead_to(start);
+                self.set_lead(start);
                 s
             }
         };
-        if self.lead > 0 && got == self.channels {
-            out.resize(out.len() + self.lead * ch, 0.0);
-            self.lead = 0;
-        }
         let drop = skip.saturating_sub(self.skipped).min(frames);
         self.skipped += drop;
         if got == self.channels {
+            if self.lead > 0 {
+                self.parked = Some((drop * ch, frames * ch));
+                return Ok(true);
+            }
             out.extend_from_slice(self.pcm.get(drop * ch..frames * ch).unwrap_or_default());
         }
         Ok(true)

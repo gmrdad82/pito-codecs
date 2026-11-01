@@ -41,6 +41,7 @@ fn native_prefs(prefs: &Prefs, reasons: &mut Vec<String>) -> Prefs {
         decode: Choice::Auto,
         encode,
         hevc_encode_fallback: prefs.hevc_encode_fallback.clone(),
+        pad_audio: prefs.pad_audio,
     }
 }
 

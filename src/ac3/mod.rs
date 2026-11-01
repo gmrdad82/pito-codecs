@@ -18,6 +18,24 @@ use imdct::Imdct;
 
 use crate::media::{AudioBuffer, Error, Packet, Result};
 
+pub fn packet_frames(data: &[u8]) -> Option<u64> {
+    let mut pos = 0;
+    let mut frames = 0u64;
+    let mut open = false;
+    while data.len() - pos >= 6 {
+        let h = header::parse(&data[pos..]).ok()?;
+        if h.bytes == 0 || h.bytes > data.len() - pos {
+            return None;
+        }
+        pos += h.bytes;
+        if matches!(h.kind, Kind::Independent | Kind::Convert) && h.substream == 0 {
+            frames += h.blocks as u64 * 256;
+            open = true;
+        }
+    }
+    open.then_some(frames)
+}
+
 const K: f32 = std::f32::consts::FRAC_1_SQRT_2;
 const MAX_SAMPLES: usize = 1536;
 
