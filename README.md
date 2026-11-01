@@ -22,7 +22,7 @@ Got questions or doubts? Ping me on Discord: https://discord.gg/XsNcn3kYzn
 
 ## Install and first use
 
-pcod, the command line over the library, comes with every [GitHub Release](https://github.com/gmrdad82/pito-codecs/releases/latest) for Linux x86-64, Windows x86-64 and macOS on Apple Silicon. These lines fetch the latest release.
+pcod, the command line over the library, comes with every [GitHub Release](https://github.com/gmrdad82/pito-codecs/releases/latest) for Linux x86-64 and Windows x86-64. macOS installs from source. These lines fetch the latest release.
 
 Linux x86-64:
 
@@ -32,12 +32,10 @@ curl -fsSLO "https://github.com/gmrdad82/pito-codecs/releases/download/$v/pcod-$
 tar -xzf "pcod-$v-linux-x86_64.tar.gz" pcod && install -Dm755 pcod ~/.local/bin/pcod
 ```
 
-macOS on Apple Silicon:
+macOS on Apple Silicon, from source with Rust stable (the macOS build is untested):
 
 ```sh
-v=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/gmrdad82/pito-codecs/releases/latest); v=${v##*/}
-curl -fsSLO "https://github.com/gmrdad82/pito-codecs/releases/download/$v/pcod-$v-macos-arm64.tar.gz"
-tar -xzf "pcod-$v-macos-arm64.tar.gz" pcod && sudo install -m755 pcod /usr/local/bin/pcod
+cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag v3.1.0 pito-codecs --bin pcod
 ```
 
 Windows x86-64, in PowerShell:
@@ -278,7 +276,7 @@ The front tries the GPU first and our own CPU code second, for every decode and 
 
 The NVIDIA paths are built and unit-tested but untested on NVIDIA hardware here; contributions from people with NVIDIA cards are welcome.
 
-The CPU codecs target Linux x86-64 and arm64, Windows x86-64 and macOS on Apple Silicon, with AVX2 kernels on x86-64 and NEON or portable paths on arm64. Every merge is checked for all four (format, lints and a full type-check) and runs the whole test suite on Linux x86-64; every release also runs the suite on an Apple Silicon Mac and the GPU suite on the AMD card above, and builds the Linux x86-64, Windows x86-64 and macOS binaries. No hosted CI runs this repository.
+The CPU codecs target Linux x86-64 and arm64, Windows x86-64 and macOS on Apple Silicon, with AVX2 kernels on x86-64 and NEON or portable paths on arm64. Every merge is checked for all four (format, lints and a full type-check) and runs the whole test suite on Linux x86-64; every release also runs the suite on an Apple Silicon Mac and the GPU suite on the AMD card above, and builds the Linux x86-64 and Windows x86-64 binaries. No hosted CI runs this repository.
 
 ## Small and simple
 
@@ -469,7 +467,7 @@ cargo test --release
 
 The tests use the system ffmpeg as an oracle when it is installed and skip those checks when it is not, and the GPU tests skip cleanly without a device. `bin/gate` runs rustfmt, clippy with warnings as errors (also with only the audio features, and for Windows, macOS and Linux on ARM when their std is installed), the tests through cargo-nextest, then a release build (`--fast` skips the build). `bin/docs-bundle vX.Y.Z [out dir]` builds `docs-vX.Y.Z.tar.gz`, the documentation each Release carries: the guides in `docs/site`, a command reference made from pcod's own help, the API reference from `cargo doc` and the changelog.
 
-Every change is checked on the maintainer's machines before it merges: formatting, clippy with warnings as errors, the tests with ffmpeg as the oracle, and the doc tests. Every release runs the full suite and builds pcod for Linux x86-64, Windows x86-64 and macOS on Apple Silicon there too, along with the VA-API tests and the benchmarks on an AMD card; the GitHub Release carries those binaries and their checksums. Media Foundation, NVENC and VideoToolbox are built for their systems; Media Foundation and NVENC have not run on their hardware here.
+Every change is checked on the maintainer's machines before it merges: formatting, clippy with warnings as errors, the tests with ffmpeg as the oracle, and the doc tests. Every release runs the full suite and builds pcod for Linux x86-64 and Windows x86-64 there too, along with the VA-API tests and the benchmarks on an AMD card; the GitHub Release carries those binaries and their checksums. Media Foundation, NVENC and VideoToolbox are built for their systems; Media Foundation and NVENC have not run on their hardware here.
 
 ## Contributing
 
