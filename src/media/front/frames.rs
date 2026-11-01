@@ -32,6 +32,7 @@ fn native_prefs(prefs: &Prefs) -> Prefs {
         decode: Choice::Auto,
         encode: prefs.encode.clone(),
         hevc_encode_fallback: prefs.hevc_encode_fallback.clone(),
+        pad_audio: prefs.pad_audio,
     }
 }
 

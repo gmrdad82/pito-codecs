@@ -230,6 +230,7 @@ pub struct BareFeed {
     pub rate: u32,
     pub channels: u16,
     frames: u64,
+    first: u64,
     src: Src,
 }
 
@@ -245,6 +246,7 @@ impl BareFeed {
                     rate: r.layout.rate,
                     channels: r.layout.channels,
                     frames: r.layout.frames(),
+                    first: 0,
                     src: Src::Wav(Box::new(r)),
                 }
             }
@@ -255,6 +257,7 @@ impl BareFeed {
                     rate: b.rate,
                     channels: b.channels,
                     frames: b.frames() as u64,
+                    first: 0,
                     src: Src::Memory(b, 0),
                 }
             }
@@ -266,6 +269,7 @@ impl BareFeed {
                     rate: i.rate,
                     channels: u16::from(i.channels),
                     frames: r.total()?,
+                    first: 0,
                     src: Src::Flac(Box::new(r)),
                 }
             }
@@ -276,6 +280,7 @@ impl BareFeed {
                     rate: b.rate,
                     channels: b.channels,
                     frames: b.frames() as u64,
+                    first: 0,
                     src: Src::Memory(b, 0),
                 }
             }
@@ -286,6 +291,7 @@ impl BareFeed {
                     rate: b.rate,
                     channels: b.channels,
                     frames: b.frames() as u64,
+                    first: 0,
                     src: Src::Memory(b, 0),
                 }
             }
@@ -298,6 +304,7 @@ impl BareFeed {
             )));
         }
         let first = ((from.max(0.0) * f64::from(feed.rate)).round() as u64).min(feed.frames);
+        feed.first = first;
         if first > 0 {
             match &mut feed.src {
                 Src::Wav(r) => r.seek(first),
@@ -307,6 +314,10 @@ impl BareFeed {
             }
         }
         Ok(feed)
+    }
+
+    pub fn left(&self) -> u64 {
+        self.frames - self.first
     }
 
     pub fn end(&self) -> f64 {
