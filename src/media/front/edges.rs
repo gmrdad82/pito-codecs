@@ -378,6 +378,52 @@ fn tags_on_va(src: &Path, codec: Codec, tag: &str) {
     keeps_the_look(src, &e, codec, first, tag);
 }
 
+fn forty_edges(src: &Path, choice: Choice, name: &str) -> (Exported, Duration) {
+    let pieces: Vec<Piece> = (0..40)
+        .map(|k| Piece {
+            path: src.to_path_buf(),
+            from: 0.12 + 1.2 * k as f64,
+            to: 1.07 + 1.2 * k as f64,
+        })
+        .collect();
+    let opts = ExportOptions {
+        video: Codec::H264,
+        prefs: Prefs {
+            decode: choice.clone(),
+            encode: choice,
+            ..Prefs::default()
+        },
+        ..ExportOptions::default()
+    };
+    let out = dir().join(name);
+    let start = Instant::now();
+    let done = export(&out, &pieces, opts, |_| true).unwrap();
+    (done, start.elapsed())
+}
+
+#[test]
+#[ignore]
+fn forty_1080p_h264_edges_on_the_card_and_on_the_cpu() {
+    if !ready(Codec::H264) {
+        return;
+    }
+    let mut clip = Clip::new(refs::BIG, (refs::FPS, 1), 490);
+    clip.gop = refs::GOP;
+    let src = clip
+        .video_only()
+        .make(refs::AREA, "edges-h264-1080p-long.mp4");
+    for round in 0..2 {
+        for (choice, label) in [(Choice::Gpu, "gpu"), (Choice::Cpu, "cpu")] {
+            let (e, wall) = forty_edges(&src, choice, &format!("edges-forty-{label}.mp4"));
+            report(
+                &format!("round {round} {label} route {:?}", e.video.route),
+                &e,
+                wall,
+            );
+        }
+    }
+}
+
 #[test]
 fn a_1080p_h264_cut_on_va_api_opens_its_sessions_once_and_keeps_the_sources_tags() {
     if !ready(Codec::H264) {
