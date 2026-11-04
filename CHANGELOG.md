@@ -1,10 +1,15 @@
 # Changelog
 
-## Unreleased
+## v3.2.0 — 2026-11-04
 
 ### Added
 
 - `export_dmabufs` and `HwEncoder::encode_dmabuf` (Linux) take a frame as a dmabuf, with no readback: NV12 or 8-bit RGB (`DRM_FORMAT_ARGB8888`, `XRGB8888`, `ABGR8888`, `XBGR8888`) in any modifier the card imports, converted to NV12 on the GPU by VA-API's video processor and encoded in place. A `DmaImage` carries the fourcc, modifier, and each plane's fd, offset and pitch, and says how the caller's rendering is known to be finished (`DmaReady::Finished` or a sync file). A `DmaFrame` may carry a `readback`: when the import fails, the buffer is on another GPU, an overlay needs the CPU or the encoder is not VA-API, that frame and the rest read back through it and `Exported::reasons` says why. Existing callers of `export_frames` and `HwEncoder` compile unchanged.
+
+### Fixed
+
+- `Probe` reads an E-AC-3 track's first frame and reports what decode refuses as not native, naming why: enhanced coupling, a reduced sample rate (16 to 24 kHz) and a reserved bitstream id. A later frame that turns on enhanced coupling is still refused by decode. A track with no readable first frame stays native.
+- The README's test note says what the tests do: they check against recorded references and never run ffmpeg. The README and the install guide point macOS at a source build, as Releases carry no macOS archive since v3.1.0.
 
 ## v3.1.0 — 2026-11-01
 

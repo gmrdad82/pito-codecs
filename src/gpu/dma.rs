@@ -146,8 +146,12 @@ impl DmaImage {
                 u64::from(self.height / 2)
             };
             let end = u64::from(p.offset) + u64::from(p.pitch) * rows;
-            let known = length.max(end);
-            let size = u32::try_from(known)
+            if length > 0 && end > length {
+                return Err(format!(
+                    "plane {i} ends at byte {end}, past its buffer of {length} bytes"
+                ));
+            }
+            let size = u32::try_from(length.max(end))
                 .map_err(|_| format!("plane {i}'s buffer is larger than 4 GiB"))?;
             objects[at].size = objects[at].size.max(size);
             plane_object.push(at);
@@ -303,6 +307,33 @@ mod tests {
         assert_eq!(layout.plane_object, vec![0, 1]);
         assert_eq!(layout.objects[0].size, 64 * 32);
         assert_eq!(layout.objects[1].size, 64 * 16);
+    }
+
+    #[test]
+    fn a_plane_past_the_end_of_its_buffer_is_refused() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/dma");
+        std::fs::create_dir_all(&dir).unwrap();
+        let sized = |name: &str, bytes: u64| -> OwnedFd {
+            let file = File::create(dir.join(name)).unwrap();
+            file.set_len(bytes).unwrap();
+            file.into()
+        };
+        let whole = 256 * 32;
+        let short = image(
+            DRM_FORMAT_XRGB8888,
+            vec![plane(sized("short", whole - 1), 0, 256)],
+        );
+        assert!(short.layout().unwrap_err().contains("past its buffer"));
+        let shifted = image(
+            DRM_FORMAT_XRGB8888,
+            vec![plane(sized("shifted", whole), 4, 256)],
+        );
+        assert!(shifted.layout().unwrap_err().contains("past its buffer"));
+        let exact = image(
+            DRM_FORMAT_XRGB8888,
+            vec![plane(sized("exact", whole), 0, 256)],
+        );
+        assert_eq!(exact.layout().unwrap().objects[0].size as u64, whole);
     }
 
     #[test]
