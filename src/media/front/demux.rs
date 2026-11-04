@@ -740,7 +740,7 @@ fn mkv_audio(r: &mkv::Reader, starts: &Starts) -> Vec<AudioTrack> {
         .filter_map(|(index, i)| {
             let a = r.tracks.get(i)?;
             let name = a.name.trim();
-            let (codec, rate, refused) = super::probe::mkv_audio_codec(a);
+            let (codec, rate, refused) = super::probe::mkv_audio_codec(a, || r.read(i, 0).ok());
             Some(AudioTrack {
                 index,
                 stream: i,

@@ -376,3 +376,121 @@ fn the_window_tells_a_lost_or_extra_frame() {
     }
     assert!(diff(&refs::window::window(&full, n), &want).within(0.0, 0.0));
 }
+
+#[derive(Default)]
+struct Writer {
+    bits: Vec<bool>,
+}
+
+impl Writer {
+    fn put(&mut self, n: u32, v: u32) {
+        for i in (0..n).rev() {
+            self.bits.push(v >> i & 1 != 0);
+        }
+    }
+
+    fn bytes(&self, len: usize) -> Vec<u8> {
+        let mut out = vec![0u8; len];
+        out[0] = 0x0B;
+        out[1] = 0x77;
+        for (i, &bit) in self.bits.iter().enumerate() {
+            out[2 + i / 8] |= (bit as u8) << (7 - i % 8);
+        }
+        out
+    }
+}
+
+fn eac3_frame(fscod: u32, bsid: u32, acmod: u32, lfe: u32, coupling: Option<bool>) -> Vec<u8> {
+    let nfchans = header::NFCHANS[acmod as usize] as u32;
+    let mut w = Writer::default();
+    w.put(2, 0);
+    w.put(3, 0);
+    w.put(11, 127);
+    w.put(2, fscod);
+    if fscod == 3 {
+        w.put(2, 0);
+    } else {
+        w.put(2, 3);
+    }
+    w.put(3, acmod);
+    w.put(1, lfe);
+    w.put(5, bsid);
+    for _ in 0..if acmod == 0 { 2 } else { 1 } {
+        w.put(5, 27);
+        w.put(1, 0);
+    }
+    w.put(3, 0);
+    w.put(1, 1);
+    w.put(1, 0);
+    w.put(2, 0);
+    w.put(8, 0);
+    if acmod > 1 {
+        w.put(1, coupling.is_some() as u32);
+        for _ in 1..6 {
+            w.put(1, 0);
+        }
+    }
+    for _ in 0..6 {
+        if coupling.is_some() {
+            w.put(2, 1);
+        }
+        for _ in 0..nfchans {
+            w.put(2, 1);
+        }
+    }
+    if lfe == 1 {
+        for _ in 0..6 {
+            w.put(1, 1);
+        }
+    }
+    w.put(5 * nfchans, 0);
+    w.put(6, 0);
+    w.put(4, 0);
+    w.put(1, 0);
+    w.put(1, 0);
+    w.put(1, 0);
+    if let Some(enhanced) = coupling {
+        w.put(1, enhanced as u32);
+    }
+    w.bytes(256)
+}
+
+#[test]
+fn a_reduced_rate_frame_is_refused_by_name() {
+    let frame = eac3_frame(3, 16, 7, 1, None);
+    assert_eq!(
+        refused(&frame).as_deref(),
+        Some("E-AC-3 at a reduced sample rate (16 to 24 kHz)")
+    );
+}
+
+#[test]
+fn a_reserved_bitstream_id_is_refused_by_name() {
+    for bsid in [17, 21, 31] {
+        let frame = eac3_frame(0, bsid, 7, 1, None);
+        assert_eq!(refused(&frame), Some(format!("E-AC-3 bitstream id {bsid}")));
+    }
+}
+
+#[test]
+fn enhanced_coupling_is_refused_by_name() {
+    let frame = eac3_frame(0, 16, 2, 0, Some(true));
+    assert_eq!(refused(&frame).as_deref(), Some("E-AC-3 enhanced coupling"));
+}
+
+#[test]
+fn plain_coupling_and_plain_5_1_are_not_refused() {
+    assert_eq!(refused(&eac3_frame(0, 16, 2, 0, Some(false))), None);
+    assert_eq!(refused(&eac3_frame(0, 16, 7, 1, None)), None);
+    assert_eq!(refused(&eac3_frame(1, 11, 7, 1, None)), None);
+}
+
+#[test]
+fn frames_that_cannot_be_read_are_not_refused() {
+    let frame = eac3_frame(0, 16, 7, 1, None);
+    for len in 0..frame.len().min(40) {
+        assert_eq!(refused(&frame[..len]), None, "{len}");
+    }
+    assert_eq!(refused(&[]), None);
+    assert_eq!(refused(&[0; 64]), None);
+}
