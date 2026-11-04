@@ -35,6 +35,8 @@ impl Picture {
 use crate::gpu::biplanar::Geometry;
 use va::Session;
 
+#[cfg(test)]
+pub use va::rgba_dmabuf;
 pub use va::{DmaBuf, DmaLayer, DmaObject, DmaPlane, GpuSurface, Picture, Scaler, open_display};
 
 pub type Device = Arc<va::Display>;
@@ -529,6 +531,19 @@ impl EncoderBackend for VaEncoder {
             GpuInner::VaApi(g) => self.encode_surface(g, frame.time_base()),
             GpuInner::Cpu(f) => VaEncoder::encode(self, f),
         }
+    }
+
+    fn takes_dmabuf(&self) -> bool {
+        true
+    }
+
+    fn encode_dmabuf(
+        &mut self,
+        image: &crate::gpu::DmaImage,
+        pts: i64,
+        time_base: crate::media::TimeBase,
+    ) -> Result<Vec<Packet>> {
+        VaEncoder::encode_dmabuf(self, image, pts, time_base)
     }
 
     fn composes(&self) -> bool {

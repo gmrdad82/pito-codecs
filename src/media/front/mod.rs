@@ -15,6 +15,19 @@ mod base;
 mod demux;
 #[cfg(all(
     test,
+    target_os = "linux",
+    feature = "h264",
+    feature = "hevc",
+    feature = "aac",
+    feature = "mp4",
+    feature = "gpu",
+    feature = "filter",
+    feature = "mkv",
+    feature = "vp9"
+))]
+mod dmabuf;
+#[cfg(all(
+    test,
     feature = "h264",
     feature = "hevc",
     feature = "aac",
@@ -217,7 +230,19 @@ pub use export::{
     feature = "mkv",
     feature = "vp9"
 ))]
-pub use frames::{Canvas, export_frames};
+pub use frames::{Canvas, FrameSource, export_frames};
+#[cfg(all(
+    target_os = "linux",
+    feature = "h264",
+    feature = "hevc",
+    feature = "aac",
+    feature = "mp4",
+    feature = "gpu",
+    feature = "filter",
+    feature = "mkv",
+    feature = "vp9"
+))]
+pub use frames::{DmaFrame, Readback, export_dmabufs};
 #[cfg(feature = "gif")]
 pub use gif::{
     GifFrame, GifInfo, decode_gif, decode_scanned, flatten_alpha, gif_frames, gif_info, gif_rate,

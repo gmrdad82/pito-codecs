@@ -483,6 +483,30 @@ impl VaEncoder {
         })
     }
 
+    pub fn encode_dmabuf(
+        &mut self,
+        image: &crate::gpu::DmaImage,
+        pts: i64,
+        time_base: TimeBase,
+    ) -> Result<Vec<Packet>> {
+        let size = (self.config.width, self.config.height);
+        if self.bits != 8 {
+            return Err(Error::Unsupported(
+                "dmabuf frames are taken for 8-bit encodes only".into(),
+            ));
+        }
+        let mut imported = true;
+        let made = self.push(pts, time_base, |session, input| {
+            session.blit_dma(input, image, size).inspect_err(|_| {
+                imported = false;
+            })
+        });
+        match made {
+            Err(Error::Backend(m)) if !imported => Err(Error::Unsupported(m)),
+            other => other,
+        }
+    }
+
     pub fn composes(&self) -> bool {
         self.session.composes()
     }

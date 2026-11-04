@@ -11,6 +11,21 @@ use super::route::{Caps, Choice, Picked, Prefs, pick_encode};
 use super::video::VideoFrame;
 use crate::media::{AudioBuffer, Codec, Error, Frame, PixelFormat, Result, Route, TimeBase};
 
+#[cfg(target_os = "linux")]
+pub type Readback = Box<dyn FnOnce() -> Result<VideoFrame>>;
+
+#[cfg(target_os = "linux")]
+pub struct DmaFrame {
+    pub image: crate::gpu::DmaImage,
+    pub readback: Option<Readback>,
+}
+
+pub enum FrameSource {
+    Video(VideoFrame),
+    #[cfg(target_os = "linux")]
+    Dma(DmaFrame),
+}
+
 const AUDIO_STOPPED: &str = "the audio stopped";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,8 +85,38 @@ fn checked(n: u64, frame: &Frame, size: (u32, u32)) -> Result<()> {
 pub fn export_frames(
     out: &Path,
     canvas: Canvas,
-    mut opts: ExportOptions,
+    opts: ExportOptions,
     mut frames: impl FnMut(u64, Option<Frame>) -> Result<Option<VideoFrame>>,
+    audio: impl FnMut(u64, usize) -> Result<AudioBuffer> + Send,
+    progress: impl FnMut(&Progress) -> bool,
+) -> Result<Exported> {
+    export_sources(
+        out,
+        canvas,
+        opts,
+        |n, spent| Ok(frames(n, spent)?.map(FrameSource::Video)),
+        audio,
+        progress,
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub fn export_dmabufs(
+    out: &Path,
+    canvas: Canvas,
+    opts: ExportOptions,
+    frames: impl FnMut(u64, Option<Frame>) -> Result<Option<FrameSource>>,
+    audio: impl FnMut(u64, usize) -> Result<AudioBuffer> + Send,
+    progress: impl FnMut(&Progress) -> bool,
+) -> Result<Exported> {
+    export_sources(out, canvas, opts, frames, audio, progress)
+}
+
+fn export_sources(
+    out: &Path,
+    canvas: Canvas,
+    mut opts: ExportOptions,
+    mut frames: impl FnMut(u64, Option<Frame>) -> Result<Option<FrameSource>>,
     mut audio: impl FnMut(u64, usize) -> Result<AudioBuffer> + Send,
     mut progress: impl FnMut(&Progress) -> bool,
 ) -> Result<Exported> {
@@ -148,6 +193,10 @@ pub fn export_frames(
                 let time_base = TimeBase::new(fps.1, fps.0);
                 let mut blender = Blender::new();
                 let mut spent: Option<Frame> = None;
+                #[cfg(target_os = "linux")]
+                let mut dma_off: Option<String> = None;
+                #[cfg(target_os = "linux")]
+                let mut overlay_noted = false;
                 let mut n = 0u64;
                 let tell = |n: u64, progress: &mut dyn FnMut(&Progress) -> bool| {
                     let done = match canvas.frames {
@@ -171,8 +220,68 @@ pub fn export_frames(
                         None => None,
                     };
                     let pts = i64::try_from(n).unwrap_or(i64::MAX);
+                    let frame = match frame {
+                        FrameSource::Video(v) => Ok(v),
+                        #[cfg(target_os = "linux")]
+                        FrameSource::Dma(d) => {
+                            if (d.image.width, d.image.height) != size {
+                                return Err(Error::Invalid(format!(
+                                    "frame {n} is {}x{}, the export is {}x{}",
+                                    d.image.width, d.image.height, size.0, size.1
+                                )));
+                            }
+                            if dma_off.is_none()
+                                && let Err(why) = enc.takes_dmabuf()
+                            {
+                                dma_off = Some(why);
+                            }
+                            if layer.is_some() && !overlay_noted {
+                                overlay_noted = true;
+                                let r = "an overlay is drawn on the CPU, so dmabuf frames are read back to it"
+                                    .to_string();
+                                if !reasons.contains(&r) {
+                                    reasons.push(r);
+                                }
+                            }
+                            let direct = if dma_off.is_none() && layer.is_none() {
+                                match enc.encode_dmabuf(&d.image, pts, time_base) {
+                                    Ok(p) => Some(p),
+                                    Err(Error::Unsupported(e)) => {
+                                        dma_off = Some(e);
+                                        None
+                                    }
+                                    Err(e) => return Err(e),
+                                }
+                            } else {
+                                None
+                            };
+                            if let Some(why) = &dma_off {
+                                let r = format!(
+                                    "dmabuf frames are read back to the CPU instead: {why}"
+                                );
+                                if !reasons.contains(&r) {
+                                    reasons.push(r);
+                                }
+                            }
+                            match direct {
+                                Some(p) => Err(p),
+                                None => match d.readback {
+                                    Some(read) => Ok(read()?),
+                                    None => {
+                                        return Err(Error::Unsupported(format!(
+                                            "frame {n} is a dmabuf the encoder could not take ({}), and the frame has no readback",
+                                            dma_off
+                                                .as_deref()
+                                                .unwrap_or("an overlay is drawn on the CPU")
+                                        )));
+                                    }
+                                },
+                            }
+                        }
+                    };
                     let packets = match frame {
-                        VideoFrame::Gpu(mut g) if layer.is_none() && enc.on_gpu() => {
+                        Err(packets) => packets,
+                        Ok(VideoFrame::Gpu(mut g)) if layer.is_none() && enc.on_gpu() => {
                             if g.size() != size {
                                 return Err(Error::Invalid(format!(
                                     "frame {n} is {}x{}, the export is {}x{}",
@@ -185,7 +294,7 @@ pub fn export_frames(
                             g.retime(pts, time_base);
                             enc.encode_gpu(&g)?
                         }
-                        other => {
+                        Ok(other) => {
                             let mut f = match other {
                                 VideoFrame::Cpu(f) => f,
                                 VideoFrame::Gpu(g) => g.download()?,

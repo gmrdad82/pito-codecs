@@ -1079,3 +1079,167 @@ fn a_restart_may_change_only_the_rate_and_the_gop() {
         assert!(!super::restartable(&asked, &changed), "{changed:?}");
     }
 }
+
+#[cfg(all(
+    target_os = "linux",
+    feature = "h264",
+    feature = "hevc",
+    feature = "filter"
+))]
+mod dmabuf {
+    use super::*;
+    use crate::filter::{ColorSpec, rgba_to_yuv};
+    use crate::gpu::{
+        DRM_FORMAT_ABGR8888, DRM_FORMAT_ARGB8888, DRM_FORMAT_XBGR8888, DRM_FORMAT_XRGB8888,
+        DmaImage, DmaReady,
+    };
+    use crate::media::Rgba;
+
+    const SIZE: (u32, u32) = (640, 360);
+
+    fn picture(i: usize) -> Rgba {
+        let mut p = Rgba::new(SIZE.0, SIZE.1);
+        for (n, px) in p.data.chunks_exact_mut(4).enumerate() {
+            let (x, y) = (n % SIZE.0 as usize, n / SIZE.0 as usize);
+            let moved = (x + i * 9) % 256;
+            let bar = if (x / 64 + y / 45 + i).is_multiple_of(2) {
+                220
+            } else {
+                40
+            };
+            px.copy_from_slice(&[moved as u8, (y * 255 / 359) as u8, bar, 255]);
+        }
+        p
+    }
+
+    fn swapped(p: &Rgba) -> Rgba {
+        let mut q = Rgba::new(p.width, p.height);
+        for (d, s) in q.data.chunks_exact_mut(4).zip(p.data.chunks_exact(4)) {
+            d.copy_from_slice(&[s[2], s[1], s[0], s[3]]);
+        }
+        q
+    }
+
+    fn reference(p: &Rgba) -> Frame {
+        let mut f = Frame::new(
+            PixelFormat::Yuv420p8,
+            p.width,
+            p.height,
+            0,
+            TimeBase::new(1, 90000),
+        );
+        rgba_to_yuv(p, ColorSpec::BT709, PixelFormat::Yuv420p8, &mut f).unwrap();
+        f
+    }
+
+    fn config(codec: Codec) -> EncoderConfig {
+        EncoderConfig {
+            width: SIZE.0,
+            height: SIZE.1,
+            fps: (30, 1),
+            profile: if codec == Codec::Hevc {
+                Profile::Main
+            } else {
+                Profile::High
+            },
+            rate: Rate::Crf(18),
+            gop: 30,
+            b_frames: 0,
+            bitstream: Bitstream::LengthPrefixed,
+            ..Default::default()
+        }
+    }
+
+    fn through(codec: Codec, images: &[DmaImage]) -> Vec<Frame> {
+        let mut enc = HwEncoder::new(codec, &config(codec)).unwrap();
+        assert!(enc.takes_dmabuf());
+        let mut packets = Vec::new();
+        for (i, image) in images.iter().enumerate() {
+            packets.extend(
+                enc.encode_dmabuf(image, i as i64 * 3000, TimeBase::new(1, 90000))
+                    .unwrap(),
+            );
+        }
+        packets.extend(enc.flush().unwrap());
+        let stream = annexb_stream(codec, &packets, enc.extradata().unwrap());
+        cpu_decode(codec, &stream)
+    }
+
+    fn rgb_image(p: &Rgba, fourcc: u32) -> DmaImage {
+        let buf = crate::gpu::rgba_dmabuf(p).unwrap();
+        let mut image = DmaImage::from_export(&buf, DmaReady::Finished).unwrap();
+        assert_eq!(image.fourcc, DRM_FORMAT_ABGR8888);
+        image.fourcc = fourcc;
+        image
+    }
+
+    #[test]
+    fn an_rgb_dmabuf_encodes_on_the_gpu_to_the_cpu_conversion_within_a_stated_tolerance() {
+        let formats = [
+            (DRM_FORMAT_ABGR8888, false),
+            (DRM_FORMAT_XBGR8888, false),
+            (DRM_FORMAT_ARGB8888, true),
+            (DRM_FORMAT_XRGB8888, true),
+        ];
+        for codec in [Codec::H264, Codec::Hevc] {
+            if !has(codec, Direction::Encode) {
+                continue;
+            }
+            for (fourcc, bgr) in formats {
+                let sources: Vec<Rgba> = (0..10).map(picture).collect();
+                let images: Vec<DmaImage> = sources.iter().map(|p| rgb_image(p, fourcc)).collect();
+                let got = through(codec, &images);
+                assert_eq!(got.len(), sources.len());
+                let want: Vec<Frame> = sources
+                    .iter()
+                    .map(|p| reference(&if bgr { swapped(p) } else { p.clone() }))
+                    .collect();
+                let db = psnr(&got, &want);
+                eprintln!("{codec:?} {}: {db:.2} dB", crate::gpu::fourcc_name(fourcc));
+                assert!(
+                    db > 45.0,
+                    "{codec:?} {}: PSNR {db:.2} dB against the CPU BT.709 conversion",
+                    crate::gpu::fourcc_name(fourcc)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_nv12_dmabuf_encodes_on_the_gpu_to_its_own_pictures_within_a_stated_tolerance() {
+        if !has(Codec::H264, Direction::Decode) {
+            return;
+        }
+        if !has(Codec::H264, Direction::Encode) {
+            return;
+        }
+        let source = source_frames(SIZE.0, SIZE.1, 8, PixelFormat::Yuv420p8);
+        let (packets, extradata, _) = encode_all(Codec::H264, &config(Codec::H264), &source);
+        let data = annexb_stream(Codec::H264, &packets, &extradata);
+        let mut dec = HwDecoder::new(Codec::H264, &[]).unwrap();
+        let mut frames = Vec::new();
+        for (i, u) in access_units(Codec::H264, &data).into_iter().enumerate() {
+            frames.extend(dec.decode_gpu(&packet(i, u, 1)).unwrap());
+        }
+        frames.extend(dec.flush_gpu().unwrap());
+        frames.truncate(8);
+        assert_eq!(frames.len(), 8);
+        let images: Vec<DmaImage> = frames
+            .iter()
+            .map(|f| DmaImage::from_export(&f.dmabuf(false).unwrap(), DmaReady::Finished).unwrap())
+            .collect();
+        let want: Vec<Frame> = frames.iter().map(|f| f.download().unwrap()).collect();
+        for codec in [Codec::H264, Codec::Hevc] {
+            if !has(codec, Direction::Encode) {
+                continue;
+            }
+            let got = through(codec, &images);
+            let db = psnr(&got, &want);
+            eprintln!("{codec:?} NV12: {db:.2} dB");
+            assert!(
+                db > 50.0,
+                "{codec:?} NV12: PSNR {db:.2} dB against the source"
+            );
+        }
+    }
+}

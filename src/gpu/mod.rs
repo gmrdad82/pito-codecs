@@ -7,6 +7,9 @@ mod nal;
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 mod av1c;
 
+#[cfg(target_os = "linux")]
+mod dma;
+
 #[cfg(test)]
 mod tests;
 
@@ -30,6 +33,14 @@ use std::sync::Arc;
 
 pub use crate::media::color::Color;
 
+#[cfg(target_os = "linux")]
+pub use dma::{
+    DRM_FORMAT_ABGR8888, DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_INVALID, DRM_FORMAT_MOD_LINEAR,
+    DRM_FORMAT_NV12, DRM_FORMAT_XBGR8888, DRM_FORMAT_XRGB8888, DmaImage, DmaImagePlane, DmaReady,
+    fourcc_name,
+};
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use vaapi::rgba_dmabuf;
 #[cfg(target_os = "linux")]
 pub use vaapi::{DmaBuf, DmaLayer, DmaObject, DmaPlane};
 
@@ -308,6 +319,21 @@ pub(crate) trait EncoderBackend: Send {
     }
     fn composes(&self) -> bool {
         false
+    }
+    fn takes_dmabuf(&self) -> bool {
+        false
+    }
+    #[cfg(target_os = "linux")]
+    fn encode_dmabuf(
+        &mut self,
+        _image: &DmaImage,
+        _pts: i64,
+        _time_base: TimeBase,
+    ) -> Result<Vec<Packet>> {
+        Err(Error::Unsupported(format!(
+            "the {} encoder does not take dmabufs",
+            self.name()
+        )))
     }
     fn encode_gpu_over(&mut self, _frame: &GpuFrame, _layer: &Arc<Rgba>) -> Result<Vec<Packet>> {
         Err(Error::Unsupported(
@@ -785,6 +811,20 @@ impl HwEncoder {
 
     pub fn composes(&self) -> bool {
         self.inner.composes()
+    }
+
+    pub fn takes_dmabuf(&self) -> bool {
+        self.inner.takes_dmabuf()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn encode_dmabuf(
+        &mut self,
+        image: &DmaImage,
+        pts: i64,
+        time_base: TimeBase,
+    ) -> Result<Vec<Packet>> {
+        self.inner.encode_dmabuf(image, pts, time_base)
     }
 
     pub fn encode_gpu_over(&mut self, frame: &GpuFrame, layer: &Arc<Rgba>) -> Result<Vec<Packet>> {
