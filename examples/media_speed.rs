@@ -898,6 +898,21 @@ fn mark(w: u32, h: u32) -> Rgba {
     m
 }
 
+fn wide_mark(w: u32, h: u32, word: Option<u64>) -> Rgba {
+    let mut m = match word {
+        Some(word) => caption(w, h, word),
+        None => Rgba::new(w, h),
+    };
+    for (i, px) in m.data.chunks_exact_mut(4).enumerate() {
+        if px[3] == 0 {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            let a = 24 + ((x / 64 + y / 64) % 2) as u8 * 16;
+            px.copy_from_slice(&[a, a, a, a]);
+        }
+    }
+    m
+}
+
 fn caption(w: u32, h: u32, word: u64) -> Rgba {
     let mut m = Rgba::new(w, h);
     let (bh, y0) = (h / 10, h - h / 10 - h / 20);
@@ -949,6 +964,21 @@ fn xport(path: &std::path::Path, decode: Choice, encode: Choice, overlay: Option
         Some("full") | Some("clear") => Some(Box::new(move |_, _, _| Some(layer.clone()))),
         Some("empty") => Some(Box::new(|_, _, _| None)),
         Some("mark") => Some(Box::new(move |_, _, _| Some(marked.clone()))),
+        Some("wide") => {
+            let wide = Arc::new(wide_mark(w, h, None));
+            Some(Box::new(move |_, _, _| Some(wide.clone())))
+        }
+        Some("wide-captions") => Some(Box::new(move |t, _, _| {
+            let word = (t * 3.0) as u64;
+            match &said {
+                Some((n, l)) if *n == word => Some(l.clone()),
+                _ => {
+                    let l = Arc::new(wide_mark(w, h, Some(word)));
+                    said = Some((word, l.clone()));
+                    Some(l)
+                }
+            }
+        })),
         Some("captions") => Some(Box::new(move |t, _, _| {
             let word = (t * 3.0) as u64;
             if word % 7 == 6 {
