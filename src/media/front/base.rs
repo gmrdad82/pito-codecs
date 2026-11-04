@@ -191,7 +191,7 @@ pub fn probe(path: &Path) -> Result<Probe> {
             let a = &r.tracks[i];
             let name = a.name.trim();
             let lower = name.to_lowercase();
-            let (codec, rate, refused) = super::probe::mp4_audio_codec(a);
+            let (codec, rate, refused) = super::probe::mp4_audio_codec(a, || r.read(i, 0).ok());
             AudioTrack {
                 index,
                 stream: i,

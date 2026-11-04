@@ -332,8 +332,23 @@ fn alac(cookie: Option<&[u8]>, rate: u32) -> (String, u32, Option<String>) {
     }
 }
 
-pub(super) fn mp4_audio_codec(t: &crate::mp4::Track) -> (String, u32, Option<String>) {
+#[cfg(feature = "ac3")]
+fn eac3(rate: u32, first: impl FnOnce() -> Option<Vec<u8>>) -> (String, u32, Option<String>) {
+    let refused = first().and_then(|f| crate::ac3::refused(&f));
+    ("eac3".into(), rate, refused)
+}
+
+pub(super) fn mp4_audio_codec(
+    t: &crate::mp4::Track,
+    first: impl FnOnce() -> Option<Vec<u8>>,
+) -> (String, u32, Option<String>) {
     let name = t.config().map(|c| c.name()).unwrap_or_default();
+    #[cfg(feature = "ac3")]
+    if name == "eac3" {
+        return eac3(t.sample_rate(), first);
+    }
+    #[cfg(not(feature = "ac3"))]
+    let _ = first;
     #[cfg(feature = "alac")]
     if name == "alac" {
         return alac(
@@ -353,8 +368,17 @@ pub(super) fn mp4_audio_codec(t: &crate::mp4::Track) -> (String, u32, Option<Str
     (name, t.sample_rate(), None)
 }
 
-pub(super) fn mkv_audio_codec(t: &crate::mkv::Track) -> (String, u32, Option<String>) {
+pub(super) fn mkv_audio_codec(
+    t: &crate::mkv::Track,
+    first: impl FnOnce() -> Option<Vec<u8>>,
+) -> (String, u32, Option<String>) {
     let name = t.codec_name();
+    #[cfg(feature = "ac3")]
+    if name == "eac3" {
+        return eac3(t.sample_rate(), first);
+    }
+    #[cfg(not(feature = "ac3"))]
+    let _ = first;
     if name == "A_MS/ACM" {
         let rate = super::sound::acm_format(&t.codec_private).map_or(t.sample_rate(), |f| f.2);
         return (
@@ -712,5 +736,42 @@ mod tests {
             "unsupported: unknown video is not supported"
         );
         assert_eq!(p.unsupported(), ["unknown"]);
+    }
+
+    #[cfg(feature = "ac3")]
+    #[test]
+    fn an_eac3_track_the_decoder_refuses_is_not_native_and_says_why() {
+        for (why, native) in [
+            (
+                Some("E-AC-3 at a reduced sample rate (16 to 24 kHz)"),
+                false,
+            ),
+            (Some("E-AC-3 enhanced coupling"), false),
+            (Some("E-AC-3 bitstream id 17"), false),
+            (None, true),
+        ] {
+            let mut t = track("eac3");
+            t.refused = why.map(String::from);
+            assert_eq!(t.native(), native);
+            match why {
+                Some(w) => {
+                    assert_eq!(t.variant(), w);
+                    assert_eq!(
+                        t.decodable().unwrap_err().to_string(),
+                        format!("unsupported: {w}")
+                    );
+                }
+                None => assert_eq!(t.variant(), "eac3"),
+            }
+        }
+    }
+
+    #[cfg(feature = "ac3")]
+    #[test]
+    fn eac3_reads_the_first_frame_for_its_refusal_and_keeps_a_missing_one_native() {
+        let (codec, rate, refused) = eac3(48_000, || None);
+        assert_eq!((codec.as_str(), rate, refused), ("eac3", 48_000, None));
+        let (_, _, refused) = eac3(48_000, || Some(vec![0; 3]));
+        assert_eq!(refused, None);
     }
 }

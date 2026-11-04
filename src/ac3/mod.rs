@@ -63,6 +63,23 @@ pub fn info(frame: &[u8]) -> Result<Info> {
     })
 }
 
+pub fn refused(frame: &[u8]) -> Option<String> {
+    let h = match header::parse(frame) {
+        Ok(h) => h,
+        Err(Error::Unsupported(why)) => return Some(why),
+        Err(_) => return None,
+    };
+    if !h.eac3 {
+        return None;
+    }
+    let mut b = Bits::new(frame.get(..h.bytes)?);
+    b.skip(h.bits).ok()?;
+    match eac3::decode(&mut State::new(), &mut b, &h) {
+        Err(Error::Unsupported(why)) => Some(why),
+        _ => None,
+    }
+}
+
 pub fn layout(channels: u16) -> u16 {
     match channels {
         0 | 1 => 1,
