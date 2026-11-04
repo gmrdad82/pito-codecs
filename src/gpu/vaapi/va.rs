@@ -10,6 +10,10 @@ use super::ffi::{self, VAConfigAttrib, VAImage, VAImageFormat, VASurfaceID};
 use super::host::HostBuffer;
 use super::{Accel, LAG, SLACK};
 use crate::gpu::biplanar::{self, Biplanar, Geometry};
+use crate::gpu::dma::{
+    DRM_FORMAT_ABGR8888, DRM_FORMAT_ARGB8888, DRM_FORMAT_NV12, DRM_FORMAT_XBGR8888,
+    DRM_FORMAT_XRGB8888, DmaImage,
+};
 use crate::media::{Frame, Rgba};
 
 struct Api {
@@ -196,6 +200,58 @@ impl Display {
 
     pub fn vendor(&self) -> &str {
         &self.vendor
+    }
+
+    pub fn node(&self) -> Option<u64> {
+        use std::os::unix::fs::MetadataExt;
+        self.device.as_ref()?.metadata().ok().map(|m| m.rdev())
+    }
+
+    fn import_dma(&self, image: &DmaImage) -> Result<VASurfaceID, String> {
+        if let Some(device) = image.device
+            && let Some(ours) = self.node()
+            && device != ours
+        {
+            return Err(format!(
+                "the buffer is on another GPU (device {device:#x}, the encoder's is {ours:#x})"
+            ));
+        }
+        let layout = image.layout()?;
+        let (rt_format, fourcc) = match image.fourcc {
+            DRM_FORMAT_NV12 => (ffi::VA_RT_FORMAT_YUV420, ffi::VA_FOURCC_NV12),
+            DRM_FORMAT_ARGB8888 => (ffi::VA_RT_FORMAT_RGB32, ffi::VA_FOURCC_BGRA),
+            DRM_FORMAT_XRGB8888 => (ffi::VA_RT_FORMAT_RGB32, ffi::VA_FOURCC_BGRX),
+            DRM_FORMAT_ABGR8888 => (ffi::VA_RT_FORMAT_RGB32, ffi::VA_FOURCC_RGBA),
+            DRM_FORMAT_XBGR8888 => (ffi::VA_RT_FORMAT_RGB32, ffi::VA_FOURCC_RGBX),
+            _ => return Err("the dmabuf format is not taken".into()),
+        };
+        let mut descriptor = ffi::VADRMPRIMESurfaceDescriptor {
+            fourcc,
+            width: image.width,
+            height: image.height,
+            num_objects: layout.objects.len() as u32,
+            num_layers: 1,
+            ..Default::default()
+        };
+        for (slot, o) in descriptor.objects.iter_mut().zip(&layout.objects) {
+            *slot = ffi::VADRMPRIMEObject {
+                fd: o.fd,
+                size: o.size,
+                drm_format_modifier: image.modifier,
+            };
+        }
+        let mut layer = ffi::VADRMPRIMELayer {
+            drm_format: image.fourcc,
+            num_planes: image.planes.len() as u32,
+            ..Default::default()
+        };
+        for (i, p) in image.planes.iter().enumerate() {
+            layer.object_index[i] = layout.plane_object[i] as u32;
+            layer.offset[i] = p.offset;
+            layer.pitch[i] = p.pitch;
+        }
+        descriptor.layers[0] = layer;
+        self.import(rt_format, (image.width, image.height), &mut descriptor)
     }
 
     pub fn dead(&self) -> bool {
@@ -852,39 +908,7 @@ impl GpuSurface {
 
     pub fn dmabuf(&self, separate: bool) -> Result<DmaBuf, String> {
         let d = self.pool.display.export(self.id()?, separate)?;
-        let count = (d.num_objects as usize).min(4);
-        let mut objects = Vec::with_capacity(count);
-        for o in &d.objects[..count] {
-            if o.fd < 0 {
-                return Err("vaExportSurfaceHandle gave no file descriptor".into());
-            }
-            objects.push(DmaObject {
-                fd: unsafe { OwnedFd::from_raw_fd(o.fd) },
-                size: o.size,
-                modifier: o.drm_format_modifier,
-            });
-        }
-        let layers = d.layers[..(d.num_layers as usize).min(4)]
-            .iter()
-            .map(|l| DmaLayer {
-                drm_format: l.drm_format,
-                planes: (0..(l.num_planes as usize).min(4))
-                    .map(|i| DmaPlane {
-                        object: l.object_index[i] as usize,
-                        offset: l.offset[i],
-                        pitch: l.pitch[i],
-                    })
-                    .collect(),
-            })
-            .collect();
-        Ok(DmaBuf {
-            fourcc: d.fourcc,
-            width: d.width,
-            height: d.height,
-            crop: self.geometry.crop,
-            objects,
-            layers,
-        })
+        describe(&d, self.geometry.crop)
     }
 
     pub fn download(&self) -> Result<Frame, String> {
@@ -909,6 +933,75 @@ impl GpuSurface {
         d.destroy_image(&image);
         frame.map(|f| Frame { pts: self.pts, ..f })
     }
+}
+
+fn describe(
+    d: &ffi::VADRMPRIMESurfaceDescriptor,
+    crop: (u32, u32, u32, u32),
+) -> Result<DmaBuf, String> {
+    let count = (d.num_objects as usize).min(4);
+    let mut objects = Vec::with_capacity(count);
+    for o in &d.objects[..count] {
+        if o.fd < 0 {
+            return Err("vaExportSurfaceHandle gave no file descriptor".into());
+        }
+        objects.push(DmaObject {
+            fd: unsafe { OwnedFd::from_raw_fd(o.fd) },
+            size: o.size,
+            modifier: o.drm_format_modifier,
+        });
+    }
+    let layers = d.layers[..(d.num_layers as usize).min(4)]
+        .iter()
+        .map(|l| DmaLayer {
+            drm_format: l.drm_format,
+            planes: (0..(l.num_planes as usize).min(4))
+                .map(|i| DmaPlane {
+                    object: l.object_index[i] as usize,
+                    offset: l.offset[i],
+                    pitch: l.pitch[i],
+                })
+                .collect(),
+        })
+        .collect();
+    Ok(DmaBuf {
+        fourcc: d.fourcc,
+        width: d.width,
+        height: d.height,
+        crop,
+        objects,
+        layers,
+    })
+}
+
+#[cfg(test)]
+pub fn rgba_dmabuf(rgba: &Rgba) -> Result<DmaBuf, String> {
+    let display = shared()?;
+    let size = (rgba.width, rgba.height);
+    let surface = display.create_rgba(size)?;
+    let image = display.create_rgba_image(size)?;
+    let (pitch, offset) = (image.pitches[0] as usize, image.offsets[0] as usize);
+    let row = rgba.width as usize * 4;
+    let made = display
+        .with_image(&image, |data| {
+            for (r, src) in rgba.data.chunks_exact(row).enumerate() {
+                let at = offset + r * pitch;
+                data.get_mut(at..at + row)
+                    .ok_or("the image is too small")?
+                    .copy_from_slice(src);
+            }
+            Ok(())
+        })
+        .and_then(|()| display.put_image(surface, &image, size))
+        .and_then(|()| display.export(surface, false))
+        .and_then(|d| describe(&d, (0, 0, size.0, size.1)));
+    display.release(
+        Some(image),
+        ffi::VA_INVALID_ID,
+        &mut [surface],
+        ffi::VA_INVALID_ID,
+    );
+    made
 }
 
 pub struct DmaObject {
@@ -2016,6 +2109,34 @@ impl EncodeSession {
             Some(vpp) => vpp.blit(src, surface, size),
             None => Err("no VA-API video processor".into()),
         }
+    }
+
+    pub fn blit_dma(
+        &mut self,
+        surface: VASurfaceID,
+        image: &DmaImage,
+        size: (u32, u32),
+    ) -> Result<(), String> {
+        if (image.width, image.height) != size {
+            return Err(format!(
+                "the dmabuf is {}x{}, the encoder {}x{}",
+                image.width, image.height, size.0, size.1
+            ));
+        }
+        image.wait_ready()?;
+        if self.vpp.is_none() {
+            self.vpp = Some(Vpp::new(self.display.clone())?);
+        }
+        let source = self.display.import_dma(image)?;
+        let done = match &self.vpp {
+            Some(vpp) => vpp
+                .copy(source, (0, 0, size.0, size.1), surface, size)
+                .and_then(|()| self.display.sync(surface)),
+            None => Err("no VA-API video processor".into()),
+        };
+        self.display
+            .release(None, ffi::VA_INVALID_ID, &mut [source], ffi::VA_INVALID_ID);
+        done
     }
 
     pub fn composes(&self) -> bool {

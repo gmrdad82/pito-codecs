@@ -135,6 +135,30 @@ impl VEnc {
         matches!(self, VEnc::Gpu(_))
     }
 
+    #[cfg(target_os = "linux")]
+    pub(super) fn takes_dmabuf(&self) -> std::result::Result<(), String> {
+        match self {
+            VEnc::Gpu(e) if e.takes_dmabuf() => Ok(()),
+            VEnc::Gpu(e) => Err(format!("the {} encoder does not take dmabufs", e.name())),
+            _ => Err("the video is encoded on the CPU".to_string()),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn encode_dmabuf(
+        &mut self,
+        image: &crate::gpu::DmaImage,
+        pts: i64,
+        time_base: crate::media::TimeBase,
+    ) -> Result<Vec<Packet>> {
+        match self {
+            VEnc::Gpu(e) => e.encode_dmabuf(image, pts, time_base),
+            _ => Err(Error::Unsupported(
+                "the video is encoded on the CPU".to_string(),
+            )),
+        }
+    }
+
     pub(super) fn composes(&self) -> bool {
         matches!(self, VEnc::Gpu(e) if e.composes())
     }

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `export_dmabufs` and `HwEncoder::encode_dmabuf` (Linux) take a frame as a dmabuf, with no readback: NV12 or 8-bit RGB (`DRM_FORMAT_ARGB8888`, `XRGB8888`, `ABGR8888`, `XBGR8888`) in any modifier the card imports, converted to NV12 on the GPU by VA-API's video processor and encoded in place. A `DmaImage` carries the fourcc, modifier, and each plane's fd, offset and pitch, and says how the caller's rendering is known to be finished (`DmaReady::Finished` or a sync file). A `DmaFrame` may carry a `readback`: when the import fails, the buffer is on another GPU, an overlay needs the CPU or the encoder is not VA-API, that frame and the rest read back through it and `Exported::reasons` says why. Existing callers of `export_frames` and `HwEncoder` compile unchanged.
+
 ## v3.1.0 — 2026-11-01
 
 ### Added
