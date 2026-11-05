@@ -15,7 +15,7 @@ pub struct Piece {
 }
 ```
 
-The export is frame-accurate and fast: where it can, it copies the middle of each piece as it is and re-encodes only the frames from each cut to the next keyframe. That is a **smart** export, and it ran 1.7× to 2.9× faster than ffmpeg re-encoding every frame.
+The export is frame-accurate and fast: where it can, it copies the middle of each piece as it is and re-encodes only the frames from each cut to the next keyframe. That is a **smart** export, and it ran 1.7× to 2.0× faster than ffmpeg re-encoding every frame.
 
 ![Smart-cut export in times real time](../images/chart-export.png)
 

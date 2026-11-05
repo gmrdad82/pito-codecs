@@ -35,7 +35,7 @@ tar -xzf "pcod-$v-linux-x86_64.tar.gz" pcod && install -Dm755 pcod ~/.local/bin/
 macOS on Apple Silicon, from source with Rust stable (the macOS build is untested):
 
 ```sh
-cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag v3.2.0 pito-codecs --bin pcod
+cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag v3.2.1 pito-codecs --bin pcod
 ```
 
 Windows x86-64, in PowerShell:
@@ -59,13 +59,13 @@ pcod stills clip.mp4 --every 2s --out frames/
 pcod filmstrip clip.mp4 strip.png --every 10s --timecodes
 ```
 
-`SHA256SUMS` in each Release lists every archive's checksum. To build pcod from source anywhere, Linux arm64 included, with Rust 1.97 or newer: `cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag v3.2.0 pito-codecs --bin pcod`.
+`SHA256SUMS` in each Release lists every archive's checksum. To build pcod from source anywhere, Linux arm64 included, with Rust 1.97 or newer: `cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag v3.2.1 pito-codecs --bin pcod`.
 
 In a Rust project, add the library with the parts you need (all are on by default):
 
 ```toml
 [dependencies]
-pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v3.2.0", default-features = false, features = ["h264", "hevc", "vp9", "aac", "mp4", "mkv", "gpu", "filter", "opus", "ac3", "mp3", "flac", "alac"] }
+pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v3.2.1", default-features = false, features = ["h264", "hevc", "vp9", "aac", "mp4", "mkv", "gpu", "filter", "opus", "ac3", "mp3", "flac", "alac"] }
 ```
 
 and let it pick the fastest route for each job:
@@ -270,13 +270,13 @@ The front tries the GPU first and our own CPU code second, for every decode and 
 | --- | --- | --- | --- | --- |
 | VA-API, AMD (Mesa radeonsi) | Linux | H.264, H.265, VP9, AV1 | H.264, H.265; overlays composed on the card | AMD Radeon RX 9060 XT (RDNA 4), before every release |
 | VA-API, Intel (iHD) | Linux | H.264, H.265, VP9, AV1 | H.264, H.265 | Built, untested on Intel hardware |
-| VideoToolbox | macOS | H.264, H.265, AV1 | H.264, H.265 | An Apple Silicon Mac before every release: the test suite runs there, decodes compared with ffmpeg where it is installed, encodes decoded back; AV1 (Apple M3 and later) built, untested |
+| VideoToolbox | macOS | H.264, H.265, AV1 | H.264, H.265 | Type-checked, not run on a Mac for this release; AV1 (Apple M3 and later) built, untested |
 | NVENC | Linux, Windows | — | H.264, H.265 | Built and unit-tested, untested on NVIDIA hardware |
 | Media Foundation | Windows | H.264, H.265, AV1 | — | Built and unit-tested, untested on GPU hardware |
 
 The NVIDIA paths are built and unit-tested but untested on NVIDIA hardware here; contributions from people with NVIDIA cards are welcome.
 
-The CPU codecs target Linux x86-64 and arm64, Windows x86-64 and macOS on Apple Silicon, with AVX2 kernels on x86-64 and NEON or portable paths on arm64. Every merge is checked for all four (format, lints and a full type-check) and runs the whole test suite on Linux x86-64; every release also runs the suite on an Apple Silicon Mac and the GPU suite on the AMD card above, and builds the Linux x86-64 and Windows x86-64 binaries. No hosted CI runs this repository.
+The CPU codecs target Linux x86-64 and arm64, Windows x86-64 and macOS on Apple Silicon, with AVX2 kernels on x86-64 and NEON or portable paths on arm64. Every merge is checked for all four (format, lints and a full type-check) and runs the whole test suite on Linux x86-64; every release also runs the GPU suite on the AMD card above, and builds the Linux x86-64 and Windows x86-64 binaries. No hosted CI runs this repository.
 
 ## Small and simple
 
@@ -474,7 +474,7 @@ cargo test --release
 
 The tests check against references recorded from the reference tools and never run ffmpeg, and the GPU tests skip cleanly without a device. `bin/gate` runs rustfmt, clippy with warnings as errors (also with only the audio features, and for Windows, macOS and Linux on ARM when their std is installed), the tests through cargo-nextest, then a release build (`--fast` skips the build). `bin/docs-bundle vX.Y.Z [out dir]` builds `docs-vX.Y.Z.tar.gz`, the documentation each Release carries: the guides in `docs/site`, a command reference made from pcod's own help, the API reference from `cargo doc` and the changelog.
 
-Every change is checked on the maintainer's machines before it merges: formatting, clippy with warnings as errors, the tests with ffmpeg as the oracle, and the doc tests. Every release runs the full suite and builds pcod for Linux x86-64 and Windows x86-64 there too, along with the VA-API tests and the benchmarks on an AMD card; the GitHub Release carries those binaries and their checksums. Media Foundation, NVENC and VideoToolbox are built for their systems; Media Foundation and NVENC have not run on their hardware here.
+Every change is checked on the maintainer's machines before it merges: formatting, clippy with warnings as errors, the tests against recorded references, and the doc tests. Every release runs the full suite and builds pcod for Linux x86-64 and Windows x86-64 there too, along with the VA-API tests and the benchmarks on an AMD card; a docs-only release carries the results of the last release that changed code. The GitHub Release carries those binaries and their checksums. Media Foundation, NVENC and VideoToolbox are built for their systems; Media Foundation and NVENC have not run on their hardware here, and VideoToolbox has not run on a Mac for this release.
 
 ## Contributing
 

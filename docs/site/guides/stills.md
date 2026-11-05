@@ -19,7 +19,7 @@ let still = first_frame("clip.mp4".as_ref(), 240, &Prefs::default())?;
 first frame 426x240 in 52.9 ms
 ```
 
-That time is a cold start in a fresh process on a busy machine; the README's measured run gives 4.1 ms for 1440p H.264 on the CPU and 12.4 ms for HEVC on the GPU, 7× to 21× sooner than ffmpeg.
+That time is a cold start in a fresh process on a busy machine; the README's measured run gives 4.2 ms for 1440p H.264 on the CPU and 3.2 ms for HEVC on the GPU, 12× to 28× sooner than ffmpeg.
 
 ![Time to first frame at 1440p, pito-codecs against ffmpeg](../images/chart-first-frame.png)
 

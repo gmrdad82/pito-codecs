@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.2.1 — 2026-11-05
+
+Documentation only. No code changed, so the speed numbers and hardware results are v3.2.0's.
+
+### Fixed
+
+- The docs site's front page carries the README's speed numbers, AV1 decode, Vorbis and everything `pcod` does; it had stood still since before v3.2.0.
+- The GPU routes in the README and the guide no longer say a Mac runs the suite before every release, or that decodes are compared with ffmpeg: VideoToolbox is type-checked and has not run on a Mac for this release. The GPU guide lists the AV1 decode routes.
+- The README's note on checks says the tests run against recorded references, not ffmpeg.
+
 ## v3.2.0 — 2026-11-04
 
 ### Added

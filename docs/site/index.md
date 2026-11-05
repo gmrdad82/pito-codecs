@@ -7,14 +7,15 @@ sidebar:
 
 ![A terminal running pcod on a 1080p H.264 clip: it probes the file, decodes it on the CPU and on the GPU through VA-API with the speed of each, then encodes it to HEVC on the GPU.](images/decode.gif)
 
-**Video and audio codecs in pure Rust, on the CPU and the GPU, with no ffmpeg inside.** H.264, H.265, VP9, AAC, AC-3, E-AC-3, Opus, MP3, FLAC and ALAC; MP4, MOV, MKV and WebM; GIF and WebP. One MIT Cargo package, a feature per part, two direct dependencies and no C linked.
+**Video and audio codecs in pure Rust, on the CPU and the GPU, with no ffmpeg inside.** H.264, H.265, VP9, AV1 decode, AAC, AC-3, E-AC-3, Opus, Vorbis, MP3, FLAC and ALAC; MP4, MOV, MKV and WebM; GIF and WebP. One MIT Cargo package, a feature per part, two direct dependencies and no C linked.
 
-It comes as a Rust library and as `pcod`, a small command line over it that probes, decodes and encodes MP4 files.
+It comes as a Rust library and as `pcod`, a small command line over it that converts, joins, probes, decodes and encodes video, and writes stills and filmstrips.
 
-- **First frame 7× to 21× faster than ffmpeg:** 4.1 ms against 87.4 ms for a 1440p H.264 file on the CPU.
-- **Filmstrips 8× to 12× faster:** 12 stills at 240 px in 29 to 72 ms.
-- **Frame-accurate smart cuts 1.7× to 2.9× faster** than an ffmpeg re-encode: only the frames around each cut are encoded.
-- **GPU decode and encode on VA-API 1.1× to 1.3× faster** than ffmpeg's, and frames can stay on the card from decode to encode.
+- **First frame 12× to 28× faster than ffmpeg:** 4.2 ms against 85.2 ms for a 1440p H.264 file on the CPU.
+- **AV1 on the card and the processor:** first frame 1.6× to 4.4× faster than ffmpeg with dav1d, every frame bit-exact with dav1d.
+- **Filmstrips 9× to 11× faster:** 12 stills at 240 px in 24 to 36 ms.
+- **Frame-accurate smart cuts 1.7× to 2.0× faster** than an ffmpeg re-encode: only the frames around each cut are encoded, and 40 short cuts run 1.3× to 1.4× faster on the card than in 1.4.2.
+- **GPU decode and encode on VA-API 1.1× to 1.2× faster** than ffmpeg's, and frames can stay on the card from decode to encode.
 - **Overlays composed on the card:** a marked or captioned export uses 18× to 23× less CPU time than decoding and blending on the CPU.
 - **Small:** a 5.7 MB command line, and a library that pulls in 8 crates on Linux.
 
