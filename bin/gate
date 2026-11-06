@@ -29,11 +29,66 @@ for tool in ff''mpeg ff''probe; do
     printf '#!/bin/sh\necho "%s was spawned by a test" >&2\nexit 1\n' "$tool" >"$stubs/$tool"
     chmod +x "$stubs/$tool"
 done
-tests=(env "PATH=$stubs:$PATH" cargo nextest run --cargo-profile ci --all-targets --no-fail-fast)
-if command -v prlimit >/dev/null 2>&1; then
-    prlimit --core=1:1 -- "${tests[@]}"
+run_tests() {
+    local tests=(env "PATH=$stubs:$PATH" cargo nextest run --cargo-profile ci --no-fail-fast "$@")
+    if command -v prlimit >/dev/null 2>&1; then
+        prlimit --core=1:1 -- "${tests[@]}"
+    else
+        "${tests[@]}"
+    fi
+}
+if [ "$fast" -eq 1 ]; then
+    base="$(git merge-base HEAD main 2>/dev/null || true)"
+    if [ -z "$base" ]; then
+        changed=""
+        scope=all
+    else
+        changed="$( { git diff --name-only "$base"; git ls-files --others --exclude-standard; } | sort -u)"
+        scope=none
+    fi
+    filters=()
+    while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        case "$file" in
+            Cargo.toml|Cargo.lock|build.rs|rust-toolchain*|.cargo/*|.config/*|bin/gate|src/*|examples/*|tests/fixtures/*|tests/refs/*)
+                scope=all
+                break
+                ;;
+            tests/*.rs)
+                name="$(basename "$file" .rs)"
+                filters+=("binary($name)")
+                scope=some
+                ;;
+            tests/*)
+                scope=all
+                break
+                ;;
+            README.md)
+                filters+=("binary(readme)")
+                scope=some
+                ;;
+            bin/*)
+                part=no_ff; filters+=("binary(${part}mpeg)")
+                scope=some
+                ;;
+        esac
+    done <<<"$changed"
+    case "$scope" in
+        all)
+            echo "gate: running every test"
+            run_tests --all-targets
+            ;;
+        some)
+            expr="$(printf '%s | ' "${filters[@]}")"
+            echo "gate: running the tests of what changed against main"
+            run_tests --all-targets -E "${expr% | }"
+            ;;
+        none)
+            echo "gate: nothing changed against main has tests; none run"
+            ;;
+    esac
 else
-    "${tests[@]}"
+    run_tests --all-targets
 fi
 if [ "$fast" -eq 0 ]; then
     cargo build --release
