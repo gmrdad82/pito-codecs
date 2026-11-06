@@ -38,7 +38,7 @@ run_tests() {
     fi
 }
 if [ "$fast" -eq 1 ]; then
-    base="$(git merge-base HEAD main 2>/dev/null || true)"
+    base="${GATE_BASE:-$(git merge-base HEAD main 2>/dev/null || true)}"
     if [ -z "$base" ]; then
         changed=""
         scope=all
