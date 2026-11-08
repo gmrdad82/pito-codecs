@@ -207,6 +207,7 @@ impl Workers {
             let h = std::thread::Builder::new()
                 .name(format!("h264enc-{i}"))
                 .spawn(move || {
+                    crate::threads::enter();
                     let mut scratch = Scratch::new();
                     loop {
                         let job = {
@@ -544,6 +545,7 @@ impl Encoder {
             pool: if threads > 1 {
                 rayon::ThreadPoolBuilder::new()
                     .num_threads(threads)
+                    .start_handler(|_| crate::threads::enter())
                     .build()
                     .ok()
             } else {

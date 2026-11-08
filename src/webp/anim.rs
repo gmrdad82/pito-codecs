@@ -333,11 +333,16 @@ impl AnimEncoder {
                 .iter()
                 .map(|j| {
                     let image = &j.image;
-                    let a = s.spawn(move || encode_piece(image, &options));
-                    let b = j
-                        .plain
-                        .as_ref()
-                        .map(|p| s.spawn(move || encode_piece(p, &options)));
+                    let a = s.spawn(move || {
+                        crate::threads::enter();
+                        encode_piece(image, &options)
+                    });
+                    let b = j.plain.as_ref().map(|p| {
+                        s.spawn(move || {
+                            crate::threads::enter();
+                            encode_piece(p, &options)
+                        })
+                    });
                     (a, b)
                 })
                 .collect();

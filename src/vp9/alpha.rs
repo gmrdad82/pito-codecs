@@ -66,7 +66,10 @@ impl AlphaEncoder {
         self.plane.time_base = frame.time_base;
         let (color, alpha, plane) = (&mut self.color, &mut self.alpha, &self.plane);
         let (c, a) = std::thread::scope(|s| {
-            let a = s.spawn(|| alpha.encode(plane));
+            let a = s.spawn(|| {
+                crate::threads::enter();
+                alpha.encode(plane)
+            });
             let c = color.encode(frame);
             let a = a.join().unwrap_or_else(|_| {
                 Err(Error::Backend("vp9 alpha: the alpha encoder failed".into()))
@@ -169,7 +172,10 @@ impl AlphaDecoder {
                     keyframe: packet.keyframe,
                 };
                 std::thread::scope(|s| {
-                    let a = s.spawn(move || other.decode(&ap));
+                    let a = s.spawn(move || {
+                        crate::threads::enter();
+                        other.decode(&ap)
+                    });
                     let c = color.decode(packet);
                     let a = a.join().unwrap_or_else(|_| {
                         Err(Error::Backend("vp9 alpha: the alpha decoder failed".into()))

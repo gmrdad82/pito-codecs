@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `pito_codecs::threads::set_below_normal(true)` makes every worker and encoder thread pito-codecs starts run at below-normal priority on Windows (`SetThreadPriority`); on Linux a new thread keeps its creator's nice offset. Off by default. Callers that run pito-codecs work on their own rayon pool call `threads::enter()` from its `start_handler`.
+
 ## v3.2.1 — 2026-11-05
 
 Documentation only. No code changed, so the speed numbers and hardware results are v3.2.0's.

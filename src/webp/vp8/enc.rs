@@ -783,7 +783,10 @@ fn analyse(ctx: &Ctx, threads: usize) {
     } else {
         rayon::scope(|sc| {
             for _ in 0..threads {
-                sc.spawn(|_| work());
+                sc.spawn(|_| {
+                    crate::threads::enter();
+                    work()
+                });
             }
         });
     }

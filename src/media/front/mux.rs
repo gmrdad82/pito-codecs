@@ -652,6 +652,7 @@ fn vp9_edge(
             let (tx, rx) = mpsc::channel::<Frame>();
             senders.push(Some(tx));
             workers.push(s.spawn(move || {
+                crate::threads::enter();
                 let run = || -> Result<Vec<Packet>> {
                     let Ok(first) = rx.recv() else {
                         return Ok(Vec::new());
@@ -981,9 +982,12 @@ pub(super) fn run(
     let audio_job = job.quiet();
     let (copied, encoded, mux, reasons, audio) = std::thread::scope(|s| -> Result<_> {
         let (aj, gains, stop_ref, aac) = (&audio_job, &gains, &stop, &mut aac);
-        let audio = s.spawn(move || match sound {
-            Sound::Tracks => mix(aj, gains, aac, stop_ref).map(|(p, n)| (p, Some(n))),
-            Sound::Premixed(p) => premixed(aj, p, aac, stop_ref).map(|(p, n)| (p, Some(n))),
+        let audio = s.spawn(move || {
+            crate::threads::enter();
+            match sound {
+                Sound::Tracks => mix(aj, gains, aac, stop_ref).map(|(p, n)| (p, Some(n))),
+                Sound::Premixed(p) => premixed(aj, p, aac, stop_ref).map(|(p, n)| (p, Some(n))),
+            }
         });
         let video = if smart {
             smart_video(
@@ -1527,6 +1531,7 @@ fn smart_video(
             let (plan, next, edges, groups, wanted, budget) =
                 (&plan, &next, &edges, &groups, &wanted, &budget);
             s.spawn(move || {
+                crate::threads::enter();
                 let mut worker = Worker::default();
                 loop {
                     if stop.load(Ordering::Relaxed) {

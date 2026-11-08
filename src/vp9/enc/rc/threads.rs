@@ -190,7 +190,10 @@ impl Wavefront {
             [first, rest @ ..] => rayon::in_place_scope(|s| {
                 for w in rest {
                     let work = &work;
-                    s.spawn(move |_| work(w));
+                    s.spawn(move |_| {
+                        crate::threads::enter();
+                        work(w)
+                    });
                 }
                 work(first);
             }),

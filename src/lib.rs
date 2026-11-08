@@ -1,3 +1,5 @@
+pub mod threads;
+
 #[cfg(feature = "media")]
 pub mod media;
 

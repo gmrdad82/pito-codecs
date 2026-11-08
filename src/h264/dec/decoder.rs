@@ -104,6 +104,7 @@ impl Decoder {
         let pool = if threads > 1 && cfg!(not(target_arch = "wasm32")) {
             rayon::ThreadPoolBuilder::new()
                 .num_threads(threads)
+                .start_handler(|_| crate::threads::enter())
                 .thread_name(|i| format!("h264-{i}"))
                 .build()
                 .ok()

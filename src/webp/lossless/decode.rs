@@ -90,6 +90,7 @@ impl<'a> Decoder<'a> {
         let transforms = &transforms;
         std::thread::scope(|s| {
             let worker = s.spawn(move || {
+                crate::threads::enter();
                 let mut rows = Rows::new(transforms, width);
                 for (y0, y1, buf) in rx {
                     for y in y0..y1 {

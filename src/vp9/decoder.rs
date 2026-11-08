@@ -87,6 +87,7 @@ impl Decoder {
         let pool = if threads > 1 {
             rayon::ThreadPoolBuilder::new()
                 .num_threads(threads)
+                .start_handler(|_| crate::threads::enter())
                 .thread_name(|i| format!("vp9-{i}"))
                 .build()
                 .ok()
@@ -533,6 +534,7 @@ impl Decoder {
         let spawned = std::thread::Builder::new()
             .name("vp9-post".into())
             .spawn(move || {
+                crate::threads::enter();
                 if let Ok(job) = job_rx.recv() {
                     match guarded(|| job.run()) {
                         Some(Some(p)) => {

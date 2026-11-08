@@ -988,6 +988,7 @@ pub fn decode_rgba(data: &[u8], out: &mut [u8]) -> Result<()> {
             work.push(tx);
             let full_tx = full_tx.clone();
             s.spawn(move || {
+                crate::threads::enter();
                 for (my, mut row) in rx {
                     let mut wave = Wave {
                         nz,
@@ -1006,6 +1007,7 @@ pub fn decode_rgba(data: &[u8], out: &mut [u8]) -> Result<()> {
         }
         drop(full_tx);
         s.spawn(move || {
+            crate::threads::enter();
             let mut held: Vec<Option<RowData>> = (0..RING).map(|_| None).collect();
             let mut next = 0;
             for (my, row) in full_rx {
@@ -1020,6 +1022,7 @@ pub fn decode_rgba(data: &[u8], out: &mut [u8]) -> Result<()> {
             }
         });
         s.spawn(move || {
+            crate::threads::enter();
             let mut bands = bands.into_iter();
             for (my, row) in done_rx {
                 unsafe { sh.filter_row(my, &row.mbs) };

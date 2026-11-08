@@ -281,6 +281,7 @@ impl Stills {
             let spawned = std::thread::Builder::new()
                 .name("stills-warm".into())
                 .spawn(move || {
+                    crate::threads::enter();
                     let dec = std::panic::catch_unwind(AssertUnwindSafe(|| {
                         let mut dec = native::video_decoder(&d, Route::Gpu, 1)?;
                         if dec.route() == Route::Gpu {
@@ -532,6 +533,7 @@ impl Stills {
             for w in 0..workers {
                 let (next, make, run) = (&next, &make, &run);
                 s.spawn(move || {
+                    crate::threads::enter();
                     let mut state = make(if w < on_route { route } else { Route::Cpu });
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);

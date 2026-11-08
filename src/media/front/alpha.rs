@@ -148,6 +148,7 @@ pub fn export_rgba(
             let writer = &mut writer;
             let enc = &mut enc;
             let worker = s.spawn(move || -> Result<()> {
+                crate::threads::enter();
                 for (f, a) in rx {
                     for (p, add) in enc.encode(&f, a.as_ref())? {
                         writer.push_alpha(v, &p, add.as_deref())?;

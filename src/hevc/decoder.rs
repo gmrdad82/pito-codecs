@@ -88,6 +88,7 @@ impl Decoder {
         let pool = if threads > 1 {
             rayon::ThreadPoolBuilder::new()
                 .num_threads(threads)
+                .start_handler(|_| crate::threads::enter())
                 .thread_name(|i| format!("hevc-{i}"))
                 .build()
                 .ok()

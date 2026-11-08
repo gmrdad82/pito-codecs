@@ -66,7 +66,10 @@ pub(super) fn encode_image(px: Vec<u32>, width: usize, height: usize, policy: &P
             .iter()
             .map(|&(pal, recipe)| {
                 let px = &px;
-                s.spawn(move || body(px, width, height, pal, recipe, effort))
+                s.spawn(move || {
+                    crate::threads::enter();
+                    body(px, width, height, pal, recipe, effort)
+                })
             })
             .collect();
         let mut best = body(&px, width, height, last.0, last.1, effort);

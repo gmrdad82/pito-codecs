@@ -309,7 +309,10 @@ pub(crate) fn rav1d_open(s: &Rav1dSettings) -> Rav1dResult<Arc<Rav1dContext>> {
             let task = if n_tc > 1 {
                 let handle = thread::Builder::new()
                     .name(format!("rav1d-worker-{n}"))
-                    .spawn(|| rav1d_worker_task(thread_data_copy))
+                    .spawn(|| {
+                        crate::threads::enter();
+                        rav1d_worker_task(thread_data_copy)
+                    })
                     .unwrap();
                 Rav1dContextTaskType::Worker(handle)
             } else {

@@ -169,6 +169,7 @@ fn export_sources(
         let (count, sound) = std::thread::scope(|s| -> Result<_> {
             let (aac, stop, work) = (&mut aac, &stop, &work);
             let sound = s.spawn(move || -> Result<(Spill, u64)> {
+                crate::threads::enter();
                 let mut packets = Spill::create(work, "premixed.aac")?;
                 let mut first = 0u64;
                 for upto in rx {

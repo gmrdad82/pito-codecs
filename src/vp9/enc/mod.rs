@@ -409,6 +409,7 @@ impl Encoder {
                         let syntax = &syntax;
                         let rows = &layout.rows;
                         s.spawn(move || {
+                            crate::threads::enter();
                             let mut tw = TileWriter::new(syntax, NullSink, c0, c1);
                             for &(r0, r1) in rows {
                                 tw.tile(r0, r1);
@@ -451,6 +452,7 @@ impl Encoder {
                     let syntax = &syntax;
                     let rows = &layout.rows;
                     s.spawn(move || {
+                        crate::threads::enter();
                         let mut tw = TileWriter::new(syntax, BoolWriter::new(Vec::new()), c0, c1);
                         let mut out = Vec::new();
                         for &(r0, r1) in rows {

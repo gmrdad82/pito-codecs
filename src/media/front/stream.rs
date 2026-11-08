@@ -661,6 +661,7 @@ pub fn decode_audio_span(
     std::thread::scope(|s| {
         let (tx, rx) = mpsc::sync_channel::<Result<AudioBuffer>>(QUEUE);
         s.spawn(move || {
+            crate::threads::enter();
             for b in stream {
                 let failed = b.is_err();
                 if tx.send(b).is_err() || failed {
