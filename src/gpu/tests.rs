@@ -1174,6 +1174,53 @@ mod dmabuf {
     }
 
     #[test]
+    fn reused_and_fresh_dmabufs_decode_in_order_to_their_own_pictures() {
+        for codec in [Codec::H264, Codec::Hevc] {
+            if !has(codec, Direction::Encode) {
+                continue;
+            }
+            let sources: Vec<Rgba> = (0..40).map(picture).collect();
+            let pool: Vec<DmaImage> = sources
+                .iter()
+                .take(5)
+                .map(|p| rgb_image(p, DRM_FORMAT_ABGR8888))
+                .collect();
+            for (cycled, b_frames) in [(true, 0u32), (false, 0), (false, 2)] {
+                let mut cfg = config(codec);
+                cfg.b_frames = b_frames as _;
+                let mut enc = HwEncoder::new(codec, &cfg).unwrap();
+                let mut packets = Vec::new();
+                let mut want = Vec::new();
+                for (i, p) in sources.iter().enumerate() {
+                    let made;
+                    let (image, shown) = if cycled {
+                        (&pool[i % pool.len()], &sources[i % pool.len()])
+                    } else {
+                        made = rgb_image(p, DRM_FORMAT_ABGR8888);
+                        (&made, p)
+                    };
+                    want.push(reference(shown));
+                    packets.extend(
+                        enc.encode_dmabuf(image, i as i64 * 3000, TimeBase::new(1, 90000))
+                            .unwrap(),
+                    );
+                }
+                packets.extend(enc.flush().unwrap());
+                let stream = annexb_stream(codec, &packets, enc.extradata().unwrap());
+                let got = cpu_decode(codec, &stream);
+                assert_eq!(got.len(), want.len());
+                for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                    let db = psnr(std::slice::from_ref(g), std::slice::from_ref(w));
+                    assert!(
+                        db > 45.0,
+                        "{codec:?} cycled {cycled} b{b_frames}: frame {i} is {db:.2} dB from its own picture"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn an_rgb_dmabuf_encodes_on_the_gpu_to_the_cpu_conversion_within_a_stated_tolerance() {
         let formats = [
             (DRM_FORMAT_ABGR8888, false),
