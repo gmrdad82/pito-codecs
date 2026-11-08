@@ -1986,6 +1986,14 @@ pub struct Slot {
     pub coded: ffi::VABufferID,
 }
 
+const IMPORTS: usize = 8;
+
+struct Import {
+    key: Vec<u64>,
+    source: VASurfaceID,
+    last: VASurfaceID,
+}
+
 pub struct EncodeSession {
     display: Arc<Display>,
     config: ffi::VAConfigID,
@@ -1999,6 +2007,7 @@ pub struct EncodeSession {
     derive: bool,
     vpp: Option<Vpp>,
     painter: Option<Painter>,
+    imported: Vec<Import>,
 }
 
 pub struct EncodeSetup {
@@ -2059,6 +2068,7 @@ impl EncodeSession {
             derive: std::env::var_os("PITO_VA_NO_DERIVE").is_none(),
             vpp: None,
             painter: None,
+            imported: Vec::new(),
         };
         s.surfaces =
             s.display
@@ -2127,16 +2137,56 @@ impl EncodeSession {
         if self.vpp.is_none() {
             self.vpp = Some(Vpp::new(self.display.clone())?);
         }
-        let source = self.display.import_dma(image)?;
+        let layout = image.layout()?;
+        let key = image.import_key(&layout);
+        let at = match self.imported.iter().position(|i| i.key == key) {
+            Some(at) => at,
+            None => {
+                let source = self.display.import_dma(image)?;
+                if self.imported.len() >= IMPORTS {
+                    let old = self.imported.remove(0);
+                    self.retire(old);
+                }
+                self.imported.push(Import {
+                    key,
+                    source,
+                    last: ffi::VA_INVALID_ID,
+                });
+                self.imported.len() - 1
+            }
+        };
+        let source = self.imported[at].source;
         let done = match &self.vpp {
-            Some(vpp) => vpp
-                .copy(source, (0, 0, size.0, size.1), surface, size)
-                .and_then(|()| self.display.sync(surface)),
+            Some(vpp) => vpp.copy(source, (0, 0, size.0, size.1), surface, size),
             None => Err("no VA-API video processor".into()),
         };
-        self.display
-            .release(None, ffi::VA_INVALID_ID, &mut [source], ffi::VA_INVALID_ID);
-        done
+        match done {
+            Ok(()) => {
+                let used = self.imported.remove(at);
+                self.imported.push(Import {
+                    last: surface,
+                    ..used
+                });
+                Ok(())
+            }
+            Err(e) => {
+                let bad = self.imported.remove(at);
+                self.retire(bad);
+                Err(e)
+            }
+        }
+    }
+
+    fn retire(&self, import: Import) {
+        if import.last != ffi::VA_INVALID_ID {
+            let _ = self.display.sync(import.last);
+        }
+        self.display.release(
+            None,
+            ffi::VA_INVALID_ID,
+            &mut [import.source],
+            ffi::VA_INVALID_ID,
+        );
     }
 
     pub fn composes(&self) -> bool {
@@ -2252,6 +2302,9 @@ impl EncodeSession {
 
 impl Drop for EncodeSession {
     fn drop(&mut self) {
+        for import in std::mem::take(&mut self.imported) {
+            self.retire(import);
+        }
         self.painter = None;
         self.vpp = None;
         self.display.destroy_buffers(&self.coded);

@@ -45,6 +45,7 @@ pub(crate) struct Object {
 pub(crate) struct Layout {
     pub objects: Vec<Object>,
     pub plane_object: Vec<usize>,
+    pub identities: Vec<(u64, u64)>,
 }
 
 impl DmaImage {
@@ -159,7 +160,28 @@ impl DmaImage {
         Ok(Layout {
             objects,
             plane_object,
+            identities,
         })
+    }
+
+    pub(crate) fn import_key(&self, layout: &Layout) -> Vec<u64> {
+        let mut key = vec![
+            u64::from(self.fourcc),
+            self.modifier,
+            u64::from(self.width),
+            u64::from(self.height),
+        ];
+        for (dev, ino) in &layout.identities {
+            key.extend([*dev, *ino]);
+        }
+        for (i, p) in self.planes.iter().enumerate() {
+            key.extend([
+                layout.plane_object[i] as u64,
+                u64::from(p.offset),
+                u64::from(p.pitch),
+            ]);
+        }
+        key
     }
 
     pub(crate) fn wait_ready(&self) -> Result<(), String> {
