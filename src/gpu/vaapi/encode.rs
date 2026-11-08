@@ -9,7 +9,7 @@ use crate::gpu::{Color, EncoderConfig, Profile};
 use crate::media::{Bitstream, Rate};
 use crate::media::{Codec, Error, Frame, Packet, Result, Rgba, TimeBase};
 
-const DEPTH: usize = 4;
+const DEPTH: usize = 1;
 const REFERENCES: usize = 4;
 const PIC_INIT_QP: i32 = 26;
 const RATE_MIN_QP: u32 = 18;

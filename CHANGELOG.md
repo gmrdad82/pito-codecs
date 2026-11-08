@@ -5,6 +5,11 @@
 ### Added
 
 - `pito_codecs::threads::set_below_normal(true)` makes every worker and encoder thread pito-codecs starts run at below-normal priority on Windows (`SetThreadPriority`); on Linux a new thread keeps its creator's nice offset. Off by default. Callers that run pito-codecs work on their own rayon pool call `threads::enter()` from its `start_handler`.
+- `media_speed <file> xport` takes `QUEUE=1`: a second GPU encoder times a 352x240 frame every 16.7 ms during the export and reports how long other work waits behind it.
+
+### Fixed
+
+- A VA-API encode keeps one frame in flight instead of four, so other work on the card waits less behind an export. On a 90 s 4K60 HEVC overlay export on an RX 9060 XT, a small encode beside it waits 8.3 ms (p50, 10.2 ms p99) instead of 23.2 ms (24.2 ms p99), and the export takes 27.25 s instead of 26.92 s. That run was on a busy machine, and most of the gap is the probe's own extra encodes.
 
 ### Fixed
 
