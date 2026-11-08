@@ -10,9 +10,6 @@
 ### Fixed
 
 - A VA-API encode keeps one frame in flight instead of four, so other work on the card waits less behind an export. On a 90 s 4K60 HEVC overlay export on an RX 9060 XT, a small encode beside it waits 8.3 ms (p50, 10.2 ms p99) instead of 23.2 ms (24.2 ms p99), and the export takes 27.25 s instead of 26.92 s. That run was on a busy machine, and most of the gap is the probe's own extra encodes.
-
-### Fixed
-
 - A CPU H.264 export keeps the source's sample aspect ratio. It wrote 1:1, so a 1440x1080 HEVC source with a 4:3 sample aspect ratio came out displayed 4:3 instead of 16:9. The ratio is now in the SPS VUI and, when not square, in the container's `pasp` box.
 
 ### Changed
