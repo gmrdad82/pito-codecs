@@ -318,7 +318,11 @@ fn encoder(
         return Ok((VEnc::Gpu(Box::new(e)), why));
     }
     let shape = (job.size, job.fps, job.format);
-    Ok((encoder_for(shape, video, crf, edge, frames, threads)?, None))
+    let sar = cpu_sar(job, video);
+    Ok((
+        encoder_for(shape, video, crf, edge, frames, threads, sar)?,
+        None,
+    ))
 }
 
 fn restarted(job: &Job, enc: &mut HwEncoder, config: &GpuConfig) -> Result<()> {
@@ -369,6 +373,24 @@ pub(super) fn broken(job: &Job) -> bool {
     false
 }
 
+pub(super) fn cpu_sar(job: &Job, video: &Picked) -> (u16, u16) {
+    let sar = job.look.0;
+    if video.route == Route::Cpu && video.codec == Codec::H264 && sar.0 > 0 && sar.1 > 0 {
+        sar
+    } else {
+        (1, 1)
+    }
+}
+
+fn shown(mut entry: SampleEntry, sar: (u16, u16)) -> SampleEntry {
+    if sar.0 != sar.1
+        && let Some(v) = entry.video.as_mut()
+    {
+        v.pixel_aspect = Some((u32::from(sar.0), u32::from(sar.1)));
+    }
+    entry
+}
+
 pub(super) type Shape = ((u32, u32), (u32, u32), PixelFormat);
 
 pub(super) fn encoder_for(
@@ -378,6 +400,7 @@ pub(super) fn encoder_for(
     edge: bool,
     frames: i64,
     threads: usize,
+    sar: (u16, u16),
 ) -> Result<VEnc> {
     let (crf, gop) = tuning(fps, crf, edge, frames);
     if video.route == Route::Gpu {
@@ -405,6 +428,7 @@ pub(super) fn encoder_for(
         b_frames: if edge { 0 } else { 2 },
         threads,
         bitstream: Bitstream::LengthPrefixed,
+        sar,
         color: Color::BT709,
     })?)))
 }
@@ -571,7 +595,10 @@ fn encode_edge(
     let avcc = enc
         .extradata()
         .ok_or_else(|| Error::Backend("the encoder gave no parameter sets".to_string()))?;
-    let entry = entry_for(video.codec, &avcc, job.size.0, job.size.1)?;
+    let entry = shown(
+        entry_for(video.codec, &avcc, job.size.0, job.size.1)?,
+        cpu_sar(job, video),
+    );
     let mut reasons = std::mem::take(&mut resident.reasons);
     reasons.extend(refreshed);
     job.tally.edge();
@@ -1048,6 +1075,7 @@ pub(super) struct Sink<'a> {
     timescale: u32,
     fd: i64,
     part: &'a Path,
+    sar: (u16, u16),
 }
 
 impl<'a> Sink<'a> {
@@ -1067,7 +1095,13 @@ impl<'a> Sink<'a> {
             timescale,
             fd,
             part,
+            sar: (1, 1),
         }
+    }
+
+    pub(super) fn with_sar(mut self, sar: (u16, u16)) -> Self {
+        self.sar = sar;
+        self
     }
 
     pub(super) fn feed(&mut self, enc: &VEnc, packets: Vec<Packet>) -> Result<()> {
@@ -1079,7 +1113,10 @@ impl<'a> Sink<'a> {
             let mut entries = Entries::default();
             entries.id(
                 x.clone(),
-                entry_for(self.codec, &x, self.size.0, self.size.1)?,
+                shown(
+                    entry_for(self.codec, &x, self.size.0, self.size.1)?,
+                    self.sar,
+                ),
             );
             self.mux = Some(open_mux(
                 self.rotation,
@@ -1142,7 +1179,8 @@ fn whole_video(
     } else {
         job.sources[job.index[0]].probe.rotation
     };
-    let mut out = Sink::new(video.codec, job.size, rotation, (timescale, fd), part);
+    let mut out = Sink::new(video.codec, job.size, rotation, (timescale, fd), part)
+        .with_sar(cpu_sar(job, video));
     let mut resident = Resident::new(&enc);
     resident.reasons.extend(why);
     let mut at = 0i64;

@@ -708,3 +708,67 @@ fn the_x264_sources_are_what_the_recorder_feeds_x264() {
     );
     assert!(to_annexb(&[1, 0x64, 0, 0x1f, 0xff, 0xe1], &[]).is_err());
 }
+
+#[test]
+fn encoded_streams_carry_the_sample_aspect_ratio_back_out() {
+    for sar in [
+        (1, 1),
+        (4, 3),
+        (8, 9),
+        (12, 11),
+        (16, 11),
+        (160, 99),
+        (2, 1),
+        (65_535, 3),
+    ] {
+        let config = EncoderConfig {
+            sar,
+            ..colour_config(0)
+        };
+        let (avcc, packets) = encode(config, &colour_frames()).unwrap();
+        let stream = to_annexb(&avcc, &packets).unwrap();
+        let sps = stream
+            .windows(4)
+            .position(|w| w[..3] == [0, 0, 1] && w[3] & 0x1f == 7)
+            .unwrap()
+            + 4;
+        let end = stream[sps..]
+            .windows(3)
+            .position(|w| w == [0, 0, 1])
+            .map_or(stream.len(), |at| sps + at - 1);
+        let vui = crate::syntax::h264::params::Sps::parse(&crate::syntax::bits::unescape_rbsp(
+            &stream[sps..end],
+        ))
+        .unwrap()
+        .vui
+        .unwrap();
+        assert_eq!(vui.sar, sar);
+        let mut dec = Decoder::with_extradata(&avcc).unwrap();
+        let mut shown = 0;
+        for p in &packets {
+            shown += dec.decode(p).unwrap().len();
+        }
+        shown += dec.flush().unwrap().len();
+        assert_eq!(shown, 6);
+    }
+}
+
+#[test]
+fn an_unset_sample_aspect_ratio_is_left_unsignalled() {
+    for sar in [(0, 0), (4, 0), (0, 3)] {
+        let config = EncoderConfig {
+            sar,
+            ..colour_config(0)
+        };
+        let (avcc, _) = encode(config, &colour_frames()).unwrap();
+        let sps = &avcc[8..];
+        let len = usize::from(u16::from_be_bytes([avcc[6], avcc[7]]));
+        let vui = crate::syntax::h264::params::Sps::parse(&crate::syntax::bits::unescape_rbsp(
+            &sps[1..len],
+        ))
+        .unwrap()
+        .vui
+        .unwrap();
+        assert_eq!(vui.sar, (0, 0));
+    }
+}

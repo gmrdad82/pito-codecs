@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- A CPU H.264 export keeps the source's sample aspect ratio. It wrote 1:1, so a 1440x1080 HEVC source with a 4:3 sample aspect ratio came out displayed 4:3 instead of 16:9. The ratio is now in the SPS VUI and, when not square, in the container's `pasp` box.
+
+### Changed
+
+- `h264::EncoderConfig` has a `sar: (u16, u16)` field, `(1, 1)` by default; a struct literal needs it or `..Default::default()`.
+
 ## v3.2.1 — 2026-11-05
 
 Documentation only. No code changed, so the speed numbers and hardware results are v3.2.0's.

@@ -52,7 +52,7 @@ fn native_prefs(prefs: &Prefs) -> Prefs {
 }
 
 fn open_encoder(shape: Shape, video: &mut Picked, crf: u8) -> Result<VEnc> {
-    match encoder_for(shape, video, crf, false, 0, 0) {
+    match encoder_for(shape, video, crf, false, 0, 0, (1, 1)) {
         Ok(e) => Ok(e),
         Err(e) if video.route == Route::Gpu => {
             video.reasons.push(format!(
@@ -60,7 +60,7 @@ fn open_encoder(shape: Shape, video: &mut Picked, crf: u8) -> Result<VEnc> {
             ));
             video.route = Route::Cpu;
             video.codec = Codec::H264;
-            encoder_for(shape, video, crf, false, 0, 0)
+            encoder_for(shape, video, crf, false, 0, 0, (1, 1))
         }
         Err(e) => Err(e),
     }

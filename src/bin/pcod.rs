@@ -1234,6 +1234,7 @@ impl Encoder {
             b_frames: 2,
             threads,
             bitstream: media::Bitstream::LengthPrefixed,
+            sar: (1, 1),
             color: gpu::Color::BT709,
         })?;
         Ok(Encoder::Cpu(Box::new(e)))

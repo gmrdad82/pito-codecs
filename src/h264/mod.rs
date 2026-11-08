@@ -133,6 +133,7 @@ pub struct EncoderConfig {
     pub b_frames: u8,
     pub threads: usize,
     pub bitstream: media::Bitstream,
+    pub sar: (u16, u16),
     pub color: Color,
 }
 
@@ -149,6 +150,7 @@ impl Default for EncoderConfig {
             b_frames: 2,
             threads: 0,
             bitstream: media::Bitstream::LengthPrefixed,
+            sar: (1, 1),
             color: Color::BT709,
         }
     }
@@ -176,6 +178,7 @@ impl Encoder {
             media::Rate::Qp(q) => enc::RateControl::Qp(q),
         };
         cfg.keyint = config.gop;
+        cfg.sar = config.sar;
         cfg.color = config.color;
         cfg.bframes = config.b_frames;
         cfg.threads = config.threads;

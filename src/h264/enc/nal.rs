@@ -14,12 +14,25 @@ pub fn nal(nal_ref_idc: u8, nal_type: u8, rbsp: &[u8]) -> Vec<u8> {
     out
 }
 
+fn aspect_idc(sar: (u16, u16)) -> Option<u8> {
+    if sar.0 == 0 || sar.1 == 0 {
+        return None;
+    }
+    let found = crate::syntax::hevc::params::SAR_TABLE
+        .iter()
+        .skip(1)
+        .position(|&s| s == sar)
+        .and_then(|i| u8::try_from(i + 1).ok());
+    Some(found.unwrap_or(255))
+}
+
 #[derive(Clone, Debug)]
 pub struct Vui {
     pub num_units_in_tick: u32,
     pub time_scale: u32,
     pub max_num_reorder_frames: u32,
     pub max_dec_frame_buffering: u32,
+    pub sar: (u16, u16),
     pub color: crate::media::color::Color,
 }
 
@@ -74,8 +87,15 @@ impl Sps {
         }
         w.write_bit(true);
         let v = &self.vui;
-        w.write_bit(true);
-        w.write_bits(1, 8);
+        let idc = aspect_idc(v.sar);
+        w.write_bit(idc.is_some());
+        if let Some(idc) = idc {
+            w.write_bits(u32::from(idc), 8);
+            if idc == 255 {
+                w.write_bits(u32::from(v.sar.0), 16);
+                w.write_bits(u32::from(v.sar.1), 16);
+            }
+        }
         w.write_bit(false);
         w.write_bit(true);
         w.write_bits(5, 3);
