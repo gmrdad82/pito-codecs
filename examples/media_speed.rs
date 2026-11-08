@@ -1035,6 +1035,9 @@ fn xport(path: &std::path::Path, decode: Choice, encode: Choice, overlay: Option
             worst
         })
     };
+    let queue = std::env::var("QUEUE")
+        .is_ok()
+        .then(|| queue_probe(stop.clone()));
     let before = engines();
     let cpu_before = cpu_seconds();
     let t = Instant::now();
@@ -1096,7 +1099,96 @@ fn xport(path: &std::path::Path, decode: Choice, encode: Choice, overlay: Option
         })
         .collect();
     say!("  engines: {}", busy.join("; "))?;
+    if let Some(probe) = queue {
+        let (idle, during) = probe.join().map_err(|_| "the queue probe stopped")??;
+        let ms = |v: &[(f64, f64)], q: f64| {
+            let mut w: Vec<f64> = v.iter().map(|x| x.1).collect();
+            w.sort_by(f64::total_cmp);
+            w.get(((w.len() as f64 - 1.0) * q).round() as usize)
+                .copied()
+                .unwrap_or(0.0)
+        };
+        say!(
+            "  queue probe idle p50 {:.2} ms; during the export p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms ({} probes)",
+            ms(&idle, 0.5),
+            ms(&during, 0.5),
+            ms(&during, 0.99),
+            ms(&during, 1.0),
+            during.len()
+        )?;
+        let mut from = 0.0;
+        while from < s {
+            let part: Vec<(f64, f64)> = during
+                .iter()
+                .copied()
+                .filter(|x| x.0 >= from && x.0 < from + 5.0)
+                .collect();
+            if !part.is_empty() {
+                say!(
+                    "    {from:>4.0}-{:<4.0} s: p50 {:.2} ms, p99 {:.2} ms",
+                    from + 5.0,
+                    ms(&part, 0.5),
+                    ms(&part, 0.99)
+                )?;
+            }
+            from += 5.0;
+        }
+    }
     Ok(())
+}
+
+type Probes = (Vec<(f64, f64)>, Vec<(f64, f64)>);
+
+fn queue_probe(
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) -> std::thread::JoinHandle<Result<Probes, String>> {
+    let ready = Arc::new(std::sync::Barrier::new(2));
+    let started = ready.clone();
+    let handle = std::thread::spawn(move || {
+        let made = pito_codecs::gpu::HwEncoder::new(
+            Codec::H264,
+            &pito_codecs::gpu::EncoderConfig {
+                width: 352,
+                height: 240,
+                fps: (60, 1),
+                rate: pito_codecs::media::Rate::Qp(30),
+                gop: 60,
+                b_frames: 0,
+                ..Default::default()
+            },
+        );
+        let mut frame = Frame::new(PixelFormat::Yuv420p8, 352, 240, 0, TimeBase::new(1, 60));
+        let mut once = |enc: &mut pito_codecs::gpu::HwEncoder| -> Result<f64, String> {
+            frame.pts += 1;
+            let t = Instant::now();
+            enc.encode(&frame).map_err(|e| e.to_string())?;
+            enc.flush().map_err(|e| e.to_string())?;
+            Ok(t.elapsed().as_secs_f64() * 1e3)
+        };
+        let mut enc = match made {
+            Ok(enc) => enc,
+            Err(e) => {
+                started.wait();
+                return Err(e.to_string());
+            }
+        };
+        let mut idle = Vec::new();
+        for _ in 0..60 {
+            idle.push((0.0, once(&mut enc)?));
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        started.wait();
+        let t = Instant::now();
+        let mut during = Vec::new();
+        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+            let at = t.elapsed().as_secs_f64();
+            during.push((at, once(&mut enc)?));
+            std::thread::sleep(std::time::Duration::from_micros(16_700));
+        }
+        Ok((idle, during))
+    });
+    ready.wait();
+    handle
 }
 
 fn cpu_seconds() -> f64 {
