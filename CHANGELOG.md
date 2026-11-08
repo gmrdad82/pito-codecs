@@ -1,5 +1,11 @@
 # Changelog
 
+## v4.0.1 — 2026-11-08
+
+### Fixed
+
+- The download archives carry pcod's agent skill (`skills/pcod`), with `skills/install-skill.sh` and `skills/install-skill.ps1` to link or copy it into Claude Code, Codex, Pi and other agents' skill folders.
+
 ## v4.0.0 — 2026-11-08
 
 ### Added
