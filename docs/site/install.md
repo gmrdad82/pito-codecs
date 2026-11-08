@@ -41,6 +41,16 @@ Anywhere Rust 1.97 or newer runs, Linux arm64 included:
 cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag @VERSION@ pito-codecs --bin pcod
 ```
 
+## The agent skill
+
+Each archive carries `skills/pcod/` beside the binary: a skill that teaches coding agents to use pcod. Link it into the skills folder of each agent you use, from the folder you unpacked into:
+
+```sh
+for h in ~/.agents ~/.claude ~/.codex ~/.pi/agent; do mkdir -p "$h/skills" && ln -sfn "$PWD/skills/pcod" "$h/skills/pcod"; done
+```
+
+From a source checkout, link `skills/pcod` the same way. On Windows, copy the folder into each agent's `skills` folder.
+
 ## The library
 
 Add it to a Rust project's `Cargo.toml`. Every part is on by default:
