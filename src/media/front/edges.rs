@@ -655,3 +655,70 @@ fn an_export_with_no_pieces_is_refused() {
     );
     assert!(matches!(r, Err(Error::Invalid(_))));
 }
+
+fn entry_aspects(path: &Path) -> Vec<Option<(u32, u32)>> {
+    let d = Demux::open(path).unwrap();
+    let r = d.mp4().expect("an mp4");
+    let track = d.video().unwrap();
+    r.tracks[track]
+        .entries
+        .iter()
+        .map(|e| e.video.and_then(|v| v.pixel_aspect))
+        .collect()
+}
+
+fn cpu_h264_from(name: &str) -> (Look, Exported) {
+    let src = fixture(name);
+    let want = source_look(&src, Codec::Hevc, name);
+    let opts = ExportOptions {
+        video: Codec::H264,
+        prefs: Prefs {
+            decode: Choice::Cpu,
+            encode: Choice::Cpu,
+            ..Prefs::default()
+        },
+        ..ExportOptions::default()
+    };
+    let pieces = [Piece {
+        path: src,
+        from: 0.0,
+        to: refs::FRAMES as f64 / f64::from(refs::FPS),
+    }];
+    let done = export(
+        &dir().join(format!("cpu-h264-{name}")),
+        &pieces,
+        opts,
+        |_| true,
+    )
+    .unwrap();
+    (want, done)
+}
+
+#[test]
+fn a_cpu_h264_encode_of_a_4_3_sar_hevc_source_writes_that_sar_and_the_colour_tags() {
+    let (want, e) = cpu_h264_from(refs::HEVC_TAGGED);
+    assert_eq!(want, Some(((4, 3), Color::BT709)));
+    assert_eq!(e.video.route, Route::Cpu, "{:?}", e.reasons);
+    assert_eq!(e.video.codec, Codec::H264);
+    assert!(
+        !e.smart && e.encoded > 0 && e.copied == 0,
+        "{:?}",
+        e.reasons
+    );
+    let got = frame_looks(&e.path, Codec::H264);
+    assert_eq!(got.len() as u64, e.frames);
+    assert!(got.iter().all(|l| *l == want), "{got:?}");
+    assert_eq!(entry_aspects(&e.path), vec![Some((4, 3))]);
+}
+
+#[test]
+fn a_cpu_h264_encode_of_a_square_pixel_hevc_source_stays_1_1_with_the_colour_tags() {
+    let (want, e) = cpu_h264_from(refs::HEVC_SQUARE);
+    assert_eq!(want, Some(((1, 1), Color::BT709)));
+    assert_eq!(e.video.route, Route::Cpu, "{:?}", e.reasons);
+    assert_eq!(e.video.codec, Codec::H264);
+    let got = frame_looks(&e.path, Codec::H264);
+    assert_eq!(got.len() as u64, e.frames);
+    assert!(got.iter().all(|l| *l == want), "{got:?}");
+    assert_eq!(entry_aspects(&e.path), vec![None]);
+}

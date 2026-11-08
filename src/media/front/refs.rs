@@ -27,16 +27,23 @@ pub struct Fixture {
 }
 
 pub const HEVC_TAGGED: &str = "hevc-tagged.mp4";
+pub const HEVC_SQUARE: &str = "hevc-square.mp4";
 pub const HEVC_UNTAGGED: &str = "hevc-untagged.mp4";
 pub const HEVC_ANAMORPHIC_FULL: &str = "hevc-anamorphic-full.mp4";
 pub const H264_UNTAGGED: &str = "h264-untagged.mp4";
 pub const H264_ANAMORPHIC_FULL: &str = "h264-anamorphic-full.mp4";
 
-pub const FIXTURES: [Fixture; 5] = [
+pub const FIXTURES: [Fixture; 6] = [
     Fixture {
         name: HEVC_TAGGED,
         hevc: true,
         sar: Some((4, 3)),
+        tags: Tags::Bt709Tv,
+    },
+    Fixture {
+        name: HEVC_SQUARE,
+        hevc: true,
+        sar: Some((1, 1)),
         tags: Tags::Bt709Tv,
     },
     Fixture {

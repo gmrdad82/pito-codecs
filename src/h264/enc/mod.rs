@@ -102,6 +102,7 @@ pub struct EncoderConfig {
     pub bframes: u8,
     pub threads: usize,
     pub format: PacketFormat,
+    pub sar: (u16, u16),
     pub color: crate::media::color::Color,
 }
 
@@ -121,6 +122,7 @@ impl EncoderConfig {
             bframes: 2,
             threads: 0,
             format: PacketFormat::AnnexB,
+            sar: (1, 1),
             color: crate::media::color::Color::BT709,
         }
     }
@@ -528,6 +530,7 @@ impl Encoder {
                 time_scale: cfg.fps_num.saturating_mul(2),
                 max_num_reorder_frames: reorder,
                 max_dec_frame_buffering: max_refs as u32,
+                sar: cfg.sar,
                 color: cfg.color,
             },
         };

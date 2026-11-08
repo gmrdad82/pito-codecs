@@ -3,7 +3,7 @@ name = "source.i420"
 file = ""
 sha256 = "181deeb2862a668b84e46cf748676fb26ca4828ec8c097d2e6e8cfd2d5ad63b2"
 kind = "bit-exact"
-tool = "pito-codecs 2.1.0"
+tool = "pito-codecs 3.2.1"
 command = "examples/record_refs: src/media/front/refs.rs source_bytes()"
 
 [[ref]]
@@ -19,8 +19,24 @@ name = "hevc-tagged.mp4"
 file = "hevc-tagged.mp4"
 sha256 = "a3c78c8e939b4180d4db72aa136f838d13ea8407d27adadb378710f3eb64a8f1"
 kind = "fixture"
-tool = "pito-codecs 2.1.0"
+tool = "pito-codecs 3.2.1"
 command = "examples/record_refs: examples/record_refs/filter.rs hevc_mp4(\"hevc-tagged.265\")"
+
+[[ref]]
+name = "hevc-square.265"
+file = ""
+sha256 = "46664fd1c37de9134617dc5672c8f9b61fce47f5c8b08dec3667fe8660f8ff4b"
+kind = "bit-exact"
+tool = "x265 [info]: HEVC encoder version 4.3"
+command = "x265 --input {src} --input-res 384x240 --input-csp i420 --fps 10 --frames 65 --preset ultrafast --crf 51 --keyint 5 --min-keyint 5 --no-scenecut --no-open-gop --bframes 0 --frame-threads 1 --no-info --log-level error --sar 1:1 --colorprim bt709 --transfer bt709 --colormatrix bt709 --range limited --output {out}"
+
+[[ref]]
+name = "hevc-square.mp4"
+file = "hevc-square.mp4"
+sha256 = "93d078584296d5ae18c83e09b0091c62d6ef76db0aae5b05e0798b55f4e79566"
+kind = "fixture"
+tool = "pito-codecs 3.2.1"
+command = "examples/record_refs: examples/record_refs/filter.rs hevc_mp4(\"hevc-square.265\")"
 
 [[ref]]
 name = "hevc-untagged.265"
@@ -35,7 +51,7 @@ name = "hevc-untagged.mp4"
 file = "hevc-untagged.mp4"
 sha256 = "79fcfae0be130802731dc94bdb7330cd5c58b84570ef9340b444505a95e8b11b"
 kind = "fixture"
-tool = "pito-codecs 2.1.0"
+tool = "pito-codecs 3.2.1"
 command = "examples/record_refs: examples/record_refs/filter.rs hevc_mp4(\"hevc-untagged.265\")"
 
 [[ref]]
@@ -51,7 +67,7 @@ name = "hevc-anamorphic-full.mp4"
 file = "hevc-anamorphic-full.mp4"
 sha256 = "2c31c165acb781d04a03387d3f2188e65db2a808d1dadb03ff2c6a099a3b23d0"
 kind = "fixture"
-tool = "pito-codecs 2.1.0"
+tool = "pito-codecs 3.2.1"
 command = "examples/record_refs: examples/record_refs/filter.rs hevc_mp4(\"hevc-anamorphic-full.265\")"
 
 [[ref]]
