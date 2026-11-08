@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v4.0.0 — 2026-11-08
 
 ### Added
 
@@ -14,7 +14,7 @@
 
 ### Changed
 
-- `h264::EncoderConfig` has a `sar: (u16, u16)` field, `(1, 1)` by default; a struct literal needs it or `..Default::default()`.
+- **Breaking:** `h264::EncoderConfig` has a `sar: (u16, u16)` field, `(1, 1)` by default; a struct literal needs it or `..Default::default()`.
 
 ## v3.2.1 — 2026-11-05
 
