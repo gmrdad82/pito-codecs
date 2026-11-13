@@ -919,7 +919,7 @@ impl<S: ByteSource> Reader<S> {
             .min()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn tail_cues_span(&self) -> Option<(u64, u64)> {
         let at = self.tail_cues()?;
         let mut cache = Cache::default();
