@@ -16,6 +16,8 @@ const HEIGHT: u32 = 120;
 const REORDER: usize = 17;
 const WIN: u64 = 64 << 10;
 
+type Look = (&'static str, fn(&Path));
+
 struct Today {
     name: &'static str,
     duration: f64,
@@ -282,7 +284,7 @@ fn opening_and_the_first_frame_read_only_the_head_and_the_first_cluster() {
         let bytes = variant(name);
         let second = second_cluster(&bytes);
         let cues = cues_span(source());
-        let looks: [(&str, fn(&Path)); 3] = [
+        let looks: [Look; 3] = [
             ("open", |p: &Path| {
                 mkv_head(p).unwrap().unwrap();
             }),

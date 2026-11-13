@@ -949,15 +949,6 @@ impl<S: ByteSource> Reader<S> {
         after(&self.cues_at).or_else(|| after(self.cue_places()))
     }
 
-    #[cfg(all(test, unix))]
-    pub(crate) fn tail_cues_span(&self) -> Option<(u64, u64)> {
-        let at = self.tail_cues()?;
-        let mut cache = Cache::default();
-        let mut io = Io::with_len(&self.source, self.len, &mut cache);
-        let h = io.header(at, self.segment_end).ok()??;
-        (h.id == CUES).then(|| (at, h.end(self.segment_end)))
-    }
-
     pub(crate) fn end_before_cues(&self, track: usize) -> Option<i64> {
         let first = self.first_cluster?;
         let fence = self.tail_cues()?;
