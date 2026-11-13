@@ -17,6 +17,7 @@ const MAX_SAMPLES: usize = 1 << 26;
 const MAX_WARNINGS: usize = 256;
 const CUE_SPAN: u64 = 64 << 20;
 const TAIL_STEP: u64 = 1 << 20;
+const REORDER: usize = 17;
 
 fn warn(warnings: &mut Vec<String>, line: impl FnOnce() -> String) {
     match warnings.len().cmp(&MAX_WARNINGS) {
@@ -43,6 +44,13 @@ pub(crate) struct Cache {
     start: u64,
     win: usize,
     scanned: Option<Scanned>,
+    fence: Option<u64>,
+}
+
+impl Cache {
+    pub(crate) fn fence(&mut self, end: Option<u64>) {
+        self.fence = end;
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -105,7 +113,7 @@ impl<'a, S: ByteSource + ?Sized> Io<'a, S> {
         (from <= to && to <= c.buf.len()).then_some(from..to)
     }
 
-    fn refill(&mut self, pos: u64) -> Result<()> {
+    fn refill(&mut self, pos: u64, need: u64) -> Result<()> {
         let c = &*self.cache;
         let end = c.start.saturating_add(c.buf.len() as u64);
         let ahead = !c.buf.is_empty() && pos >= c.start && pos <= end.saturating_add(c.win as u64);
@@ -114,7 +122,11 @@ impl<'a, S: ByteSource + ?Sized> Io<'a, S> {
         } else {
             WIN
         };
-        let fill = self.len.saturating_sub(pos).min(win as u64) as usize;
+        let room = match self.cache.fence {
+            Some(f) if f > pos => (f - pos).max(need),
+            _ => u64::MAX,
+        };
+        let fill = self.len.saturating_sub(pos).min(win as u64).min(room) as usize;
         let mut buf = std::mem::take(&mut self.cache.buf);
         buf.resize(fill, 0);
         let read = self.src.read_at(pos, &mut buf);
@@ -136,7 +148,7 @@ impl<'a, S: ByteSource + ?Sized> Io<'a, S> {
         let range = match self.cached(pos, want_end) {
             Some(r) => r,
             None => {
-                self.refill(pos)?;
+                self.refill(pos, want_end - pos)?;
                 self.cached(pos, want_end).ok_or_else(eof)?
             }
         };
@@ -634,12 +646,15 @@ pub struct Reader<S: ByteSource = File> {
     pub tracks: Vec<Track>,
     pub(crate) cues: OnceLock<Vec<CuePoint>>,
     cues_at: Vec<u64>,
+    seek_heads_at: Vec<u64>,
+    cue_places: OnceLock<Vec<u64>>,
     pub clusters: Vec<Cluster>,
     pub warnings: Vec<String>,
     pub indexed: bool,
     pub(crate) segment_start: u64,
     pub(crate) segment_end: u64,
     pub(crate) first_cluster: Option<u64>,
+    pub(crate) first_cluster_end: Option<u64>,
     full: OnceLock<std::result::Result<Box<Reader<S>>, Error>>,
     every: OnceLock<std::result::Result<Box<Reader<S>>, Error>>,
     cue_keys: OnceLock<Option<Vec<i64>>>,
@@ -650,11 +665,13 @@ struct Head {
     info: Info,
     tracks: Vec<Track>,
     cues_at: Vec<u64>,
+    seek_heads_at: Vec<u64>,
     clusters: Vec<Cluster>,
     warnings: Vec<String>,
     segment_start: u64,
     segment_end: u64,
     first_cluster: Option<u64>,
+    first_cluster_end: Option<u64>,
     seek_head: Vec<SeekEntry>,
 }
 
@@ -739,11 +756,13 @@ impl<S: ByteSource> Reader<S> {
             info: Info::default(),
             tracks: Vec::new(),
             cues_at: Vec::new(),
+            seek_heads_at: Vec::new(),
             clusters: Vec::new(),
             warnings: Vec::new(),
             segment_start: seg.data_start(),
             segment_end: seg.end(len),
             first_cluster: None,
+            first_cluster_end: None,
             seek_head: Vec::new(),
         };
         if seg.overruns(len) {
@@ -770,12 +789,15 @@ impl<S: ByteSource> Reader<S> {
             tracks: head.tracks,
             cues: OnceLock::new(),
             cues_at: head.cues_at,
+            seek_heads_at: head.seek_heads_at,
+            cue_places: OnceLock::new(),
             clusters: head.clusters,
             warnings: head.warnings,
             indexed: options.index,
             segment_start: head.segment_start,
             segment_end: head.segment_end,
             first_cluster: head.first_cluster,
+            first_cluster_end: head.first_cluster_end,
             full: OnceLock::new(),
             every: OnceLock::new(),
             cue_keys: OnceLock::new(),
@@ -880,25 +902,8 @@ impl<S: ByteSource> Reader<S> {
         let mut cache = Cache::default();
         let mut io = Io::with_len(&self.source, self.len, &mut cache);
         let mut out = Vec::new();
-        for &at in &self.cues_at {
-            let Ok(Some(h)) = io.header(at, self.segment_end) else {
-                continue;
-            };
-            if h.id != CUES {
-                continue;
-            }
-            let end = match h.size {
-                Size::Unknown => match io.unknown_end(h.data_start(), self.segment_end) {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                },
-                Size::Known(_) => h.end(self.segment_end),
-            };
-            let n = end - h.data_start();
-            if n > MAX_META {
-                continue;
-            }
-            if let Ok(data) = io.read_vec(h.data_start(), n) {
+        for &at in self.cue_places() {
+            if let Some(data) = element(&mut io, at, CUES, self.segment_end) {
                 parse::cues(&data, &mut out);
             }
         }
@@ -910,22 +915,38 @@ impl<S: ByteSource> Reader<S> {
         self.cues.get().is_some()
     }
 
-    pub(crate) fn tail_cues(&self) -> Option<u64> {
-        let first = self.first_cluster?;
-        self.cues_at
-            .iter()
-            .copied()
-            .filter(|&p| p > first && p <= self.segment_end)
-            .min()
+    fn cue_places(&self) -> &[u64] {
+        self.cue_places.get_or_init(|| {
+            let mut out = self.cues_at.clone();
+            let mut cache = Cache::default();
+            let mut io = Io::with_len(&self.source, self.len, &mut cache);
+            for &at in &self.seek_heads_at {
+                let Some(data) = element(&mut io, at, SEEK_HEAD, self.segment_end) else {
+                    continue;
+                };
+                for e in parse::seek_head(&data) {
+                    let Some(abs) = self.segment_start.checked_add(e.position) else {
+                        continue;
+                    };
+                    if e.id == CUES && abs < self.segment_end && !out.contains(&abs) {
+                        out.push(abs);
+                    }
+                }
+            }
+            out
+        })
     }
 
-    #[cfg(all(test, unix))]
-    pub(crate) fn tail_cues_span(&self) -> Option<(u64, u64)> {
-        let at = self.tail_cues()?;
-        let mut cache = Cache::default();
-        let mut io = Io::with_len(&self.source, self.len, &mut cache);
-        let h = io.header(at, self.segment_end).ok()??;
-        (h.id == CUES).then(|| (at, h.end(self.segment_end)))
+    pub(crate) fn tail_cues(&self) -> Option<u64> {
+        let first = self.first_cluster?;
+        let after = |places: &[u64]| {
+            places
+                .iter()
+                .copied()
+                .filter(|&p| p > first && p <= self.segment_end)
+                .min()
+        };
+        after(&self.cues_at).or_else(|| after(self.cue_places()))
     }
 
     pub(crate) fn end_before_cues(&self, track: usize) -> Option<i64> {
@@ -989,14 +1010,11 @@ impl<S: ByteSource> Reader<S> {
                 these.append(&mut frames);
                 frames = these;
                 ends = p;
-                if let Some(k) = frames.iter().rposition(|f| f.keyframe) {
-                    return frames[k..]
+                if frames.len() >= REORDER || p <= first {
+                    return frames
                         .iter()
                         .map(|f| f.pts.saturating_add(f.duration as i64))
                         .max();
-                }
-                if p <= first {
-                    return None;
                 }
             }
         }
@@ -1175,6 +1193,27 @@ impl Reader<File> {
     }
 }
 
+fn element<S: ByteSource + ?Sized>(
+    io: &mut Io<'_, S>,
+    at: u64,
+    id: u32,
+    limit: u64,
+) -> Option<Vec<u8>> {
+    let h = io.header(at, limit).ok()??;
+    if h.id != id {
+        return None;
+    }
+    let end = match h.size {
+        Size::Unknown => io.unknown_end(h.data_start(), limit).ok()?,
+        Size::Known(_) => h.end(limit),
+    };
+    let n = end - h.data_start();
+    if n > MAX_META {
+        return None;
+    }
+    io.read_vec(h.data_start(), n).ok()
+}
+
 struct Window<'a> {
     base: u64,
     data: &'a [u8],
@@ -1304,6 +1343,7 @@ impl Walker {
                 CLUSTER => {
                     if r.first_cluster.is_none() {
                         r.first_cluster = Some(h.pos);
+                        r.first_cluster_end = h.size.known().map(|_| h.end(seg_end));
                         self.follow_seek_head(io, r, &[INFO, TRACKS])?;
                         if !self.index {
                             break;
@@ -1393,16 +1433,21 @@ impl Walker {
                 }
             }
         }
-        self.follow_seek_head(io, r, &[INFO, TRACKS, SEEK_HEAD])?;
+        self.follow_seek_head(io, r, &[INFO, TRACKS])?;
         for e in &r.seek_head {
-            if e.id != CUES {
-                continue;
-            }
             let Some(abs) = r.segment_start.checked_add(e.position) else {
                 continue;
             };
-            if abs < r.segment_end && !self.parsed.contains(&abs) && !r.cues_at.contains(&abs) {
-                r.cues_at.push(abs);
+            if abs >= r.segment_end || self.parsed.contains(&abs) {
+                continue;
+            }
+            let places = match e.id {
+                CUES => &mut r.cues_at,
+                SEEK_HEAD => &mut r.seek_heads_at,
+                _ => continue,
+            };
+            if !places.contains(&abs) {
+                places.push(abs);
             }
         }
         Ok(())
