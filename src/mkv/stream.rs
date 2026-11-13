@@ -162,8 +162,10 @@ impl<S: ByteSource> Stream<'_, S> {
 
 impl Cursor {
     pub(crate) fn new<S: ByteSource>(r: &Reader<S>) -> Cursor {
+        let mut cache = Cache::default();
+        cache.fence(r.first_cluster_end);
         Cursor {
-            cache: Cache::default(),
+            cache,
             pos: r.first_cluster.unwrap_or(r.segment_end),
             cluster: None,
             pending: VecDeque::new(),

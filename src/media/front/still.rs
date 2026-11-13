@@ -183,7 +183,7 @@ impl Stills {
                     .tracks
                     .get(v)
                     .ok_or_else(|| Error::Invalid("no video track".to_string()))?;
-                let keys = cue_keys(r, t, d.start(), times, seek);
+                let keys = cue_keys(r, t, d.start(), times);
                 Ok(times.iter().map(|at| cue_snap(&keys, *at)).collect())
             }
             Kind::Alpha(r) => times.iter().map(|at| super::alpha::shown(r, *at)).collect(),
@@ -369,7 +369,7 @@ impl Stills {
         let skip = d.stream(v).ok().and_then(|s| native::skipper(&s));
         let start = d.start();
         let shift = d.shift(v);
-        let keys = cue_keys(r, t, start, times, seek);
+        let keys = cue_keys(r, t, start, times);
         let snapped = |at: f64| cue_snap(&keys, at);
         let (wanted, jobs): (Vec<f64>, Vec<Vec<f64>>) = match seek {
             Seek::Keyframe => {
@@ -585,8 +585,8 @@ fn deliver(wanted: &[f64], batch: &[f64], got: Result<Vec<Rgba>>, emit: Emit) {
     }
 }
 
-fn cue_keys(r: &mkv::Reader, t: &mkv::Track, start: f64, times: &[f64], seek: Seek) -> Vec<f64> {
-    if seek == Seek::Keyframe && times.iter().all(|at| *at <= 0.0) {
+fn cue_keys(r: &mkv::Reader, t: &mkv::Track, start: f64, times: &[f64]) -> Vec<f64> {
+    if times.iter().all(|at| *at <= 0.0) {
         return Vec::new();
     }
     let mut keys: Vec<f64> = r
