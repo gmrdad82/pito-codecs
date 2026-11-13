@@ -5,7 +5,7 @@ use super::demux::{mkv_head, video_end};
 use super::probe::probe;
 use super::route::{Choice, Prefs};
 use super::still::{Seek, first_frame, frames_at, frames_at_seek};
-use crate::media::Rgba;
+use crate::media::{Packet, Rgba};
 use crate::mkv::{self, Reader};
 use crate::mp4::trace::Watch;
 use crate::testref::{Clip, Picture, sha256};
@@ -15,6 +15,8 @@ const STILLS: [f64; 10] = [0.0, 0.4, 1.7, 3.0, 4.6, 6.2, 7.5, 9.1, 10.2, 10.9];
 const HEIGHT: u32 = 120;
 const REORDER: usize = 17;
 const WIN: u64 = 64 << 10;
+const SOUND_STEP: i64 = 100;
+const OUTLAST: i64 = 1500;
 
 type Look = (&'static str, fn(&Path), bool);
 
@@ -155,12 +157,54 @@ fn damaged(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-fn longer(bytes: &[u8]) -> Vec<u8> {
+fn stretched(bytes: &[u8], ms: f64) -> Vec<u8> {
     let mut out = bytes.to_vec();
     let d = at(bytes, &INFO_DURATION) + 3;
     let said = f64::from_be_bytes(out[d..d + 8].try_into().unwrap());
-    out[d..d + 8].copy_from_slice(&(said + 250.0).to_be_bytes());
+    out[d..d + 8].copy_from_slice(&(said + ms).to_be_bytes());
     out
+}
+
+fn longer(bytes: &[u8]) -> Vec<u8> {
+    stretched(bytes, 250.0)
+}
+
+fn outlasting() -> Vec<u8> {
+    let src = whole(source());
+    let v = src.video().unwrap();
+    let t = &src.tracks[v];
+    let mut w = mkv::Writer::new(std::io::Cursor::new(Vec::new()), mkv::Options::default());
+    let video = w.add_track(mkv::TrackConfig::from_track(t)).unwrap();
+    let audio = w
+        .add_track(mkv::TrackConfig {
+            sample_rate: 48_000,
+            channels: 2,
+            ..mkv::TrackConfig::new(mkv::TrackKind::Audio, "A_PCM/INT/LIT", t.time_base)
+        })
+        .unwrap();
+    let sound = |pts: i64| Packet {
+        data: vec![0; 64],
+        pts,
+        dts: pts,
+        keyframe: true,
+    };
+    let (mut heard, mut seen) = (0, 0);
+    for i in 0..t.samples.len() {
+        let p = src.packet(v, i).unwrap();
+        seen = seen.max(p.pts);
+        while heard < seen {
+            w.push_timed(audio, &sound(heard), SOUND_STEP as u32)
+                .unwrap();
+            heard += SOUND_STEP;
+        }
+        w.push(video, &p).unwrap();
+    }
+    while heard < t.end() + OUTLAST {
+        w.push_timed(audio, &sound(heard), SOUND_STEP as u32)
+            .unwrap();
+        heard += SOUND_STEP;
+    }
+    w.finish().unwrap().into_inner()
 }
 
 fn nested(bytes: &[u8]) -> Vec<u8> {
@@ -422,7 +466,8 @@ fn the_probe_ends_where_the_last_cue_said_it_ends() {
     let path = copy("ends.mkv", source());
     let r = mkv_head(&path).unwrap().unwrap();
     let v = r.video().unwrap();
-    let ahead = r.end_before_cues(v).unwrap();
+    let (ahead, every) = r.end_before_cues(v).unwrap();
+    assert_eq!(every, ahead);
     assert!(!r.cues_read());
     let t = &r.tracks[v];
     let last = r.cues().iter().rev().find(|c| c.track == t.number).unwrap();
@@ -449,4 +494,42 @@ fn a_cues_entry_found_only_in_a_second_seek_head_is_read_on_the_first_seek() {
         .unwrap()
         .unwrap();
     assert!(unlisted.cues().is_empty());
+}
+
+#[test]
+fn sound_that_outlasts_the_picture_keeps_the_probe_off_the_cues() {
+    let bytes = outlasting();
+    let cues = cues_span(&bytes);
+    let src = whole(&bytes);
+    let v = src.video().unwrap();
+    let t = &src.tracks[v];
+    let exact = t.seconds(t.end());
+    assert!(src.tracks[src.audio()[0]].end() >= t.end() + OUTLAST);
+    assert!(src.duration_seconds() > exact + 1.0);
+    let mut probes = Vec::new();
+    for (name, bytes, falls_back) in [
+        ("outlasting", bytes.clone(), false),
+        ("overstated", stretched(&bytes, 5000.0), true),
+    ] {
+        let path = copy(&format!("{name}-probe.mkv"), &bytes);
+        let watch = Watch::new(&path);
+        let probed = probe_digest(&path);
+        let reads = watch.reads();
+        drop(watch);
+        let head = mkv_head(&path).unwrap().unwrap();
+        assert_eq!(probed.0, exact, "{name}");
+        assert_eq!(head.cues_read(), falls_back, "{name}");
+        assert_eq!(inside(&reads, cues) > 0, falls_back, "{name} {reads:?}");
+        let last = head
+            .cues()
+            .iter()
+            .rev()
+            .find(|c| c.track == t.number)
+            .unwrap();
+        let mut s = head.stream();
+        s.seek(v, t.seconds(last.time as i64)).unwrap();
+        assert_eq!(video_end(&mut s, v).unwrap(), Some(t.end()), "{name}");
+        probes.push(probed);
+    }
+    assert_eq!(probes[0], probes[1]);
 }
