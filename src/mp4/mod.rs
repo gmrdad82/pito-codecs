@@ -13,6 +13,8 @@ pub use entry::{
 pub use reader::{Edit, Reader, Sample, Track, TrackKind};
 pub use remux::{Cut, Snap, Span, copy_samples, plan, remux};
 pub use source::ByteSource;
+#[cfg(all(test, unix))]
+pub(crate) use source::trace;
 pub use writer::{Brand, FragmentedWriter, Options, TrackConfig, Writer, rotation_matrix};
 
 use crate::media::Error;

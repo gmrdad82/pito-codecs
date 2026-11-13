@@ -252,7 +252,7 @@ fn hand_built_file_reads_every_lacing_and_block_group() {
         ("mux", "write")
     );
     assert!((r.duration_seconds() - 0.4).abs() < 1e-9);
-    assert!(r.cues.is_empty());
+    assert!(r.cues().is_empty());
     assert_eq!(r.clusters.len(), 2);
     assert_eq!(r.clusters[0].timestamp, 100);
     assert_eq!(

@@ -409,21 +409,26 @@ struct Known {
     keys: Option<Vec<f64>>,
 }
 
+static KNOWN: LazyLock<Mutex<HashMap<Key, Known>>> = LazyLock::new(Default::default);
+
+fn known_only<T: Clone>(path: &Path, field: fn(&mut Known) -> &mut Option<T>) -> Option<T> {
+    let k = key(path).ok()?;
+    KNOWN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get_mut(&k)
+        .and_then(|e| field(e).clone())
+}
+
 fn known<T: Clone>(
     path: &Path,
     field: fn(&mut Known) -> &mut Option<T>,
     make: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    static KNOWN: LazyLock<Mutex<HashMap<Key, Known>>> = LazyLock::new(Default::default);
-    let k = key(path)?;
-    if let Some(v) = KNOWN
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get_mut(&k)
-        .and_then(|e| field(e).clone())
-    {
+    if let Some(v) = known_only(path, field) {
         return Ok(v);
     }
+    let k = key(path)?;
     let v = make()?;
     let mut map = KNOWN.lock().unwrap_or_else(PoisonError::into_inner);
     if map.len() > 4096 {
@@ -435,6 +440,18 @@ fn known<T: Clone>(
 
 pub fn probe(path: &Path, _: &Prefs) -> Result<Probe> {
     known(path, |k| &mut k.probe, || super::base::probe(path))
+}
+
+pub(super) fn decodable(path: &Path, prefs: &Prefs) -> Result<()> {
+    if let Some(p) = known_only(path, |k| &mut k.probe) {
+        return p.decodable();
+    }
+    if let Ok(Some(head)) = super::demux::mkv_head(path)
+        && let Ok(Some(p)) = super::demux::shape_head(&head)
+    {
+        return p.decodable();
+    }
+    probe(path, prefs)?.decodable()
 }
 
 pub fn keyframes(path: &Path, _: &Prefs) -> Result<Vec<f64>> {

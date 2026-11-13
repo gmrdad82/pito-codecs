@@ -734,7 +734,7 @@ pub fn mkv_end(r: &Arc<mkv::Reader>, i: usize) -> Result<f64> {
     let d = Demux::Mkv(r.clone());
     let mut sound = Sound::open(&d, i)?;
     let last_cue = r
-        .cues
+        .cues()
         .last()
         .and_then(|c| r.tracks.get(i).map(|t| t.seconds(c.time as i64)))
         .unwrap_or(0.0);

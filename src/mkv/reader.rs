@@ -16,6 +16,7 @@ const MAX_META: u64 = 256 << 20;
 const MAX_SAMPLES: usize = 1 << 26;
 const MAX_WARNINGS: usize = 256;
 const CUE_SPAN: u64 = 64 << 20;
+const TAIL_STEP: u64 = 1 << 20;
 
 fn warn(warnings: &mut Vec<String>, line: impl FnOnce() -> String) {
     match warnings.len().cmp(&MAX_WARNINGS) {
@@ -631,7 +632,8 @@ pub struct Reader<S: ByteSource = File> {
     pub doc_type: String,
     pub info: Info,
     pub tracks: Vec<Track>,
-    pub cues: Vec<CuePoint>,
+    pub(crate) cues: OnceLock<Vec<CuePoint>>,
+    cues_at: Vec<u64>,
     pub clusters: Vec<Cluster>,
     pub warnings: Vec<String>,
     pub indexed: bool,
@@ -647,7 +649,7 @@ struct Head {
     doc_type: String,
     info: Info,
     tracks: Vec<Track>,
-    cues: Vec<CuePoint>,
+    cues_at: Vec<u64>,
     clusters: Vec<Cluster>,
     warnings: Vec<String>,
     segment_start: u64,
@@ -736,7 +738,7 @@ impl<S: ByteSource> Reader<S> {
             doc_type,
             info: Info::default(),
             tracks: Vec::new(),
-            cues: Vec::new(),
+            cues_at: Vec::new(),
             clusters: Vec::new(),
             warnings: Vec::new(),
             segment_start: seg.data_start(),
@@ -766,7 +768,8 @@ impl<S: ByteSource> Reader<S> {
             doc_type: head.doc_type,
             info: head.info,
             tracks: head.tracks,
-            cues: head.cues,
+            cues: OnceLock::new(),
+            cues_at: head.cues_at,
             clusters: head.clusters,
             warnings: head.warnings,
             indexed: options.index,
@@ -869,6 +872,136 @@ impl<S: ByteSource> Reader<S> {
         self.len
     }
 
+    pub fn cues(&self) -> &[CuePoint] {
+        self.cues.get_or_init(|| self.read_cues())
+    }
+
+    fn read_cues(&self) -> Vec<CuePoint> {
+        let mut cache = Cache::default();
+        let mut io = Io::with_len(&self.source, self.len, &mut cache);
+        let mut out = Vec::new();
+        for &at in &self.cues_at {
+            let Ok(Some(h)) = io.header(at, self.segment_end) else {
+                continue;
+            };
+            if h.id != CUES {
+                continue;
+            }
+            let end = match h.size {
+                Size::Unknown => match io.unknown_end(h.data_start(), self.segment_end) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                },
+                Size::Known(_) => h.end(self.segment_end),
+            };
+            let n = end - h.data_start();
+            if n > MAX_META {
+                continue;
+            }
+            if let Ok(data) = io.read_vec(h.data_start(), n) {
+                parse::cues(&data, &mut out);
+            }
+        }
+        out.sort_by_key(|c| c.time);
+        out
+    }
+
+    pub(crate) fn cues_read(&self) -> bool {
+        self.cues.get().is_some()
+    }
+
+    pub(crate) fn tail_cues(&self) -> Option<u64> {
+        let first = self.first_cluster?;
+        self.cues_at
+            .iter()
+            .copied()
+            .filter(|&p| p > first && p <= self.segment_end)
+            .min()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tail_cues_span(&self) -> Option<(u64, u64)> {
+        let at = self.tail_cues()?;
+        let mut cache = Cache::default();
+        let mut io = Io::with_len(&self.source, self.len, &mut cache);
+        let h = io.header(at, self.segment_end).ok()??;
+        (h.id == CUES).then(|| (at, h.end(self.segment_end)))
+    }
+
+    pub(crate) fn end_before_cues(&self, track: usize) -> Option<i64> {
+        let first = self.first_cluster?;
+        let fence = self.tail_cues()?;
+        let t = self.tracks.get(track)?;
+        let scale = self.info.timestamp_scale;
+        let id = CLUSTER.to_be_bytes();
+        let mut buf: Vec<u8> = Vec::new();
+        let (mut lo, mut ends, mut grow) = (fence, fence, WIN as u64);
+        let mut frames: Vec<FrameRef> = Vec::new();
+        loop {
+            if lo <= first || fence - lo >= CUE_SPAN {
+                return None;
+            }
+            let add = grow.min(lo - first);
+            let mut more = vec![0; usize::try_from(add).ok()?];
+            self.source.read_at(lo - add, &mut more).ok()?;
+            more.extend_from_slice(&buf);
+            buf = more;
+            lo -= add;
+            grow = (grow * 2).min(TAIL_STEP);
+            loop {
+                let room = usize::try_from(ends - lo).ok()?;
+                let found = (0..room.saturating_sub(3)).rev().find_map(|i| {
+                    if buf[i..i + 4] != id {
+                        return None;
+                    }
+                    let (size, sl) = read_size(&buf[i + 4..room])?;
+                    let p = lo + i as u64;
+                    (p.checked_add(4 + sl as u64)?.checked_add(size.known()?)? == ends).then_some(p)
+                });
+                let Some(p) = found else {
+                    break;
+                };
+                let window = Window {
+                    base: lo,
+                    data: &buf[..room],
+                };
+                let mut cache = Cache::default();
+                let mut io = Io::with_len(&window, ends, &mut cache);
+                let h = io.header(p, ends).ok()??;
+                let (mut warnings, mut laced, mut these) = (Vec::new(), Vec::new(), Vec::new());
+                scan_cluster(
+                    &mut io,
+                    &h,
+                    ends,
+                    &self.tracks,
+                    &mut warnings,
+                    &mut laced,
+                    |b, f| {
+                        if b.track == track {
+                            expand(b, f, t, scale, 0, |x| these.push(x));
+                        }
+                    },
+                )
+                .ok()?;
+                if !warnings.is_empty() {
+                    return None;
+                }
+                these.append(&mut frames);
+                frames = these;
+                ends = p;
+                if let Some(k) = frames.iter().rposition(|f| f.keyframe) {
+                    return frames[k..]
+                        .iter()
+                        .map(|f| f.pts.saturating_add(f.duration as i64))
+                        .max();
+                }
+                if p <= first {
+                    return None;
+                }
+            }
+        }
+    }
+
     pub(crate) fn cue_keys(&self) -> Option<&[i64]> {
         self.cue_keys
             .get_or_init(|| self.keys_from_cues())
@@ -879,7 +1012,7 @@ impl<S: ByteSource> Reader<S> {
         let v = self.video()?;
         let t = self.tracks.get(v)?;
         let mut cues = self
-            .cues
+            .cues()
             .iter()
             .filter(|c| c.track == t.number)
             .map(|c| {
@@ -1039,6 +1172,25 @@ impl Reader<File> {
             Ok(r) => Ok(r),
             Err(e) => Err(again(e)),
         }
+    }
+}
+
+struct Window<'a> {
+    base: u64,
+    data: &'a [u8],
+}
+
+impl ByteSource for Window<'_> {
+    fn len(&self) -> u64 {
+        self.base + self.data.len() as u64
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        let at = offset
+            .checked_sub(self.base)
+            .and_then(|a| usize::try_from(a).ok())
+            .ok_or(std::io::ErrorKind::UnexpectedEof)?;
+        self.data.read_at(at as u64, buf)
     }
 }
 
@@ -1241,9 +1393,18 @@ impl Walker {
                 }
             }
         }
-        self.follow_seek_head(io, r, &[INFO, TRACKS, CUES, SEEK_HEAD])?;
-        self.follow_seek_head(io, r, &[CUES])?;
-        r.cues.sort_by_key(|c| c.time);
+        self.follow_seek_head(io, r, &[INFO, TRACKS, SEEK_HEAD])?;
+        for e in &r.seek_head {
+            if e.id != CUES {
+                continue;
+            }
+            let Some(abs) = r.segment_start.checked_add(e.position) else {
+                continue;
+            };
+            if abs < r.segment_end && !self.parsed.contains(&abs) && !r.cues_at.contains(&abs) {
+                r.cues_at.push(abs);
+            }
+        }
         Ok(())
     }
 
@@ -1299,6 +1460,10 @@ impl Walker {
         if !self.parsed.insert(h.pos) || !matches!(h.id, SEEK_HEAD | INFO | TRACKS | CUES) {
             return Ok(end);
         }
+        if h.id == CUES {
+            r.cues_at.push(h.pos);
+            return Ok(end);
+        }
         let n = end - h.data_start();
         if n > MAX_META {
             warn(&mut r.warnings, || {
@@ -1316,7 +1481,6 @@ impl Walker {
             TRACKS if r.tracks.is_empty() => {
                 r.tracks = parse::tracks(&data, r.info.timestamp_scale);
             }
-            CUES => parse::cues(&data, &mut r.cues),
             _ => {}
         }
         Ok(end)

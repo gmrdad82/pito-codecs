@@ -294,13 +294,16 @@ impl Cursor {
             self.position_at(c, s.block, s.lace);
             return Ok(t.seconds(s.pts));
         }
-        let cue = r
-            .cues
+        if let Some(pts) = self.seek_start(r, track, ticks)? {
+            return Ok(t.seconds(pts));
+        }
+        let cues = r.cues();
+        let cue = cues
             .iter()
             .filter(|c| c.track == t.number)
             .take_while(|c| c.time as i64 <= ticks)
             .last()
-            .or_else(|| r.cues.iter().find(|c| c.track == t.number));
+            .or_else(|| cues.iter().find(|c| c.track == t.number));
         if let Some(at) = cue.and_then(|c| r.segment_start.checked_add(c.cluster))
             && let Some(pts) = self.seek_in(r, track, ticks, &[at], true)?
         {
@@ -335,7 +338,7 @@ impl Cursor {
         }
         let ticks = t.ticks(seconds);
         let mut near: Vec<u64> = Vec::with_capacity(3);
-        for c in r.cues.iter().take_while(|c| c.time as i64 <= ticks) {
+        for c in r.cues().iter().take_while(|c| c.time as i64 <= ticks) {
             let Some(at) = r.segment_start.checked_add(c.cluster) else {
                 continue;
             };
@@ -367,6 +370,27 @@ impl Cursor {
             }
         }
         self.seek_scan(r, track, ticks)
+    }
+
+    fn seek_start<S: ByteSource>(
+        &mut self,
+        r: &Reader<S>,
+        track: usize,
+        ticks: i64,
+    ) -> Result<Option<i64>> {
+        let Some(first) = r.first_cluster.filter(|_| !r.cues_read()) else {
+            return Ok(None);
+        };
+        let mut io = Io::with_len(r.source(), r.len(), &mut self.cache);
+        let Some(h) = io.header(first, r.segment_end)? else {
+            return Ok(None);
+        };
+        if h.id != CLUSTER || ticks > cluster_ts(&mut io, &h, h.end(r.segment_end))? {
+            return Ok(None);
+        }
+        Ok(self
+            .seek_in(r, track, ticks, &[first], true)?
+            .filter(|&pts| pts >= ticks))
     }
 
     fn track_bisect<S: ByteSource>(

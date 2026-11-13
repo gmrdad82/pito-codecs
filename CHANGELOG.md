@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Opening a Matroska file and taking its first frame no longer reads the Cues. The Cues are read the first time a seek or a still away from the start needs them, once per open file, and seeks and stills land where they did. `probe` still finds the exact end of the video in the last group of pictures, now found by walking back from where the Cues begin, so durations are unchanged. A file whose SeekHead lists no Cues, or whose Cues are damaged, seeks as before. On four 720p BluRay MKVs read over SMB, probe plus first frame read 3-25% fewer bytes.
+- A still or a frame decode at the start of a Matroska file checks only the head, not the whole probe, before it decodes.
+
+### Changed
+
+- **Breaking:** `mkv::Reader::cues` is a method, `cues()`, that reads the Cues on first call; it was a public field. Damage in the Cues no longer shows in `Reader::warnings`.
+
 ## v4.0.1 — 2026-11-08
 
 ### Fixed

@@ -69,6 +69,8 @@ impl ByteSource for std::fs::File {
     }
     #[cfg(unix)]
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        #[cfg(test)]
+        trace::record(self, offset, buf.len() as u64);
         std::os::unix::fs::FileExt::read_exact_at(self, buf, offset)
     }
     #[cfg(windows)]
@@ -90,5 +92,50 @@ impl ByteSource for std::fs::File {
         let mut f = self;
         f.seek(SeekFrom::Start(offset))?;
         f.read_exact(buf)
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) mod trace {
+    use std::os::unix::fs::MetadataExt;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static WATCHING: AtomicUsize = AtomicUsize::new(0);
+    static READS: Mutex<Vec<(u64, u64, u64)>> = Mutex::new(Vec::new());
+
+    pub(crate) fn record(f: &std::fs::File, offset: u64, len: u64) {
+        if WATCHING.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        if let Ok(m) = f.metadata() {
+            let mut reads = READS.lock().unwrap_or_else(|e| e.into_inner());
+            reads.push((m.ino(), offset, len));
+        }
+    }
+
+    pub(crate) struct Watch(u64);
+
+    impl Watch {
+        pub(crate) fn new(path: &std::path::Path) -> Watch {
+            WATCHING.fetch_add(1, Ordering::Relaxed);
+            Watch(std::fs::metadata(path).map(|m| m.ino()).unwrap_or(0))
+        }
+
+        pub(crate) fn reads(&self) -> Vec<(u64, u64)> {
+            READS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .filter(|r| r.0 == self.0)
+                .map(|r| (r.1, r.2))
+                .collect()
+        }
+    }
+
+    impl Drop for Watch {
+        fn drop(&mut self) {
+            WATCHING.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }
