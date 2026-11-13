@@ -1,5 +1,11 @@
 # Changelog
 
+## v5.0.1 — 2026-11-13
+
+### Fixed
+
+- pito-codecs builds with `h264` and without `hevc` or `gpu`, such as `h264`, `aac` and `mp4` alone. Since v4.0.0 the H.264 encoder took its aspect ratio table from the HEVC parser, which those features leave out.
+
 ## v5.0.0 — 2026-11-13
 
 ### Fixed
