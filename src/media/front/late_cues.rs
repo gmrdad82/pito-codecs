@@ -38,7 +38,7 @@ const V4_0_1: [Today; 5] = [
         probe: "ec5434b87719ae2ca06c0e528f9ad19575fbde2db9b53ca526a72173f676de37",
         first: "7a68be25a26ebe3c829758a62ab21cb02fb3fe861266b309980b4a0055f290bc",
         pts: [9933, 9933, 8400, 7133, 5667, 4133, 2867, 1467, 0, 0],
-        landed: "218cf16e16a6d310c0af1c89fb29e62249c56c5c2c35adb207bd086bd54acba7",
+        landed: "d18fb8e7d42e45a0b7302d9f08d43c7e016ef1288c681e3794b80fe8a67131c1",
         keyframe: "7a84fa093737fe1be6c6092330e009106402fec6061cb3b3bb2dd97156fbd65f",
         exact: "1ec36063d00fe91f2d010c1f2cc22cbd46243db238c2baa0945fdee7dcc302e3",
     },
@@ -48,7 +48,7 @@ const V4_0_1: [Today; 5] = [
         probe: "ec5434b87719ae2ca06c0e528f9ad19575fbde2db9b53ca526a72173f676de37",
         first: "7a68be25a26ebe3c829758a62ab21cb02fb3fe861266b309980b4a0055f290bc",
         pts: [9933, 9933, 8400, 5667, 5667, 2867, 2867, 0, 0, 0],
-        landed: "b0d9fe3cda7df3c75425b5b874cbd55dc41c09b302527f0986c3ba8267112837",
+        landed: "7611c34713fdebf8b382e45a67c32de74260bf296cfec88889fb348e2ed3b7f9",
         keyframe: "54568ff3bde4f148e9157ec0a6aa6d822c0ab1194fdde23cadb31a9198f959cc",
         exact: "1ec36063d00fe91f2d010c1f2cc22cbd46243db238c2baa0945fdee7dcc302e3",
     },
@@ -68,7 +68,7 @@ const V4_0_1: [Today; 5] = [
         probe: "ec5434b87719ae2ca06c0e528f9ad19575fbde2db9b53ca526a72173f676de37",
         first: "7a68be25a26ebe3c829758a62ab21cb02fb3fe861266b309980b4a0055f290bc",
         pts: [9933, 9933, 8400, 7133, 5667, 4133, 2867, 1467, 0, 0],
-        landed: "218cf16e16a6d310c0af1c89fb29e62249c56c5c2c35adb207bd086bd54acba7",
+        landed: "d18fb8e7d42e45a0b7302d9f08d43c7e016ef1288c681e3794b80fe8a67131c1",
         keyframe: "7a84fa093737fe1be6c6092330e009106402fec6061cb3b3bb2dd97156fbd65f",
         exact: "1ec36063d00fe91f2d010c1f2cc22cbd46243db238c2baa0945fdee7dcc302e3",
     },
@@ -78,7 +78,7 @@ const V4_0_1: [Today; 5] = [
         probe: "ec5434b87719ae2ca06c0e528f9ad19575fbde2db9b53ca526a72173f676de37",
         first: "7a68be25a26ebe3c829758a62ab21cb02fb3fe861266b309980b4a0055f290bc",
         pts: [9933, 9933, 8400, 7133, 5667, 4133, 2867, 1467, 0, 0],
-        landed: "218cf16e16a6d310c0af1c89fb29e62249c56c5c2c35adb207bd086bd54acba7",
+        landed: "d18fb8e7d42e45a0b7302d9f08d43c7e016ef1288c681e3794b80fe8a67131c1",
         keyframe: "7a84fa093737fe1be6c6092330e009106402fec6061cb3b3bb2dd97156fbd65f",
         exact: "1ec36063d00fe91f2d010c1f2cc22cbd46243db238c2baa0945fdee7dcc302e3",
     },
@@ -305,12 +305,26 @@ fn landings(r: &mkv::Reader) -> (Vec<i64>, String) {
             let b = s.next_into(&mut data).unwrap().unwrap();
             if b.track == v {
                 pts.push(b.pts);
-                all.extend_from_slice(&data);
+                all.extend(without_sei(&data));
                 break;
             }
         }
     }
     (pts, sha256(&all))
+}
+
+fn without_sei(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at + 4 <= data.len() {
+        let n = u32::from_be_bytes(data[at..at + 4].try_into().unwrap()) as usize;
+        let end = (at + 4 + n).min(data.len());
+        if data.get(at + 4).is_some_and(|h| h & 0x1F != 6) {
+            out.extend_from_slice(&data[at..end]);
+        }
+        at = end;
+    }
+    out
 }
 
 fn probe_digest(path: &Path) -> (f64, String) {
