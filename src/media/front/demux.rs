@@ -661,14 +661,14 @@ fn variant_config(t: &mkv::Track) -> &[u8] {
 const SPARE_END: f64 = 1.0;
 
 fn end_before_cues(r: &mkv::Reader, v: usize, t: &mkv::Track) -> Option<i64> {
-    let end = r.end_before_cues(v)?;
+    let (end, last) = r.end_before_cues(v)?;
     let said = r
         .info
         .duration
         .filter(|d| *d > 0.0)
         .map(|_| r.duration_seconds());
     match said {
-        Some(said) if t.seconds(end) + SPARE_END < said => None,
+        Some(said) if t.seconds(last) + SPARE_END < said => None,
         _ => Some(end),
     }
 }

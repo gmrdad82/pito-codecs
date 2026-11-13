@@ -949,15 +949,16 @@ impl<S: ByteSource> Reader<S> {
         after(&self.cues_at).or_else(|| after(self.cue_places()))
     }
 
-    pub(crate) fn end_before_cues(&self, track: usize) -> Option<i64> {
+    pub(crate) fn end_before_cues(&self, track: usize) -> Option<(i64, i64)> {
         let first = self.first_cluster?;
         let fence = self.tail_cues()?;
-        let t = self.tracks.get(track)?;
+        self.tracks.get(track)?;
         let scale = self.info.timestamp_scale;
         let id = CLUSTER.to_be_bytes();
         let mut buf: Vec<u8> = Vec::new();
         let (mut lo, mut ends, mut grow) = (fence, fence, WIN as u64);
         let mut frames: Vec<FrameRef> = Vec::new();
+        let mut last = i64::MIN;
         loop {
             if lo <= first || fence - lo >= CUE_SPAN {
                 return None;
@@ -998,9 +999,15 @@ impl<S: ByteSource> Reader<S> {
                     &mut warnings,
                     &mut laced,
                     |b, f| {
-                        if b.track == track {
-                            expand(b, f, t, scale, 0, |x| these.push(x));
-                        }
+                        let Some(bt) = self.tracks.get(b.track) else {
+                            return;
+                        };
+                        expand(b, f, bt, scale, 0, |x| {
+                            last = last.max(x.pts.saturating_add(x.duration as i64));
+                            if b.track == track {
+                                these.push(x);
+                            }
+                        });
                     },
                 )
                 .ok()?;
@@ -1011,10 +1018,11 @@ impl<S: ByteSource> Reader<S> {
                 frames = these;
                 ends = p;
                 if frames.len() >= REORDER || p <= first {
-                    return frames
+                    let end = frames
                         .iter()
                         .map(|f| f.pts.saturating_add(f.duration as i64))
-                        .max();
+                        .max()?;
+                    return Some((end, last.max(end)));
                 }
             }
         }
