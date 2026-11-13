@@ -74,6 +74,8 @@ mod gif;
     feature = "vp9"
 ))]
 mod join;
+#[cfg(all(test, unix, feature = "h264", feature = "aac"))]
+mod late_cues;
 #[cfg(all(
     feature = "h264",
     feature = "hevc",

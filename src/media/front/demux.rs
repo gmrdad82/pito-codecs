@@ -640,7 +640,10 @@ pub fn hevc_profile(c: &HevcConfig) -> (String, u8) {
 const TAIL_SPAN: u64 = 16 << 20;
 const MAX_TAIL_SPAN: u64 = 256 << 20;
 
-fn video_end(stream: &mut mkv::Stream<'_, std::fs::File>, v: usize) -> Result<Option<i64>> {
+pub(super) fn video_end(
+    stream: &mut mkv::Stream<'_, std::fs::File>,
+    v: usize,
+) -> Result<Option<i64>> {
     let mut end: Option<i64> = None;
     while let Some(b) = stream.next_block(Some(v))? {
         end = end.max(Some(b.pts.saturating_add(b.duration as i64)));
@@ -655,12 +658,34 @@ fn variant_config(t: &mkv::Track) -> &[u8] {
     }
 }
 
+const SPARE_END: f64 = 1.0;
+
+fn end_before_cues(r: &mkv::Reader, v: usize, t: &mkv::Track) -> Option<i64> {
+    let end = r.end_before_cues(v)?;
+    let said = r
+        .info
+        .duration
+        .filter(|d| *d > 0.0)
+        .map(|_| r.duration_seconds());
+    match said {
+        Some(said) if t.seconds(end) + SPARE_END < said => None,
+        _ => Some(end),
+    }
+}
+
 pub fn probe_head(r: &Arc<mkv::Reader>) -> Result<Option<Probe>> {
+    head_probe(r, true)
+}
+
+pub fn shape_head(r: &Arc<mkv::Reader>) -> Result<Option<Probe>> {
+    head_probe(r, false)
+}
+
+fn head_probe(r: &Arc<mkv::Reader>, timed: bool) -> Result<Option<Probe>> {
     let (v, t) = mkv_video(r)?;
     let Some(ns) = t.default_duration.filter(|d| *d > 0) else {
         return Ok(None);
     };
-    let last = r.cues.iter().rev().find(|c| c.track == t.number);
     let wants = super::variant::needs_keyframe(t.codec(), variant_config(t));
     let mut stream = r.stream();
     let mut data = Vec::new();
@@ -683,25 +708,32 @@ pub fn probe_head(r: &Arc<mkv::Reader>) -> Result<Option<Probe>> {
     if seen == 0 {
         return Ok(None);
     }
-    let end = match last {
-        Some(last) => {
-            stream.seek(v, t.seconds(last.time as i64))?;
-            video_end(&mut stream, v)?
-        }
-        None => {
-            let mut span = TAIL_SPAN;
-            loop {
-                if stream.tail(span)?
-                    && let Some(end) = video_end(&mut stream, v)?
-                {
-                    break Some(end);
-                }
-                if span >= MAX_TAIL_SPAN || span >= r.len() {
-                    break None;
-                }
-                span *= 4;
+    if !timed {
+        let starts = Demux::Mkv(r.clone()).starts();
+        return describe(r, t, (0.0, 1e9 / ns as f64, None), first, &starts).map(Some);
+    }
+    let end = match end_before_cues(r, v, t) {
+        Some(end) => Some(end),
+        None => match r.cues().iter().rev().find(|c| c.track == t.number) {
+            Some(last) => {
+                stream.seek(v, t.seconds(last.time as i64))?;
+                video_end(&mut stream, v)?
             }
-        }
+            None => {
+                let mut span = TAIL_SPAN;
+                loop {
+                    if stream.tail(span)?
+                        && let Some(end) = video_end(&mut stream, v)?
+                    {
+                        break Some(end);
+                    }
+                    if span >= MAX_TAIL_SPAN || span >= r.len() {
+                        break None;
+                    }
+                    span *= 4;
+                }
+            }
+        },
     };
     let Some(end) = end else {
         return Ok(None);

@@ -8,7 +8,7 @@ use crate::mkv;
 use super::demux::{Demux, mkv_head};
 use super::native;
 use super::picture::Color;
-use super::probe::{keyframes, probe};
+use super::probe::{decodable, keyframes};
 use super::route::{Caps, Prefs, pick_decode};
 use super::video::{Source, source};
 use crate::media::{Codec, Error, Result, Rgba, Route};
@@ -134,12 +134,12 @@ impl Stills {
     pub fn open(path: &Path, height: u32, prefs: &Prefs) -> Result<Stills> {
         let kind = match mkv_head(path) {
             Ok(Some(r)) if super::alpha::has_alpha(&r) => {
-                probe(path, prefs)?.decodable()?;
+                decodable(path, prefs)?;
                 Kind::Alpha(r)
             }
             Ok(Some(r)) => match mkv_route(&r, prefs) {
                 Some(route) => {
-                    probe(path, prefs)?.decodable()?;
+                    decodable(path, prefs)?;
                     Kind::Mkv { r, route }
                 }
                 None => file(path, prefs)?,
@@ -183,7 +183,7 @@ impl Stills {
                     .tracks
                     .get(v)
                     .ok_or_else(|| Error::Invalid("no video track".to_string()))?;
-                let keys = cue_keys(r, t, d.start());
+                let keys = cue_keys(r, t, d.start(), times, seek);
                 Ok(times.iter().map(|at| cue_snap(&keys, *at)).collect())
             }
             Kind::Alpha(r) => times.iter().map(|at| super::alpha::shown(r, *at)).collect(),
@@ -369,7 +369,7 @@ impl Stills {
         let skip = d.stream(v).ok().and_then(|s| native::skipper(&s));
         let start = d.start();
         let shift = d.shift(v);
-        let keys = cue_keys(r, t, start);
+        let keys = cue_keys(r, t, start, times, seek);
         let snapped = |at: f64| cue_snap(&keys, at);
         let (wanted, jobs): (Vec<f64>, Vec<Vec<f64>>) = match seek {
             Seek::Keyframe => {
@@ -585,9 +585,12 @@ fn deliver(wanted: &[f64], batch: &[f64], got: Result<Vec<Rgba>>, emit: Emit) {
     }
 }
 
-fn cue_keys(r: &mkv::Reader, t: &mkv::Track, start: f64) -> Vec<f64> {
+fn cue_keys(r: &mkv::Reader, t: &mkv::Track, start: f64, times: &[f64], seek: Seek) -> Vec<f64> {
+    if seek == Seek::Keyframe && times.iter().all(|at| *at <= 0.0) {
+        return Vec::new();
+    }
     let mut keys: Vec<f64> = r
-        .cues
+        .cues()
         .iter()
         .filter(|c| c.track == t.number)
         .map(|c| (t.seconds(c.time as i64) - start).max(0.0))

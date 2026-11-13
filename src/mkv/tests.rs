@@ -258,7 +258,7 @@ mod decoded {
             assert_eq!(in_ms(&back), in_ms(&r), "{file}");
             same_packets(&timed(&back), &twin(&refs_dir, other), file);
             assert_eq!(back.is_webm(), webm);
-            assert!(!back.cues.is_empty());
+            assert!(!back.cues().is_empty());
             let span = span_seconds(&r);
             let d = back.duration_seconds();
             assert!(
@@ -379,7 +379,7 @@ mod decoded {
             ReadOptions { index: false },
         )
         .unwrap();
-        assert!(!lazy.cues.is_empty());
+        assert!(!lazy.cues().is_empty());
         let mut s = lazy.stream();
         let mut data = Vec::new();
         s.seek(v, 110.0).unwrap();
@@ -407,10 +407,12 @@ mod decoded {
         assert_eq!(lazy.cue_keys(), Some(&walked[..]));
         let mut sparse = Reader::open_with(&path, ReadOptions { index: false }).unwrap();
         let mut n = 0;
-        sparse.cues.retain(|_| {
+        let mut kept = sparse.cues().to_vec();
+        kept.retain(|_| {
             n += 1;
             n % 2 == 1
         });
+        sparse.cues = kept.into();
         assert_eq!(sparse.cue_keys(), None);
     }
 }
@@ -460,7 +462,7 @@ fn a_track_stored_far_behind_the_video_seeks_by_its_own_times() {
     }
     w.finish().unwrap();
     let r = Reader::open_with(&path, ReadOptions { index: false }).unwrap();
-    assert!(!r.cues.is_empty());
+    assert!(!r.cues().is_empty());
     for (track, at) in [(b, 600.0), (b, 1100.0), (a, 600.0)] {
         let mut cur = Cursor::new(&r);
         let landed = cur.seek_near(&r, track, at).unwrap();
