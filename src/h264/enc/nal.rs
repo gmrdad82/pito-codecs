@@ -18,7 +18,7 @@ fn aspect_idc(sar: (u16, u16)) -> Option<u8> {
     if sar.0 == 0 || sar.1 == 0 {
         return None;
     }
-    let found = crate::syntax::hevc::params::SAR_TABLE
+    let found = crate::syntax::h264::params::SAR_TABLE
         .iter()
         .skip(1)
         .position(|&s| s == sar)

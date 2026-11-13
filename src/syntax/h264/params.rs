@@ -229,7 +229,7 @@ pub struct BitstreamRestriction {
     pub max_dec_frame_buffering: u32,
 }
 
-const SAR_TABLE: [(u16, u16); 17] = [
+pub(crate) const SAR_TABLE: [(u16, u16); 17] = [
     (0, 0),
     (1, 1),
     (12, 11),
