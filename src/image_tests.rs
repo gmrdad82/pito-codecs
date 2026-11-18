@@ -13,7 +13,7 @@ fn photo(w: u32, h: u32, seed: u32) -> Rgba {
         px[0] = (128.0 + 90.0 * (x * 0.07).sin() + n) as u8;
         px[1] = (128.0 + 90.0 * (y * 0.05).cos() + n) as u8;
         px[2] = ((x + y) * 1.3 + n) as u8;
-        px[3] = if (x as u32 / 5 + y as u32 / 7) % 4 == 0 {
+        px[3] = if (x as u32 / 5 + y as u32 / 7).is_multiple_of(4) {
             90
         } else {
             255

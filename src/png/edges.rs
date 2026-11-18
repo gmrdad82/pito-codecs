@@ -5,7 +5,7 @@ use crate::testref::{self, Refs};
 
 #[allow(dead_code)]
 #[path = "refs.rs"]
-mod refs;
+pub(super) mod refs;
 
 use refs::{CLAIMED, Image, Lcg, SIGNATURE, chunk, palette, stored};
 

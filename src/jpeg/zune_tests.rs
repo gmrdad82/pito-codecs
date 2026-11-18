@@ -1,4 +1,4 @@
-use crate::testref::{self, Refs};
+use crate::testref;
 use zune_jpeg::JpegDecoder;
 use zune_jpeg::zune_core::bytestream::ZCursor;
 use zune_jpeg::zune_core::colorspace::ColorSpace;
@@ -45,7 +45,7 @@ fn every_reference_file_decodes_like_zune_jpeg_to_within_the_upsampling_filters(
             (w, h),
             "{path:?}"
         );
-        let (max, mean) = worst(&ours.data, &theirs);
+        let (max, _) = worst(&ours.data, &theirs);
         if max != 0 {
             odd.push(path.file_name().unwrap().to_string_lossy().into_owned());
         }

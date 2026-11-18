@@ -4,9 +4,7 @@ use super::{
 use crate::testref::Refs;
 use ::png18 as outside;
 
-#[allow(dead_code)]
-#[path = "refs.rs"]
-mod refs;
+use super::edges::refs;
 
 fn ours_color(c: outside::ColorType) -> Color {
     match c {

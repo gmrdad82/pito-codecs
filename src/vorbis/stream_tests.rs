@@ -154,9 +154,8 @@ fn repage(data: &[u8], per: usize, shift: i64) -> Vec<u8> {
     out.extend(page(0, 0, 1, &[&ogg.headers[1], &ogg.headers[2]]));
     let mut cum = 0i64;
     let mut prev: Option<usize> = None;
-    let mut seq = 2;
     let groups: Vec<&[&[u8]]> = packets.chunks(per).collect();
-    for (k, group) in groups.iter().enumerate() {
+    for (seq, (k, group)) in (2u32..).zip(groups.iter().enumerate()) {
         for p in group.iter() {
             let n = dec.blocksize(p).unwrap();
             cum += prev.map_or(0, |q| (q / 4 + n / 4) as i64);
@@ -165,7 +164,6 @@ fn repage(data: &[u8], per: usize, shift: i64) -> Vec<u8> {
         let last = k + 1 == groups.len();
         let granule = if last { end - shift } else { cum - shift };
         out.extend(page(if last { 4 } else { 0 }, granule, seq, group));
-        seq += 1;
     }
     out
 }
