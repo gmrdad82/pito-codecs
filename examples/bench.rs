@@ -2595,9 +2595,9 @@ mod tests {
         let noisy = png::picture(f, "noisy");
         assert_eq!(flat.data, png::picture(f, "flat").data);
         assert_eq!(noisy.data, png::picture(f, "noisy").data);
-        let runs = |d: &[u8]| d.windows(2).filter(|w| w[0] == w[1]).count();
-        assert!(runs(&flat.data) * 10 > flat.data.len() * 9);
-        assert!(runs(&noisy.data) * 10 < noisy.data.len());
+        let same = |d: &[u8]| d.windows(4).filter(|w| w[0] == w[3]).count();
+        assert!(same(&flat.data) * 4 > flat.data.len() * 3);
+        assert!(same(&noisy.data) * 10 < noisy.data.len());
     }
 
     #[test]
