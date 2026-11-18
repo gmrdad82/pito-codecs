@@ -101,6 +101,81 @@ fn clamp(v: i32) -> u8 {
 }
 
 pub fn ycbcr(y: &[u8], cb: &[u8], cr: &[u8], out: &mut [u8]) {
+    #[cfg(target_arch = "x86_64")]
+    let done = if wide() {
+        let n = y.len().min(cb.len()).min(cr.len()).min(out.len() / 4);
+        unsafe { avx2::ycbcr(&y[..n], &cb[..n], &cr[..n], out) }
+    } else {
+        0
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let done = 0;
+    ycbcr_scalar(&y[done..], &cb[done..], &cr[done..], &mut out[done * 4..]);
+}
+
+#[cfg(target_arch = "x86_64")]
+fn wide() -> bool {
+    use std::sync::LazyLock;
+    static WIDE: LazyLock<bool> = LazyLock::new(|| {
+        std::env::var_os("PITO_CODECS_NO_SIMD").is_none() && is_x86_feature_detected!("avx2")
+    });
+    *WIDE
+}
+
+#[cfg(target_arch = "x86_64")]
+mod avx2 {
+    use super::{CB_CF, CR_CF, G_CB, G_CR, PREC, RND, Y_CF};
+    use std::arch::x86_64::*;
+
+    #[target_feature(enable = "avx2")]
+    pub fn ycbcr(y: &[u8], cb: &[u8], cr: &[u8], out: &mut [u8]) -> usize {
+        let n = y.len();
+        let lanes = |p: &[u8], at: usize| unsafe {
+            _mm256_cvtepu8_epi32(_mm_loadl_epi64(p.as_ptr().add(at).cast()))
+        };
+        let c128 = _mm256_set1_epi32(128);
+        let rnd = _mm256_set1_epi32(RND);
+        let (ycf, crcf, cbcf) = (
+            _mm256_set1_epi32(Y_CF),
+            _mm256_set1_epi32(CR_CF),
+            _mm256_set1_epi32(CB_CF),
+        );
+        let (gcr, gcb) = (_mm256_set1_epi32(G_CR), _mm256_set1_epi32(G_CB));
+        let zero = _mm256_setzero_si256();
+        let top = _mm256_set1_epi32(255);
+        let clamp = |v: __m256i| _mm256_min_epi32(_mm256_max_epi32(v, zero), top);
+        let mut x = 0;
+        while x + 8 <= n {
+            let luma = _mm256_add_epi32(_mm256_mullo_epi32(lanes(y, x), ycf), rnd);
+            let cbv = _mm256_sub_epi32(lanes(cb, x), c128);
+            let crv = _mm256_sub_epi32(lanes(cr, x), c128);
+            let r = _mm256_srai_epi32::<{ PREC }>(_mm256_add_epi32(
+                luma,
+                _mm256_mullo_epi32(crv, crcf),
+            ));
+            let g = _mm256_srai_epi32::<{ PREC }>(_mm256_add_epi32(
+                _mm256_add_epi32(luma, _mm256_mullo_epi32(crv, gcr)),
+                _mm256_mullo_epi32(cbv, gcb),
+            ));
+            let b = _mm256_srai_epi32::<{ PREC }>(_mm256_add_epi32(
+                luma,
+                _mm256_mullo_epi32(cbv, cbcf),
+            ));
+            let px = _mm256_or_si256(
+                _mm256_or_si256(clamp(r), _mm256_slli_epi32::<8>(clamp(g))),
+                _mm256_or_si256(
+                    _mm256_slli_epi32::<16>(clamp(b)),
+                    _mm256_set1_epi32(0xFF00_0000u32 as i32),
+                ),
+            );
+            unsafe { _mm256_storeu_si256(out.as_mut_ptr().add(x * 4).cast(), px) };
+            x += 8;
+        }
+        x
+    }
+}
+
+fn ycbcr_scalar(y: &[u8], cb: &[u8], cr: &[u8], out: &mut [u8]) {
     for (((px, &y), &cb), &cr) in out.chunks_exact_mut(4).zip(y).zip(cb).zip(cr) {
         let cb = i32::from(cb) - 128;
         let cr = i32::from(cr) - 128;
@@ -115,5 +190,31 @@ pub fn ycbcr(y: &[u8], cb: &[u8], cr: &[u8], out: &mut [u8]) {
 pub fn grey(y: &[u8], out: &mut [u8]) {
     for (px, &y) in out.chunks_exact_mut(4).zip(y) {
         px.copy_from_slice(&[y, y, y, 255]);
+    }
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_wide_conversion_writes_the_scalar_bytes() {
+        let mut s = 99u32;
+        let mut bytes = |n: usize| -> Vec<u8> {
+            (0..n)
+                .map(|_| {
+                    s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    (s >> 24) as u8
+                })
+                .collect()
+        };
+        for n in [0usize, 1, 7, 8, 9, 63, 64, 1000, 1921] {
+            let (y, cb, cr) = (bytes(n), bytes(n), bytes(n));
+            let mut a = vec![0u8; n * 4];
+            let mut b = vec![0u8; n * 4];
+            ycbcr(&y, &cb, &cr, &mut a);
+            ycbcr_scalar(&y, &cb, &cr, &mut b);
+            assert!(a == b, "{n} pixels");
+        }
     }
 }

@@ -5,9 +5,12 @@ pub mod header_cached;
 pub mod huffman_tree;
 pub mod imdct;
 pub mod ogg;
+pub mod stream;
 
 #[cfg(test)]
 mod decode_tests;
+#[cfg(test)]
+mod stream_tests;
 #[cfg(test)]
 mod tests;
 
@@ -17,6 +20,7 @@ pub use header::{
     read_header_ident, read_header_set, read_header_setup,
 };
 pub use ogg::{OggVorbis, decode, xiph_headers};
+pub use stream::Stream;
 
 pub(crate) fn ilog(val: u64) -> u8 {
     64 - val.leading_zeros() as u8

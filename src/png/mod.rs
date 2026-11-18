@@ -4,13 +4,17 @@ mod edges;
 mod encode;
 mod filter;
 mod inflate;
+mod native;
+#[cfg(test)]
+mod native_tests;
 #[cfg(test)]
 mod tests;
 
 use crate::media::{self, Error, Result};
 use crc::crc;
-pub use encode::{encode, encode_rgba};
+pub use encode::{Compression, Options, Picture, encode, encode_picture, encode_rgba};
 use filter::{Simd, unfilter};
+pub use native::{Meta, Output, Text, Transform, metadata, output};
 
 const SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
 const MAX_PIXELS: u64 = 1 << 28;
@@ -136,6 +140,8 @@ struct Layout {
     has_palette: bool,
     palette_len: usize,
     trns: Option<[u16; 3]>,
+    trns_present: bool,
+    alpha: Vec<u8>,
 }
 
 impl Layout {
@@ -164,6 +170,12 @@ impl Default for Decoder {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Mode {
+    Rgba,
+    Native(Transform),
+}
+
 const XORIG: [usize; 7] = [0, 4, 0, 2, 0, 1, 0];
 const YORIG: [usize; 7] = [0, 0, 4, 0, 2, 0, 1];
 const XSPC: [usize; 7] = [8, 8, 4, 4, 2, 2, 1];
@@ -182,7 +194,7 @@ impl Decoder {
         }
     }
 
-    pub fn decode_into(&mut self, data: &[u8], out: &mut media::Rgba) -> Result<()> {
+    fn prepare(&mut self, data: &[u8]) -> Result<Layout> {
         let info = header(data)?;
         let mut layout = Layout {
             info,
@@ -190,6 +202,8 @@ impl Decoder {
             has_palette: false,
             palette_len: 0,
             trns: None,
+            trns_present: false,
+            alpha: Vec::new(),
         };
         let mut single: Option<&[u8]> = None;
         let mut parts = 0usize;
@@ -245,7 +259,12 @@ impl Decoder {
                     layout.palette_len = (len / 3).min(usable);
                 }
                 b"tRNS" => match info.color {
-                    Color::Palette if !body.is_empty() && len <= layout.palette_len => {
+                    Color::Palette if !body.is_empty() => {
+                        layout.trns_present = true;
+                        layout.alpha = body.to_vec();
+                        if len > layout.palette_len {
+                            continue;
+                        }
                         for (e, a) in layout.palette.iter_mut().zip(body) {
                             e.0[3] = *a;
                         }
@@ -253,10 +272,12 @@ impl Decoder {
                     Color::Grey if len >= 2 => {
                         let g = u16::from_be_bytes([body[0], body[1]]);
                         layout.trns = Some([g, g, g]);
+                        layout.trns_present = true;
                     }
                     Color::Rgb if len >= 6 => {
                         let s = |i: usize| u16::from_be_bytes([body[i], body[i + 1]]);
                         layout.trns = Some([s(0), s(2), s(4)]);
+                        layout.trns_present = true;
                     }
                     _ => {}
                 },
@@ -307,6 +328,13 @@ impl Decoder {
                 "the image data ends early ({written} of {expected} bytes)"
             )));
         }
+        Ok(layout)
+    }
+
+    pub fn decode_into(&mut self, data: &[u8], out: &mut media::Rgba) -> Result<()> {
+        let layout = self.prepare(data)?;
+        let info = layout.info;
+        let (w, h) = (info.width as usize, info.height as usize);
         out.width = info.width;
         out.height = info.height;
         out.data.resize(w * h * 4, 0);
@@ -314,7 +342,7 @@ impl Decoder {
         let result = if info.interlaced {
             self.interlaced(&layout, &rows, out)
         } else {
-            self.rows(&layout, &rows, w, h, &mut |y, rgba| {
+            self.rows(&layout, &rows, w, h, Mode::Rgba, &mut |y, rgba| {
                 out.data[y * w * 4..(y + 1) * w * 4].copy_from_slice(rgba);
             })
         };
@@ -328,15 +356,17 @@ impl Decoder {
         data: &[u8],
         width: usize,
         height: usize,
+        mode: Mode,
         put: &mut dyn FnMut(usize, &[u8]),
     ) -> Result<()> {
+        let px = mode.pixel_bytes(layout);
         let stride = layout.row_bytes(width);
         let bpp = layout.bpp();
         self.prev.clear();
         self.prev.resize(stride, 0);
         self.cur.clear();
         self.cur.resize(stride, 0);
-        self.pass.resize(width * 4, 0);
+        self.pass.resize(width * px, 0);
         let mut pass = std::mem::take(&mut self.pass);
         let mut result = Ok(());
         for (y, line) in data.chunks_exact(stride + 1).take(height).enumerate() {
@@ -352,8 +382,14 @@ impl Decoder {
                 result = Err(invalid(format!("unknown filter type {}", line[0])));
                 break;
             }
-            self.expand(layout, width, &mut pass[..width * 4]);
-            put(y, &pass[..width * 4]);
+            let n = match mode {
+                Mode::Rgba => {
+                    self.expand(layout, width, &mut pass[..width * 4]);
+                    width * 4
+                }
+                Mode::Native(t) => self.native(layout, t, width, &mut pass[..width * px]),
+            };
+            put(y, &pass[..n]);
             std::mem::swap(&mut self.prev, &mut self.cur);
         }
         self.pass = pass;
@@ -373,7 +409,7 @@ impl Decoder {
                 .get(offset..offset + len)
                 .ok_or_else(|| invalid("the interlaced data ends early"))?;
             let pixels = &mut out.data;
-            self.rows(layout, slice, x, y, &mut |j, rgba| {
+            self.rows(layout, slice, x, y, Mode::Rgba, &mut |j, rgba| {
                 let oy = j * YSPC[p] + YORIG[p];
                 for (i, px) in rgba.chunks_exact(4).enumerate() {
                     let ox = i * XSPC[p] + XORIG[p];

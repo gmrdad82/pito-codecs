@@ -16,6 +16,9 @@ sysroot="$(rustc --print sysroot)"
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo clippy --lib --no-default-features --features audio,mp3,opus,ac3 -- -D warnings
+for feature in png jpeg wav loudness vorbis image; do
+    cargo clippy --lib --no-default-features --features "$feature" -- -D warnings
+done
 for target in x86_64-pc-windows-gnu aarch64-apple-darwin aarch64-unknown-linux-gnu; do
     if [ -d "$sysroot/lib/rustlib/$target/lib" ]; then
         cargo clippy --all-targets --target "$target" -- -D warnings

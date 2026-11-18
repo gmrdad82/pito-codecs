@@ -1,8 +1,9 @@
-use super::resample::{bessel_i0, kaiser, sinc};
 use crate::media::{AudioBuffer, Error, Result};
+#[cfg(feature = "filter")]
 use rayon::prelude::*;
 use std::f64::consts::PI;
 
+const MAX_WINDOW_RATE: u32 = 2_822_400;
 const HIST_MIN: f64 = -70.0;
 const HIST_MAX: f64 = 20.0;
 const HIST_STEP: f64 = 0.01;
@@ -13,7 +14,38 @@ pub(crate) const TAPS: usize = 32;
 const CUTOFF: f64 = 0.97;
 const BETA: f64 = 9.0;
 const CHUNK: usize = 1024;
+#[cfg(feature = "filter")]
 const PARALLEL: usize = 8192;
+
+pub(crate) fn kaiser(r: f64, beta: f64, i0: f64) -> f64 {
+    if r.abs() >= 1.0 {
+        0.0
+    } else {
+        bessel_i0(beta * (1.0 - r * r).sqrt()) / i0
+    }
+}
+
+pub(crate) fn sinc(x: f64) -> f64 {
+    if x.abs() < 1e-12 {
+        1.0
+    } else {
+        (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
+    }
+}
+
+pub(crate) fn bessel_i0(x: f64) -> f64 {
+    let mut sum = 1.0;
+    let mut term = 1.0;
+    let q = x * x / 4.0;
+    for k in 1..64 {
+        term *= q / (k * k) as f64;
+        sum += term;
+        if term < sum * 1e-17 {
+            break;
+        }
+    }
+    sum
+}
 
 pub(crate) fn lufs(e: f64) -> f64 {
     if e <= 0.0 {
@@ -159,6 +191,7 @@ struct Channel {
     s: [f64; 4],
     carry: f64,
     sums: Vec<f64>,
+    squares: Vec<f64>,
     buffer: Vec<f32>,
     out: Vec<f32>,
     sample_peak: f32,
@@ -171,6 +204,7 @@ impl Channel {
             s: [0.0; 4],
             carry: 0.0,
             sums: Vec::new(),
+            squares: Vec::new(),
             buffer: vec![0.0; TAPS - 1],
             out: vec![0.0; CHUNK],
             sample_peak: 0.0,
@@ -202,6 +236,9 @@ fn weigh<const N: usize>(chans: &mut [Channel], k: &Filters, segments: &[usize])
     let mut s: [[f64; 4]; N] = std::array::from_fn(|i| chans[i].s);
     let mut sums: [Vec<f64>; N] = std::array::from_fn(|i| std::mem::take(&mut chans[i].sums));
     sums.iter_mut().for_each(Vec::clear);
+    let mut squares: [Vec<f64>; N] = std::array::from_fn(|i| std::mem::take(&mut chans[i].squares));
+    squares.iter_mut().for_each(Vec::clear);
+    let keep = k.keep;
     let data: [&[f32]; N] = std::array::from_fn(|i| &chans[i].buffer[TAPS - 1..]);
     let (pre, rlb) = (k.pre, k.rlb);
     let mut at = 0;
@@ -209,7 +246,7 @@ fn weigh<const N: usize>(chans: &mut [Channel], k: &Filters, segments: &[usize])
         let mut acc = [0.0f64; N];
         let part: [&[f32]; N] = std::array::from_fn(|i| &data[i][at..at + len]);
         (0..len).for_each(|t| {
-            for ((st, a), p) in s.iter_mut().zip(acc.iter_mut()).zip(&part) {
+            for (i, ((st, a), p)) in s.iter_mut().zip(acc.iter_mut()).zip(&part).enumerate() {
                 let x = p[t] as f64;
                 let [p1, p2, r1, r2] = st;
                 let y = pre.b0 * x + *p1;
@@ -219,6 +256,9 @@ fn weigh<const N: usize>(chans: &mut [Channel], k: &Filters, segments: &[usize])
                 *r1 = -2.0 * y - rlb.a1 * z + *r2;
                 *r2 = y - rlb.a2 * z;
                 *a += z * z;
+                if keep {
+                    squares[i].push(z * z);
+                }
             }
         });
         for i in 0..N {
@@ -227,9 +267,10 @@ fn weigh<const N: usize>(chans: &mut [Channel], k: &Filters, segments: &[usize])
         }
         at += len;
     }
-    for (c, (st, sum)) in chans.iter_mut().zip(s.into_iter().zip(sums)) {
+    for (c, ((st, sum), sq)) in chans.iter_mut().zip(s.into_iter().zip(sums).zip(squares)) {
         c.s = st;
         c.sums = sum;
+        c.squares = sq;
     }
 }
 
@@ -332,6 +373,7 @@ fn interpolated_plain(buffer: &[f32], bank: &[[f32; TAPS]], out: &mut [f32], flo
 struct Filters {
     pre: Coeffs,
     rlb: Coeffs,
+    keep: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -353,6 +395,31 @@ pub struct LoudnessMeter {
     short_term_max: f64,
     integrated: Histogram,
     range: Histogram,
+    history: Option<History>,
+}
+
+#[derive(Debug, Clone)]
+struct History {
+    energy: Vec<f64>,
+    at: usize,
+}
+
+impl History {
+    fn push(&mut self, e: f64) {
+        let n = self.energy.len();
+        self.energy[self.at] = e;
+        self.at = (self.at + 1) % n;
+    }
+
+    fn mean(&self, frames: usize) -> f64 {
+        let n = self.energy.len();
+        let frames = frames.clamp(1, n);
+        let mut sum = 0.0;
+        for k in 0..frames {
+            sum += self.energy[(self.at + n - 1 - k) % n];
+        }
+        sum / frames as f64
+    }
 }
 
 impl LoudnessMeter {
@@ -369,6 +436,7 @@ impl LoudnessMeter {
             filters: Filters {
                 pre: prefilter(r),
                 rlb: rlb(r),
+                keep: false,
             },
             bank: polyphase(oversampling(r)),
             channels: vec![Channel::new(); channels as usize],
@@ -384,7 +452,26 @@ impl LoudnessMeter {
             short_term_max: f64::NEG_INFINITY,
             integrated: Histogram::new(),
             range: Histogram::new(),
+            history: None,
         })
+    }
+
+    pub fn windows(mut self) -> Result<Self> {
+        if self.rate > MAX_WINDOW_RATE {
+            return Err(Error::Invalid(format!(
+                "window history at {} Hz is above {MAX_WINDOW_RATE} Hz",
+                self.rate
+            )));
+        }
+        let frames = self.rate as usize * 3;
+        let mut energy = Vec::new();
+        energy
+            .try_reserve_exact(frames)
+            .map_err(|_| Error::Invalid("no memory for the window history".into()))?;
+        energy.resize(frames, 0.0);
+        self.filters.keep = true;
+        self.history = Some(History { energy, at: 0 });
+        Ok(self)
     }
 
     pub fn set_weights(&mut self, weights: &[f64]) {
@@ -401,7 +488,18 @@ impl LoudnessMeter {
                 self.rate, nch, input.rate, input.channels
             )));
         }
-        let frames = input.frames();
+        self.add(&input.samples)
+    }
+
+    pub fn add(&mut self, samples: &[f32]) -> Result<()> {
+        let nch = self.channels.len();
+        if !samples.len().is_multiple_of(nch) {
+            return Err(Error::Invalid(format!(
+                "meter expects whole frames of {nch} channels, got {} samples",
+                samples.len()
+            )));
+        }
+        let frames = samples.len() / nch;
         if frames == 0 {
             return Ok(());
         }
@@ -417,14 +515,12 @@ impl LoudnessMeter {
         for (c, ch) in self.channels.iter_mut().enumerate() {
             let start = ch.buffer.len();
             ch.buffer.resize(start + frames, 0.0);
-            for (o, f) in ch.buffer[start..]
-                .iter_mut()
-                .zip(input.samples.chunks_exact(nch))
-            {
+            for (o, f) in ch.buffer[start..].iter_mut().zip(samples.chunks_exact(nch)) {
                 *o = f[c];
             }
         }
         let (filters, segments, bank) = (self.filters, &self.segments, &self.bank);
+        #[cfg(feature = "filter")]
         if frames * nch >= PARALLEL && nch > 1 {
             self.channels
                 .par_chunks_mut(2)
@@ -433,6 +529,21 @@ impl LoudnessMeter {
             self.channels
                 .chunks_mut(2)
                 .for_each(|pair| run(pair, &filters, segments, bank));
+        }
+        #[cfg(not(feature = "filter"))]
+        self.channels
+            .chunks_mut(2)
+            .for_each(|pair| run(pair, &filters, segments, bank));
+        if let Some(h) = &mut self.history {
+            for t in 0..frames {
+                let e: f64 = self
+                    .channels
+                    .iter()
+                    .zip(&self.weights)
+                    .map(|(c, w)| w * c.squares[t])
+                    .sum();
+                h.push(e);
+            }
         }
         for k in 0..self.segments.len() {
             let len = self.segments[k];
@@ -491,6 +602,41 @@ impl LoudnessMeter {
         h.gate(-10.0)
             .and_then(|b| h.mean_from(b))
             .map_or(f64::NEG_INFINITY, lufs)
+    }
+
+    pub fn momentary_now(&self) -> Result<f64> {
+        self.window(400)
+    }
+
+    pub fn short_term_now(&self) -> Result<f64> {
+        self.window(3000)
+    }
+
+    pub fn window(&self, ms: u32) -> Result<f64> {
+        let Some(h) = &self.history else {
+            return Err(Error::Invalid(
+                "the meter keeps no window history; build it with windows()".into(),
+            ));
+        };
+        if ms == 0 || ms > 3000 {
+            return Err(Error::Invalid(format!(
+                "a loudness window of {ms} ms is outside 1 to 3000"
+            )));
+        }
+        let frames = (u64::from(self.rate) * u64::from(ms) / 1000).max(1) as usize;
+        Ok(lufs(h.mean(frames)))
+    }
+
+    pub fn channels(&self) -> usize {
+        self.channels.len()
+    }
+
+    pub fn sample_peak_of(&self, channel: usize) -> Option<f64> {
+        self.channels.get(channel).map(|c| f64::from(c.sample_peak))
+    }
+
+    pub fn true_peak_of(&self, channel: usize) -> Option<f64> {
+        self.channels.get(channel).map(|c| f64::from(c.true_peak))
     }
 
     pub fn threshold(&self) -> f64 {

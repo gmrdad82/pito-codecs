@@ -1,0 +1,336 @@
+use super::{
+    Color, Compression, Decoder, Options, Picture, Transform, encode_picture, metadata, output,
+};
+use crate::testref::Refs;
+use ::png18 as outside;
+
+use super::edges::refs;
+
+fn ours_color(c: outside::ColorType) -> Color {
+    match c {
+        outside::ColorType::Grayscale => Color::Grey,
+        outside::ColorType::Rgb => Color::Rgb,
+        outside::ColorType::Indexed => Color::Palette,
+        outside::ColorType::GrayscaleAlpha => Color::GreyAlpha,
+        outside::ColorType::Rgba => Color::Rgba,
+    }
+}
+
+fn outside_decode(file: &[u8], t: outside::Transformations) -> (Color, u8, u32, u32, Vec<u8>) {
+    let mut d = outside::Decoder::new(std::io::Cursor::new(file));
+    d.set_transformations(t);
+    let mut r = d.read_info().expect("info");
+    let mut buf = vec![0; r.output_buffer_size().expect("size")];
+    let f = r.next_frame(&mut buf).expect("frame");
+    buf.truncate(f.buffer_size());
+    (
+        ours_color(f.color_type),
+        f.bit_depth as u8,
+        f.width,
+        f.height,
+        buf,
+    )
+}
+
+fn pairs() -> [(Transform, outside::Transformations); 3] {
+    [
+        (Transform::Expand, outside::Transformations::EXPAND),
+        (
+            Transform::Normalize8,
+            outside::Transformations::normalize_to_color8(),
+        ),
+        (Transform::Identity, outside::Transformations::IDENTITY),
+    ]
+}
+
+#[test]
+fn every_claimed_and_keyed_case_reads_like_the_png_crate_in_each_transform() {
+    let mut dec = Decoder::new();
+    let mut checked = 0;
+    for case in refs::cases() {
+        let interlaced = case.name.ends_with("i1");
+        for (mine, theirs) in pairs() {
+            if mine == Transform::Identity && interlaced && case.depth < 8 {
+                assert!(dec.decode_picture(&case.file, mine).is_err());
+                continue;
+            }
+            let (color, depth, w, h, bytes) = outside_decode(&case.file, theirs);
+            let pic = dec
+                .decode_picture(&case.file, mine)
+                .unwrap_or_else(|e| panic!("{} {mine:?}: {e}", case.name));
+            let tag = format!("{} {mine:?}", case.name);
+            assert_eq!(
+                (pic.color, pic.depth, pic.width, pic.height),
+                (color, depth, w, h),
+                "{tag}"
+            );
+            assert!(pic.data == bytes, "{tag}: samples differ");
+            let out = output(&case.file, mine).unwrap();
+            assert_eq!(
+                (out.bytes, out.row_bytes * h as usize),
+                (bytes.len(), bytes.len()),
+                "{tag}"
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 44 * 3 - 9);
+}
+
+#[test]
+fn sixteen_bit_samples_match_the_references_bit_for_bit() {
+    let r = Refs::open(refs::AREA);
+    let mut dec = Decoder::new();
+    let mut seen = 0;
+    for case in refs::cases().iter().filter(|c| c.wide()) {
+        let pic = dec.decode_picture(&case.file, Transform::Expand).unwrap();
+        assert_eq!(pic.depth, 16);
+        let wide = r.bytes(&format!("{}.rgba64", case.name));
+        let want: Vec<u16> = wide
+            .chunks_exact(2)
+            .map(|s| u16::from_be_bytes([s[0], s[1]]))
+            .collect();
+        let rgba16 = rgba16(&pic);
+        assert_eq!(rgba16.len(), want.len(), "{}", case.name);
+        let exact = rgba16.iter().zip(&want).filter(|(a, b)| a == b).count();
+        let off = rgba16
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        assert!(
+            off <= 257 && exact * 10 >= want.len() * 9,
+            "{}: max {off}",
+            case.name
+        );
+        seen += 1;
+    }
+    assert_eq!(seen, 8 + 4);
+}
+
+fn rgba16(p: &Picture) -> Vec<u16> {
+    let s = p.samples16();
+    let n = p.color.samples();
+    s.chunks_exact(n)
+        .flat_map(|px| match p.color {
+            Color::Grey => [px[0], px[0], px[0], 65535],
+            Color::GreyAlpha => [px[0], px[0], px[0], px[1]],
+            Color::Rgb => [px[0], px[1], px[2], 65535],
+            _ => [px[0], px[1], px[2], px[3]],
+        })
+        .collect()
+}
+
+#[test]
+fn reading_into_a_callers_buffer_fills_exactly_the_picture() {
+    let mut dec = Decoder::new();
+    for case in refs::cases().iter().filter(|c| c.name.ends_with("i0")) {
+        let want = dec.decode_picture(&case.file, Transform::Expand).unwrap();
+        let mut buf = vec![0xAAu8; want.data.len() + 17];
+        let out = dec
+            .decode_slice(&case.file, Transform::Expand, &mut buf)
+            .unwrap();
+        assert_eq!(out.bytes, want.data.len(), "{}", case.name);
+        assert!(buf[..out.bytes] == want.data[..], "{}", case.name);
+        assert!(buf[out.bytes..].iter().all(|&b| b == 0xAA), "{}", case.name);
+        let mut small = vec![0u8; want.data.len() - 1];
+        assert!(
+            dec.decode_slice(&case.file, Transform::Expand, &mut small)
+                .is_err()
+        );
+    }
+}
+
+fn grid(color: Color, depth: u8, w: u32, h: u32, seed: u32) -> Picture {
+    let mut p = Picture::new(w, h, color, depth);
+    let mut s = seed;
+    for (i, b) in p.data.iter_mut().enumerate() {
+        s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *b = if i % 11 < 5 {
+            (i / 9) as u8
+        } else {
+            (s >> 24) as u8
+        };
+    }
+    p
+}
+
+#[test]
+fn every_colour_type_and_depth_is_written_as_itself_and_read_by_the_png_crate() {
+    let mut dec = Decoder::new();
+    for color in [Color::Grey, Color::GreyAlpha, Color::Rgb, Color::Rgba] {
+        for depth in [8u8, 16] {
+            for level in [Compression::Fast, Compression::Balanced, Compression::High] {
+                for (w, h) in [(1, 1), (3, 2), (37, 29), (300, 40)] {
+                    let pic = grid(color, depth, w, h, u32::from(depth) + w);
+                    let opts = Options {
+                        compression: level,
+                        ..Options::default()
+                    };
+                    let file = encode_picture(&pic, &opts).unwrap();
+                    let tag = format!("{color:?} {depth} {level:?} {w}x{h}");
+                    assert_eq!(file[24], depth, "{tag}");
+                    let (c, d, ow, oh, bytes) =
+                        outside_decode(&file, outside::Transformations::IDENTITY);
+                    assert_eq!((c, d, ow, oh), (color, depth, w, h), "{tag}");
+                    assert!(
+                        bytes == pic.data,
+                        "{tag}: the png crate reads other samples"
+                    );
+                    assert!(
+                        dec.decode_picture(&file, Transform::Identity).unwrap() == pic,
+                        "{tag}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_balanced_and_high_levels_beat_the_fast_one_on_flat_art() {
+    let mut p = Picture::new(256, 64, Color::Rgba, 8);
+    let row = grid(Color::Rgba, 8, 256, 1, 9).data;
+    for line in p.data.chunks_exact_mut(1024) {
+        line.copy_from_slice(&row);
+    }
+    let size = |level| {
+        encode_picture(
+            &p,
+            &Options {
+                compression: level,
+                ..Options::default()
+            },
+        )
+        .unwrap()
+        .len()
+    };
+    let (fast, balanced, high) = (
+        size(Compression::Fast),
+        size(Compression::Balanced),
+        size(Compression::High),
+    );
+    assert!(
+        balanced < fast && high <= balanced,
+        "{fast} {balanced} {high}"
+    );
+}
+
+#[test]
+fn the_colour_chunks_and_text_round_trip_with_the_png_crate() {
+    let pic = grid(Color::Rgb, 16, 5, 4, 3);
+    let opts = Options {
+        compression: Compression::Fast,
+        srgb: Some(0),
+        gamma: Some(45455),
+        chromaticities: Some([31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000]),
+        pixel_dims: Some((2835, 2835, 1)),
+        text: vec![
+            ("Title".into(), "plain".into()),
+            ("Naïve".into(), "x".into()),
+        ],
+    };
+    assert!(encode_picture(&pic, &opts).is_err());
+    let opts = Options {
+        text: vec![
+            ("Title".into(), "plain".into()),
+            ("Note".into(), "caf\u{e9}".into()),
+            ("Wide".into(), "snow \u{2603}".into()),
+        ],
+        ..opts
+    };
+    let file = encode_picture(&pic, &opts).unwrap();
+    let theirs = outside::Decoder::new(std::io::Cursor::new(&file[..]))
+        .read_info()
+        .unwrap();
+    let info = theirs.info();
+    assert!(info.srgb.is_some());
+    assert_eq!(info.gama_chunk.map(|g| g.into_scaled()), Some(45455));
+    assert_eq!(
+        info.chrm_chunk.map(|c| c.white.0.into_scaled()),
+        Some(31270)
+    );
+    assert_eq!(info.pixel_dims.map(|p| p.xppu), Some(2835));
+    assert_eq!(info.uncompressed_latin1_text.len(), 2);
+    assert_eq!(info.utf8_text.len(), 1);
+    let meta = metadata(&file).unwrap();
+    assert_eq!(meta.srgb, Some(0));
+    assert_eq!(meta.gamma, Some(45455));
+    assert_eq!(meta.chromaticities.map(|c| c[0]), Some(31270));
+    assert_eq!(meta.pixel_dims, Some((2835, 2835, 1)));
+    let got: Vec<(&str, &str)> = meta
+        .text
+        .iter()
+        .map(|t| (t.keyword.as_str(), t.text.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("Title", "plain"),
+            ("Note", "caf\u{e9}"),
+            ("Wide", "snow \u{2603}")
+        ]
+    );
+}
+
+#[test]
+fn text_and_colour_chunks_the_png_crate_wrote_are_read() {
+    let mut file = Vec::new();
+    {
+        let mut e = outside::Encoder::new(&mut file, 3, 2);
+        e.set_color(outside::ColorType::Rgba);
+        e.set_depth(outside::BitDepth::Eight);
+        e.set_source_srgb(outside::SrgbRenderingIntent::Perceptual);
+        e.set_source_gamma(outside::ScaledFloat::from_scaled(45455));
+        e.add_text_chunk("Author".into(), "Catalin".into()).unwrap();
+        e.add_ztxt_chunk("Comment".into(), "squeezed ".repeat(40))
+            .unwrap();
+        e.add_itxt_chunk("Title".into(), "d\u{e9}j\u{e0} vu \u{2603}".into())
+            .unwrap();
+        let mut w = e.write_header().unwrap();
+        w.write_image_data(&[7u8; 24]).unwrap();
+    }
+    let meta = metadata(&file).unwrap();
+    assert_eq!(meta.srgb, Some(0));
+    assert_eq!(meta.gamma, Some(45455));
+    let find = |k: &str| {
+        meta.text
+            .iter()
+            .find(|t| t.keyword == k)
+            .unwrap()
+            .text
+            .clone()
+    };
+    assert_eq!(find("Author"), "Catalin");
+    assert_eq!(find("Comment"), "squeezed ".repeat(40));
+    assert_eq!(find("Title"), "d\u{e9}j\u{e0} vu \u{2603}");
+}
+
+#[test]
+fn hostile_files_never_panic_in_the_new_entry_points() {
+    let pic = grid(Color::GreyAlpha, 16, 9, 7, 5);
+    let good = encode_picture(&pic, &Options::default()).unwrap();
+    let mut dec = Decoder::new();
+    let mut s = 1u32;
+    for round in 0..3000 {
+        let mut bad = good.clone();
+        s = s.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        let at = 8 + (s as usize >> 8) % (good.len() - 8);
+        bad[at] ^= 1 << (round % 8);
+        if round % 3 == 0 {
+            bad.truncate(at);
+        }
+        for t in [
+            Transform::Identity,
+            Transform::Expand,
+            Transform::Normalize8,
+        ] {
+            let _ = dec.decode_picture(&bad, t);
+            let _ = output(&bad, t);
+            let mut buf = [0u8; 200];
+            let _ = dec.decode_slice(&bad, t, &mut buf);
+        }
+        let _ = metadata(&bad);
+    }
+}

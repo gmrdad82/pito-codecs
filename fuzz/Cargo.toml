@@ -81,3 +81,38 @@ path = "fuzz_targets/pcm.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "png"
+path = "fuzz_targets/png.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jpeg"
+path = "fuzz_targets/jpeg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vorbis_stream"
+path = "fuzz_targets/vorbis_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wav"
+path = "fuzz_targets/wav.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "loudness"
+path = "fuzz_targets/loudness.rs"
+test = false
+doc = false
+bench = false

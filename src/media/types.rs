@@ -190,6 +190,69 @@ impl Rgba {
     pub fn stride(&self) -> usize {
         self.width as usize * 4
     }
+
+    pub fn from_raw(width: u32, height: u32, data: Vec<u8>) -> Option<Self> {
+        let need = (width as usize)
+            .checked_mul(height as usize)?
+            .checked_mul(4)?;
+        (data.len() == need).then_some(Self {
+            width,
+            height,
+            data,
+        })
+    }
+
+    pub fn pixel(&self, x: u32, y: u32) -> Option<[u8; 4]> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let at = y as usize * self.stride() + x as usize * 4;
+        self.data.get(at..at + 4).map(|p| [p[0], p[1], p[2], p[3]])
+    }
+
+    pub fn put(&mut self, x: u32, y: u32, value: [u8; 4]) -> bool {
+        if x >= self.width || y >= self.height {
+            return false;
+        }
+        let at = y as usize * self.stride() + x as usize * 4;
+        match self.data.get_mut(at..at + 4) {
+            Some(p) => {
+                p.copy_from_slice(&value);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn crop(&self, x: u32, y: u32, width: u32, height: u32) -> Rgba {
+        let x = x.min(self.width);
+        let y = y.min(self.height);
+        let width = width.min(self.width - x);
+        let height = height.min(self.height - y);
+        let mut out = Rgba::new(width, height);
+        let row = width as usize * 4;
+        for r in 0..height as usize {
+            let from = (y as usize + r) * self.stride() + x as usize * 4;
+            out.data[r * row..(r + 1) * row].copy_from_slice(&self.data[from..from + row]);
+        }
+        out
+    }
+
+    pub fn replace(&mut self, source: &Rgba, x: i64, y: i64) {
+        let left = x.max(0);
+        let top = y.max(0);
+        let right = (x + i64::from(source.width)).min(i64::from(self.width));
+        let bottom = (y + i64::from(source.height)).min(i64::from(self.height));
+        if left >= right || top >= bottom {
+            return;
+        }
+        let n = (right - left) as usize * 4;
+        for row in top..bottom {
+            let from = (row - y) as usize * source.stride() + (left - x) as usize * 4;
+            let to = row as usize * self.stride() + left as usize * 4;
+            self.data[to..to + n].copy_from_slice(&source.data[from..from + n]);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -46,6 +46,12 @@ pub mod gpu;
 )]
 mod syntax;
 
+#[cfg(feature = "loudness")]
+pub mod loudness;
+
+#[cfg(all(test, feature = "loudness"))]
+mod loudness_tests;
+
 #[cfg(feature = "filter")]
 pub mod filter;
 
@@ -72,6 +78,12 @@ pub mod gif;
 
 #[cfg(feature = "png")]
 pub mod png;
+
+#[cfg(feature = "image")]
+pub mod image;
+
+#[cfg(all(test, feature = "image"))]
+mod image_tests;
 
 #[cfg(feature = "jpeg")]
 pub mod jpeg;
