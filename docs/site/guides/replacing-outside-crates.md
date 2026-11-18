@@ -22,7 +22,7 @@ Each module stands alone. A project that takes one feature builds that module an
 | `jpeg` | `pito_codecs::jpeg`: baseline and progressive decoder, restart intervals, encoder; AVX2 paths with scalar fallbacks; about 3,000 lines | none | 0.7 s |
 | `wav` | `pito_codecs::media::wav`: reader and writer; about 500 lines | none | 0.4 s |
 | `vorbis` | `pito_codecs::vorbis`: decoder and the streaming `Stream`; about 5,000 lines | none | 1.1 s |
-| `loudness` | `pito_codecs::loudness`: `LoudnessMeter`; about 700 lines | none | 0.8 s |
+| `loudness` | `pito_codecs::loudness`: `LoudnessMeter`; about 750 lines | none | 0.8 s |
 | `image` | `pito_codecs::image`: sniffing open, decode, encode and size over `png` and `jpeg`; 70 lines | none | 0.9 s |
 
 `filter` still has its own `filter::LoudnessMeter` path; it is the same type, now defined in `loudness`, and `filter` turns on the parallel channel filter that `loudness` alone leaves serial.
@@ -152,15 +152,20 @@ Differences: for more than two channels lewton hands the samples in Vorbis order
 | `loudness_shortterm()` | `meter.short_term_now()?`, or `meter.short_term()` at the last 100 ms |
 | `loudness_window(ms)` | `meter.window(ms)?` for 1 to 3000 ms; a clip shorter than a gating block reads as the window over its whole length |
 | `sample_peak(c)` | `meter.sample_peak_of(c)` returns `Option<f64>`, linear; `meter.sample_peak()` is the largest in dB |
-| `true_peak(c)` | `meter.true_peak_of(c)`, linear; `meter.true_peak()` is the largest in dB |
-| `loudness_range()` | `meter.range()` |
-| `relative_threshold()` | `meter.threshold()` |
+| `true_peak(c)` | `meter.true_peak_of(c)`, linear, the same 48-coefficient interpolator (4x below 96 kHz, 2x below 192 kHz, none above); `meter.true_peak()` is the largest in dB |
+| `loudness_range()` | `meter.range()`: short-term blocks every second, as ebur128 takes them; `0.0` before the first block (3 s in) |
+| `relative_threshold()` | `meter.threshold()`; `-70.0` when nothing passed the absolute gate, as in ebur128 |
 | `set_channel_map(..)` | `meter.set_weights(&[f64])`, one weight a channel (0 leaves a channel out, 1.41 is a surround) |
 | the two together | `meter.summary()` returns integrated, range, both peaks, and the loudest momentary and short-term |
 
-Equal means: on a 7.3 s signal with a tone, noise, a quiet middle and impulses, at 22.05, 44.1, 48, 96 and 192 kHz with 1, 2, 3, 5 and 6 channels, fed in blocks from 441 to 19,200 frames, after every block the momentary, short-term and five window readings (1, 50, 400, 1,234 and 3,000 ms) differ from ebur128's by less than 1e-6 LU, the integrated loudness by less than 0.02 LU, the sample peaks by less than 1e-7 and silence reads minus infinity in both. The true peak is where the two differ most: ebur128 interpolates with a 49-tap filter, pito-codecs with the 32-tap Kaiser-windowed one it has always used, and on the impulse train in that signal pito-codecs reads up to 1.4% (0.12 dB) lower at 44.1 and 48 kHz, under 0.01% at 96 kHz and equal at 192 kHz, where no interpolation is needed.
+Equal means, with ebur128 as a dev-dependency and the same samples fed to both in blocks:
 
-Differences: `range()` takes its short-term blocks every 100 ms (ffmpeg's way) where ebur128 takes them every second, so the two ranges differ, by 1 LU on that signal; the default weights for 4 channels (all 1) and for 7 or more (surround on channels 6 to 8) are the BS.1770 layout, ebur128's are left, right, surround, surround for 4 and 0 beyond the sixth for the rest; set them with `set_weights`. The meter keeps no rate converter or channel remap of its own.
+- On a 7.3 s signal with a tone, noise, a quiet middle and impulses, at 22.05, 44.1, 48, 88.2, 95.999, 96 and 192 kHz with 1, 2, 3, 4, 5 and 6 channels, in blocks from 441 to 19,200 frames, after every block the momentary, short-term and five window readings (1, 50, 400, 1,234 and 3,000 ms) differ from ebur128's by less than 1e-6 LU; at the end the integrated loudness, the loudness range and the relative threshold differ by less than 1e-6 LU, the sample peaks by less than 1e-7, and silence reads minus infinity and a zero peak in both.
+- The true peak is the same filter: ebur128's 48 coefficients (a Hann-windowed sinc, four phases of 12 taps below 96 kHz, two of 24 below 192 kHz, none from 192 kHz up, where the true peak is the sample peak). On 33 signals (22.05, 44.1, 48, 88.2, 96 and 192 kHz with 1 to 6 channels, three seeds, 9.1 s each, every channel) the largest difference in linear peak measured is 0, bit for bit, and the tests hold it under 1e-6. The signals pfx's `peak.rs` uses (a 12 kHz tone at 0, 45, 60 and 67.5 degrees, a full-scale 45 degree tone, 1, 17 and 9.6 kHz tones, a two-sample full-scale click and its hot mix) read the same peak per channel, and so does the chime's 100 ms-block short-term maximum with a second of padding.
+- The loudness range and the integrated loudness use ebur128's own rule: every block above the absolute gate is kept (one number per 100 ms, one per second for the range), the range takes the 10th and 95th percentile of the short-term blocks above minus 20 LU from their mean, and the integrated takes the mean above minus 10 LU. On those 33 signals the largest differences measured are 9e-10 LU on the range and 4e-8 LU on the integrated loudness (the K-weighting filter's rounding at 192 kHz). On programmes of 12, 31 and 63.5 s with quiet and loud passages the range is over 1 LU and equal; a steady tone reads under 0.01 LU in both, and a clip under 3 s reads 0 in both.
+- inbox0's call (`Mode::I | SAMPLE_PEAK | M`, then `loudness_window` for a clip too short to gate) reads the same integrated loudness, sample peak and window; up to 40,000 frames of NaN, infinity, subnormal, full-range and random-bit samples at ten rates from 1 Hz to 400 kHz go through every reading without a panic (`fuzz/fuzz_targets/loudness.rs` adds the same under cargo-fuzz).
+
+Differences: the default weights for 7 and 8 channels are the BS.1770 7.1 layout (surround on channels 6 to 8), where ebur128 gives channels 7 and 8 no weight; `set_weights(&[1.0, 1.0, 1.0, 0.0, 1.41, 1.41, 0.0, 0.0])` makes them equal (a test does), and up to 6 channels the defaults are ebur128's. The meter keeps one `f64` per 100 ms for the integrated loudness and one per second for the range, the same unbounded list ebur128 keeps by default, about 290 KB an hour. The meter keeps no rate converter or channel remap of its own.
 
 ## What remains impossible
 
@@ -170,4 +175,4 @@ Differences: `range()` takes its short-term blocks every 100 ms (ffmpeg's way) w
 - JPEG: CMYK, YCCK, lossless and arithmetic-coded files are refused by name, and a 12-bit file reports `decodable: false` from `info`; zune-jpeg's other output colourspaces (YCbCr, luma only) are not offered, the output is RGBA.
 - WAV: more than 4 GiB, RF64 writing, and sample sizes that are not 8, 16, 24 or 32 bits.
 - Vorbis: seeking to a frame (rewind to the top is there), chained streams, and lewton's i16 output (divide by 32768 yourself if you need it back).
-- ebur128: loudness range at 1 s steps, mode flags and `set_max_window` (not needed; every reading is always on), and sample types other than `f32`.
+- ebur128: mode flags and `set_max_window` (not needed; every reading is always on), `Mode::HISTOGRAM` (the integrated loudness and range are exact, never binned), the seed and reset calls, and sample types other than `f32`.
