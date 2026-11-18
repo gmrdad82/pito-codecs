@@ -14,16 +14,16 @@ pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v5.1.0",
 
 ## Features
 
-Each module stands alone. A project that takes one feature builds that module and `media` (the shared types and the WAV code), and nothing else: `cargo tree` shows no outside crate for any of them. Clean build times are `cargo build --release --lib --no-default-features --features <name>` after `cargo clean -p pito-codecs --release`, sccache off, `-j 8`, on a shared 32-thread machine.
+Each module stands alone. A project that takes one feature builds that module and `media` (the shared types and the WAV code), and nothing else: `cargo tree` shows no outside crate for any of them. Clean build times are `cargo build --release --lib --no-default-features --features <name>` after `cargo clean -p pito-codecs --release`, sccache off, `-j 8`, on a shared 32-thread machine under load 33 to 60, one run each; sccache is off because it would answer from its cache in 50 ms.
 
 | Feature | Compiles | Outside crates | Clean build |
 |---|---|---|---|
-| `png` | `pito_codecs::png`: decoder (all colour types, 1 to 16 bits, interlaced), encoder, metadata; about 2,800 lines | none | 0.8 s |
-| `jpeg` | `pito_codecs::jpeg`: baseline and progressive decoder, restart intervals, encoder; AVX2 paths with scalar fallbacks; about 3,000 lines | none | 0.7 s |
-| `wav` | `pito_codecs::media::wav`: reader and writer; about 500 lines | none | 0.4 s |
-| `vorbis` | `pito_codecs::vorbis`: decoder and the streaming `Stream`; about 5,000 lines | none | 1.1 s |
-| `loudness` | `pito_codecs::loudness`: `LoudnessMeter`; about 750 lines | none | 0.8 s |
-| `image` | `pito_codecs::image`: sniffing open, decode, encode and size over `png` and `jpeg`; 70 lines | none | 0.9 s |
+| `png` | `pito_codecs::png`: decoder (all colour types, 1 to 16 bits, interlaced), encoder, metadata; about 2,800 lines | none | 0.4 s |
+| `jpeg` | `pito_codecs::jpeg`: baseline and progressive decoder, restart intervals, encoder; AVX2 paths with scalar fallbacks; about 3,000 lines | none | 0.4 s |
+| `wav` | `pito_codecs::media::wav`: reader and writer; about 500 lines | none | 0.2 s |
+| `vorbis` | `pito_codecs::vorbis`: decoder and the streaming `Stream`; about 5,000 lines | none | 0.6 s |
+| `loudness` | `pito_codecs::loudness`: `LoudnessMeter`; about 750 lines | none | 0.5 s |
+| `image` | `pito_codecs::image`: sniffing open, decode, encode and size over `png` and `jpeg`; 70 lines | none | 0.7 s |
 
 `filter` still has its own `filter::LoudnessMeter` path; it is the same type, now defined in `loudness`, and `filter` turns on the parallel channel filter that `loudness` alone leaves serial.
 
@@ -145,27 +145,27 @@ Differences: for more than two channels lewton hands the samples in Vorbis order
 
 | In `ebur128` | In pito-codecs |
 |---|---|
-| `EbuR128::new(channels, rate, Mode::I \| Mode::M \| Mode::S \| Mode::SAMPLE_PEAK \| Mode::TRUE_PEAK)` | `LoudnessMeter::new(rate, channels)?`: note the order. It measures everything, so there are no mode flags. Add `.windows()?` when you read the momentary, short-term or window loudness at an arbitrary frame |
+| `EbuR128::new(channels, rate, Mode::I \| Mode::M \| Mode::S \| Mode::LRA \| Mode::SAMPLE_PEAK \| Mode::TRUE_PEAK)` | `LoudnessMeter::ebur128(rate, channels)?`: note the order. It reads as ebur128 does, and measures everything, so there are no mode flags. Add `.windows()?` when you read the momentary, short-term or window loudness at an arbitrary frame. `LoudnessMeter::new(rate, channels)?` is the meter pcod uses and reads differently, see Differences |
 | `add_frames_f32(&[f32])` | `meter.add(&[f32])?`, interleaved; `meter.process(&AudioBuffer)?` as before. Other sample types convert to `f32` first |
 | `loudness_global()` | `meter.integrated()`; `f64::NEG_INFINITY` when nothing passes the gate, as in ebur128 |
 | `loudness_momentary()` | `meter.momentary_now()?` after any number of frames (needs `windows()`); `meter.momentary()` is the value at the last whole 100 ms |
 | `loudness_shortterm()` | `meter.short_term_now()?`, or `meter.short_term()` at the last 100 ms |
 | `loudness_window(ms)` | `meter.window(ms)?` for 1 to 3000 ms; a clip shorter than a gating block reads as the window over its whole length |
 | `sample_peak(c)` | `meter.sample_peak_of(c)` returns `Option<f64>`, linear; `meter.sample_peak()` is the largest in dB |
-| `true_peak(c)` | `meter.true_peak_of(c)`, linear, the same 48-coefficient interpolator (4x below 96 kHz, 2x below 192 kHz, none above); `meter.true_peak()` is the largest in dB |
+| `true_peak(c)` | `meter.true_peak_of(c)`, linear; with `ebur128()` the same 48-coefficient interpolator (4x below 96 kHz, 2x below 192 kHz, none above); `meter.true_peak()` is the largest in dB |
 | `loudness_range()` | `meter.range()`: short-term blocks every second, as ebur128 takes them; `0.0` before the first block (3 s in) |
 | `relative_threshold()` | `meter.threshold()`; `-70.0` when nothing passed the absolute gate, as in ebur128 |
 | `set_channel_map(..)` | `meter.set_weights(&[f64])`, one weight a channel (0 leaves a channel out, 1.41 is a surround) |
 | the two together | `meter.summary()` returns integrated, range, both peaks, and the loudest momentary and short-term |
 
-Equal means, with ebur128 as a dev-dependency and the same samples fed to both in blocks:
+Equal means, for a meter made with `LoudnessMeter::ebur128`, with ebur128 as a dev-dependency and the same samples fed to both in blocks:
 
 - On a 7.3 s signal with a tone, noise, a quiet middle and impulses, at 22.05, 44.1, 48, 88.2, 95.999, 96 and 192 kHz with 1, 2, 3, 4, 5 and 6 channels, in blocks from 441 to 19,200 frames, after every block the momentary, short-term and five window readings (1, 50, 400, 1,234 and 3,000 ms) differ from ebur128's by less than 1e-6 LU; at the end the integrated loudness, the loudness range and the relative threshold differ by less than 1e-6 LU, the sample peaks by less than 1e-7, and silence reads minus infinity and a zero peak in both.
 - The true peak is the same filter: ebur128's 48 coefficients (a Hann-windowed sinc, four phases of 12 taps below 96 kHz, two of 24 below 192 kHz, none from 192 kHz up, where the true peak is the sample peak). On 33 signals (22.05, 44.1, 48, 88.2, 96 and 192 kHz with 1 to 6 channels, three seeds, 9.1 s each, every channel) the largest difference in linear peak measured is 0, bit for bit, and the tests hold it under 1e-6. The signals pfx's `peak.rs` uses (a 12 kHz tone at 0, 45, 60 and 67.5 degrees, a full-scale 45 degree tone, 1, 17 and 9.6 kHz tones, a two-sample full-scale click and its hot mix) read the same peak per channel, and so does the chime's 100 ms-block short-term maximum with a second of padding.
 - The loudness range and the integrated loudness use ebur128's own rule: every block above the absolute gate is kept (one number per 100 ms, one per second for the range), the range takes the 10th and 95th percentile of the short-term blocks above minus 20 LU from their mean, and the integrated takes the mean above minus 10 LU. On those 33 signals the largest differences measured are 9e-10 LU on the range and 4e-8 LU on the integrated loudness (the K-weighting filter's rounding at 192 kHz). On programmes of 12, 31 and 63.5 s with quiet and loud passages the range is over 1 LU and equal; a steady tone reads under 0.01 LU in both, and a clip under 3 s reads 0 in both.
 - inbox0's call (`Mode::I | SAMPLE_PEAK | M`, then `loudness_window` for a clip too short to gate) reads the same integrated loudness, sample peak and window; up to 40,000 frames of NaN, infinity, subnormal, full-range and random-bit samples at ten rates from 1 Hz to 400 kHz go through every reading without a panic (`fuzz/fuzz_targets/loudness.rs` adds the same under cargo-fuzz).
 
-Differences: the default weights for 7 and 8 channels are the BS.1770 7.1 layout (surround on channels 6 to 8), where ebur128 gives channels 7 and 8 no weight; `set_weights(&[1.0, 1.0, 1.0, 0.0, 1.41, 1.41, 0.0, 0.0])` makes them equal (a test does), and up to 6 channels the defaults are ebur128's. The meter keeps one `f64` per 100 ms for the integrated loudness and one per second for the range, the same unbounded list ebur128 keeps by default, about 290 KB an hour. The meter keeps no rate converter or channel remap of its own.
+Differences: `LoudnessMeter::new` is the meter `pcod loudness` and its levelling use, and it reads three things differently from `ebur128()`. Its true peak uses a 32-tap Kaiser-windowed interpolator, which reads broadband material higher (white noise at 44.1 kHz: -4.94 dBTP against -5.78, which is why pcod keeps it: its ceiling checks would otherwise pass mixes that peak over the ceiling) and an impulse train up to 0.12 dB lower; its loudness range takes the short-term blocks every 100 ms, so it can differ by 1 LU or more; and four channels weigh all 1 where `ebur128()` weighs them left, right, surround, surround. The momentary, short-term and window readings and the sample peaks are the same in both, and the integrated loudness differs by under 1e-6 LU. A project replacing ebur128 calls `ebur128()` and nothing else changes. The default weights for 7 and 8 channels are, in both meters, the BS.1770 7.1 layout (surround on channels 6 to 8), where ebur128 gives channels 7 and 8 no weight; `set_weights(&[1.0, 1.0, 1.0, 0.0, 1.41, 1.41, 0.0, 0.0])` makes them equal (a test does), and up to 6 channels the defaults are ebur128's. The meter keeps one `f64` per 100 ms for the integrated loudness and one per second for the range, the same unbounded list ebur128 keeps by default, about 290 KB an hour. The meter keeps no rate converter or channel remap of its own.
 
 ## What remains impossible
 

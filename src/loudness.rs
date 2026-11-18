@@ -11,17 +11,13 @@ const RANGE_EVERY: u64 = 10;
 const REFERENCE_TAPS: f64 = 48.0;
 const FOUR_TAPS: usize = 12;
 const TWO_TAPS: usize = 24;
-#[cfg(feature = "filter")]
 pub(crate) const TAPS: usize = 32;
-#[cfg(feature = "filter")]
 const CUTOFF: f64 = 0.97;
-#[cfg(feature = "filter")]
 const BETA: f64 = 9.0;
 const CHUNK: usize = 1024;
 #[cfg(feature = "filter")]
 const PARALLEL: usize = 8192;
 
-#[cfg(feature = "filter")]
 pub(crate) fn kaiser(r: f64, beta: f64, i0: f64) -> f64 {
     if r.abs() >= 1.0 {
         0.0
@@ -30,7 +26,6 @@ pub(crate) fn kaiser(r: f64, beta: f64, i0: f64) -> f64 {
     }
 }
 
-#[cfg(feature = "filter")]
 pub(crate) fn sinc(x: f64) -> f64 {
     if x.abs() < 1e-12 {
         1.0
@@ -39,7 +34,6 @@ pub(crate) fn sinc(x: f64) -> f64 {
     }
 }
 
-#[cfg(feature = "filter")]
 pub(crate) fn bessel_i0(x: f64) -> f64 {
     let mut sum = 1.0;
     let mut term = 1.0;
@@ -102,9 +96,9 @@ fn rlb(rate: f64) -> Coeffs {
     }
 }
 
-fn weights(channels: usize) -> Vec<f64> {
+fn weights(channels: usize, reference: bool) -> Vec<f64> {
     match channels {
-        4 => vec![1.0, 1.0, 1.41, 1.41],
+        4 if reference => vec![1.0, 1.0, 1.41, 1.41],
         5 => vec![1.0, 1.0, 1.0, 1.41, 1.41],
         6 => vec![1.0, 1.0, 1.0, 0.0, 1.41, 1.41],
         8 => vec![1.0, 1.0, 1.0, 0.0, 1.41, 1.41, 1.41, 1.41],
@@ -112,7 +106,6 @@ fn weights(channels: usize) -> Vec<f64> {
     }
 }
 
-#[cfg(feature = "filter")]
 pub(crate) fn oversampling(rate: f64) -> usize {
     if rate < 88_200.0 {
         4
@@ -123,7 +116,6 @@ pub(crate) fn oversampling(rate: f64) -> usize {
     }
 }
 
-#[cfg(feature = "filter")]
 pub(crate) fn polyphase(factor: usize) -> Vec<[f32; TAPS]> {
     if factor < 2 {
         return Vec::new();
@@ -173,10 +165,11 @@ enum Oversampler {
     Off,
     Two(Vec<[f32; TWO_TAPS]>),
     Four(Vec<[f32; FOUR_TAPS]>),
+    Kaiser(Vec<[f32; TAPS]>),
 }
 
 impl Oversampler {
-    fn new(rate: u32) -> Self {
+    fn reference(rate: u32) -> Self {
         if rate < 96_000 {
             Oversampler::Four(reference_bank(4))
         } else if rate < 192_000 {
@@ -186,11 +179,16 @@ impl Oversampler {
         }
     }
 
+    fn kaiser(rate: u32) -> Self {
+        Oversampler::Kaiser(polyphase(oversampling(f64::from(rate))))
+    }
+
     fn lead(&self) -> usize {
         match self {
             Oversampler::Off => 0,
             Oversampler::Two(_) => TWO_TAPS - 1,
             Oversampler::Four(_) => FOUR_TAPS - 1,
+            Oversampler::Kaiser(_) => TAPS - 1,
         }
     }
 
@@ -199,6 +197,7 @@ impl Oversampler {
             Oversampler::Off => 0.0,
             Oversampler::Two(bank) => true_peak(buffer, bank, scratch),
             Oversampler::Four(bank) => true_peak(buffer, bank, scratch),
+            Oversampler::Kaiser(bank) => true_peak(buffer, bank, scratch),
         }
     }
 }
@@ -429,6 +428,7 @@ pub struct LoudnessMeter {
     weights: Vec<f64>,
     filters: Filters,
     over: Oversampler,
+    range_every: u64,
     channels: Vec<Channel>,
     segments: Vec<usize>,
     block: usize,
@@ -471,16 +471,28 @@ impl History {
 
 impl LoudnessMeter {
     pub fn new(rate: u32, channels: u16) -> Result<Self> {
+        Self::build(rate, channels, false)
+    }
+
+    pub fn ebur128(rate: u32, channels: u16) -> Result<Self> {
+        Self::build(rate, channels, true)
+    }
+
+    fn build(rate: u32, channels: u16, reference: bool) -> Result<Self> {
         if rate == 0 || channels == 0 {
             return Err(Error::Invalid(format!(
                 "loudness meter at {rate} Hz with {channels} channels"
             )));
         }
         let r = rate as f64;
-        let over = Oversampler::new(rate);
+        let over = if reference {
+            Oversampler::reference(rate)
+        } else {
+            Oversampler::kaiser(rate)
+        };
         Ok(LoudnessMeter {
             rate,
-            weights: weights(channels as usize),
+            weights: weights(channels as usize, reference),
             filters: Filters {
                 pre: prefilter(r),
                 rlb: rlb(r),
@@ -488,6 +500,7 @@ impl LoudnessMeter {
             },
             channels: vec![Channel::new(over.lead()); channels as usize],
             over,
+            range_every: if reference { RANGE_EVERY } else { 1 },
             segments: Vec::new(),
             block: ((rate as usize + 5) / 10).max(1),
             position: 0,
@@ -635,7 +648,7 @@ impl LoudnessMeter {
             self.momentary_max = self.momentary_max.max(self.momentary);
         }
         if self.seen >= SHORT as u64 {
-            if (self.seen - SHORT as u64).is_multiple_of(RANGE_EVERY) && es >= gate {
+            if (self.seen - SHORT as u64).is_multiple_of(self.range_every) && es >= gate {
                 self.range.push(es);
             }
             self.short_term_max = self.short_term_max.max(self.short_term);

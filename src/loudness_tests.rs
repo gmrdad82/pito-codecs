@@ -59,7 +59,7 @@ fn every_reading_matches_ebur128_across_rates_channels_and_block_sizes() {
         let tag = format!("{rate} Hz x{channels} blocks of {block}");
         let samples = signal(rate, channels, 7.3, rate + channels as u32);
         let mut theirs = EbuR128::new(channels as u32, rate, MODE).unwrap();
-        let mut ours = LoudnessMeter::new(rate, channels as u16)
+        let mut ours = LoudnessMeter::ebur128(rate, channels as u16)
             .unwrap()
             .windows()
             .unwrap();
@@ -132,7 +132,7 @@ fn a_clip_shorter_than_a_gating_block_reads_through_the_window_the_way_a_short_v
     let rate = 48_000;
     let samples = signal(rate, 1, 0.31, 5);
     let mut theirs = EbuR128::new(1, rate, Mode::I | Mode::M | Mode::SAMPLE_PEAK).unwrap();
-    let mut ours = LoudnessMeter::new(rate, 1).unwrap().windows().unwrap();
+    let mut ours = LoudnessMeter::ebur128(rate, 1).unwrap().windows().unwrap();
     theirs.add_frames_f32(&samples).unwrap();
     ours.add(&samples).unwrap();
     assert_eq!(theirs.loudness_global().unwrap(), f64::NEG_INFINITY);
@@ -156,7 +156,10 @@ fn a_clip_shorter_than_a_gating_block_reads_through_the_window_the_way_a_short_v
 fn silence_reads_as_minus_infinity_and_a_zero_peak_in_both() {
     let samples = vec![0.0f32; 48_000 * 2 * 2];
     let mut theirs = EbuR128::new(2, 48_000, MODE).unwrap();
-    let mut ours = LoudnessMeter::new(48_000, 2).unwrap().windows().unwrap();
+    let mut ours = LoudnessMeter::ebur128(48_000, 2)
+        .unwrap()
+        .windows()
+        .unwrap();
     theirs.add_frames_f32(&samples).unwrap();
     ours.add(&samples).unwrap();
     assert_eq!(ours.integrated(), theirs.loudness_global().unwrap());
@@ -174,14 +177,24 @@ fn silence_reads_as_minus_infinity_and_a_zero_peak_in_both() {
 
 #[test]
 fn what_a_meter_refuses_it_refuses_in_a_line() {
+    assert!(LoudnessMeter::ebur128(0, 2).is_err());
+    assert!(LoudnessMeter::ebur128(48_000, 0).is_err());
     assert!(LoudnessMeter::new(0, 2).is_err());
     assert!(LoudnessMeter::new(48_000, 0).is_err());
-    let mut plain = LoudnessMeter::new(48_000, 2).unwrap();
+    let mut plain = LoudnessMeter::ebur128(48_000, 2).unwrap();
     assert!(plain.window(400).is_err());
     assert!(plain.add(&[0.0; 3]).is_err());
-    let windowed = LoudnessMeter::new(48_000, 2).unwrap().windows().unwrap();
+    let windowed = LoudnessMeter::ebur128(48_000, 2)
+        .unwrap()
+        .windows()
+        .unwrap();
     assert!(windowed.window(0).is_err());
-    assert!(LoudnessMeter::new(5_000_000, 1).unwrap().windows().is_err());
+    assert!(
+        LoudnessMeter::ebur128(5_000_000, 1)
+            .unwrap()
+            .windows()
+            .is_err()
+    );
     assert!(windowed.window(3001).is_err());
     assert!(windowed.sample_peak_of(2).is_none());
     plain.add(&[]).unwrap();
@@ -190,8 +203,8 @@ fn what_a_meter_refuses_it_refuses_in_a_line() {
 #[test]
 fn whole_buffers_and_the_interleaved_slice_give_the_same_meter() {
     let samples = signal(48_000, 2, 3.0, 9);
-    let mut a = LoudnessMeter::new(48_000, 2).unwrap();
-    let mut b = LoudnessMeter::new(48_000, 2).unwrap();
+    let mut a = LoudnessMeter::ebur128(48_000, 2).unwrap();
+    let mut b = LoudnessMeter::ebur128(48_000, 2).unwrap();
     a.add(&samples).unwrap();
     b.process(&crate::media::AudioBuffer {
         samples: samples.clone(),
@@ -201,7 +214,10 @@ fn whole_buffers_and_the_interleaved_slice_give_the_same_meter() {
     .unwrap();
     assert_eq!(a.summary(), b.summary());
     let tracked = {
-        let mut c = LoudnessMeter::new(48_000, 2).unwrap().windows().unwrap();
+        let mut c = LoudnessMeter::ebur128(48_000, 2)
+            .unwrap()
+            .windows()
+            .unwrap();
         c.add(&samples).unwrap();
         c.summary()
     };
@@ -245,7 +261,7 @@ fn hot(rate: u32, seconds: f64) -> Vec<f32> {
 fn true_peaks(rate: u32, channels: u32, samples: &[f32]) -> (Vec<f64>, Vec<f64>) {
     let mut theirs = EbuR128::new(channels, rate, Mode::TRUE_PEAK).unwrap();
     theirs.add_frames_f32(samples).unwrap();
-    let mut ours = LoudnessMeter::new(rate, channels as u16).unwrap();
+    let mut ours = LoudnessMeter::ebur128(rate, channels as u16).unwrap();
     ours.add(samples).unwrap();
     (
         (0..channels)
@@ -315,12 +331,12 @@ fn the_true_peak_follows_ebur128_at_every_rate_boundary_and_block_size() {
             ours[0],
             theirs[0]
         );
-        let mut chunked = LoudnessMeter::new(rate, 2).unwrap();
+        let mut chunked = LoudnessMeter::ebur128(rate, 2).unwrap();
         for piece in signal.chunks(2 * 97) {
             chunked.add(piece).unwrap();
         }
         assert_eq!(chunked.true_peak_of(0), {
-            let mut whole = LoudnessMeter::new(rate, 2).unwrap();
+            let mut whole = LoudnessMeter::ebur128(rate, 2).unwrap();
             whole.add(&signal).unwrap();
             whole.true_peak_of(0)
         });
@@ -342,7 +358,7 @@ fn the_chime_reading_matches_ebur128_in_tenth_of_a_second_blocks_with_a_second_o
     }
     chime.extend(std::iter::repeat_n(0.0, rate as usize * 2));
     let mut theirs = EbuR128::new(2, rate, Mode::S | Mode::TRUE_PEAK).unwrap();
-    let mut ours = LoudnessMeter::new(rate, 2).unwrap();
+    let mut ours = LoudnessMeter::ebur128(rate, 2).unwrap();
     let (mut short_theirs, mut short_ours) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
     for block in chime.chunks(rate as usize / 10 * 2) {
         theirs.add_frames_f32(block).unwrap();
@@ -380,7 +396,7 @@ fn the_range_equals_ebur128s_on_programmes_with_quiet_and_loud_passages() {
             samples.extend(part.iter().map(|v| v * level as f32));
         }
         let mut theirs = EbuR128::new(2, rate, MODE).unwrap();
-        let mut ours = LoudnessMeter::new(rate, 2).unwrap();
+        let mut ours = LoudnessMeter::ebur128(rate, 2).unwrap();
         for chunk in samples.chunks(2 * 2048) {
             theirs.add_frames_f32(chunk).unwrap();
             ours.add(chunk).unwrap();
@@ -405,7 +421,7 @@ fn the_range_equals_ebur128s_on_programmes_with_quiet_and_loud_passages() {
     }
     let steady = tone(rate, 997.0, 0.25, 0.0, 12.0);
     let mut theirs = EbuR128::new(2, rate, MODE).unwrap();
-    let mut ours = LoudnessMeter::new(rate, 2).unwrap();
+    let mut ours = LoudnessMeter::ebur128(rate, 2).unwrap();
     theirs.add_frames_f32(&steady).unwrap();
     ours.add(&steady).unwrap();
     near(
@@ -421,7 +437,7 @@ fn the_range_equals_ebur128s_on_programmes_with_quiet_and_loud_passages() {
 fn a_clip_under_three_seconds_has_no_range_in_either() {
     let samples = signal(48_000, 1, 2.9, 4);
     let mut theirs = EbuR128::new(1, 48_000, MODE).unwrap();
-    let mut ours = LoudnessMeter::new(48_000, 1).unwrap();
+    let mut ours = LoudnessMeter::ebur128(48_000, 1).unwrap();
     theirs.add_frames_f32(&samples).unwrap();
     ours.add(&samples).unwrap();
     assert_eq!(theirs.loudness_range().unwrap(), 0.0);
@@ -439,7 +455,7 @@ fn the_default_weights_are_ebur128s_up_to_six_channels_and_eight_follow_set_weig
     for channels in [1usize, 2, 3, 4, 5, 6] {
         let samples = signal(48_000, channels, 4.0, channels as u32);
         let mut theirs = EbuR128::new(channels as u32, 48_000, MODE).unwrap();
-        let mut ours = LoudnessMeter::new(48_000, channels as u16).unwrap();
+        let mut ours = LoudnessMeter::ebur128(48_000, channels as u16).unwrap();
         theirs.add_frames_f32(&samples).unwrap();
         ours.add(&samples).unwrap();
         near(
@@ -451,7 +467,7 @@ fn the_default_weights_are_ebur128s_up_to_six_channels_and_eight_follow_set_weig
     }
     let samples = signal(48_000, 8, 4.0, 8);
     let mut theirs = EbuR128::new(8, 48_000, MODE).unwrap();
-    let mut ours = LoudnessMeter::new(48_000, 8).unwrap();
+    let mut ours = LoudnessMeter::ebur128(48_000, 8).unwrap();
     ours.set_weights(&[1.0, 1.0, 1.0, 0.0, 1.41, 1.41, 0.0, 0.0]);
     theirs.add_frames_f32(&samples).unwrap();
     ours.add(&samples).unwrap();
@@ -468,7 +484,7 @@ fn a_voice_clip_is_levelled_from_the_readings_inbox0_asks_for() {
     let rate = 48_000u32;
     let samples: Vec<f32> = signal(rate, 1, 5.0, 77);
     let mut theirs = EbuR128::new(1, rate, Mode::I | Mode::SAMPLE_PEAK | Mode::M).unwrap();
-    let mut ours = LoudnessMeter::new(rate, 1).unwrap().windows().unwrap();
+    let mut ours = LoudnessMeter::ebur128(rate, 1).unwrap().windows().unwrap();
     theirs.add_frames_f32(&samples).unwrap();
     ours.add(&samples).unwrap();
     assert_eq!(
@@ -513,7 +529,7 @@ fn hostile_samples_and_odd_rates_never_panic_in_any_reading() {
                     _ => (next() as f32 / u32::MAX as f32) * 2.0 - 1.0,
                 })
                 .collect();
-            let Ok(meter) = LoudnessMeter::new(rate, channels) else {
+            let Ok(meter) = LoudnessMeter::ebur128(rate, channels) else {
                 continue;
             };
             let mut meter = meter.windows().unwrap();
@@ -528,4 +544,48 @@ fn hostile_samples_and_odd_rates_never_panic_in_any_reading() {
             }
         }
     }
+}
+
+#[test]
+fn the_default_meter_keeps_its_own_true_peak_and_range_and_agrees_on_the_rest() {
+    let rate = 48_000u32;
+    let mix = hot(rate, 6.0);
+    let mut theirs = EbuR128::new(2, rate, MODE).unwrap();
+    let mut reference = LoudnessMeter::ebur128(rate, 2).unwrap();
+    let mut own = LoudnessMeter::new(rate, 2).unwrap();
+    theirs.add_frames_f32(&mix).unwrap();
+    reference.add(&mix).unwrap();
+    own.add(&mix).unwrap();
+    near(
+        own.integrated(),
+        theirs.loudness_global().unwrap(),
+        1e-6,
+        "integrated",
+    );
+    assert_eq!(own.sample_peak(), reference.sample_peak());
+    let (a, b) = (own.true_peak(), reference.true_peak());
+    assert!(a != b && (a - b).abs() < 1.0, "true peaks {a} and {b}");
+    let noise: Vec<f32> = (0..44_100u32 * 2 * 10)
+        .scan(3u32, |s, _| {
+            *s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            Some((f64::from(*s >> 8) / f64::from(1u32 << 24) * 0.6 - 0.3) as f32)
+        })
+        .collect();
+    let mut own = LoudnessMeter::new(44_100, 2).unwrap();
+    let mut reference = LoudnessMeter::ebur128(44_100, 2).unwrap();
+    own.add(&noise).unwrap();
+    reference.add(&noise).unwrap();
+    assert!(
+        own.true_peak() > reference.true_peak() + 0.3,
+        "white noise: {} against {}",
+        own.true_peak(),
+        reference.true_peak()
+    );
+    let quiet = signal(rate, 2, 20.0, 5);
+    let mut own = LoudnessMeter::new(rate, 2).unwrap();
+    let mut reference = LoudnessMeter::ebur128(rate, 2).unwrap();
+    own.add(&quiet).unwrap();
+    reference.add(&quiet).unwrap();
+    assert!(own.range() > 1.0 && reference.range() > 1.0);
+    assert_ne!(own.range(), reference.range());
 }

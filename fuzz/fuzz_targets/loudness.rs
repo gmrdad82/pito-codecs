@@ -9,7 +9,12 @@ fuzz_target!(|data: &[u8]| {
     }
     let channels = u16::from(data[0] % 9);
     let rate = u32::from(u16::from_le_bytes([data[1], data[2]])) * 4;
-    let Ok(meter) = LoudnessMeter::new(rate, channels) else {
+    let built = if (data[0] / 9) % 2 == 1 {
+        LoudnessMeter::ebur128(rate, channels)
+    } else {
+        LoudnessMeter::new(rate, channels)
+    };
+    let Ok(meter) = built else {
         return;
     };
     let Ok(mut meter) = meter.windows() else {

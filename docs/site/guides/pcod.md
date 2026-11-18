@@ -48,7 +48,7 @@ Exit codes: `0` it worked; `1` refused or failed, with one line on stderr starti
 
 ## Loudness
 
-`loudness` measures one audio track (`--track`, the first by default) at its own rate and channels, per ITU-R BS.1770-4 and EBU R128: the gated integrated loudness, the loudness range, the true peak (4x oversampled below 96 kHz, 2x below 192 kHz), the sample peak, and the short-term (3 s) and momentary (400 ms) maxima. It reads a video, an M4A or MKA, a WAV or an MP3, so a delivery can be checked as it will ship. `--json` prints the same numbers, unrounded.
+`loudness` measures one audio track (`--track`, the first by default) at its own rate and channels, per ITU-R BS.1770-4 and EBU R128: the gated integrated loudness, the loudness range, the true peak (4x oversampled below 88.2 kHz), the sample peak, and the short-term (3 s) and momentary (400 ms) maxima. It reads a video, an M4A or MKA, a WAV or an MP3, so a delivery can be checked as it will ship. `--json` prints the same numbers, unrounded.
 
 ```sh
 pcod loudness trailer.mp4

@@ -36,7 +36,7 @@ Adapted modules (one line per module, filled in by each task):
 - src/gpu/nvenc/: from crates/platform/src/nvenc (ffi, session, device, HEVC).
 - src/gpu/videotoolbox/: from crates/platform/src/videotoolbox.rs and videotoolbox_encode.rs.
 - src/gpu/media_foundation/: from crates/platform/src/media_foundation and crates/platform/src/annexb.rs.
-- src/loudness.rs and src/filter/: the EBU R128 meter (K-weighting filters, gating, loudness range) and the Kaiser polyphase oversampler of the limiter from crates/audio-dsp; the meter's true-peak interpolator, gating and loudness range follow ebur128 0.1.10, credited below; the rest is new, the spectrogram in src/filter/spectrum.rs included, with its colour stops sampled from matplotlib's inferno colour map (CC0 1.0, Nathaniel J. Smith and Stefan van der Walt) and its 5x7 glyphs taken from this package's bench charts.
+- src/loudness.rs and src/filter/: the EBU R128 meter (K-weighting filters, gating, loudness range) and the Kaiser polyphase oversampler of the limiter from crates/audio-dsp; the true-peak interpolator, gating and loudness range of `LoudnessMeter::ebur128` follow ebur128 0.1.10, credited below; the rest is new, the spectrogram in src/filter/spectrum.rs included, with its colour stops sampled from matplotlib's inferno colour map (CC0 1.0, Nathaniel J. Smith and Stefan van der Walt) and its 5x7 glyphs taken from this package's bench charts.
 - src/vp9/: the VP9 decoder from crates/vp9 (header and superframe parsing, boolean decoder, probability adaptation, tiles, prediction, transforms, loop filter, frame threading); the shared Frame and Packet front and the bit reader (from crates/bitstream) are adapted.
 - src/opus/: the decoder (SILK, CELT, hybrid, multistream, OpusHead) from crates/opus; the range encoder, the FFT butterflies and the Ogg reader and writer are new.
 - src/mkv/: the Matroska and WebM reader (EBML, lacing, Cues, damage resync) from crates/matroska; the writer, remux and MP4 to MKV are reworked or new.
@@ -1399,10 +1399,10 @@ which carries this notice:
     2550 Garcia Avenue
     Mountain View, California 94043
 
-The true-peak interpolator, the gating and the loudness range in
-src/loudness.rs follow ebur128 0.1.10 (https://github.com/sdroege/ebur128,
+The true-peak interpolator, the gating and the loudness range of
+`LoudnessMeter::ebur128` in src/loudness.rs follow ebur128 0.1.10 (https://github.com/sdroege/ebur128,
 src/interp.rs, src/true_peak.rs and src/history.rs), a Rust port of
-libebur128, licensed MIT; the meter reads the same numbers as that crate, which
+libebur128, licensed MIT; the meter then reads the same numbers as that crate, which
 apps use today. Its notice:
 
 Copyright (c) 2011 Jan Kokemüller
