@@ -37,6 +37,10 @@ pub fn decode(data: &[u8]) -> Result<Rgba> {
     decode_planes(data)?.rgba()
 }
 
+pub fn decode_into(data: &[u8], out: &mut Rgba) -> Result<()> {
+    decode_planes(data)?.rgba_into(out)
+}
+
 fn err<T>(message: impl Into<String>) -> Result<T> {
     Err(Error(format!("JPEG: {}", message.into())))
 }
@@ -161,14 +165,27 @@ pub(crate) fn decode_planes(data: &[u8]) -> Result<Planes> {
 
 impl Planes {
     pub fn rgba(&self) -> Result<Rgba> {
-        let (w, h) = (self.width, self.height);
         let mut out = Rgba {
-            width: w as u32,
-            height: h as u32,
-            data: zeroed(w * h * 4, 0u8)?,
+            width: 0,
+            height: 0,
+            data: Vec::new(),
         };
+        self.rgba_into(&mut out)?;
+        Ok(out)
+    }
+
+    pub fn rgba_into(&self, out: &mut Rgba) -> Result<()> {
+        let (w, h) = (self.width, self.height);
+        let need = w * h * 4;
+        out.width = w as u32;
+        out.height = h as u32;
+        out.data.clear();
+        if out.data.try_reserve_exact(need).is_err() {
+            return err(format!("no memory for {need} samples"));
+        }
+        out.data.resize(need, 0);
         if w == 0 {
-            return Ok(out);
+            return Ok(());
         }
         let planes: Vec<Plane> = self
             .planes
@@ -209,7 +226,7 @@ impl Planes {
             }
             _ => return err(format!("{} colour components", planes.len())),
         }
-        Ok(out)
+        Ok(())
     }
 }
 

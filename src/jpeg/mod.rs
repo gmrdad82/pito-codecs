@@ -7,9 +7,11 @@ mod quant;
 #[cfg(test)]
 mod tests;
 mod writer;
+#[cfg(test)]
+mod zune_tests;
 
 pub mod decode;
-pub use decode::decode;
+pub use decode::{decode, decode_into};
 
 use crate::media::Rgba;
 use huffman::HuffmanTable;

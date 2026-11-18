@@ -152,6 +152,25 @@ case "$target" in
     rm -f "$dir/tone.mp4"
     flat tests/refs/opus/*.opus
     ;;
+  png)
+    flat tests/refs/png/*.png
+    ;;
+  jpeg)
+    flat tests/refs/jpeg/*.jpg
+    ;;
+  vorbis_stream)
+    flat tests/refs/vorbis/*.ogg
+    ;;
+  wav)
+    synth tone.mp4 --audio sine:440
+    convert "$dir/tone.mp4" tone.wav
+    rm -f "$dir/tone.mp4"
+    flat tests/refs/pcod/*.wav tests/refs/media/*.wav
+    ;;
+  loudness)
+    printf '\x02\x80\xbb\x00' > "$dir/stereo-48k.bin"
+    head -c 40000 /dev/zero | tr '\0' '\100' >> "$dir/stereo-48k.bin"
+    ;;
   pcm)
     synth tone.mp4 --audio sine:440
     convert "$dir/tone.mp4" raw.s16

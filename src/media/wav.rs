@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use super::{AudioBuffer, Error, Result};
@@ -195,31 +195,39 @@ fn clean(v: f32) -> f32 {
     if v.is_finite() { v } else { 0.0 }
 }
 
-pub struct Reader {
-    file: File,
+pub struct Reader<R = File> {
+    file: R,
     pub layout: Layout,
     next: u64,
     bytes: Vec<u8>,
 }
 
-impl Reader {
-    pub fn open(path: &Path) -> Result<Reader> {
+fn fetch<R: Read + Seek>(file: &mut R, pos: u64, n: usize) -> std::io::Result<Vec<u8>> {
+    let mut b = vec![0u8; n];
+    file.seek(SeekFrom::Start(pos))?;
+    let mut got = 0;
+    while got < n {
+        match file.read(&mut b[got..])? {
+            0 => break,
+            k => got += k,
+        }
+    }
+    b.truncate(got);
+    Ok(b)
+}
+
+impl Reader<File> {
+    pub fn open(path: &Path) -> Result<Reader<File>> {
         let at = |e: std::io::Error| Error::at(path, e);
-        let mut file = File::open(path).map_err(at)?;
-        let len = file.metadata().map_err(at)?.len();
-        let layout = layout_of(len, |pos, n| {
-            let mut b = vec![0u8; n];
-            file.seek(SeekFrom::Start(pos))?;
-            let mut got = 0;
-            while got < n {
-                match file.read(&mut b[got..])? {
-                    0 => break,
-                    k => got += k,
-                }
-            }
-            b.truncate(got);
-            Ok(b)
-        })?;
+        let file = File::open(path).map_err(at)?;
+        Reader::new(file)
+    }
+}
+
+impl<R: Read + Seek> Reader<R> {
+    pub fn new(mut file: R) -> Result<Reader<R>> {
+        let len = file.seek(SeekFrom::End(0))?;
+        let layout = layout_of(len, |pos, n| Ok(fetch(&mut file, pos, n)?))?;
         Ok(Reader {
             file,
             layout,
@@ -232,7 +240,11 @@ impl Reader {
         self.next = frame.min(self.layout.frames());
     }
 
-    pub fn read(&mut self, frames: usize, out: &mut Vec<f32>) -> Result<usize> {
+    pub fn position(&self) -> u64 {
+        self.next
+    }
+
+    fn fill(&mut self, frames: usize) -> Result<usize> {
         let left = self.layout.frames() - self.next;
         let n = (frames as u64).min(left) as usize;
         if n == 0 {
@@ -243,8 +255,248 @@ impl Reader {
         self.file
             .seek(SeekFrom::Start(self.layout.data + self.next * fb as u64))?;
         self.file.read_exact(&mut self.bytes)?;
-        convert(&self.layout, &self.bytes, out);
         self.next += n as u64;
         Ok(n)
     }
+
+    pub fn read(&mut self, frames: usize, out: &mut Vec<f32>) -> Result<usize> {
+        let n = self.fill(frames)?;
+        if n > 0 {
+            convert(&self.layout, &self.bytes, out);
+        }
+        Ok(n)
+    }
+
+    pub fn read_ints(&mut self, frames: usize, out: &mut Vec<i32>) -> Result<usize> {
+        if self.layout.float() {
+            return Err(invalid("a float file has no integer samples"));
+        }
+        let n = self.fill(frames)?;
+        if n == 0 {
+            return Ok(0);
+        }
+        let bytes = &self.bytes;
+        match self.layout.bits {
+            8 => out.extend(bytes.iter().map(|&b| i32::from(b) - 128)),
+            16 => out.extend(
+                bytes
+                    .chunks_exact(2)
+                    .map(|s| i32::from(i16::from_le_bytes([s[0], s[1]]))),
+            ),
+            24 => out.extend(
+                bytes
+                    .chunks_exact(3)
+                    .map(|s| i32::from_le_bytes([0, s[0], s[1], s[2]]) >> 8),
+            ),
+            _ => out.extend(
+                bytes
+                    .chunks_exact(4)
+                    .map(|s| i32::from_le_bytes([s[0], s[1], s[2], s[3]])),
+            ),
+        }
+        Ok(n)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Int8,
+    Int16,
+    Int24,
+    Int32,
+    Float32,
+}
+
+impl Format {
+    pub fn bits(self) -> u16 {
+        match self {
+            Format::Int8 => 8,
+            Format::Int16 => 16,
+            Format::Int24 => 24,
+            Format::Int32 | Format::Float32 => 32,
+        }
+    }
+
+    pub fn float(self) -> bool {
+        self == Format::Float32
+    }
+}
+
+pub struct Writer<W: Write + Seek> {
+    out: W,
+    format: Format,
+    channels: u16,
+    bytes: u64,
+    start: u64,
+    scratch: Vec<u8>,
+}
+
+impl Writer<std::io::BufWriter<File>> {
+    pub fn create(
+        path: &Path,
+        rate: u32,
+        channels: u16,
+        format: Format,
+    ) -> Result<Writer<std::io::BufWriter<File>>> {
+        let file = File::create(path).map_err(|e| Error::at(path, e))?;
+        Writer::new(std::io::BufWriter::new(file), rate, channels, format)
+    }
+}
+
+fn mask(channels: u16) -> u32 {
+    match channels {
+        1 => 0x4,
+        2 => 0x3,
+        4 => 0x33,
+        6 => 0x3F,
+        8 => 0x63F,
+        _ => 0,
+    }
+}
+
+impl<W: Write + Seek> Writer<W> {
+    pub fn new(mut out: W, rate: u32, channels: u16, format: Format) -> Result<Writer<W>> {
+        if rate == 0 || channels == 0 {
+            return Err(invalid(format!("{channels} channels at {rate} Hz")));
+        }
+        let bits = format.bits();
+        let align = u32::from(channels) * u32::from(bits / 8);
+        let Ok(block) = u16::try_from(align) else {
+            return Err(invalid(format!("{channels} channels are too many")));
+        };
+        let wide = channels > 2 || bits > 16 && !format.float();
+        let tag: u16 = if format.float() { 3 } else { 1 };
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&(if wide { 0xFFFEu16 } else { tag }).to_le_bytes());
+        fmt.extend_from_slice(&channels.to_le_bytes());
+        fmt.extend_from_slice(&rate.to_le_bytes());
+        fmt.extend_from_slice(&(rate.saturating_mul(align)).to_le_bytes());
+        fmt.extend_from_slice(&block.to_le_bytes());
+        fmt.extend_from_slice(&bits.to_le_bytes());
+        if wide {
+            fmt.extend_from_slice(&22u16.to_le_bytes());
+            fmt.extend_from_slice(&bits.to_le_bytes());
+            fmt.extend_from_slice(&mask(channels).to_le_bytes());
+            fmt.extend_from_slice(&tag.to_le_bytes());
+            fmt.extend_from_slice(&[0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xAA, 0, 0x38, 0x9B, 0x71]);
+        } else if format.float() {
+            fmt.extend_from_slice(&0u16.to_le_bytes());
+        }
+        let mut head = Vec::new();
+        head.extend_from_slice(b"RIFF\0\0\0\0WAVEfmt ");
+        head.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+        head.extend_from_slice(&fmt);
+        if format.float() {
+            head.extend_from_slice(b"fact\x04\0\0\0\0\0\0\0");
+        }
+        head.extend_from_slice(b"data\0\0\0\0");
+        let start = out.stream_position()?;
+        out.write_all(&head)?;
+        Ok(Writer {
+            out,
+            format,
+            channels,
+            bytes: 0,
+            start,
+            scratch: Vec::new(),
+        })
+    }
+
+    pub fn frames(&self) -> u64 {
+        self.bytes / (u64::from(self.format.bits() / 8) * u64::from(self.channels))
+    }
+
+    fn put(&mut self) -> Result<()> {
+        self.bytes += self.scratch.len() as u64;
+        if self.bytes > u64::from(u32::MAX) - 1024 {
+            return Err(Error::Unsupported(
+                "WAV: more than 4 GiB of samples does not fit a RIFF file".into(),
+            ));
+        }
+        self.out.write_all(&self.scratch)?;
+        Ok(())
+    }
+
+    pub fn write(&mut self, samples: &[f32]) -> Result<()> {
+        if !samples.len().is_multiple_of(usize::from(self.channels)) {
+            return Err(invalid("the samples do not fill whole frames"));
+        }
+        self.scratch.clear();
+        for &raw in samples {
+            let v = if raw.is_nan() {
+                0.0
+            } else {
+                raw.clamp(-1.0, 1.0)
+            };
+            match self.format {
+                Format::Int8 => self.scratch.push(((v * 127.0).round() as i32 + 128) as u8),
+                Format::Int16 => self
+                    .scratch
+                    .extend_from_slice(&((v * 32767.0).round() as i16).to_le_bytes()),
+                Format::Int24 => self
+                    .scratch
+                    .extend_from_slice(&((v * 8_388_607.0).round() as i32).to_le_bytes()[..3]),
+                Format::Int32 => self.scratch.extend_from_slice(
+                    &((f64::from(v) * 2_147_483_647.0).round() as i32).to_le_bytes(),
+                ),
+                Format::Float32 => self.scratch.extend_from_slice(&raw.to_le_bytes()),
+            }
+        }
+        self.put()
+    }
+
+    pub fn write_ints(&mut self, samples: &[i32]) -> Result<()> {
+        if self.format.float() {
+            return Err(invalid("integer samples into a float file"));
+        }
+        if !samples.len().is_multiple_of(usize::from(self.channels)) {
+            return Err(invalid("the samples do not fill whole frames"));
+        }
+        let bits = self.format.bits();
+        let (lo, hi) = (-(1i64 << (bits - 1)), (1i64 << (bits - 1)) - 1);
+        self.scratch.clear();
+        for &v in samples {
+            let v = i64::from(v).clamp(lo, hi) as i32;
+            match self.format {
+                Format::Int8 => self.scratch.push((v + 128) as u8),
+                Format::Int16 => self.scratch.extend_from_slice(&(v as i16).to_le_bytes()),
+                Format::Int24 => self.scratch.extend_from_slice(&v.to_le_bytes()[..3]),
+                _ => self.scratch.extend_from_slice(&v.to_le_bytes()),
+            }
+        }
+        self.put()
+    }
+
+    pub fn finish(mut self) -> Result<W> {
+        if self.bytes % 2 == 1 {
+            self.out.write_all(&[0])?;
+        }
+        let end = self.out.stream_position()?;
+        let riff = (end - self.start - 8) as u32;
+        let data = self.bytes as u32;
+        self.out.seek(SeekFrom::Start(self.start + 4))?;
+        self.out.write_all(&riff.to_le_bytes())?;
+        let at = end - self.bytes - self.bytes % 2 - 4;
+        self.out.seek(SeekFrom::Start(at))?;
+        self.out.write_all(&data.to_le_bytes())?;
+        if self.format.float() {
+            let fact = at - 4 - 4;
+            self.out.seek(SeekFrom::Start(fact))?;
+            self.out.write_all(&(self.frames() as u32).to_le_bytes())?;
+        }
+        self.out.seek(SeekFrom::Start(end))?;
+        self.out.flush()?;
+        Ok(self.out)
+    }
+}
+
+pub fn encode(buffer: &AudioBuffer, format: Format) -> Result<Vec<u8>> {
+    let mut w = Writer::new(
+        std::io::Cursor::new(Vec::new()),
+        buffer.rate,
+        buffer.channels,
+        format,
+    )?;
+    w.write(&buffer.samples)?;
+    Ok(w.finish()?.into_inner())
 }

@@ -5,6 +5,8 @@ pub(crate) mod fft;
 mod nal;
 mod types;
 pub mod wav;
+#[cfg(test)]
+mod wav_tests;
 
 pub use nal::length_prefixed_to_annexb;
 pub use types::*;

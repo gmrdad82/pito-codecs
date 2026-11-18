@@ -61,6 +61,8 @@ pcod filmstrip clip.mp4 strip.png --every 10s --timecodes
 
 `SHA256SUMS` in each Release lists every archive's checksum. To build pcod from source anywhere, Linux arm64 included, with Rust 1.97 or newer: `cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag v5.0.1 pito-codecs --bin pcod`.
 
+pito-codecs also stands in for the `png`, `image`, `zune-jpeg`, `hound`, `lewton` and `ebur128` crates, each behind its own feature with no outside crate: see the guide "Replacing png, image, zune-jpeg, hound, lewton and ebur128" in the docs.
+
 In a Rust project, add the library with the parts you need (all are on by default):
 
 ```toml

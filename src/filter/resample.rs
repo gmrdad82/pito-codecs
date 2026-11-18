@@ -12,35 +12,7 @@ fn gcd(a: u64, b: u64) -> u64 {
     if b == 0 { a } else { gcd(b, a % b) }
 }
 
-pub(crate) fn kaiser(r: f64, beta: f64, i0: f64) -> f64 {
-    if r.abs() >= 1.0 {
-        0.0
-    } else {
-        bessel_i0(beta * (1.0 - r * r).sqrt()) / i0
-    }
-}
-
-pub(crate) fn sinc(x: f64) -> f64 {
-    if x.abs() < 1e-12 {
-        1.0
-    } else {
-        (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
-    }
-}
-
-pub(crate) fn bessel_i0(x: f64) -> f64 {
-    let mut sum = 1.0;
-    let mut term = 1.0;
-    let q = x * x / 4.0;
-    for k in 1..64 {
-        term *= q / (k * k) as f64;
-        sum += term;
-        if term < sum * 1e-17 {
-            break;
-        }
-    }
-    sum
-}
+pub(crate) use crate::loudness::{bessel_i0, kaiser, sinc};
 
 #[derive(Debug, Clone)]
 pub struct Resampler {

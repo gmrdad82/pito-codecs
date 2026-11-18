@@ -1,8 +1,8 @@
 use crate::media::{self, Error, Result};
 
-use super::SIGNATURE;
 use super::crc::crc;
 use super::inflate::adler32;
+use super::{Color, SIGNATURE};
 
 const LENGTHS: [u8; 286] = [
     2, 3, 4, 5, 5, 6, 6, 7, 7, 7, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 10, 10, 10, 10, 10, 10, 10,
@@ -214,6 +214,123 @@ fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
     out.extend_from_slice(&crc(&[kind, data]).to_be_bytes());
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Compression {
+    Fast,
+    #[default]
+    Balanced,
+    High,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Options {
+    pub compression: Compression,
+    pub srgb: Option<u8>,
+    pub gamma: Option<u32>,
+    pub chromaticities: Option<[u32; 8]>,
+    pub pixel_dims: Option<(u32, u32, u8)>,
+    pub text: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Picture {
+    pub width: u32,
+    pub height: u32,
+    pub color: Color,
+    pub depth: u8,
+    pub data: Vec<u8>,
+}
+
+impl Picture {
+    pub fn new(width: u32, height: u32, color: Color, depth: u8) -> Self {
+        let bytes = Self::bytes_for(width, height, color, depth);
+        Picture {
+            width,
+            height,
+            color,
+            depth,
+            data: vec![0; bytes],
+        }
+    }
+
+    fn bytes_for(width: u32, height: u32, color: Color, depth: u8) -> usize {
+        (width as usize * color.samples() * usize::from(depth)).div_ceil(8) * height as usize
+    }
+
+    pub fn row_bytes(&self) -> usize {
+        (self.width as usize * self.color.samples() * usize::from(self.depth)).div_ceil(8)
+    }
+
+    pub fn from_u16(width: u32, height: u32, color: Color, samples: &[u16]) -> Result<Self> {
+        let want = width as usize * height as usize * color.samples();
+        if samples.len() != want {
+            return Err(Error::Invalid(format!(
+                "PNG: {width}x{height} {color:?} needs {want} samples, got {}",
+                samples.len()
+            )));
+        }
+        Ok(Picture {
+            width,
+            height,
+            color,
+            depth: 16,
+            data: samples.iter().flat_map(|s| s.to_be_bytes()).collect(),
+        })
+    }
+
+    pub fn samples16(&self) -> Vec<u16> {
+        match self.depth {
+            16 => self
+                .data
+                .chunks_exact(2)
+                .map(|s| u16::from_be_bytes([s[0], s[1]]))
+                .collect(),
+            _ => self.data.iter().map(|&b| u16::from(b) * 257).collect(),
+        }
+    }
+
+    pub fn to_rgba(&self) -> Result<media::Rgba> {
+        self.rgba(false)
+    }
+
+    pub fn to_rgba_rounded(&self) -> Result<media::Rgba> {
+        self.rgba(true)
+    }
+
+    fn rgba(&self, round: bool) -> Result<media::Rgba> {
+        if self.depth != 8 && self.depth != 16 || self.color == Color::Palette {
+            return Err(Error::Invalid(
+                "PNG: only 8 and 16 bit pictures convert".into(),
+            ));
+        }
+        let step = usize::from(self.depth / 8);
+        let n = self.color.samples();
+        let mut out = media::Rgba::new(self.width, self.height);
+        for (px, src) in out
+            .data
+            .chunks_exact_mut(4)
+            .zip(self.data.chunks_exact(n * step))
+        {
+            let s = |i: usize| {
+                if step == 2 && round {
+                    let v = u32::from(u16::from_be_bytes([src[i * 2], src[i * 2 + 1]]));
+                    ((v + 128) / 257) as u8
+                } else {
+                    src[i * step]
+                }
+            };
+            let (r, g, b, a) = match self.color {
+                Color::Grey => (s(0), s(0), s(0), 255),
+                Color::GreyAlpha => (s(0), s(0), s(0), s(1)),
+                Color::Rgb => (s(0), s(1), s(2), 255),
+                _ => (s(0), s(1), s(2), s(3)),
+            };
+            px.copy_from_slice(&[r, g, b, a]);
+        }
+        Ok(out)
+    }
+}
+
 pub fn encode(image: &media::Rgba) -> Result<Vec<u8>> {
     write(image, 3)
 }
@@ -224,43 +341,333 @@ pub fn encode_rgba(image: &media::Rgba) -> Result<Vec<u8>> {
 
 fn write(image: &media::Rgba, bpp: usize) -> Result<Vec<u8>> {
     let (w, h) = (image.width as usize, image.height as usize);
-    let row = w * bpp;
-    if w == 0 || h == 0 || w > 1 << 24 || h > 1 << 24 {
-        return Err(Error::Invalid(format!("cannot write a {w}x{h} PNG")));
-    }
     if image.data.len() < w * h * 4 {
         return Err(Error::Invalid("image data is shorter than its size".into()));
     }
-    let mut raw = vec![0u8; (row + 1) * h];
+    let color = if bpp == 4 { Color::Rgba } else { Color::Rgb };
+    let fast = Options {
+        compression: Compression::Fast,
+        ..Options::default()
+    };
+    build(
+        image.width,
+        image.height,
+        color,
+        8,
+        &|y, cur| {
+            let line = &image.data[y * w * 4..(y + 1) * w * 4];
+            for (dst, px) in cur.chunks_exact_mut(bpp).zip(line.chunks_exact(4)) {
+                dst.copy_from_slice(&px[..bpp]);
+            }
+        },
+        &fast,
+    )
+}
+
+pub fn encode_picture(picture: &Picture, options: &Options) -> Result<Vec<u8>> {
+    if picture.color == Color::Palette {
+        return Err(Error::Invalid(
+            "PNG: palette pictures are not written".into(),
+        ));
+    }
+    if picture.depth != 8 && picture.depth != 16 {
+        return Err(Error::Invalid(format!(
+            "PNG: bit depth {} is not written",
+            picture.depth
+        )));
+    }
+    let row = picture.row_bytes();
+    let need = row
+        .checked_mul(picture.height as usize)
+        .ok_or_else(|| Error::Invalid("PNG: the picture is too large".into()))?;
+    if picture.data.len() < need {
+        return Err(Error::Invalid(format!(
+            "PNG: the picture holds {} bytes, {}x{} needs {need}",
+            picture.data.len(),
+            picture.width,
+            picture.height
+        )));
+    }
+    build(
+        picture.width,
+        picture.height,
+        picture.color,
+        picture.depth,
+        &|y, cur| cur.copy_from_slice(&picture.data[y * row..(y + 1) * row]),
+        options,
+    )
+}
+
+fn build(
+    width: u32,
+    height: u32,
+    color: Color,
+    depth: u8,
+    fill: &dyn Fn(usize, &mut [u8]),
+    options: &Options,
+) -> Result<Vec<u8>> {
+    let (w, h) = (width as usize, height as usize);
+    if w == 0 || h == 0 || w > 1 << 24 || h > 1 << 24 {
+        return Err(Error::Invalid(format!("cannot write a {w}x{h} PNG")));
+    }
+    let bpp = (color.samples() * usize::from(depth) / 8).max(1);
+    let row = w * color.samples() * usize::from(depth) / 8;
+    let mut raw = Vec::new();
+    raw.try_reserve_exact((row + 1) * h)
+        .map_err(|_| Error::Invalid("PNG: no memory for the picture".into()))?;
+    raw.resize((row + 1) * h, 0);
     let mut prev = vec![0u8; row];
     let mut cur = vec![0u8; row];
-    for (y, line) in image.data.chunks_exact(w * 4).take(h).enumerate() {
-        for (dst, px) in cur.chunks_exact_mut(bpp).zip(line.chunks_exact(4)) {
-            dst.copy_from_slice(&px[..bpp]);
-        }
+    let mut trial = vec![0u8; row];
+    for y in 0..h {
+        fill(y, &mut cur);
         let out = &mut raw[y * (row + 1)..(y + 1) * (row + 1)];
-        out[0] = 4;
-        for i in 0..row {
-            let a = if i >= bpp { cur[i - bpp] } else { 0 };
-            let c = if i >= bpp { prev[i - bpp] } else { 0 };
-            out[i + 1] = cur[i].wrapping_sub(paeth(a, prev[i], c));
+        if options.compression == Compression::Fast {
+            out[0] = 4;
+            filter_row(4, &cur, &prev, bpp, &mut out[1..]);
+        } else {
+            let mut best = (u64::MAX, 0u8);
+            for kind in 0..5u8 {
+                filter_row(kind, &cur, &prev, bpp, &mut trial);
+                let cost: u64 = trial
+                    .iter()
+                    .map(|&b| u64::from((b as i8).unsigned_abs()))
+                    .sum();
+                if cost < best.0 {
+                    best = (cost, kind);
+                }
+            }
+            out[0] = best.1;
+            filter_row(best.1, &cur, &prev, bpp, &mut out[1..]);
         }
         std::mem::swap(&mut prev, &mut cur);
     }
-    let mut z = Deflate::new(raw.len() / 3);
-    z.data(&raw);
-    let z = z.finish(adler32(&raw));
+    let z = match options.compression {
+        Compression::Fast => {
+            let mut z = Deflate::new(raw.len() / 3);
+            z.data(&raw);
+            z.finish(adler32(&raw))
+        }
+        Compression::Balanced => fixed::zlib(&raw, 12),
+        Compression::High => fixed::zlib(&raw, 96),
+    };
     let mut out = Vec::with_capacity(z.len() + 64 + z.len() / IDAT_CHUNK * 12);
     out.extend_from_slice(&SIGNATURE);
     let mut ihdr = [0u8; 13];
-    ihdr[..4].copy_from_slice(&(w as u32).to_be_bytes());
-    ihdr[4..8].copy_from_slice(&(h as u32).to_be_bytes());
-    ihdr[8] = 8;
-    ihdr[9] = if bpp == 4 { 6 } else { 2 };
+    ihdr[..4].copy_from_slice(&width.to_be_bytes());
+    ihdr[4..8].copy_from_slice(&height.to_be_bytes());
+    ihdr[8] = depth;
+    ihdr[9] = match color {
+        Color::Grey => 0,
+        Color::Rgb => 2,
+        Color::Palette => 3,
+        Color::GreyAlpha => 4,
+        Color::Rgba => 6,
+    };
     chunk(&mut out, b"IHDR", &ihdr);
+    if let Some(c) = options.chromaticities {
+        let body: Vec<u8> = c.iter().flat_map(|v| v.to_be_bytes()).collect();
+        chunk(&mut out, b"cHRM", &body);
+    }
+    if let Some(g) = options.gamma {
+        chunk(&mut out, b"gAMA", &g.to_be_bytes());
+    }
+    if let Some(i) = options.srgb {
+        chunk(&mut out, b"sRGB", &[i]);
+    }
+    if let Some((x, y, unit)) = options.pixel_dims {
+        let mut body = Vec::with_capacity(9);
+        body.extend_from_slice(&x.to_be_bytes());
+        body.extend_from_slice(&y.to_be_bytes());
+        body.push(unit);
+        chunk(&mut out, b"pHYs", &body);
+    }
+    for (key, value) in &options.text {
+        text_chunk(&mut out, key, value)?;
+    }
     for part in z.chunks(IDAT_CHUNK) {
         chunk(&mut out, b"IDAT", part);
     }
     chunk(&mut out, b"IEND", &[]);
     Ok(out)
+}
+
+fn text_chunk(out: &mut Vec<u8>, key: &str, value: &str) -> Result<()> {
+    if key.is_empty() || key.len() > 79 || !key.chars().all(|c| (' '..='~').contains(&c)) {
+        return Err(Error::Invalid(format!(
+            "PNG: {key:?} is not a text keyword"
+        )));
+    }
+    let mut body = Vec::new();
+    body.extend_from_slice(key.as_bytes());
+    body.push(0);
+    if value.chars().all(|c| c as u32 <= 0xff && c != '\0') {
+        body.extend(value.chars().map(|c| c as u8));
+        chunk(out, b"tEXt", &body);
+    } else {
+        body.extend_from_slice(&[0, 0, 0, 0]);
+        body.extend_from_slice(value.as_bytes());
+        chunk(out, b"iTXt", &body);
+    }
+    Ok(())
+}
+
+fn filter_row(kind: u8, cur: &[u8], prev: &[u8], bpp: usize, out: &mut [u8]) {
+    for i in 0..cur.len() {
+        let a = if i >= bpp { cur[i - bpp] } else { 0 };
+        let b = prev[i];
+        let c = if i >= bpp { prev[i - bpp] } else { 0 };
+        let p = match kind {
+            0 => 0,
+            1 => a,
+            2 => b,
+            3 => ((u16::from(a) + u16::from(b)) / 2) as u8,
+            _ => paeth(a, b, c),
+        };
+        out[i] = cur[i].wrapping_sub(p);
+    }
+}
+
+mod fixed {
+    use super::adler32;
+
+    const MIN: usize = 3;
+    const MAX: usize = 258;
+    const WINDOW: usize = 32768;
+    const HASH: usize = 1 << 15;
+
+    struct Bits {
+        out: Vec<u8>,
+        acc: u64,
+        n: u32,
+    }
+
+    impl Bits {
+        fn put(&mut self, v: u32, n: u32) {
+            self.acc |= u64::from(v) << self.n;
+            self.n += n;
+            while self.n >= 8 {
+                self.out.push(self.acc as u8);
+                self.acc >>= 8;
+                self.n -= 8;
+            }
+        }
+
+        fn code(&mut self, code: u32, n: u32) {
+            self.put(code.reverse_bits() >> (32 - n), n);
+        }
+
+        fn literal(&mut self, sym: u32) {
+            match sym {
+                0..=143 => self.code(0x30 + sym, 8),
+                144..=255 => self.code(0x190 + sym - 144, 9),
+                256..=279 => self.code(sym - 256, 7),
+                _ => self.code(0xC0 + sym - 280, 8),
+            }
+        }
+    }
+
+    const LEN_BASE: [u16; 29] = [
+        3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115,
+        131, 163, 195, 227, 258,
+    ];
+    const LEN_EXTRA: [u8; 29] = [
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
+    ];
+    const DIST_BASE: [u16; 30] = [
+        1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
+        2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
+    ];
+    const DIST_EXTRA: [u8; 30] = [
+        0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12,
+        13, 13,
+    ];
+
+    fn hash(d: &[u8], i: usize) -> usize {
+        let v = u32::from(d[i]) | u32::from(d[i + 1]) << 8 | u32::from(d[i + 2]) << 16;
+        (v.wrapping_mul(0x9E37_79B1) >> 17) as usize & (HASH - 1)
+    }
+
+    fn matched(d: &[u8], from: usize, at: usize) -> usize {
+        let limit = (d.len() - at).min(MAX);
+        let mut n = 0;
+        while n < limit && d[from + n] == d[at + n] {
+            n += 1;
+        }
+        n
+    }
+
+    pub fn zlib(data: &[u8], chain: usize) -> Vec<u8> {
+        let mut b = Bits {
+            out: Vec::with_capacity(data.len() / 2 + 16),
+            acc: 0,
+            n: 0,
+        };
+        b.out.extend_from_slice(&[0x78, 0x9C]);
+        b.put(1, 1);
+        b.put(1, 2);
+        let mut head = vec![usize::MAX; HASH];
+        let mut prev = vec![usize::MAX; data.len()];
+        let mut i = 0;
+        while i < data.len() {
+            let mut best = (0usize, 0usize);
+            if i + MIN <= data.len() {
+                let h = hash(data, i);
+                let mut cand = head[h];
+                let mut steps = chain;
+                while cand != usize::MAX && i - cand <= WINDOW && steps > 0 {
+                    let n = matched(data, cand, i);
+                    if n > best.0 {
+                        best = (n, i - cand);
+                        if n == MAX {
+                            break;
+                        }
+                    }
+                    cand = prev[cand];
+                    steps -= 1;
+                }
+                prev[i] = head[h];
+                head[h] = i;
+            }
+            if best.0 >= MIN {
+                let (len, dist) = best;
+                let li = LEN_BASE
+                    .iter()
+                    .rposition(|&v| usize::from(v) <= len)
+                    .unwrap_or(0);
+                b.literal(257 + li as u32);
+                b.put(
+                    (len - usize::from(LEN_BASE[li])) as u32,
+                    u32::from(LEN_EXTRA[li]),
+                );
+                let di = DIST_BASE
+                    .iter()
+                    .rposition(|&v| usize::from(v) <= dist)
+                    .unwrap_or(0);
+                b.code(di as u32, 5);
+                b.put(
+                    (dist - usize::from(DIST_BASE[di])) as u32,
+                    u32::from(DIST_EXTRA[di]),
+                );
+                for k in 1..len {
+                    let at = i + k;
+                    if at + MIN <= data.len() {
+                        let h = hash(data, at);
+                        prev[at] = head[h];
+                        head[h] = at;
+                    }
+                }
+                i += len;
+            } else {
+                b.literal(u32::from(data[i]));
+                i += 1;
+            }
+        }
+        b.literal(256);
+        if b.n > 0 {
+            b.put(0, 8 - b.n);
+        }
+        b.out.extend_from_slice(&adler32(data).to_be_bytes());
+        b.out
+    }
 }
