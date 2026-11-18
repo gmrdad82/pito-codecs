@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Every release carries `pcod-<tag>-macos-arm64.tar.gz` for Apple Silicon, built, signed with a Developer ID and notarized on a Mac, with the Linux archive's contents; v5.1.0 has it. The README and the install guide give its install lines and no longer call the macOS build untested.
+- Every release carries `pcod-<tag>-macos-arm64.tar.gz` for Apple Silicon, built, signed with a Developer ID and notarized on a Mac, with the Linux archive's contents; v5.1.0 has it. The README and the install guide give its install lines and no longer call the macOS build untested, and the GPU guide says what VideoToolbox ran on an Apple M1 Max.
 
 ## v5.1.0 — 2026-11-18
 
