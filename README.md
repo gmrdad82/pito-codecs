@@ -43,7 +43,7 @@ tar -xzf "pcod-$v-macos-arm64.tar.gz" pcod && mkdir -p ~/.local/bin && install -
 From source, anywhere Rust stable runs:
 
 ```sh
-cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag v5.1.0 pito-codecs --bin pcod
+cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag v5.1.1 pito-codecs --bin pcod
 ```
 
 Windows x86-64, in PowerShell:
@@ -67,7 +67,7 @@ pcod stills clip.mp4 --every 2s --out frames/
 pcod filmstrip clip.mp4 strip.png --every 10s --timecodes
 ```
 
-`SHA256SUMS` in each Release lists every archive's checksum. To build pcod from source anywhere, Linux arm64 included, with Rust 1.97 or newer: `cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag v5.1.0 pito-codecs --bin pcod`.
+`SHA256SUMS` in each Release lists every archive's checksum. To build pcod from source anywhere, Linux arm64 included, with Rust 1.97 or newer: `cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag v5.1.1 pito-codecs --bin pcod`.
 
 pito-codecs also stands in for the `png`, `image`, `zune-jpeg`, `hound`, `lewton` and `ebur128` crates, each behind its own feature with no outside crate: see the guide "Replacing png, image, zune-jpeg, hound, lewton and ebur128" in the docs.
 
@@ -75,7 +75,7 @@ In a Rust project, add the library with the parts you need (all are on by defaul
 
 ```toml
 [dependencies]
-pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v5.1.0", default-features = false, features = ["h264", "hevc", "vp9", "aac", "mp4", "mkv", "gpu", "filter", "opus", "ac3", "mp3", "flac", "alac"] }
+pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v5.1.1", default-features = false, features = ["h264", "hevc", "vp9", "aac", "mp4", "mkv", "gpu", "filter", "opus", "ac3", "mp3", "flac", "alac"] }
 ```
 
 and let it pick the fastest route for each job:

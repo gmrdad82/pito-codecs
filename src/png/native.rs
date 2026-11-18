@@ -1,5 +1,5 @@
 use super::{
-    Color, Decoder, Entry, Info, Layout, Mode, XORIG, XSPC, YORIG, YSPC, be32, crc, header,
+    Color, Decoder, Entry, Info, Layout, Mode, Target, XORIG, XSPC, YORIG, YSPC, be32, crc, header,
     inflate, invalid, pass_size, unpack_bits,
 };
 use crate::media::{Error, Result};
@@ -220,7 +220,7 @@ impl Decoder {
     }
 
     pub fn decode_slice(&mut self, data: &[u8], t: Transform, buf: &mut [u8]) -> Result<Output> {
-        let layout = self.prepare(data)?;
+        let (layout, expected, single) = self.prepare(data)?;
         let out = describe(&layout.info, layout.trns_present, t)?;
         if buf.len() < out.bytes {
             return Err(Error::Invalid(format!(
@@ -230,16 +230,31 @@ impl Decoder {
             )));
         }
         let (w, h) = (out.width as usize, out.height as usize);
-        let rows = std::mem::take(&mut self.inflated);
+        let idat = std::mem::take(&mut self.idat);
+        let compressed = single.unwrap_or(&idat[..]);
         let result = if layout.info.interlaced {
-            self.interlaced_native(&layout, t, &rows, &out, buf)
+            self.inflate_all(compressed, expected, h).and_then(|()| {
+                let rows = std::mem::take(&mut self.inflated);
+                let result = self.interlaced_native(&layout, t, &rows, &out, buf);
+                self.inflated = rows;
+                result
+            })
+        } else if t == Transform::Identity {
+            self.stream(&layout, compressed, expected, w, h, Target::Direct(buf))
         } else {
             let stride = out.row_bytes;
-            self.rows(&layout, &rows, w, h, Mode::Native(t), &mut |y, row| {
-                buf[y * stride..(y + 1) * stride].copy_from_slice(row);
-            })
+            self.stream(
+                &layout,
+                compressed,
+                expected,
+                w,
+                h,
+                Target::Rows(Mode::Native(t), &mut |y, row| {
+                    buf[y * stride..(y + 1) * stride].copy_from_slice(row);
+                }),
+            )
         };
-        self.inflated = rows;
+        self.idat = idat;
         result.map(|()| out)
     }
 

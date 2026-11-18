@@ -1,8 +1,10 @@
 # Changelog
 
-## Unreleased
+## v5.1.1 — 2026-11-18
 
 ### Changed
+
+- PNG no longer lags the `png` crate: on a 3840x2160 RGBA picture at 8 bits (mostly flat) `Fast` writes at 3,600 MP/s against 156 before (`png` 0.18.1: 570) and `Balanced` at 163 against 22 (`png`: 38) in a file 34% smaller than before and 1.7% smaller than `png`'s default, and files read back at 0.72 to 1.38 times the `png` crate's speed against 0.53 to 0.94 before (the 0.72 is a noisy file `png` wrote, where reading is all inflate); at 16 bits `Fast` goes from 69 to 2,236 MP/s, `Balanced` from 11 to 157 in a file 1.1% smaller than `png`'s, and reads run at 0.9 to 1.26 times `png`'s speed. The work is cut into pieces compressed on every core, with the same bytes at any thread count, and rows are unfiltered as they are inflated; on one thread `Balanced` still writes at half the `png` crate's speed. Measured at a 1-minute load of 27 to 43 with the runs interleaved; `cargo run --release --example png_speed` and `bench --only png` repeat it.
 
 - Every release carries `pcod-<tag>-macos-arm64.tar.gz` for Apple Silicon, built, signed with a Developer ID and notarized on a Mac, with the Linux archive's contents; v5.1.0 has it. The README and the install guide give its install lines and no longer call the macOS build untested, and the GPU guide says what VideoToolbox ran on an Apple M1 Max.
 

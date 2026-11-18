@@ -2,11 +2,15 @@ mod crc;
 #[cfg(test)]
 mod edges;
 mod encode;
+mod fastz;
 mod filter;
 mod inflate;
+mod lz;
 mod native;
 #[cfg(test)]
 mod native_tests;
+mod pack;
+mod par;
 #[cfg(test)]
 mod tests;
 
@@ -15,9 +19,12 @@ use crc::crc;
 pub use encode::{Compression, Options, Picture, encode, encode_picture, encode_rgba};
 use filter::{Simd, unfilter};
 pub use native::{Meta, Output, Text, Transform, metadata, output};
+#[doc(hidden)]
+pub use par::limit_threads;
 
 const SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
 const MAX_PIXELS: u64 = 1 << 28;
+const PIPELINE_MIN: usize = 1 << 21;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {
@@ -162,6 +169,7 @@ pub struct Decoder {
     unpacked: Vec<u8>,
     pass: Vec<u8>,
     simd: Simd,
+    pipeline_min: usize,
 }
 
 impl Default for Decoder {
@@ -170,8 +178,96 @@ impl Default for Decoder {
     }
 }
 
+pub(super) enum Target<'a> {
+    Direct(&'a mut [u8]),
+    Rows(Mode, &'a mut dyn FnMut(usize, &[u8])),
+}
+
+struct Direct<'a> {
+    out: &'a mut [u8],
+    stride: usize,
+    bpp: usize,
+    y: usize,
+    simd: Simd,
+}
+
+impl inflate::Rows for Direct<'_> {
+    fn rows(&mut self, data: &[u8]) -> Result<()> {
+        for row in data.chunks_exact(self.stride + 1) {
+            let y = self.y;
+            let (done, rest) = self.out.split_at_mut(y * self.stride);
+            let prev = if y == 0 {
+                &[][..]
+            } else {
+                &done[(y - 1) * self.stride..]
+            };
+            if !unfilter(
+                row[0],
+                y == 0,
+                prev,
+                &row[1..],
+                &mut rest[..self.stride],
+                self.bpp,
+                self.simd,
+            ) {
+                return Err(invalid(format!("unknown filter type {}", row[0])));
+            }
+            self.y += 1;
+        }
+        Ok(())
+    }
+}
+
+struct Convert<'a, 'b> {
+    dec: &'a mut Decoder,
+    layout: &'a Layout,
+    width: usize,
+    stride: usize,
+    bpp: usize,
+    y: usize,
+    mode: Mode,
+    put: &'b mut dyn FnMut(usize, &[u8]),
+    pass: Vec<u8>,
+}
+
+impl inflate::Rows for Convert<'_, '_> {
+    fn rows(&mut self, data: &[u8]) -> Result<()> {
+        let px = self.mode.pixel_bytes(self.layout);
+        for row in data.chunks_exact(self.stride + 1) {
+            if !unfilter(
+                row[0],
+                self.y == 0,
+                &self.dec.prev,
+                &row[1..],
+                &mut self.dec.cur,
+                self.bpp,
+                self.dec.simd,
+            ) {
+                return Err(invalid(format!("unknown filter type {}", row[0])));
+            }
+            let n = match self.mode {
+                Mode::Rgba => {
+                    self.dec
+                        .expand(self.layout, self.width, &mut self.pass[..self.width * 4]);
+                    self.width * 4
+                }
+                Mode::Native(t) => self.dec.native(
+                    self.layout,
+                    t,
+                    self.width,
+                    &mut self.pass[..self.width * px],
+                ),
+            };
+            (self.put)(self.y, &self.pass[..n]);
+            std::mem::swap(&mut self.dec.prev, &mut self.dec.cur);
+            self.y += 1;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy)]
-enum Mode {
+pub(super) enum Mode {
     Rgba,
     Native(Transform),
 }
@@ -191,10 +287,11 @@ impl Decoder {
             unpacked: Vec::new(),
             pass: Vec::new(),
             simd: Simd::detect(),
+            pipeline_min: PIPELINE_MIN,
         }
     }
 
-    fn prepare(&mut self, data: &[u8]) -> Result<Layout> {
+    fn prepare<'d>(&mut self, data: &'d [u8]) -> Result<(Layout, usize, Option<&'d [u8]>)> {
         let info = header(data)?;
         let mut layout = Layout {
             info,
@@ -313,40 +410,144 @@ impl Decoder {
         } else {
             (layout.row_bytes(w) + 1) * h
         };
-        let compressed = match single {
-            Some(s) if parts == 1 => s,
-            _ => &self.idat[..],
-        };
+        let single = if parts == 1 { single } else { None };
+        Ok((layout, expected, single))
+    }
+
+    fn inflate_all(&mut self, compressed: &[u8], expected: usize, height: usize) -> Result<()> {
         let written = inflate::zlib(
             compressed,
             &mut self.inflated,
             expected,
-            expected + 4 * h + 64,
+            expected + 4 * height + 64,
         )?;
         if written < expected {
             return Err(invalid(format!(
                 "the image data ends early ({written} of {expected} bytes)"
             )));
         }
-        Ok(layout)
+        Ok(())
+    }
+
+    fn stream(
+        &mut self,
+        layout: &Layout,
+        compressed: &[u8],
+        expected: usize,
+        width: usize,
+        height: usize,
+        target: Target,
+    ) -> Result<()> {
+        let stride = layout.row_bytes(width);
+        let bpp = layout.bpp();
+        let limit = expected + 4 * height + 64;
+        let result = match target {
+            Target::Direct(out) => {
+                let mut sink = Direct {
+                    out,
+                    stride,
+                    bpp,
+                    y: 0,
+                    simd: self.simd,
+                };
+                if expected >= self.pipeline_min && par::workers(2) > 1 {
+                    inflate::zlib_piped(compressed, limit, stride + 1, height, &mut sink)
+                } else {
+                    self.inline(compressed, limit, stride + 1, height, &mut sink)
+                }
+            }
+            Target::Rows(mode, put) => {
+                self.prev.clear();
+                self.prev.resize(stride, 0);
+                self.cur.clear();
+                self.cur.resize(stride, 0);
+                let mut pass = std::mem::take(&mut self.pass);
+                pass.resize(width * mode.pixel_bytes(layout), 0);
+                let mut sink = Convert {
+                    dec: self,
+                    layout,
+                    width,
+                    stride,
+                    bpp,
+                    y: 0,
+                    mode,
+                    put,
+                    pass,
+                };
+                let line = stride + 1;
+                let mut ring = std::mem::take(&mut sink.dec.inflated);
+                let need = inflate::ring_len(line);
+                if ring.len() < need {
+                    ring.resize(need, 0);
+                }
+                let result =
+                    inflate::zlib_rows(compressed, &mut ring, limit, line, height, &mut sink);
+                let pass = std::mem::take(&mut sink.pass);
+                self.inflated = ring;
+                self.pass = pass;
+                result
+            }
+        };
+        result.map(|_| ())
+    }
+
+    fn inline(
+        &mut self,
+        compressed: &[u8],
+        limit: usize,
+        line: usize,
+        height: usize,
+        sink: &mut dyn inflate::Rows,
+    ) -> Result<usize> {
+        let mut ring = std::mem::take(&mut self.inflated);
+        let need = inflate::ring_len(line);
+        if ring.len() < need {
+            ring.resize(need, 0);
+        }
+        let result = inflate::zlib_rows(compressed, &mut ring, limit, line, height, sink);
+        self.inflated = ring;
+        result
     }
 
     pub fn decode_into(&mut self, data: &[u8], out: &mut media::Rgba) -> Result<()> {
-        let layout = self.prepare(data)?;
+        let (layout, expected, single) = self.prepare(data)?;
         let info = layout.info;
         let (w, h) = (info.width as usize, info.height as usize);
         out.width = info.width;
         out.height = info.height;
         out.data.resize(w * h * 4, 0);
-        let rows = std::mem::take(&mut self.inflated);
+        let idat = std::mem::take(&mut self.idat);
+        let compressed = single.unwrap_or(&idat[..]);
         let result = if info.interlaced {
-            self.interlaced(&layout, &rows, out)
-        } else {
-            self.rows(&layout, &rows, w, h, Mode::Rgba, &mut |y, rgba| {
-                out.data[y * w * 4..(y + 1) * w * 4].copy_from_slice(rgba);
+            self.inflate_all(compressed, expected, h).and_then(|()| {
+                let rows = std::mem::take(&mut self.inflated);
+                let result = self.interlaced(&layout, &rows, out);
+                self.inflated = rows;
+                result
             })
+        } else if info.color == Color::Rgba && info.depth == 8 {
+            self.stream(
+                &layout,
+                compressed,
+                expected,
+                w,
+                h,
+                Target::Direct(&mut out.data),
+            )
+        } else {
+            let pixels = &mut out.data;
+            self.stream(
+                &layout,
+                compressed,
+                expected,
+                w,
+                h,
+                Target::Rows(Mode::Rgba, &mut |y, rgba| {
+                    pixels[y * w * 4..(y + 1) * w * 4].copy_from_slice(rgba);
+                }),
+            )
         };
-        self.inflated = rows;
+        self.idat = idat;
         result
     }
 
