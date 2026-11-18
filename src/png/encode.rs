@@ -1,211 +1,20 @@
 use crate::media::{self, Error, Result};
 
 use super::crc::crc;
-use super::inflate::adler32;
+use super::fastz::Fast;
+use super::inflate::{adler32, adler32_combine};
+use super::lz::{self, Lz};
+use super::pack::{self, Isa};
+use super::par;
 use super::{Color, SIGNATURE};
-
-const LENGTHS: [u8; 286] = [
-    2, 3, 4, 5, 5, 6, 6, 7, 7, 7, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 10, 10, 10, 10, 10, 10, 10,
-    10, 10, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12,
-    12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12,
-    12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12,
-    12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12,
-    12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12,
-    12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12,
-    12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12,
-    12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 11, 11, 11, 11, 11, 11, 11,
-    11, 11, 11, 10, 11, 10, 10, 10, 10, 10, 10, 10, 10, 10, 9, 9, 9, 9, 9, 8, 9, 8, 8, 8, 8, 8, 7,
-    7, 7, 6, 6, 6, 5, 4, 3, 12, 12, 12, 9, 9, 11, 10, 11, 11, 10, 11, 11, 11, 11, 11, 11, 12, 11,
-    12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 9,
-];
-
-const CODES: [u16; 286] = codes(&LENGTHS);
-
-const LENGTH_TO_SYMBOL: [u16; 256] = [
-    257, 258, 259, 260, 261, 262, 263, 264, 265, 265, 266, 266, 267, 267, 268, 268, 269, 269, 269,
-    269, 270, 270, 270, 270, 271, 271, 271, 271, 272, 272, 272, 272, 273, 273, 273, 273, 273, 273,
-    273, 273, 274, 274, 274, 274, 274, 274, 274, 274, 275, 275, 275, 275, 275, 275, 275, 275, 276,
-    276, 276, 276, 276, 276, 276, 276, 277, 277, 277, 277, 277, 277, 277, 277, 277, 277, 277, 277,
-    277, 277, 277, 277, 278, 278, 278, 278, 278, 278, 278, 278, 278, 278, 278, 278, 278, 278, 278,
-    278, 279, 279, 279, 279, 279, 279, 279, 279, 279, 279, 279, 279, 279, 279, 279, 279, 280, 280,
-    280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 281, 281, 281, 281, 281,
-    281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281,
-    281, 281, 281, 281, 281, 281, 281, 281, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282,
-    282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282,
-    282, 282, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283,
-    283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 284, 284, 284, 284,
-    284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284,
-    284, 284, 284, 284, 284, 284, 284, 284, 285,
-];
-
-const LENGTH_TO_LEN_EXTRA: [u8; 256] = [
-    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
-    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
-    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 0,
-];
-
-const HEADER: [u8; 54] = [
-    120, 1, 237, 192, 3, 160, 36, 89, 150, 198, 241, 255, 119, 238, 141, 200, 204, 167, 114, 75,
-    99, 174, 109, 219, 182, 109, 219, 182, 109, 219, 182, 109, 105, 140, 158, 150, 74, 175, 158,
-    50, 51, 34, 238, 249, 118, 183, 106, 122, 166, 135, 59, 107, 213, 15,
-];
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const IDAT_CHUNK: usize = 1 << 20;
-
-const fn codes(lengths: &[u8; 286]) -> [u16; 286] {
-    let mut codes = [0u16; 286];
-    let mut code = 0u32;
-    let mut len = 1;
-    while len <= 16 {
-        let mut i = 0;
-        while i < lengths.len() {
-            if lengths[i] == len {
-                codes[i] = (code as u16).reverse_bits() >> (16 - len);
-                code += 1;
-            }
-            i += 1;
-        }
-        code <<= 1;
-        len += 1;
-    }
-    codes
-}
-
-struct Deflate {
-    out: Vec<u8>,
-    buffer: u64,
-    nbits: u8,
-}
-
-impl Deflate {
-    fn new(capacity: usize) -> Self {
-        let mut d = Deflate {
-            out: Vec::with_capacity(capacity),
-            buffer: 0,
-            nbits: 0,
-        };
-        d.out.extend_from_slice(&HEADER[..53]);
-        d.bits(HEADER[53] as u64, 5);
-        d
-    }
-
-    fn bits(&mut self, bits: u64, nbits: u8) {
-        self.buffer |= bits << self.nbits;
-        self.nbits += nbits;
-        if self.nbits >= 64 {
-            self.out.extend_from_slice(&self.buffer.to_le_bytes());
-            self.nbits -= 64;
-            self.buffer = bits.checked_shr((nbits - self.nbits) as u32).unwrap_or(0);
-        }
-    }
-
-    fn literal(&mut self, b: u8) {
-        self.bits(CODES[b as usize] as u64, LENGTHS[b as usize]);
-    }
-
-    fn run(&mut self, mut run: u32) {
-        self.bits(CODES[0] as u64, LENGTHS[0]);
-        run -= 1;
-        while run >= 258 {
-            self.bits(CODES[285] as u64, LENGTHS[285] + 1);
-            run -= 258;
-        }
-        if run > 4 {
-            let sym = LENGTH_TO_SYMBOL[run as usize - 3] as usize;
-            self.bits(CODES[sym] as u64, LENGTHS[sym]);
-            let extra_len = LENGTH_TO_LEN_EXTRA[run as usize - 3];
-            let extra = ((run - 3) & ((1u32 << extra_len) - 1)) as u64;
-            self.bits(extra, extra_len + 1);
-        } else {
-            self.bits(0, run as u8 * LENGTHS[0]);
-        }
-    }
-
-    fn data(&mut self, data: &[u8]) {
-        let mut run = 0;
-        let mut chunks = data.chunks_exact(8);
-        for chunk in &mut chunks {
-            let mut word = [0u8; 8];
-            word.copy_from_slice(chunk);
-            let ichunk = u64::from_le_bytes(word);
-            if ichunk == 0 {
-                run += 8;
-                continue;
-            } else if run > 0 {
-                let run_extra = ichunk.trailing_zeros() / 8;
-                self.run(run + run_extra);
-                run = 0;
-                if run_extra > 0 {
-                    run = ichunk.leading_zeros() / 8;
-                    for &b in &word[run_extra as usize..8 - run as usize] {
-                        self.literal(b);
-                    }
-                    continue;
-                }
-            }
-            let run_start = ichunk.leading_zeros() / 8;
-            if run_start > 0 {
-                for &b in &word[..8 - run_start as usize] {
-                    self.literal(b);
-                }
-                run = run_start;
-                continue;
-            }
-            let [c0, c1, c2, c3, c4, c5, c6, c7] = word.map(|b| b as usize);
-            let (n0, n1, n2, n3) = (LENGTHS[c0], LENGTHS[c1], LENGTHS[c2], LENGTHS[c3]);
-            let bits = CODES[c0] as u64
-                | ((CODES[c1] as u64) << n0)
-                | ((CODES[c2] as u64) << (n0 + n1))
-                | ((CODES[c3] as u64) << (n0 + n1 + n2));
-            self.bits(bits, n0 + n1 + n2 + n3);
-            let (n4, n5, n6, n7) = (LENGTHS[c4], LENGTHS[c5], LENGTHS[c6], LENGTHS[c7]);
-            let bits = CODES[c4] as u64
-                | ((CODES[c5] as u64) << n4)
-                | ((CODES[c6] as u64) << (n4 + n5))
-                | ((CODES[c7] as u64) << (n4 + n5 + n6));
-            self.bits(bits, n4 + n5 + n6 + n7);
-        }
-        if run > 0 {
-            self.run(run);
-        }
-        for &b in chunks.remainder() {
-            self.literal(b);
-        }
-    }
-
-    fn finish(mut self, checksum: u32) -> Vec<u8> {
-        self.bits(CODES[256] as u64, LENGTHS[256]);
-        if !self.nbits.is_multiple_of(8) {
-            self.bits(0, 8 - self.nbits % 8);
-        }
-        if self.nbits > 0 {
-            let bytes = self.buffer.to_le_bytes();
-            self.out
-                .extend_from_slice(&bytes[..self.nbits as usize / 8]);
-        }
-        self.out.extend_from_slice(&checksum.to_be_bytes());
-        self.out
-    }
-}
-
-fn paeth(a: u8, b: u8, c: u8) -> u8 {
-    let p = a as i16 + b as i16 - c as i16;
-    let pa = (p - a as i16).abs();
-    let pb = (p - b as i16).abs();
-    let pc = (p - c as i16).abs();
-    if pa <= pb && pa <= pc {
-        a
-    } else if pb <= pc {
-        b
-    } else {
-        c
-    }
-}
+const SEGMENT_BYTES: usize = 1 << 19;
+const WINDOW: usize = 1 << 15;
+const SEGMENT_OUTPUT: usize = 14_000;
+const KEEP_TOKENS: usize = 1 << 19;
+const KEEP_BUDGET: usize = 1 << 23;
 
 fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
     out.extend_from_slice(&(data.len() as u32).to_be_bytes());
@@ -354,13 +163,13 @@ fn write(image: &media::Rgba, bpp: usize) -> Result<Vec<u8>> {
         image.height,
         color,
         8,
-        &|y, cur| {
-            let line = &image.data[y * w * 4..(y + 1) * w * 4];
-            for (dst, px) in cur.chunks_exact_mut(bpp).zip(line.chunks_exact(4)) {
-                dst.copy_from_slice(&px[..bpp]);
-            }
+        Source::Rgba {
+            data: &image.data,
+            width: w,
+            bpp,
         },
         &fast,
+        Plan::default(),
     )
 }
 
@@ -393,9 +202,207 @@ pub fn encode_picture(picture: &Picture, options: &Options) -> Result<Vec<u8>> {
         picture.height,
         picture.color,
         picture.depth,
-        &|y, cur| cur.copy_from_slice(&picture.data[y * row..(y + 1) * row]),
+        Source::Direct {
+            data: &picture.data,
+            row,
+        },
         options,
+        Plan::default(),
     )
+}
+
+enum Source<'a> {
+    Direct {
+        data: &'a [u8],
+        row: usize,
+    },
+    Rgba {
+        data: &'a [u8],
+        width: usize,
+        bpp: usize,
+    },
+}
+
+impl Source<'_> {
+    fn rows<'s>(&'s self, y0: usize, y1: usize, scratch: &'s mut Vec<u8>) -> &'s [u8] {
+        match self {
+            Source::Direct { data, row } => &data[y0 * row..y1 * row],
+            Source::Rgba { data, width, bpp } => {
+                let src = &data[y0 * width * 4..y1 * width * 4];
+                if *bpp == 4 {
+                    return src;
+                }
+                scratch.clear();
+                scratch.resize(src.len() / 4 * bpp, 0);
+                for (dst, px) in scratch.chunks_exact_mut(*bpp).zip(src.chunks_exact(4)) {
+                    dst.copy_from_slice(&px[..*bpp]);
+                }
+                scratch
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct Plan {
+    pub segment: usize,
+    pub threads: usize,
+}
+
+impl Default for Plan {
+    fn default() -> Self {
+        Plan {
+            segment: SEGMENT_BYTES,
+            threads: 0,
+        }
+    }
+}
+
+struct Worker {
+    isa: Isa,
+    trial: [Vec<u8>; 4],
+    zeros: Vec<u8>,
+    buf: Vec<u8>,
+    scratch: Vec<u8>,
+    lz: Option<Lz>,
+}
+
+struct Piece {
+    bytes: Vec<u8>,
+    adler: u32,
+    raw: usize,
+    tokens: Option<Vec<u32>>,
+}
+
+struct Shape {
+    row: usize,
+    bpp: usize,
+    height: usize,
+    rows_per: usize,
+    count: usize,
+    level: Compression,
+    kept: AtomicUsize,
+}
+
+fn segment(w: &mut Worker, src: &Source, shape: &Shape, k: usize) -> Piece {
+    let stride = shape.row + 1;
+    let r0 = k * shape.rows_per;
+    let r1 = (r0 + shape.rows_per).min(shape.height);
+    let single = shape.count == 1;
+    let dict_rows = if shape.level == Compression::Fast {
+        0
+    } else {
+        WINDOW.div_ceil(stride).min(r0)
+    };
+    let first = r0 - dict_rows;
+    let from = first.saturating_sub(1);
+    let rows = src.rows(from, r1, &mut w.scratch);
+    w.buf.clear();
+    w.buf.resize((r1 - first) * stride, 0);
+    for y in first..r1 {
+        let cur = &rows[(y - from) * shape.row..][..shape.row];
+        let prev = if y == 0 {
+            &w.zeros[..shape.row]
+        } else {
+            &rows[(y - 1 - from) * shape.row..][..shape.row]
+        };
+        let out = &mut w.buf[(y - first) * stride..][..stride];
+        if shape.level == Compression::Fast {
+            out[0] = pack::PAETH;
+            pack::filter(w.isa, pack::PAETH, cur, prev, shape.bpp, &mut out[1..]);
+        } else {
+            out[0] = pack::choose(w.isa, cur, prev, shape.bpp, &mut w.trial, &mut out[1..]);
+        }
+    }
+    let own = dict_rows * stride;
+    let raw = w.buf.len() - own;
+    let adler = adler32(&w.buf[own..]);
+    let mut tokens = None;
+    let bytes = match shape.level {
+        Compression::Fast => {
+            let mut z = Fast::new(raw / 3 + 64, single);
+            z.data(&w.buf[own..]);
+            z.finish(single)
+        }
+        level => {
+            let params = if level == Compression::High {
+                lz::HIGH
+            } else {
+                lz::BALANCED
+            };
+            let mut out = Vec::with_capacity(raw / 2 + 64);
+            let lz = w.lz.get_or_insert_with(Lz::new);
+            lz.segment(&w.buf, own, w.buf.len(), &params, single, &mut out);
+            let n = lz.tokens().len();
+            if !single && n <= KEEP_TOKENS {
+                if shape.kept.fetch_add(n, Ordering::Relaxed) + n <= KEEP_BUDGET {
+                    tokens = Some(lz.tokens().to_vec());
+                } else {
+                    shape.kept.fetch_sub(n, Ordering::Relaxed);
+                }
+            }
+            out
+        }
+    };
+    Piece {
+        bytes,
+        adler,
+        raw,
+        tokens,
+    }
+}
+
+struct Idat {
+    out: Vec<u8>,
+    chunks: Vec<(usize, usize)>,
+    start: usize,
+    len: usize,
+}
+
+impl Idat {
+    fn push(&mut self, mut piece: &[u8]) {
+        while !piece.is_empty() {
+            if self.len == 0 {
+                self.out.extend_from_slice(&[0; 4]);
+                self.out.extend_from_slice(b"IDAT");
+                self.start = self.out.len();
+            }
+            let take = piece.len().min(IDAT_CHUNK - self.len);
+            self.out.extend_from_slice(&piece[..take]);
+            self.len += take;
+            piece = &piece[take..];
+            if self.len == IDAT_CHUNK {
+                self.close();
+            }
+        }
+    }
+
+    fn close(&mut self) {
+        if self.len == 0 {
+            return;
+        }
+        self.out[self.start - 8..self.start - 4].copy_from_slice(&(self.len as u32).to_be_bytes());
+        self.out.extend_from_slice(&[0; 4]);
+        self.chunks.push((self.start, self.len));
+        self.len = 0;
+    }
+
+    fn seal(mut self) -> Vec<u8> {
+        self.close();
+        let sums = par::map(
+            self.chunks.len(),
+            par::workers(self.chunks.len() / 4),
+            || (),
+            |_, i| {
+                let (at, len) = self.chunks[i];
+                crc(&[b"IDAT", &self.out[at..at + len]])
+            },
+        );
+        for (&(at, len), sum) in self.chunks.iter().zip(sums) {
+            self.out[at + len..at + len + 4].copy_from_slice(&sum.to_be_bytes());
+        }
+        self.out
+    }
 }
 
 fn build(
@@ -403,8 +410,9 @@ fn build(
     height: u32,
     color: Color,
     depth: u8,
-    fill: &dyn Fn(usize, &mut [u8]),
+    source: Source,
     options: &Options,
+    plan: Plan,
 ) -> Result<Vec<u8>> {
     let (w, h) = (width as usize, height as usize);
     if w == 0 || h == 0 || w > 1 << 24 || h > 1 << 24 {
@@ -412,47 +420,86 @@ fn build(
     }
     let bpp = (color.samples() * usize::from(depth) / 8).max(1);
     let row = w * color.samples() * usize::from(depth) / 8;
-    let mut raw = Vec::new();
-    raw.try_reserve_exact((row + 1) * h)
-        .map_err(|_| Error::Invalid("PNG: no memory for the picture".into()))?;
-    raw.resize((row + 1) * h, 0);
-    let mut prev = vec![0u8; row];
-    let mut cur = vec![0u8; row];
-    let mut trial = vec![0u8; row];
-    for y in 0..h {
-        fill(y, &mut cur);
-        let out = &mut raw[y * (row + 1)..(y + 1) * (row + 1)];
-        if options.compression == Compression::Fast {
-            out[0] = 4;
-            filter_row(4, &cur, &prev, bpp, &mut out[1..]);
-        } else {
-            let mut best = (u64::MAX, 0u8);
-            for kind in 0..5u8 {
-                filter_row(kind, &cur, &prev, bpp, &mut trial);
-                let cost: u64 = trial
-                    .iter()
-                    .map(|&b| u64::from((b as i8).unsigned_abs()))
-                    .sum();
-                if cost < best.0 {
-                    best = (cost, kind);
-                }
-            }
-            out[0] = best.1;
-            filter_row(best.1, &cur, &prev, bpp, &mut out[1..]);
-        }
-        std::mem::swap(&mut prev, &mut cur);
-    }
-    let z = match options.compression {
-        Compression::Fast => {
-            let mut z = Deflate::new(raw.len() / 3);
-            z.data(&raw);
-            z.finish(adler32(&raw))
-        }
-        Compression::Balanced => fixed::zlib(&raw, 12),
-        Compression::High => fixed::zlib(&raw, 96),
+    let total = (row + 1)
+        .checked_mul(h)
+        .ok_or_else(|| Error::Invalid("PNG: the picture is too large".into()))?;
+    let shape_for = |count: usize| Shape {
+        row,
+        bpp,
+        height: h,
+        rows_per: h.div_ceil(count),
+        count: h.div_ceil(h.div_ceil(count)),
+        level: options.compression,
+        kept: AtomicUsize::new(0),
     };
-    let mut out = Vec::with_capacity(z.len() + 64 + z.len() / IDAT_CHUNK * 12);
-    out.extend_from_slice(&SIGNATURE);
+    let run = |shape: &Shape| {
+        let threads = match plan.threads {
+            0 => par::workers(shape.count),
+            n => n.min(shape.count),
+        };
+        par::map(
+            shape.count,
+            threads,
+            || Worker {
+                isa: Isa::detect(),
+                trial: pack::trials(row),
+                zeros: vec![0; row],
+                buf: Vec::new(),
+                scratch: Vec::new(),
+                lz: None,
+            },
+            |worker, k| segment(worker, &source, shape, k),
+        )
+    };
+    let mut shape = shape_for((total / plan.segment.max(1)).clamp(1, h));
+    let mut pieces = run(&shape);
+    let mut whole = shape.count == 1;
+    if shape.count > 1 && options.compression == Compression::Fast {
+        let produced: usize = pieces.iter().map(|p| p.bytes.len()).sum();
+        let fewer = (produced / SEGMENT_OUTPUT).max(1);
+        if fewer * 4 < shape.count * 3 {
+            shape = shape_for(fewer);
+            pieces = run(&shape);
+            whole = shape.count == 1;
+        }
+    }
+    if shape.count > 1 && pieces.iter().all(|p| p.tokens.is_some()) {
+        let all: Vec<u32> = pieces
+            .iter()
+            .flat_map(|p| p.tokens.iter().flatten().copied())
+            .collect();
+        let mut body = Vec::with_capacity(pieces.iter().map(|p| p.bytes.len()).sum());
+        Lz::new().merged(&all, &mut body);
+        let adler = pieces
+            .iter()
+            .skip(1)
+            .fold(pieces[0].adler, |a, p| adler32_combine(a, p.adler, p.raw));
+        let raw = pieces.iter().map(|p| p.raw).sum();
+        pieces = vec![Piece {
+            bytes: body,
+            adler,
+            raw,
+            tokens: None,
+        }];
+        whole = true;
+    }
+    let adler = pieces
+        .iter()
+        .skip(1)
+        .fold(pieces[0].adler, |a, p| adler32_combine(a, p.adler, p.raw));
+    let zlib: [u8; 2] = if options.compression == Compression::Fast {
+        [0x78, 0x01]
+    } else {
+        [0x78, 0x9c]
+    };
+    let z_len: usize = 2 + pieces.iter().map(|p| p.bytes.len()).sum::<usize>() + 9;
+    let mut idat = Idat {
+        out: Vec::with_capacity(z_len + 256 + z_len / IDAT_CHUNK * 12),
+        chunks: Vec::new(),
+        start: 0,
+        len: 0,
+    };
+    idat.out.extend_from_slice(&SIGNATURE);
     let mut ihdr = [0u8; 13];
     ihdr[..4].copy_from_slice(&width.to_be_bytes());
     ihdr[4..8].copy_from_slice(&height.to_be_bytes());
@@ -464,30 +511,36 @@ fn build(
         Color::GreyAlpha => 4,
         Color::Rgba => 6,
     };
-    chunk(&mut out, b"IHDR", &ihdr);
+    chunk(&mut idat.out, b"IHDR", &ihdr);
     if let Some(c) = options.chromaticities {
         let body: Vec<u8> = c.iter().flat_map(|v| v.to_be_bytes()).collect();
-        chunk(&mut out, b"cHRM", &body);
+        chunk(&mut idat.out, b"cHRM", &body);
     }
     if let Some(g) = options.gamma {
-        chunk(&mut out, b"gAMA", &g.to_be_bytes());
+        chunk(&mut idat.out, b"gAMA", &g.to_be_bytes());
     }
     if let Some(i) = options.srgb {
-        chunk(&mut out, b"sRGB", &[i]);
+        chunk(&mut idat.out, b"sRGB", &[i]);
     }
     if let Some((x, y, unit)) = options.pixel_dims {
         let mut body = Vec::with_capacity(9);
         body.extend_from_slice(&x.to_be_bytes());
         body.extend_from_slice(&y.to_be_bytes());
         body.push(unit);
-        chunk(&mut out, b"pHYs", &body);
+        chunk(&mut idat.out, b"pHYs", &body);
     }
     for (key, value) in &options.text {
-        text_chunk(&mut out, key, value)?;
+        text_chunk(&mut idat.out, key, value)?;
     }
-    for part in z.chunks(IDAT_CHUNK) {
-        chunk(&mut out, b"IDAT", part);
+    idat.push(&zlib);
+    for p in &pieces {
+        idat.push(&p.bytes);
     }
+    if !whole {
+        idat.push(&[1, 0, 0, 0xff, 0xff]);
+    }
+    idat.push(&adler.to_be_bytes());
+    let mut out = idat.seal();
     chunk(&mut out, b"IEND", &[]);
     Ok(out)
 }
@@ -512,162 +565,19 @@ fn text_chunk(out: &mut Vec<u8>, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn filter_row(kind: u8, cur: &[u8], prev: &[u8], bpp: usize, out: &mut [u8]) {
-    for i in 0..cur.len() {
-        let a = if i >= bpp { cur[i - bpp] } else { 0 };
-        let b = prev[i];
-        let c = if i >= bpp { prev[i - bpp] } else { 0 };
-        let p = match kind {
-            0 => 0,
-            1 => a,
-            2 => b,
-            3 => ((u16::from(a) + u16::from(b)) / 2) as u8,
-            _ => paeth(a, b, c),
-        };
-        out[i] = cur[i].wrapping_sub(p);
-    }
-}
-
-mod fixed {
-    use super::adler32;
-
-    const MIN: usize = 3;
-    const MAX: usize = 258;
-    const WINDOW: usize = 32768;
-    const HASH: usize = 1 << 15;
-
-    struct Bits {
-        out: Vec<u8>,
-        acc: u64,
-        n: u32,
-    }
-
-    impl Bits {
-        fn put(&mut self, v: u32, n: u32) {
-            self.acc |= u64::from(v) << self.n;
-            self.n += n;
-            while self.n >= 8 {
-                self.out.push(self.acc as u8);
-                self.acc >>= 8;
-                self.n -= 8;
-            }
-        }
-
-        fn code(&mut self, code: u32, n: u32) {
-            self.put(code.reverse_bits() >> (32 - n), n);
-        }
-
-        fn literal(&mut self, sym: u32) {
-            match sym {
-                0..=143 => self.code(0x30 + sym, 8),
-                144..=255 => self.code(0x190 + sym - 144, 9),
-                256..=279 => self.code(sym - 256, 7),
-                _ => self.code(0xC0 + sym - 280, 8),
-            }
-        }
-    }
-
-    const LEN_BASE: [u16; 29] = [
-        3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115,
-        131, 163, 195, 227, 258,
-    ];
-    const LEN_EXTRA: [u8; 29] = [
-        0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
-    ];
-    const DIST_BASE: [u16; 30] = [
-        1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
-        2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
-    ];
-    const DIST_EXTRA: [u8; 30] = [
-        0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12,
-        13, 13,
-    ];
-
-    fn hash(d: &[u8], i: usize) -> usize {
-        let v = u32::from(d[i]) | u32::from(d[i + 1]) << 8 | u32::from(d[i + 2]) << 16;
-        (v.wrapping_mul(0x9E37_79B1) >> 17) as usize & (HASH - 1)
-    }
-
-    fn matched(d: &[u8], from: usize, at: usize) -> usize {
-        let limit = (d.len() - at).min(MAX);
-        let mut n = 0;
-        while n < limit && d[from + n] == d[at + n] {
-            n += 1;
-        }
-        n
-    }
-
-    pub fn zlib(data: &[u8], chain: usize) -> Vec<u8> {
-        let mut b = Bits {
-            out: Vec::with_capacity(data.len() / 2 + 16),
-            acc: 0,
-            n: 0,
-        };
-        b.out.extend_from_slice(&[0x78, 0x9C]);
-        b.put(1, 1);
-        b.put(1, 2);
-        let mut head = vec![usize::MAX; HASH];
-        let mut prev = vec![usize::MAX; data.len()];
-        let mut i = 0;
-        while i < data.len() {
-            let mut best = (0usize, 0usize);
-            if i + MIN <= data.len() {
-                let h = hash(data, i);
-                let mut cand = head[h];
-                let mut steps = chain;
-                while cand != usize::MAX && i - cand <= WINDOW && steps > 0 {
-                    let n = matched(data, cand, i);
-                    if n > best.0 {
-                        best = (n, i - cand);
-                        if n == MAX {
-                            break;
-                        }
-                    }
-                    cand = prev[cand];
-                    steps -= 1;
-                }
-                prev[i] = head[h];
-                head[h] = i;
-            }
-            if best.0 >= MIN {
-                let (len, dist) = best;
-                let li = LEN_BASE
-                    .iter()
-                    .rposition(|&v| usize::from(v) <= len)
-                    .unwrap_or(0);
-                b.literal(257 + li as u32);
-                b.put(
-                    (len - usize::from(LEN_BASE[li])) as u32,
-                    u32::from(LEN_EXTRA[li]),
-                );
-                let di = DIST_BASE
-                    .iter()
-                    .rposition(|&v| usize::from(v) <= dist)
-                    .unwrap_or(0);
-                b.code(di as u32, 5);
-                b.put(
-                    (dist - usize::from(DIST_BASE[di])) as u32,
-                    u32::from(DIST_EXTRA[di]),
-                );
-                for k in 1..len {
-                    let at = i + k;
-                    if at + MIN <= data.len() {
-                        let h = hash(data, at);
-                        prev[at] = head[h];
-                        head[h] = at;
-                    }
-                }
-                i += len;
-            } else {
-                b.literal(u32::from(data[i]));
-                i += 1;
-            }
-        }
-        b.literal(256);
-        if b.n > 0 {
-            b.put(0, 8 - b.n);
-        }
-        b.out.extend_from_slice(&adler32(data).to_be_bytes());
-        b.out
-    }
+#[cfg(test)]
+pub(super) fn encode_with(picture: &Picture, options: &Options, plan: Plan) -> Result<Vec<u8>> {
+    let row = picture.row_bytes();
+    build(
+        picture.width,
+        picture.height,
+        picture.color,
+        picture.depth,
+        Source::Direct {
+            data: &picture.data,
+            row,
+        },
+        options,
+        plan,
+    )
 }

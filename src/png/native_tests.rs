@@ -334,3 +334,238 @@ fn hostile_files_never_panic_in_the_new_entry_points() {
         let _ = metadata(&bad);
     }
 }
+
+fn flat_art(w: u32, h: u32, depth: u8, color: Color) -> Picture {
+    let mut p = Picture::new(w, h, color, depth);
+    let n = color.samples();
+    let step = usize::from(depth / 8);
+    let mut s = 99u32;
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let panel = (x / 37 + y / 23) % 5;
+            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            for c in 0..n {
+                let v = if panel == 4 {
+                    ((x * 7 + y * 3 + c * 11) as u32 + (s >> 29)) as u16
+                } else {
+                    (panel * 40 + c * 13) as u16
+                };
+                let at = ((y * w as usize + x) * n + c) * step;
+                if step == 2 {
+                    p.data[at..at + 2].copy_from_slice(&(v << 8 | (v & 0x7f)).to_be_bytes());
+                } else {
+                    p.data[at] = v as u8;
+                }
+            }
+        }
+    }
+    p
+}
+
+fn encoded(p: &Picture, level: Compression, plan: super::encode::Plan) -> Vec<u8> {
+    let opts = Options {
+        compression: level,
+        ..Options::default()
+    };
+    super::encode::encode_with(p, &opts, plan).unwrap()
+}
+
+#[test]
+fn files_cut_into_segments_read_back_the_same_at_every_level_and_cut() {
+    let mut dec = Decoder::new();
+    for (color, depth) in [
+        (Color::Rgba, 16),
+        (Color::Rgb, 8),
+        (Color::Grey, 16),
+        (Color::GreyAlpha, 8),
+    ] {
+        let pic = flat_art(97, 61, depth, color);
+        for level in [Compression::Fast, Compression::Balanced, Compression::High] {
+            for segment in [1usize, 300, 2_000, 9_000, 1 << 30] {
+                let plan = super::encode::Plan {
+                    segment,
+                    threads: 0,
+                };
+                let file = encoded(&pic, level, plan);
+                let tag = format!("{color:?} {depth} {level:?} {segment}");
+                let (c, d, w, h, bytes) = outside_decode(&file, outside::Transformations::IDENTITY);
+                assert_eq!((c, d, w, h), (color, depth, 97, 61), "{tag}");
+                assert!(
+                    bytes == pic.data,
+                    "{tag}: the png crate reads other samples"
+                );
+                assert!(
+                    dec.decode_picture(&file, Transform::Identity).unwrap() == pic,
+                    "{tag}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_thread_count_never_changes_a_byte() {
+    let pic = flat_art(120, 90, 16, Color::Rgba);
+    for level in [Compression::Fast, Compression::Balanced, Compression::High] {
+        let one = encoded(
+            &pic,
+            level,
+            super::encode::Plan {
+                segment: 4_000,
+                threads: 1,
+            },
+        );
+        for threads in [0usize, 2, 7] {
+            let many = encoded(
+                &pic,
+                level,
+                super::encode::Plan {
+                    segment: 4_000,
+                    threads,
+                },
+            );
+            assert!(one == many, "{level:?} {threads}");
+        }
+    }
+}
+
+#[test]
+fn the_balanced_level_is_no_larger_than_the_png_crates_default() {
+    for (color, depth) in [(Color::Rgba, 16), (Color::Rgba, 8), (Color::Rgb, 8)] {
+        let pic = flat_art(400, 240, depth, color);
+        let mine = encode_picture(
+            &pic,
+            &Options {
+                compression: Compression::Balanced,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        let mut theirs = Vec::new();
+        {
+            let mut e = outside::Encoder::new(&mut theirs, 400, 240);
+            e.set_color(match color {
+                Color::Rgba => outside::ColorType::Rgba,
+                _ => outside::ColorType::Rgb,
+            });
+            e.set_depth(if depth == 16 {
+                outside::BitDepth::Sixteen
+            } else {
+                outside::BitDepth::Eight
+            });
+            let mut w = e.write_header().unwrap();
+            w.write_image_data(&pic.data).unwrap();
+        }
+        assert!(
+            mine.len() <= theirs.len(),
+            "{color:?} {depth}: {} against {}",
+            mine.len(),
+            theirs.len()
+        );
+    }
+}
+
+#[test]
+fn reading_through_the_pipeline_gives_the_samples_and_the_errors_of_reading_in_line() {
+    let pic = flat_art(150, 80, 16, Color::Rgba);
+    let big = flat_art(2000, 300, 8, Color::Rgba);
+    for (pic, level) in [
+        (&pic, Compression::Fast),
+        (&pic, Compression::Balanced),
+        (&big, Compression::High),
+    ] {
+        let plan = super::encode::Plan {
+            segment: 20_000,
+            threads: 0,
+        };
+        let file = encoded(pic, level, plan);
+        let mut line = Decoder::new();
+        line.pipeline_min = usize::MAX;
+        let mut piped = Decoder::new();
+        piped.pipeline_min = 0;
+        let a = line.decode_picture(&file, Transform::Identity).unwrap();
+        let b = piped.decode_picture(&file, Transform::Identity).unwrap();
+        assert!(a == *pic && b == *pic, "{level:?}");
+        let mut rgba_a = crate::media::Rgba::new(0, 0);
+        let mut rgba_b = crate::media::Rgba::new(0, 0);
+        if pic.depth == 8 {
+            line.decode_into(&file, &mut rgba_a).unwrap();
+            piped.decode_into(&file, &mut rgba_b).unwrap();
+            assert!(rgba_a.data == rgba_b.data && rgba_a.data == pic.data);
+        }
+        let z_len = idat_of(&file).len();
+        for cut in [z_len / 10, z_len / 2, z_len - 9] {
+            let short = with_idat(&file, |z| z.truncate(cut));
+            let ea = line.decode_picture(&short, Transform::Identity);
+            let eb = piped.decode_picture(&short, Transform::Identity);
+            assert!(ea.is_err() && eb.is_err(), "{level:?} cut at {cut}");
+        }
+        for at in [z_len / 3, z_len / 2, z_len - 6] {
+            let bad = with_idat(&file, |z| z[at] ^= 0x5a);
+            let ea = line.decode_picture(&bad, Transform::Identity);
+            let eb = piped.decode_picture(&bad, Transform::Identity);
+            assert!(ea.is_err() && eb.is_err(), "{level:?} flip at {at}");
+        }
+    }
+}
+
+fn idat_of(file: &[u8]) -> Vec<u8> {
+    let mut at = 8;
+    let mut z = Vec::new();
+    while at + 12 <= file.len() {
+        let len = u32::from_be_bytes(file[at..at + 4].try_into().unwrap()) as usize;
+        if &file[at + 4..at + 8] == b"IDAT" {
+            z.extend_from_slice(&file[at + 8..at + 8 + len]);
+        }
+        at += 12 + len;
+    }
+    z
+}
+
+fn with_idat(file: &[u8], edit: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
+    let mut z = idat_of(file);
+    edit(&mut z);
+    let mut out = file[..8].to_vec();
+    let mut at = 8;
+    let mut wrote = false;
+    while at + 12 <= file.len() {
+        let len = u32::from_be_bytes(file[at..at + 4].try_into().unwrap()) as usize;
+        let kind: [u8; 4] = file[at + 4..at + 8].try_into().unwrap();
+        if &kind == b"IDAT" {
+            if !wrote {
+                out.extend(refs::chunk(b"IDAT", &z));
+                wrote = true;
+            }
+        } else {
+            out.extend_from_slice(&file[at..at + 12 + len]);
+        }
+        at += 12 + len;
+    }
+    out
+}
+
+#[test]
+fn a_filter_byte_that_is_not_a_filter_stops_both_ways_of_reading() {
+    let raw: Vec<u8> = (0..30u32)
+        .flat_map(|y| {
+            let filter = if y == 17 { 9 } else { 0 };
+            std::iter::once(filter).chain((0..40u32).map(move |x| (x + y) as u8))
+        })
+        .collect();
+    let mut z = refs::stored(&raw);
+    let mut file = super::SIGNATURE.to_vec();
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&40u32.to_be_bytes());
+    ihdr.extend_from_slice(&30u32.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 0, 0, 0, 0]);
+    file.extend(refs::chunk(b"IHDR", &ihdr));
+    file.extend(refs::chunk(b"IDAT", &z));
+    file.extend(refs::chunk(b"IEND", &[]));
+    z.clear();
+    for min in [0usize, usize::MAX] {
+        let mut dec = Decoder::new();
+        dec.pipeline_min = min;
+        let e = dec.decode_picture(&file, Transform::Identity).unwrap_err();
+        assert!(e.to_string().contains("filter type 9"), "{e}");
+    }
+}

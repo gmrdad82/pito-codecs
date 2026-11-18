@@ -1,7 +1,7 @@
 [package]
 name = "pito-codecs"
 description = "Video and audio codecs, containers and GPU routes in Rust for PITO MD apps"
-version = "5.1.0"
+version = "5.1.1"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT"
@@ -114,9 +114,13 @@ name = "jpeg_speed"
 required-features = ["jpeg"]
 
 [[example]]
+name = "png_speed"
+required-features = ["png"]
+
+[[example]]
 name = "bench"
 test = true
-required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter", "mkv", "vp9"]
+required-features = ["media", "h264", "hevc", "aac", "mp4", "gpu", "filter", "mkv", "vp9", "png"]
 
 [[bin]]
 name = "pcod"

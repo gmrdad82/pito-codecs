@@ -5,6 +5,8 @@ mod charts;
 mod fail;
 #[path = "bench/docs.rs"]
 mod docs;
+#[path = "bench/png.rs"]
+mod png;
 #[path = "bench/reference.rs"]
 mod reference;
 #[path = "../src/bin/pcod/sha256.rs"]
@@ -186,6 +188,25 @@ fn ffmpeg_run(args: &[&str], info: bool) -> Res<(f64, String)> {
 
 fn ffmpeg_time(args: &[&str]) -> Res<f64> {
     Ok(ffmpeg_run(args, false)?.0)
+}
+
+fn png_measured(t: png::Timed, what: &str) -> Measured {
+    let mut m = Measured {
+        route: "cpu".into(),
+        note: format!(
+            "{what}: pito-codecs on all threads against {} on one thread, the same picture, runs interleaved; megapixels per second, the reference column is the outside crate",
+            png::OUTSIDE
+        ),
+        ours: t.ours,
+        ffmpeg: t.outside,
+        ..Measured::default()
+    };
+    m.details.insert("ours_bytes".into(), t.ours_bytes as f64);
+    m.details
+        .insert("png_crate_bytes".into(), t.outside_bytes as f64);
+    m.details.insert("load_1m_start".into(), t.load_start);
+    m.details.insert("load_1m_end".into(), t.load_end);
+    m
 }
 
 fn path_str(p: &Path) -> String {
@@ -646,6 +667,7 @@ fn unit_of(id: &str) -> &'static str {
         "first-frame" => "ms",
         "filmstrip" => "stills/s",
         "audio" | "smartcut" => "x realtime",
+        "png" => "MP/s",
         _ => "fps",
     }
 }
@@ -679,6 +701,10 @@ fn speedup(row: &mut Row) {
 }
 
 fn refresh(reference: &Reference, row: &mut Row) -> Option<String> {
+    if row.group == "png" {
+        speedup(row);
+        return None;
+    }
     row.ffmpeg = None;
     row.ffmpeg_runs.clear();
     row.speedup = None;
@@ -768,6 +794,80 @@ impl Bench {
             row.skipped.as_deref().unwrap_or("")
         );
         self.rows.push(row);
+    }
+
+    fn png(&mut self) {
+        if recording() {
+            return;
+        }
+        let runs = self.runs.max(3);
+        let formats: &[png::Format] = if QUICK.load(Ordering::Relaxed) {
+            &png::FORMATS[2..]
+        } else {
+            &png::FORMATS
+        };
+        for f in formats {
+            for content in png::CONTENTS {
+                let key = format!("{}.{content}", f.key);
+                let encode = format!("png.encode.{key}");
+                let decode = format!("png.decode.{key}");
+                if !self.want(&[&encode, &decode]) {
+                    continue;
+                }
+                let pic = png::picture(*f, content);
+                let what = format!(
+                    "{}x{} {} {}-BIT {}",
+                    f.width,
+                    f.height,
+                    format!("{:?}", f.color).to_uppercase(),
+                    f.depth,
+                    content.to_uppercase()
+                );
+                for level in [png::Level::Fast, png::Level::Balanced] {
+                    let id = format!("{encode}.{}", level.key());
+                    let label = format!("PNG ENCODE {what}, {}", level.key().to_uppercase());
+                    let m =
+                        png::time_encode(&pic, level, runs).map(|t| png_measured(t, level.key()));
+                    self.add(
+                        &id,
+                        "png",
+                        &label,
+                        true,
+                        m.map_err(|e| e.to_string().into()),
+                    );
+                }
+                let files: Vec<(&str, Res<Vec<u8>>)> = vec![
+                    ("ours-fast", png::encode_ours(&pic, png::Level::Fast)),
+                    (
+                        "ours-balanced",
+                        png::encode_ours(&pic, png::Level::Balanced),
+                    ),
+                    ("png-fast", png::encode_outside(&pic, png::Level::Fast)),
+                    (
+                        "png-default",
+                        png::encode_outside(&pic, png::Level::Balanced),
+                    ),
+                ];
+                for (name, file) in files {
+                    let id = format!("{decode}.{name}");
+                    let label = format!("PNG DECODE {what}, FILE FROM {}", name.to_uppercase());
+                    let m = file.and_then(|file| {
+                        if !png::Decoders::new(&pic).same_samples(&file)? {
+                            return Err("the two decoders read other samples".into());
+                        }
+                        png::time_decode(&pic, &file, runs)
+                    });
+                    let m = m.map(|t| png_measured(t, name));
+                    self.add(
+                        &id,
+                        "png",
+                        &label,
+                        true,
+                        m.map_err(|e| e.to_string().into()),
+                    );
+                }
+            }
+        }
     }
 
     fn decode(&mut self, a: &Assets) {
@@ -1897,6 +1997,7 @@ fn charts(rows: &[Row], images: &Path, machine: &Machine, date: &str) -> Res<()>
     ];
     let done: Vec<&Row> = rows
         .iter()
+        .filter(|r| r.group != "png")
         .filter(|r| r.ours.is_some() && r.ffmpeg.is_some() && r.speedup.is_some())
         .collect();
     for spec in &specs {
@@ -2132,15 +2233,23 @@ fn run() -> Res<()> {
         charts(&r.rows, &o.images, &r.machine, &r.date)?;
         return Ok(());
     }
+    let png_only =
+        !o.record_ffmpeg && !o.only.is_empty() && o.only.iter().all(|s| s.starts_with("png"));
     let reference = if o.record_ffmpeg {
         let _ = FFMPEG.set(ffmpeg_on(std::env::var_os("PATH").as_deref())?);
         let (_, version) = ffmpeg_run(&["-version"], false)?;
         record_base(!o.only.is_empty(), &o.reference, &version)?
+    } else if png_only {
+        Reference::read(&o.reference)?
     } else {
         load_reference(&o.reference, &o.out)?
     };
     let load_start = fs::read_to_string("/proc/loadavg").unwrap_or_default();
-    let assets = prepare(&o.out, &o.fixtures)?;
+    let assets = if png_only {
+        None
+    } else {
+        Some(prepare(&o.out, &o.fixtures)?)
+    };
     let mut b = Bench {
         runs: o.runs.max(1),
         only: o.only,
@@ -2149,14 +2258,17 @@ fn run() -> Res<()> {
         reference,
         missing: Vec::new(),
     };
-    b.decode(&assets);
-    b.encode(&assets);
-    b.transcode(&assets);
-    b.audio(&assets);
-    b.first_frame(&assets);
-    b.filmstrip(&assets);
-    b.smart_cut(&assets);
-    b.scale(&assets);
+    if let Some(a) = &assets {
+        b.decode(a);
+        b.encode(a);
+        b.transcode(a);
+        b.audio(a);
+        b.first_frame(a);
+        b.filmstrip(a);
+        b.smart_cut(a);
+        b.scale(a);
+    }
+    b.png();
     let date = shell("date", &["-u", "+%Y-%m-%d"]);
     let machine = machine(&b.reference.ffmpeg);
     if o.record_ffmpeg {
@@ -2171,7 +2283,9 @@ fn run() -> Res<()> {
             machine,
             date,
             b.runs,
-            &assets,
+            assets
+                .as_ref()
+                .ok_or("--record-ffmpeg needs the bench inputs")?,
             &o.reference,
             &skipped,
         )?;
@@ -2445,6 +2559,45 @@ mod tests {
         ] {
             assert_eq!(unit_of(id), "fps", "{id}");
         }
+    }
+
+    #[test]
+    fn png_rows_keep_the_outside_crate_as_their_reference_and_are_never_missing() {
+        assert_eq!(unit_of("png.encode.rgba16-4k.flat.fast"), "MP/s");
+        let mut b = bench_with(reference::tests::sample());
+        let m = Measured {
+            ours: vec![300.0, 310.0, 320.0],
+            ffmpeg: vec![100.0, 110.0, 120.0],
+            route: "cpu".into(),
+            ..Measured::default()
+        };
+        b.add(
+            "png.decode.rgb8-1080.flat.ours-fast",
+            "png",
+            "PNG",
+            true,
+            Ok(m),
+        );
+        assert!(b.missing.is_empty(), "{:?}", b.missing);
+        let row = &b.rows[0];
+        assert_eq!((row.ours, row.ffmpeg), (Some(310.0), Some(110.0)));
+        assert!((row.speedup.unwrap() - 310.0 / 110.0).abs() < 1e-9);
+        let mut again = row.clone();
+        assert_eq!(refresh(&b.reference, &mut again), None);
+        assert_eq!(again.ffmpeg, Some(110.0));
+        assert_eq!(again.speedup, row.speedup);
+    }
+
+    #[test]
+    fn the_png_pictures_are_deterministic_and_cover_flat_and_noisy_content() {
+        let f = png::FORMATS[2];
+        let flat = png::picture(f, "flat");
+        let noisy = png::picture(f, "noisy");
+        assert_eq!(flat.data, png::picture(f, "flat").data);
+        assert_eq!(noisy.data, png::picture(f, "noisy").data);
+        let runs = |d: &[u8]| d.windows(2).filter(|w| w[0] == w[1]).count();
+        assert!(runs(&flat.data) * 10 > flat.data.len() * 9);
+        assert!(runs(&noisy.data) * 10 < noisy.data.len());
     }
 
     #[test]
