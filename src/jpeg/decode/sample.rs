@@ -101,9 +101,9 @@ fn clamp(v: i32) -> u8 {
 }
 
 pub fn ycbcr(y: &[u8], cb: &[u8], cr: &[u8], out: &mut [u8]) {
-    let n = y.len().min(cb.len()).min(cr.len()).min(out.len() / 4);
     #[cfg(target_arch = "x86_64")]
     let done = if wide() {
+        let n = y.len().min(cb.len()).min(cr.len()).min(out.len() / 4);
         unsafe { avx2::ycbcr(&y[..n], &cb[..n], &cr[..n], out) }
     } else {
         0
