@@ -4,12 +4,13 @@ use rayon::prelude::*;
 use std::f64::consts::PI;
 
 const MAX_WINDOW_RATE: u32 = 2_822_400;
-const HIST_MIN: f64 = -70.0;
-const HIST_MAX: f64 = 20.0;
-const HIST_STEP: f64 = 0.01;
-const HIST_BINS: usize = ((HIST_MAX - HIST_MIN) / HIST_STEP) as usize;
+const ABSOLUTE_GATE_LUFS: f64 = -70.0;
 const SHORT: usize = 30;
 const MOMENTARY: usize = 4;
+const RANGE_EVERY: u64 = 10;
+const REFERENCE_TAPS: f64 = 48.0;
+const FOUR_TAPS: usize = 12;
+const TWO_TAPS: usize = 24;
 pub(crate) const TAPS: usize = 32;
 const CUTOFF: f64 = 0.97;
 const BETA: f64 = 9.0;
@@ -95,8 +96,9 @@ fn rlb(rate: f64) -> Coeffs {
     }
 }
 
-fn weights(channels: usize) -> Vec<f64> {
+fn weights(channels: usize, reference: bool) -> Vec<f64> {
     match channels {
+        4 if reference => vec![1.0, 1.0, 1.41, 1.41],
         5 => vec![1.0, 1.0, 1.0, 1.41, 1.41],
         6 => vec![1.0, 1.0, 1.0, 0.0, 1.41, 1.41],
         8 => vec![1.0, 1.0, 1.0, 0.0, 1.41, 1.41, 1.41, 1.41],
@@ -133,46 +135,70 @@ pub(crate) fn polyphase(factor: usize) -> Vec<[f32; TAPS]> {
         .collect()
 }
 
-#[derive(Debug, Clone)]
-struct Histogram {
-    count: Vec<u64>,
-    energy: Vec<f64>,
+fn gate_energy() -> f64 {
+    10f64.powf((ABSOLUTE_GATE_LUFS + 0.691) / 10.0)
 }
 
-impl Histogram {
-    fn new() -> Self {
-        Histogram {
-            count: vec![0; HIST_BINS],
-            energy: vec![0.0; HIST_BINS],
+fn relative_threshold(blocks: &[f64]) -> Option<f64> {
+    (!blocks.is_empty())
+        .then(|| blocks.iter().sum::<f64>() / blocks.len() as f64 * 10f64.powf(-10.0 / 10.0))
+}
+
+fn reference_bank<const N: usize>(factor: usize) -> Vec<[f32; N]> {
+    let mut bank = vec![[0.0f32; N]; factor];
+    for j in 0..N * factor {
+        let at = j as f64;
+        let w = 0.5 * (1.0 - (2.0 * PI * at / REFERENCE_TAPS).cos());
+        let m = at - REFERENCE_TAPS / 2.0;
+        let x = m * PI / factor as f64;
+        bank[j % factor][j / factor] = if m.abs() > 0.000_001 {
+            w * x.sin() / x
+        } else {
+            w
+        } as f32;
+    }
+    bank
+}
+
+#[derive(Debug, Clone)]
+enum Oversampler {
+    Off,
+    Two(Vec<[f32; TWO_TAPS]>),
+    Four(Vec<[f32; FOUR_TAPS]>),
+    Kaiser(Vec<[f32; TAPS]>),
+}
+
+impl Oversampler {
+    fn reference(rate: u32) -> Self {
+        if rate < 96_000 {
+            Oversampler::Four(reference_bank(4))
+        } else if rate < 192_000 {
+            Oversampler::Two(reference_bank(2))
+        } else {
+            Oversampler::Off
         }
     }
 
-    fn bin(l: f64) -> usize {
-        (((l - HIST_MIN) / HIST_STEP).floor().max(0.0) as usize).min(HIST_BINS - 1)
+    fn kaiser(rate: u32) -> Self {
+        Oversampler::Kaiser(polyphase(oversampling(f64::from(rate))))
     }
 
-    fn centre(i: usize) -> f64 {
-        HIST_MIN + (i as f64 + 0.5) * HIST_STEP
-    }
-
-    fn add(&mut self, energy: f64) {
-        let l = lufs(energy);
-        if l >= HIST_MIN {
-            let b = Self::bin(l);
-            self.count[b] += 1;
-            self.energy[b] += energy;
+    fn lead(&self) -> usize {
+        match self {
+            Oversampler::Off => 0,
+            Oversampler::Two(_) => TWO_TAPS - 1,
+            Oversampler::Four(_) => FOUR_TAPS - 1,
+            Oversampler::Kaiser(_) => TAPS - 1,
         }
     }
 
-    fn mean_from(&self, from: usize) -> Option<f64> {
-        let e: f64 = self.energy[from..].iter().sum();
-        let n: u64 = self.count[from..].iter().sum();
-        (n > 0).then(|| e / n as f64)
-    }
-
-    fn gate(&self, relative: f64) -> Option<usize> {
-        let t = lufs(self.mean_from(0)?) + relative;
-        Some(if t < HIST_MIN { 0 } else { Self::bin(t) })
+    fn scan(&self, buffer: &[f32], scratch: &mut [f32]) -> f32 {
+        match self {
+            Oversampler::Off => 0.0,
+            Oversampler::Two(bank) => true_peak(buffer, bank, scratch),
+            Oversampler::Four(bank) => true_peak(buffer, bank, scratch),
+            Oversampler::Kaiser(bank) => true_peak(buffer, bank, scratch),
+        }
     }
 }
 
@@ -199,47 +225,49 @@ struct Channel {
 }
 
 impl Channel {
-    fn new() -> Self {
+    fn new(lead: usize) -> Self {
         Channel {
             s: [0.0; 4],
             carry: 0.0,
             sums: Vec::new(),
             squares: Vec::new(),
-            buffer: vec![0.0; TAPS - 1],
+            buffer: vec![0.0; lead],
             out: vec![0.0; CHUNK],
             sample_peak: 0.0,
             true_peak: 0.0,
         }
     }
 
-    fn peaks(&mut self, bank: &[[f32; TAPS]]) {
-        let peak = peak(&self.buffer[TAPS - 1..]);
+    fn peaks(&mut self, over: &Oversampler) {
+        let lead = over.lead();
+        let peak = peak(&self.buffer[lead..]);
         self.sample_peak = self.sample_peak.max(peak);
-        let tp = true_peak(&self.buffer, bank, &mut self.out);
+        let tp = over.scan(&self.buffer, &mut self.out);
         self.true_peak = self.true_peak.max(tp).max(peak);
         let n = self.buffer.len();
-        self.buffer.copy_within(n - (TAPS - 1).., 0);
-        self.buffer.truncate(TAPS - 1);
+        self.buffer.copy_within(n - lead.., 0);
+        self.buffer.truncate(lead);
     }
 }
 
-fn run(chans: &mut [Channel], k: &Filters, segments: &[usize], bank: &[[f32; TAPS]]) {
+fn run(chans: &mut [Channel], k: &Filters, segments: &[usize], over: &Oversampler) {
+    let lead = over.lead();
     if chans.len() == 2 {
-        weigh::<2>(chans, k, segments);
+        weigh::<2>(chans, k, segments, lead);
     } else {
-        weigh::<1>(chans, k, segments);
+        weigh::<1>(chans, k, segments, lead);
     }
-    chans.iter_mut().for_each(|c| c.peaks(bank));
+    chans.iter_mut().for_each(|c| c.peaks(over));
 }
 
-fn weigh<const N: usize>(chans: &mut [Channel], k: &Filters, segments: &[usize]) {
+fn weigh<const N: usize>(chans: &mut [Channel], k: &Filters, segments: &[usize], lead: usize) {
     let mut s: [[f64; 4]; N] = std::array::from_fn(|i| chans[i].s);
     let mut sums: [Vec<f64>; N] = std::array::from_fn(|i| std::mem::take(&mut chans[i].sums));
     sums.iter_mut().for_each(Vec::clear);
     let mut squares: [Vec<f64>; N] = std::array::from_fn(|i| std::mem::take(&mut chans[i].squares));
     squares.iter_mut().for_each(Vec::clear);
     let keep = k.keep;
-    let data: [&[f32]; N] = std::array::from_fn(|i| &chans[i].buffer[TAPS - 1..]);
+    let data: [&[f32]; N] = std::array::from_fn(|i| &chans[i].buffer[lead..]);
     let (pre, rlb) = (k.pre, k.rlb);
     let mut at = 0;
     for &len in segments {
@@ -289,24 +317,33 @@ pub(crate) fn peak(x: &[f32]) -> f32 {
     acc.iter().fold(tail, |m, &v| m.max(v))
 }
 
-pub(crate) fn true_peak(buffer: &[f32], bank: &[[f32; TAPS]], scratch: &mut [f32]) -> f32 {
+pub(crate) fn true_peak<const N: usize>(
+    buffer: &[f32],
+    bank: &[[f32; N]],
+    scratch: &mut [f32],
+) -> f32 {
     if bank.is_empty() {
         return 0.0;
     }
-    let n = buffer.len().saturating_sub(TAPS - 1);
+    let n = buffer.len().saturating_sub(N - 1);
     let mut peak = 0.0f32;
     let mut start = 0;
     while start < n {
         let len = (n - start).min(scratch.len());
         let out = &mut scratch[..len];
-        interpolated(&buffer[start..start + len + TAPS - 1], bank, out, peak);
+        interpolated(&buffer[start..start + len + N - 1], bank, out, peak);
         peak = peak.max(self::peak(out));
         start += len;
     }
     peak
 }
 
-pub(crate) fn interpolated(buffer: &[f32], bank: &[[f32; TAPS]], out: &mut [f32], floor: f32) {
+pub(crate) fn interpolated<const N: usize>(
+    buffer: &[f32],
+    bank: &[[f32; N]],
+    out: &mut [f32],
+    floor: f32,
+) {
     #[cfg(target_arch = "x86_64")]
     if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma") {
         unsafe { interpolated_fma(buffer, bank, out, floor) };
@@ -317,22 +354,33 @@ pub(crate) fn interpolated(buffer: &[f32], bank: &[[f32; TAPS]], out: &mut [f32]
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn interpolated_fma(buffer: &[f32], bank: &[[f32; TAPS]], out: &mut [f32], floor: f32) {
+unsafe fn interpolated_fma<const N: usize>(
+    buffer: &[f32],
+    bank: &[[f32; N]],
+    out: &mut [f32],
+    floor: f32,
+) {
     interpolated_plain(buffer, bank, out, floor)
 }
 
 #[inline(always)]
-fn interpolated_plain(buffer: &[f32], bank: &[[f32; TAPS]], out: &mut [f32], floor: f32) {
+fn interpolated_plain<const N: usize>(
+    buffer: &[f32],
+    bank: &[[f32; N]],
+    out: &mut [f32],
+    floor: f32,
+) {
     const B: usize = 64;
     let n = out.len();
-    assert!(buffer.len() >= n + TAPS - 1);
+    assert!(buffer.len() >= n + N - 1);
     let gain = bank
         .iter()
         .map(|c| c.iter().map(|v| v.abs()).sum::<f32>())
-        .fold(0.0f32, f32::max);
+        .fold(0.0f32, f32::max)
+        * 1.000_01;
     let mut o = 0;
     while o + B <= n {
-        if peak(&buffer[o..o + B + TAPS - 1]) * gain <= floor {
+        if peak(&buffer[o..o + B + N - 1]) * gain <= floor {
             out[o..o + B].fill(0.0);
             o += B;
             continue;
@@ -341,9 +389,7 @@ fn interpolated_plain(buffer: &[f32], bank: &[[f32; TAPS]], out: &mut [f32], flo
         for c in bank {
             let mut acc = [0.0f32; B];
             for (j, &w) in c.iter().enumerate() {
-                let x: &[f32; B] = buffer[o + TAPS - 1 - j..o + TAPS - 1 - j + B]
-                    .try_into()
-                    .unwrap();
+                let x: &[f32; B] = buffer[o + N - 1 - j..o + N - 1 - j + B].try_into().unwrap();
                 for k in 0..B {
                     acc[k] += w * x[k];
                 }
@@ -361,7 +407,7 @@ fn interpolated_plain(buffer: &[f32], bank: &[[f32; TAPS]], out: &mut [f32], flo
             .map(|c| {
                 c.iter()
                     .enumerate()
-                    .map(|(j, &w)| w * buffer[i + TAPS - 1 - j])
+                    .map(|(j, &w)| w * buffer[i + N - 1 - j])
                     .sum::<f32>()
                     .abs()
             })
@@ -381,7 +427,8 @@ pub struct LoudnessMeter {
     rate: u32,
     weights: Vec<f64>,
     filters: Filters,
-    bank: Vec<[f32; TAPS]>,
+    over: Oversampler,
+    range_every: u64,
     channels: Vec<Channel>,
     segments: Vec<usize>,
     block: usize,
@@ -393,8 +440,8 @@ pub struct LoudnessMeter {
     short_term: f64,
     momentary_max: f64,
     short_term_max: f64,
-    integrated: Histogram,
-    range: Histogram,
+    integrated: Vec<f64>,
+    range: Vec<f64>,
     history: Option<History>,
 }
 
@@ -424,24 +471,38 @@ impl History {
 
 impl LoudnessMeter {
     pub fn new(rate: u32, channels: u16) -> Result<Self> {
+        Self::build(rate, channels, false)
+    }
+
+    pub fn ebur128(rate: u32, channels: u16) -> Result<Self> {
+        Self::build(rate, channels, true)
+    }
+
+    fn build(rate: u32, channels: u16, reference: bool) -> Result<Self> {
         if rate == 0 || channels == 0 {
             return Err(Error::Invalid(format!(
                 "loudness meter at {rate} Hz with {channels} channels"
             )));
         }
         let r = rate as f64;
+        let over = if reference {
+            Oversampler::reference(rate)
+        } else {
+            Oversampler::kaiser(rate)
+        };
         Ok(LoudnessMeter {
             rate,
-            weights: weights(channels as usize),
+            weights: weights(channels as usize, reference),
             filters: Filters {
                 pre: prefilter(r),
                 rlb: rlb(r),
                 keep: false,
             },
-            bank: polyphase(oversampling(r)),
-            channels: vec![Channel::new(); channels as usize],
+            channels: vec![Channel::new(over.lead()); channels as usize],
+            over,
+            range_every: if reference { RANGE_EVERY } else { 1 },
             segments: Vec::new(),
-            block: ((r * 0.1).round() as usize).max(1),
+            block: ((rate as usize + 5) / 10).max(1),
             position: 0,
             ring: [0.0; SHORT],
             ring_at: 0,
@@ -450,8 +511,8 @@ impl LoudnessMeter {
             short_term: f64::NEG_INFINITY,
             momentary_max: f64::NEG_INFINITY,
             short_term_max: f64::NEG_INFINITY,
-            integrated: Histogram::new(),
-            range: Histogram::new(),
+            integrated: Vec::new(),
+            range: Vec::new(),
             history: None,
         })
     }
@@ -463,7 +524,7 @@ impl LoudnessMeter {
                 self.rate
             )));
         }
-        let frames = self.rate as usize * 3;
+        let frames = (self.rate as usize * 3).max(SHORT * self.block);
         let mut energy = Vec::new();
         energy
             .try_reserve_exact(frames)
@@ -519,21 +580,21 @@ impl LoudnessMeter {
                 *o = f[c];
             }
         }
-        let (filters, segments, bank) = (self.filters, &self.segments, &self.bank);
+        let (filters, segments, over) = (self.filters, &self.segments, &self.over);
         #[cfg(feature = "filter")]
         if frames * nch >= PARALLEL && nch > 1 {
             self.channels
                 .par_chunks_mut(2)
-                .for_each(|pair| run(pair, &filters, segments, bank));
+                .for_each(|pair| run(pair, &filters, segments, over));
         } else {
             self.channels
                 .chunks_mut(2)
-                .for_each(|pair| run(pair, &filters, segments, bank));
+                .for_each(|pair| run(pair, &filters, segments, over));
         }
         #[cfg(not(feature = "filter"))]
         self.channels
             .chunks_mut(2)
-            .for_each(|pair| run(pair, &filters, segments, bank));
+            .for_each(|pair| run(pair, &filters, segments, over));
         if let Some(h) = &mut self.history {
             for t in 0..frames {
                 let e: f64 = self
@@ -579,12 +640,17 @@ impl LoudnessMeter {
         let es = window(SHORT);
         self.momentary = lufs(em);
         self.short_term = lufs(es);
+        let gate = gate_energy();
         if self.seen >= MOMENTARY as u64 {
-            self.integrated.add(em);
+            if em >= gate {
+                self.integrated.push(em);
+            }
             self.momentary_max = self.momentary_max.max(self.momentary);
         }
         if self.seen >= SHORT as u64 {
-            self.range.add(es);
+            if (self.seen - SHORT as u64).is_multiple_of(self.range_every) && es >= gate {
+                self.range.push(es);
+            }
             self.short_term_max = self.short_term_max.max(self.short_term);
         }
     }
@@ -598,32 +664,44 @@ impl LoudnessMeter {
     }
 
     pub fn integrated(&self) -> f64 {
-        let h = &self.integrated;
-        h.gate(-10.0)
-            .and_then(|b| h.mean_from(b))
-            .map_or(f64::NEG_INFINITY, lufs)
+        let blocks = &self.integrated;
+        let Some(gate) = relative_threshold(blocks) else {
+            return f64::NEG_INFINITY;
+        };
+        let (sum, count) = blocks
+            .iter()
+            .filter(|&&e| e >= gate)
+            .fold((0.0f64, 0u64), |(s, n), &e| (s + e, n + 1));
+        if count == 0 {
+            f64::NEG_INFINITY
+        } else {
+            lufs(sum / count as f64)
+        }
     }
 
     pub fn momentary_now(&self) -> Result<f64> {
-        self.window(400)
+        self.recent(MOMENTARY * self.block)
     }
 
     pub fn short_term_now(&self) -> Result<f64> {
-        self.window(3000)
+        self.recent(SHORT * self.block)
     }
 
     pub fn window(&self, ms: u32) -> Result<f64> {
-        let Some(h) = &self.history else {
-            return Err(Error::Invalid(
-                "the meter keeps no window history; build it with windows()".into(),
-            ));
-        };
         if ms == 0 || ms > 3000 {
             return Err(Error::Invalid(format!(
                 "a loudness window of {ms} ms is outside 1 to 3000"
             )));
         }
-        let frames = (u64::from(self.rate) * u64::from(ms) / 1000).max(1) as usize;
+        self.recent((u64::from(self.rate) * u64::from(ms) / 1000).max(1) as usize)
+    }
+
+    fn recent(&self, frames: usize) -> Result<f64> {
+        let Some(h) = &self.history else {
+            return Err(Error::Invalid(
+                "the meter keeps no window history; build it with windows()".into(),
+            ));
+        };
         Ok(lufs(h.mean(frames)))
     }
 
@@ -640,32 +718,25 @@ impl LoudnessMeter {
     }
 
     pub fn threshold(&self) -> f64 {
-        self.integrated
-            .mean_from(0)
-            .map_or(f64::NEG_INFINITY, |e| lufs(e) - 10.0)
+        relative_threshold(&self.integrated).map_or(ABSOLUTE_GATE_LUFS, lufs)
     }
 
     pub fn range(&self) -> f64 {
-        let h = &self.range;
-        let Some(start) = h.gate(-20.0) else {
-            return 0.0;
-        };
-        let n: u64 = h.count[start..].iter().sum();
-        if n == 0 {
+        let mut blocks = self.range.clone();
+        blocks.sort_unstable_by(f64::total_cmp);
+        if blocks.is_empty() {
             return 0.0;
         }
-        let percentile = |p: f64| {
-            let rank = ((p * (n - 1) as f64).round() as u64).min(n - 1);
-            let mut c = 0u64;
-            for i in start..HIST_BINS {
-                c += h.count[i];
-                if c > rank {
-                    return Histogram::centre(i);
-                }
-            }
-            Histogram::centre(HIST_BINS - 1)
+        let power = blocks.iter().sum::<f64>() / blocks.len() as f64;
+        let gate = 10f64.powf(-20.0 / 10.0) * power;
+        let below = blocks.iter().take_while(|&&v| v < gate).count();
+        let Some(span) = (blocks.len() - below).checked_sub(1) else {
+            return 0.0;
         };
-        (percentile(0.95) - percentile(0.10)).max(0.0)
+        let span = span as f64;
+        let high = blocks[below + (span * 0.95 + 0.5) as usize];
+        let low = blocks[below + (span * 0.1 + 0.5) as usize];
+        lufs(high) - lufs(low)
     }
 
     pub fn true_peak(&self) -> f64 {

@@ -8,7 +8,7 @@
 - PNG at 16 bits: `png::Decoder::decode_picture(bytes, Transform)` returns a `Picture` in the file's own colour type and depth (`Transform::Expand`, `Normalize8` or `Identity`, as the `png` crate's transformations), `decode_slice` fills a buffer you own, `png::output` sizes it, and `png::metadata` reads `sRGB`, `gAMA`, `cHRM`, `pHYs`, the palette, `tRNS` and `tEXt`, `zTXt` and `iTXt`. `png::encode_picture(&Picture, &Options)` writes grey, grey-alpha, RGB and RGBA at 8 or 16 bits with those chunks and a `Fast`, `Balanced` or `High` compression level. All three transforms equal the `png` 0.18 reader's output bit for bit on 44 files.
 - `vorbis::Stream` reads Ogg Vorbis over any `Read + Seek` or over bytes, giving the rate, the channels and blocks of interleaved `f32` samples, trimmed by the granule positions, with `rewind()` to start again from the top and `total_frames()` up front.
 - `media::wav::Writer` writes WAV streamed in 8, 16, 24 and 32-bit integers and 32-bit float, from `f32` or integer samples, to any `Write + Seek` or a file; `wav::encode` writes a whole `AudioBuffer`. `wav::Reader` reads over any `Read + Seek` and gives integer samples with `read_ints`.
-- `loudness::LoudnessMeter` takes interleaved `f32` slices with `add`, and with `.windows()?` reads the momentary, short-term and any 1 to 3000 ms loudness at any frame, equal to `ebur128`'s to 1e-6 LU, and the sample and true peak of each channel.
+- `loudness::LoudnessMeter` takes interleaved `f32` slices with `add`, and with `.windows()?` reads the momentary, short-term and any 1 to 3000 ms loudness at any frame, and the sample and true peak of each channel. `LoudnessMeter::ebur128(rate, channels)` reads exactly as the `ebur128` crate does: its 48-coefficient true-peak interpolator (the peaks are bit for bit its), the loudness range from short-term blocks every second, four channels weighed left, right, surround, surround, and the momentary, short-term, window, integrated and range readings and the relative threshold within 1e-6 LU. `LoudnessMeter::new` keeps the reading pcod uses.
 - `image::{open, decode, dimensions, sniff, encode, save}` open and write PNG and JPEG by their bytes, and `media::Rgba` has `from_raw`, `pixel`, `put`, `crop` and `replace`.
 - `jpeg::decode_into` decodes into a buffer you own.
 - Fuzz targets for the PNG, JPEG, Vorbis stream, WAV and loudness entry points.
@@ -17,6 +17,7 @@
 
 - The JPEG decoder's inverse transform and colour conversion run AVX2 on x86-64, and a 1080p 4:2:0 frame decodes to RGBA in 6.2 ms, 17.95 ms before, against zune-jpeg's 6.3 ms on the same frame. Output is unchanged.
 - The loudness meter lives in `loudness`; `filter::LoudnessMeter` is the same type, and `filter` turns on its parallel channel filter.
+- The loudness meter computes the integrated loudness and the range from every gated block rather than a 0.01 LU histogram (up to 0.02 LU apart), and its momentary and short-term windows are 4 and 30 blocks of `(rate + 5) / 10` frames, as `ebur128`'s are; the true peak and the range of `LoudnessMeter::new` are as before, so `pcod loudness` and levelling read what they read.
 - On a palette whose `tRNS` chunk is longer than its palette, the native decoders apply the first entries and output RGBA as the `png` crate does; `png::decode` still ignores such a chunk.
 
 ## v5.0.1 — 2026-11-13

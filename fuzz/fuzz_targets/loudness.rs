@@ -9,7 +9,12 @@ fuzz_target!(|data: &[u8]| {
     }
     let channels = u16::from(data[0] % 9);
     let rate = u32::from(u16::from_le_bytes([data[1], data[2]])) * 4;
-    let Ok(meter) = LoudnessMeter::new(rate, channels) else {
+    let built = if (data[0] / 9) % 2 == 1 {
+        LoudnessMeter::ebur128(rate, channels)
+    } else {
+        LoudnessMeter::new(rate, channels)
+    };
+    let Ok(meter) = built else {
         return;
     };
     let Ok(mut meter) = meter.windows() else {
@@ -20,7 +25,20 @@ fuzz_target!(|data: &[u8]| {
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect();
     let _ = meter.add(&samples);
+    let wanted = rate as usize * 4 * channels as usize;
+    if !samples.is_empty() && wanted <= 2_000_000 {
+        let whole = samples.len() - samples.len() % channels.max(1) as usize;
+        let mut added = whole;
+        while whole > 0 && added < wanted {
+            let _ = meter.add(&samples[..whole]);
+            added += whole;
+        }
+    }
     let _ = meter.integrated();
+    let _ = meter.threshold();
+    let _ = meter.true_peak();
+    let _ = meter.sample_peak();
+    let _ = meter.true_peak_of(0);
     let _ = meter.momentary_now();
     let _ = meter.short_term_now();
     let _ = meter.window(400);
