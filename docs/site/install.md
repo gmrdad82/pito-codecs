@@ -5,7 +5,7 @@ sidebar:
   order: 2
 ---
 
-pcod, the command line over the library, comes with every [GitHub Release](https://github.com/gmrdad82/pito-codecs/releases) for Linux x86-64 and Windows x86-64. macOS installs from source. `SHA256SUMS` in each Release lists every file's checksum.
+pcod, the command line over the library, comes with every [GitHub Release](https://github.com/gmrdad82/pito-codecs/releases) for Linux x86-64, macOS on Apple Silicon and Windows x86-64. `SHA256SUMS` in each Release lists every file's checksum.
 
 ## Linux x86-64
 
@@ -16,10 +16,11 @@ tar -xzf "pcod-$v-linux-x86_64.tar.gz" pcod && install -Dm755 pcod ~/.local/bin/
 
 ## macOS on Apple Silicon
 
-Build from source with Rust stable. The macOS build is untested.
+The archive's `pcod` is signed with a Developer ID and notarized by Apple.
 
 ```sh
-cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag @VERSION@ pito-codecs --bin pcod
+v=@VERSION@; curl -fsSLO "https://github.com/gmrdad82/pito-codecs/releases/download/$v/pcod-$v-macos-arm64.tar.gz"
+tar -xzf "pcod-$v-macos-arm64.tar.gz" pcod && mkdir -p ~/.local/bin && install -m755 pcod ~/.local/bin/pcod
 ```
 
 ## Windows x86-64
