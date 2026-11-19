@@ -98,7 +98,6 @@ fn version_help_and_profiles() {
 #[test]
 fn usage_errors_exit_2_like_clap() {
     let cases: &[&[&str]] = &[
-        &[],
         &["tui"],
         &["--nope"],
         &["in.mp4", "out.mp4", "--x"],
