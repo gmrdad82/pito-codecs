@@ -29,13 +29,14 @@ Read the matching guide before starting:
 The CLI's own help is the source of truth. Do not guess an option.
 
 ```sh
+pcod
 pcod --help
 pcod <command> --help
 pcod profiles
 pcod --version
 ```
 
-Commands: `convert` (the default, so `pcod in out` works), `join`, `profiles`, `probe`, `loudness`, `synth`, `spectrum`, `decode`, `encode`, `frames`, `stills`, `filmstrip`.
+`pcod` alone prints one line per command with its arguments. Commands: `convert` (the default, so `pcod in out` works), `join`, `profiles`, `probe`, `loudness`, `synth`, `spectrum`, `decode`, `encode`, `frames`, `stills`, `filmstrip`.
 
 ## Critical Safety Rules
 

@@ -61,6 +61,8 @@ mod size;
 mod source;
 #[path = "pcod/spectrum.rs"]
 mod spectrum;
+#[path = "pcod/summary.rs"]
+mod summary;
 #[path = "pcod/synth.rs"]
 mod synth;
 #[path = "pcod/tracks.rs"]
@@ -564,6 +566,9 @@ impl Kind {
 }
 
 fn main() -> ExitCode {
+    if std::env::args_os().len() == 1 {
+        return convert::print(summary::text().trim_end());
+    }
     let matches = Cli::command().arg_required_else_help(false).get_matches();
     let cli = match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,

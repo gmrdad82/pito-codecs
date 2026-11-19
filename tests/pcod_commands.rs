@@ -941,3 +941,72 @@ fn frames_with_loudness_measures_the_mp4_it_lands() {
     forced.push("--force");
     ok(&run(&forced));
 }
+
+#[test]
+fn bare_pcod_prints_the_summary_of_every_command_in_aligned_columns() {
+    let out = run(&[]);
+    let summary = ok(&out);
+    let first = summary.lines().next().unwrap();
+    assert!(
+        first.starts_with(&format!("pcod {}: ", env!("CARGO_PKG_VERSION"))),
+        "{first}"
+    );
+    assert!(
+        summary
+            .lines()
+            .all(|l| !l.trim_start().starts_with("error:") && !l.trim_start().starts_with("Usage:")),
+        "{summary}"
+    );
+    let rows: Vec<&str> = summary
+        .lines()
+        .filter(|l| l.starts_with("  pcod "))
+        .collect();
+    let columns: Vec<usize> = rows
+        .iter()
+        .map(|row| {
+            let usage = row[2..]
+                .find("  ")
+                .map(|i| i + 2)
+                .unwrap_or_else(|| panic!("{row}"));
+            usage + row[usage..].len() - row[usage..].trim_start().len()
+        })
+        .collect();
+    assert!(columns.iter().all(|&c| c == columns[0]), "{summary}");
+    assert!(rows.iter().all(|row| row.len() > columns[0]), "{summary}");
+    let help = ok(&run(&["--help"]));
+    let commands: Vec<&str> = help
+        .lines()
+        .skip_while(|l| *l != "Commands:")
+        .skip(1)
+        .take_while(|l| !l.is_empty())
+        .filter_map(|l| l.split_whitespace().next())
+        .filter(|c| *c != "help")
+        .collect();
+    assert_eq!(commands.len(), 12, "{help}");
+    for command in commands {
+        let lead = format!("  pcod {command} ");
+        let count = rows
+            .iter()
+            .filter(|row| row.starts_with(&lead) || **row == lead.trim_end())
+            .count();
+        assert_eq!(count, 1, "{command} in {summary}");
+    }
+    assert!(
+        rows.iter()
+            .any(|row| row.starts_with("  pcod <input> <output>"))
+    );
+    assert!(rows.iter().any(|row| row.starts_with("  pcod --help ")));
+    assert!(rows.iter().any(|row| row.starts_with("  pcod --version ")));
+    assert!(
+        help.contains("Usage: pcod [OPTIONS] <INPUT> <OUTPUT>"),
+        "{help}"
+    );
+    let convert_help = ok(&run(&["convert", "--help"]));
+    assert!(
+        convert_help.contains("Usage: pcod convert"),
+        "{convert_help}"
+    );
+    let missing = run(&["missing-input.mp4", "out.mp4"]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(text(&missing.stderr).starts_with("pcod: "));
+}

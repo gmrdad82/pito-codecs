@@ -1,5 +1,11 @@
 # Changelog
 
+## v5.1.2 — 2026-11-19
+
+### Changed
+
+- `pcod` with no arguments prints a summary instead of clap's error: `pcod <version>: <what it does>`, then one line per command with its arguments in one column and what it does in the next, and exits 0, as the other PITO MD command lines do. `pcod --help` and `pcod <command> --help` keep the full help, and `pcod <input> <output>` converts as before.
+
 ## v5.1.1 — 2026-11-18
 
 ### Changed

@@ -52,7 +52,9 @@ mkdir -p "$docs/reference"
     printf 'sidebar:\n  order: 1\n'
     printf -- '---\n\n'
     printf 'This page is made from the help of %s, so it matches the binary. The [pcod guide](../../guides/pcod/) shows each command at work.\n\n' "$("$pcod" --version)"
-    printf '## pcod\n\n```text\n'
+    printf '## pcod\n\n`pcod` alone prints one line per command:\n\n```text\n'
+    "$pcod"
+    printf '```\n\n`pcod --help` prints the full help:\n\n```text\n'
     "$pcod" --help
     printf '```\n'
     for c in $commands; do
@@ -66,7 +68,7 @@ mkdir -p "$docs/reference"
 
 - **0**: the command did its job.
 - **1**: it failed after the command line was read, such as a missing file or a stream it can't decode. One line on stderr says what failed and why: `pcod: <reason>`.
-- **2**: the command line could not be parsed, or no command was given. stderr carries clap's error, a usage line and a pointer to `--help`.
+- **2**: the command line could not be parsed. stderr carries clap's error, a usage line and a pointer to `--help`.
 
 pcod prints plain text, not JSON; see [Formats](../formats/#what-pcod-prints).
 END

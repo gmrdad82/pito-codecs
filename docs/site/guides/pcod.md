@@ -7,6 +7,31 @@ sidebar:
 
 pcod is a small command line over the library. `pcod <input> <output>` converts a file or a folder of PNG frames, `join` stitches clips, `probe` shows what is inside a file, `loudness` measures an audio track per EBU R128, `decode` decodes its whole video track and reports the speed, `encode` decodes, encodes and muxes a new MP4, copying the audio, `frames` encodes a folder of PNG frames and a WAV into an MP4, and `stills` writes stills of a video, every frame of a window or one on a cadence, as PNG, JPEG or WebP, and a contact sheet, and `filmstrip` draws tiles of a video on a cadence into one image. Every option is in the [command reference](../../reference/cli/).
 
+`pcod` alone prints every command on one line, exit code 0; `pcod --help` and `pcod <command> --help` print the full help:
+
+```text
+$ pcod
+pcod 5.1.2: video, audio and image codecs in pure Rust, on the CPU and the GPU, with no ffmpeg inside: convert, cut, join, probe, measure and take stills
+
+  pcod <input> <output> [options]               convert a video, a folder of PNG frames or a still; the output's extension picks the format
+  pcod convert <input> <output> [options]       the same, spelled out
+  pcod join <inputs>... <output>                join clips in order into one file, copied when they match
+  pcod profiles                                 list the profiles and what each one does
+  pcod probe <file> [--json]                    show what is in a video, audio or image file
+  pcod loudness <file> [--json]                 measure an audio track's loudness (EBU R128)
+  pcod synth <output> --size --fps --duration   write a test video: colour bars, a frame counter, a moving box and tones
+  pcod spectrum <file> <out.png>                draw an audio track's spectrogram as a PNG
+  pcod decode <file> [--route cpu|gpu]          decode the whole video track and report the speed
+  pcod encode <input> <output> [--codec hevc]   decode, encode and mux an MP4, copying the audio
+  pcod frames <dir> <output> --fps <fps>        encode a folder of PNG frames and an optional WAV into an MP4
+  pcod stills <file> --out <dir>|--sheet <png>  write stills, frame ranges or one contact sheet
+  pcod filmstrip <file> <output> [--every <t>]  draw tiles of a video on a cadence into one image
+  pcod --help                                   the full help; pcod <command> --help for one command
+  pcod --version                                print the version
+
+--json prints a manifest for scripts on convert, join, probe, loudness, spectrum, stills and filmstrip.
+```
+
 The outputs below are from a 10-second 1080p60 H.264 clip cut from NASA's public-domain "A Message of Resilience from the International Space Station", on a 16-core CPU and an AMD card through VA-API. Your speeds will differ.
 
 ## Convert
@@ -222,6 +247,6 @@ A file pcod can't read, or a failing route, ends with one line on stderr and exi
 pcod: missing.mp4: No such file or directory
 ```
 
-A command line it can't parse prints clap's error and usage on stderr with exit code 2; `pcod --help` and `pcod help <command>` print the full help.
+A command line it can't parse prints clap's error and usage on stderr with exit code 2; `pcod` alone prints the summary of every command, and `pcod --help` and `pcod help <command>` print the full help.
 
 pcod's output is plain text for people; conversions, joins, `probe`, `stills` and `filmstrip` also print JSON with `--json`. For anything beyond these commands, [use the library](../library/).
