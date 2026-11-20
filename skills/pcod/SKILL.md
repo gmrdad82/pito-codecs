@@ -27,6 +27,9 @@ pcod is pito-codecs' command line: video, audio and still-image conversion in pu
 | `pcod loudness`, `pcod spectrum`, `pcod synth` | measure loudness, draw a spectrogram, write a test video | [`audio.md`](audio.md) |
 | `pcod stills`, `pcod filmstrip`, `pcod frames` | pictures out of a video, and PNG frames back into one | [`stills.md`](stills.md) |
 | `pcod decode`, `pcod encode` | GPU and CPU routes and their speed | [`gpu.md`](gpu.md) |
+| `pcod skill` | `install`, `status` or `uninstall` this skill in the agents' skill folders | below |
+
+`pcod skill install` writes this skill as files into `~/.claude/skills/pcod` and `~/.agents/skills/pcod` (and Codex's and Pi's when those exist); run it again after updating pcod, and `pcod skill status` says whether it matches.
 
 Read the guide before the job. The examples in every guide run as written, in order, on this test clip:
 
