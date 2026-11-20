@@ -1,59 +1,81 @@
-# Convert, cut and join
+# Convert, cut, join
 
-`pcod <input> <output>` (or `pcod convert ...`) converts a video file or a folder of PNG frames. The output's extension picks the container:
+`pcod <input> <output>` (the same as `pcod convert <input> <output>`) reads a video, an animated GIF, a folder of PNG frames or a PNG, JPEG or WebP still, and writes what the output's extension names:
 
-| Extension | Video | Audio |
-| --- | --- | --- |
-| `mp4`, `mov`, `mkv` | H.264 | AAC-LC 320k stereo 48 kHz |
-| `webm` | VP9 | Opus 128k |
-| `gif`, `webp` | animated, loop forever | none |
-| `wav`, `opus`, `s16` | none | see [`audio.md`](audio.md) |
+| Output | Writes |
+| --- | --- |
+| `mp4`, `mov`, `mkv` | H.264 and AAC-LC 320k stereo 48 kHz; an AAC source is copied when nothing changes its audio |
+| `webm` | VP9 and Opus 128k; alpha kept |
+| `gif`, `webp` | animated, loops forever, no audio, 800 px wide at 12 fps or the source's where smaller |
+| `wav`, `opus` (or `ogg`), `s16` (or `-`) | the audio alone, see [`audio.md`](audio.md) |
+| still `webp`, `png` | one picture from a PNG, JPEG or WebP still, see [`stills.md`](stills.md) |
 
-Video output is limited-range BT.709, tagged so. Rotation and non-square pixels are applied.
+Video comes out limited-range BT.709, tagged so, with rotation and non-square pixels applied.
+
+```sh
+pcod clip.mp4 site.mp4 --profile best --crf 23
+pcod clip.mp4 draft.mp4 --profile fast --size 720p --fps 24
+pcod clip.mp4 readme.gif --from 0 --to 3 --size 480 --fps 12
+pcod clip.mp4 loop.webm --size 320
+pcod loop.webm back.mp4
+pcod readme.gif readme.mp4
+```
 
 ## Profiles
 
-`pcod profiles` lists them. Default is `balanced`.
+`pcod profiles` prints them. `balanced` is the default.
 
-- `fast`: H.264 on the GPU (VA-API, NVENC, VideoToolbox) at QP 25, on the CPU where no GPU encoder exists, saying why. Quality knob: `--qp`.
-- `balanced`: our H.264 on the CPU, matched to x264 medium CRF 20. Quality knob: `--crf`.
-- `best`: matched to x264 slow CRF 18. Quality knob: `--crf`.
-- `.webm`: balanced is libvpx CRF 32, best is CRF 28; `--crf` takes libvpx's numbers.
-- Light web: `--profile best --crf 23` (`.webm`: `--crf 40`).
-
-`--crf` goes with balanced and best, `--qp` with fast. `--tune` takes film, animation, grain, stillimage, fastdecode or zerolatency.
+- `fast`: H.264 on the GPU at QP 25, on the CPU where no GPU encoder is found (a `note` says why). Knob: `--qp`.
+- `balanced`: H.264 on the CPU, CRF 20 on x264's scale. Knob: `--crf`.
+- `best`: H.264 on the CPU, CRF 18. Knob: `--crf`.
+- `.webm`: VP9, CRF 32 for `balanced` and 28 for `best`, on libvpx's scale.
+- Light web: `--profile best --crf 23` (`.webm`: `--crf 40`). Screen recordings: `--tune animation`.
+- `--tune` takes film, animation, grain, stillimage, fastdecode or zerolatency.
+- `.gif` and `.webp` take a palette or lossy quality from the profile; `best` spends more effort.
 
 ## Size and rate
 
-- `--size`: a width (height follows), `WxH` within 1% of the aspect, or `720p`, `1080p`, `1440p`, `2160p`. pcod never stretches.
-- `--fps`: 1 to 240; integer, ratio (`24000/1001`) or decimal (`23.976`, `29.97`, `47.952`, `59.94` read as the exact NTSC ratios).
-- GIF and WebP default to 800 px wide at 12 fps, or the source's where smaller.
-- A folder of PNG frames needs `--fps`. RGBA frames keep alpha in `.webm`, `.gif`, `.webp`; H.264 lays it on black.
+- `--size`: a width (the height follows), `WxH` within 1% of the source's shape, or `720p`, `1080p`, `1440p`, `2160p`. Nothing else: `360p` is a usage error, and a shape off by more than 1% is refused. pcod never stretches, and it does scale up.
+- `--fps`: 1 to 240, an integer, a ratio (`24000/1001`) or a decimal (`29.97` and `23.976` read as the exact NTSC ratios).
+- A folder of PNG frames needs `--fps`.
 
-## Cutting with --from and --to
+## Cutting
 
-`--from` and `--to` take seconds, `m:ss` or `h:mm:ss`; `--to` defaults to the end. The window runs from the first frame at or after `--from` to the last before `--to`, the audio cut in sync, the output starting at 0.
+`--from` and `--to` take seconds, `m:ss` or `h:mm:ss`; `--to` defaults to the end. The window runs from the first frame at or after `--from` to the last before `--to`, audio cut in sync, output starting at 0.
 
-- **Copies** (fast, GOPs kept): no video option, and the output container carries the source's codec (H.264, HEVC or VP9). Only the frames before the first keyframe and after the last keyframe in the window are re-encoded. pcod says how many frames it copied and re-encoded.
-- **Re-encodes the whole window**: any video option (`--profile`, `--size`, `--fps`, `--crf`, `--qp`, `--tune`), a WebM from H.264, an MP4 or MOV from VP9 or from an MKV or WebM source, or a source whose edges our encoders cannot match.
-- `--to` not after `--from`, or `--from` at or past the end, is refused.
-- `--tune animation` re-encodes into mp4, mov, mkv; any other tune with a range is refused.
+```sh
+pcod clip.mp4 moment.mp4 --from 0:01 --to 0:03
+pcod clip.mp4 moment-small.mp4 --from 0:01 --to 0:03 --size 320
+pcod clip.mp4 moment-anim.mp4 --from 0:01 --to 0:03 --tune animation
+```
+
+- With no video option the cut copies whole GOPs and re-encodes only the frames at its edges, when the container carries the source's codec. pcod prints `cut 1.000 s to 3.000 s, 60 frames: 28 copied, 32 re-encoded at the edges`.
+- A video option (`--profile`, `--size`, `--fps`, `--crf`, `--qp`, `--tune animation`) re-encodes the whole window, and so does a source or output pcod cannot match at the edges (an MP4 or MOV from VP9, say); the `cut` line and a `note` say so.
+- Refused: `--to` not after `--from`, `--from` at or past the end, and any `--tune` but `animation` with a window.
 
 ## Tracks
 
-- With no video option the video is copied untouched, index first (faststart).
-- `--no-audio` writes no audio track.
-- `--add-audio bed.wav` keeps the video and first audio track and adds the WAV as another AAC track (160 kbps unless `--audio-bitrate`), cut to the shorter; `--title Voice,Music` names the tracks. `.mp4` or `.mov` only; `.webm` is refused.
-- `--audio-bitrate` 32 to 512 kbps.
+```sh
+pcod clip.mp4 silent.mkv --no-audio
+pcod clip.mp4 bed.wav
+pcod clip.mp4 voiced.mp4 --add-audio bed.wav --title Voice,Music
+```
 
-## Loudness while converting
-
-`--loudness youtube` (-14 LUFS, -2 dBTP) or a number from -70 to -5, `--true-peak` for the ceiling (default -1), `--linear` to keep dynamics. See [`audio.md`](audio.md).
+- `--no-audio` writes the video alone; with no video option it is copied as it is, index first.
+- `--add-audio WAV` keeps the video and the first audio track as they are and adds the WAV as another AAC track (160 kbps, `--audio-bitrate` sets it), the file cut to the shorter of the two. `.mp4` and `.mov` only; `.webm` is refused. `--title` names each audio track in order.
+- `--audio-bitrate` is 32 to 512 kbps.
+- `--loudness`, `--true-peak` and `--linear` level the audio as it converts: see [`audio.md`](audio.md).
 
 ## Join
 
-`pcod join a.mp4 b.mp4 c.mp4 out.mp4`. When every clip matches the first (codec, size, rate, colour, headers, audio) it is a stream copy; otherwise, or with any video option, it re-encodes to the first clip's size and rate, letterboxing other shapes. It prints which, and why.
+```sh
+pcod clip.mp4 part1.mp4 --from 0 --to 2
+pcod clip.mp4 part2.mp4 --from 2 --to 4
+pcod join part1.mp4 part2.mp4 film.mp4
+```
+
+`pcod join <clip> <clip>... <output>` takes two or more clips. When every clip matches the first (codec, size, rate, colour, audio) it is a stream copy; otherwise, or with any video option, it re-encodes to the first clip's size and rate, letterboxing other shapes. It prints which, and why. It takes the same options as convert.
 
 ## Scripting
 
-`--json` prints one manifest: each file's sha256 and size, the parameters, the time taken. Existing outputs need `--force`.
+`--json` prints one manifest: the source's sha256, `params` (profile, encoder, quality, size, fps, audio), `device`, `seconds`, each file's sha256 and bytes, and a `cut` object for a window.
