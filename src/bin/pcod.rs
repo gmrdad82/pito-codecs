@@ -57,6 +57,8 @@ mod raw;
 mod signals;
 #[path = "pcod/size.rs"]
 mod size;
+#[path = "pcod/skill.rs"]
+mod skill;
 #[path = "pcod/source.rs"]
 mod source;
 #[path = "pcod/spectrum.rs"]
@@ -95,6 +97,18 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum SkillAction {
+    #[command(
+        about = "Write the skill as files into each agent's skill folder, replacing an old link"
+    )]
+    Install,
+    #[command(about = "Say whether the skill is installed and matches this version")]
+    Status,
+    #[command(about = "Remove the skill from each agent's skill folder")]
+    Uninstall,
+}
+
+#[derive(Subcommand)]
 enum Command {
     #[command(about = "Convert a video or a folder of PNG frames (the default command)")]
     Convert {
@@ -116,6 +130,13 @@ enum Command {
     },
     #[command(about = "List the profiles and what each one does")]
     Profiles,
+    #[command(
+        about = "Install, check or remove pcod's agent skill in Claude Code, Codex, Pi and other agents"
+    )]
+    Skill {
+        #[command(subcommand)]
+        action: SkillAction,
+    },
     #[command(about = "Show what is in a video, audio or image file (PNG, JPEG, WebP, GIF)")]
     Probe {
         file: PathBuf,
@@ -601,6 +622,17 @@ fn main() -> ExitCode {
             return convert::run(args::options(Some("join"), first, inputs, output, convert));
         }
         Some(Command::Profiles) => return convert::print(&convert::profiles()),
+        Some(Command::Skill { action }) => {
+            let action = match action {
+                SkillAction::Install => skill::Action::Install,
+                SkillAction::Status => skill::Action::Status,
+                SkillAction::Uninstall => skill::Action::Uninstall,
+            };
+            return match skill::run(&action) {
+                Ok(text) => convert::print(text.trim_end()),
+                Err(e) => convert::refuse(&e),
+            };
+        }
         Some(Command::Synth {
             output,
             size,
@@ -690,6 +722,7 @@ fn run(command: Command) -> Result<(), Fail> {
         Command::Convert { .. }
         | Command::Synth { .. }
         | Command::Join { .. }
+        | Command::Skill { .. }
         | Command::Profiles => Ok(()),
         Command::Decode {
             file,

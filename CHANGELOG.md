@@ -55,7 +55,7 @@
 
 ### Fixed
 
-- The download archives carry pcod's agent skill (`skills/pcod`), with `skills/install-skill.sh` and `skills/install-skill.ps1` to link or copy it into Claude Code, Codex, Pi and other agents' skill folders.
+- `pcod skill install|status|uninstall` writes pcod's agent skill, which ships inside the program, as real files into Claude Code's, Codex's, Pi's and other agents' skill folders, and replaces a link from the old install script; `skills/install-skill.sh` and `skills/install-skill.ps1` in the archives call it.
 
 ## v4.0.0 — 2026-11-08
 
