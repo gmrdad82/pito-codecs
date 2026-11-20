@@ -11,7 +11,7 @@ pcod is a small command line over the library. `pcod <input> <output>` converts 
 
 ```text
 $ pcod
-pcod 5.1.2: video, audio and image codecs in pure Rust, on the CPU and the GPU, with no ffmpeg inside: convert, cut, join, probe, measure and take stills
+pcod 5.1.3: video, audio and image codecs in pure Rust, on the CPU and the GPU, with no ffmpeg inside: convert, cut, join, probe, measure and take stills
 
   pcod <input> <output> [options]               convert a video, a folder of PNG frames or a still; the output's extension picks the format
   pcod convert <input> <output> [options]       the same, spelled out

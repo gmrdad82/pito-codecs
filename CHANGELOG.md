@@ -1,5 +1,15 @@
 # Changelog
 
+## v5.1.3 — 2026-11-20
+
+### Added
+
+- `pcod skill install`, `pcod skill status` and `pcod skill uninstall` put the pcod skill where Claude Code and other agents read it, say whether it is installed and matches this pcod, and remove it; the install scripts call them.
+
+### Changed
+
+- The pcod skill matches the command line again: every command, flag, default and refusal in it was checked against pcod's help and run, and a test fails when the skill and pcod drift apart.
+
 ## v5.1.2 — 2026-11-19
 
 ### Changed

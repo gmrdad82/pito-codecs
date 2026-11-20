@@ -43,7 +43,7 @@ tar -xzf "pcod-$v-macos-arm64.tar.gz" pcod && mkdir -p ~/.local/bin && install -
 From source, anywhere Rust stable runs:
 
 ```sh
-cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag v5.1.2 pito-codecs --bin pcod
+cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag v5.1.3 pito-codecs --bin pcod
 ```
 
 Windows x86-64, in PowerShell:
@@ -71,7 +71,7 @@ pcod filmstrip clip.mp4 strip.png --every 10s --timecodes
 
 ```text
 $ pcod
-pcod 5.1.2: video, audio and image codecs in pure Rust, on the CPU and the GPU, with no ffmpeg inside: convert, cut, join, probe, measure and take stills
+pcod 5.1.3: video, audio and image codecs in pure Rust, on the CPU and the GPU, with no ffmpeg inside: convert, cut, join, probe, measure and take stills
 
   pcod <input> <output> [options]               convert a video, a folder of PNG frames or a still; the output's extension picks the format
   pcod convert <input> <output> [options]       the same, spelled out
@@ -92,7 +92,7 @@ pcod 5.1.2: video, audio and image codecs in pure Rust, on the CPU and the GPU, 
 --json prints a manifest for scripts on convert, join, probe, loudness, spectrum, stills and filmstrip.
 ```
 
-`SHA256SUMS` in each Release lists every archive's checksum. To build pcod from source anywhere, Linux arm64 included, with Rust 1.97 or newer: `cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag v5.1.2 pito-codecs --bin pcod`.
+`SHA256SUMS` in each Release lists every archive's checksum. To build pcod from source anywhere, Linux arm64 included, with Rust 1.97 or newer: `cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag v5.1.3 pito-codecs --bin pcod`.
 
 pito-codecs also stands in for the `png`, `image`, `zune-jpeg`, `hound`, `lewton` and `ebur128` crates, each behind its own feature with no outside crate: see the guide "Replacing png, image, zune-jpeg, hound, lewton and ebur128" in the docs.
 
@@ -100,7 +100,7 @@ In a Rust project, add the library with the parts you need (all are on by defaul
 
 ```toml
 [dependencies]
-pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v5.1.2", default-features = false, features = ["h264", "hevc", "vp9", "aac", "mp4", "mkv", "gpu", "filter", "opus", "ac3", "mp3", "flac", "alac"] }
+pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v5.1.3", default-features = false, features = ["h264", "hevc", "vp9", "aac", "mp4", "mkv", "gpu", "filter", "opus", "ac3", "mp3", "flac", "alac"] }
 ```
 
 and let it pick the fastest route for each job:
