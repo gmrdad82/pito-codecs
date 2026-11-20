@@ -44,7 +44,7 @@ cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag @VERS
 
 ## The agent skill
 
-Each archive carries `skills/pcod/`, a skill that teaches coding agents to use pcod, and a script that installs it. It goes into these folders:
+pcod carries a skill that teaches coding agents to use it. `pcod skill install` writes it as real files (never a link) into these folders:
 
 | Agent | Folder |
 | --- | --- |
@@ -53,11 +53,7 @@ Each archive carries `skills/pcod/`, a skill that teaches coding agents to use p
 | Pi | `~/.pi/agent/skills/pcod`, only when `~/.pi` exists |
 | Other agents | `~/.agents/skills/pcod` |
 
-On Linux, from the folder you unpacked into, `skills/install-skill.sh` copies the skill to `~/.local/opt/pcod/skills/pcod` and links it into each folder. `skills/install-skill.sh uninstall` removes the links and the copy.
-
-On Windows, in PowerShell from the unpacked folder, `skills\install-skill.ps1` copies the skill into the same folders under `%USERPROFILE%`; run it again after each update to refresh the copies, and `skills\install-skill.ps1 uninstall` removes them.
-
-A `pcod` folder there that this install did not place is left alone, with one line saying so. From a source checkout, `bin/install` does the same on every run, and `bin/install --uninstall` removes it.
+`pcod skill status` says whether each folder is installed and matches this version of pcod; run `pcod skill install` again after each update to refresh them, and `pcod skill uninstall` removes them. An old link from the earlier install script is replaced. `skills/install-skill.sh` (and `skills\install-skill.ps1` on Windows) in each archive just call these.
 
 ## The library
 

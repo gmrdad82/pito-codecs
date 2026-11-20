@@ -51,6 +51,10 @@ const LINES: &[(&str, &str)] = &[
         "draw tiles of a video on a cadence into one image",
     ),
     (
+        "pcod skill install|status|uninstall",
+        "put pcod's agent skill into Claude Code, Codex, Pi and other agents",
+    ),
+    (
         "pcod --help",
         "the full help; pcod <command> --help for one command",
     ),
