@@ -1,6 +1,6 @@
 ---
 name: pito-codecs-dev
-description: "Develop pito-codecs itself: its Rust codecs, containers, filters and GPU routes, the pcod command line's source, bin/gate and its quick check, the tests, references, fuzz targets, bench, docs and releases. Triggers: pito-codecs, pito_codecs, bin/gate, bin/smoke, bin/cov, bin/docs-bundle, gate --fast, nextest, tests/refs, record_refs, TOOLS.toml, no_ffmpeg, tests/skill.rs, src/gpu, vaapi, nvenc, videotoolbox, media_foundation, src/media, src/bin/pcod, fuzz/, the bench example, NOTICE, CHANGELOG, a codec feature in Cargo.toml, a dispatch/ branch here. Excludes using pcod to convert, cut, probe or take stills (that is the pcod skill, shipped from skills/pcod)."
+description: "Develop pito-codecs itself: its Rust codecs, containers, filters and GPU routes, the pcod command line's source, bin/gate and its quick check, the tests, references, fuzz targets, bench, docs and releases. Triggers: pito-codecs, pito_codecs, bin/gate, bin/smoke, bin/cov, bin/docs-bundle, gate --fast, nextest, tests/refs, record_refs, TOOLS.toml, no_ffmpeg, tests/skill.rs, src/gpu, vaapi, nvenc, videotoolbox, media_foundation, src/media, src/bin/pcod, fuzz/, the bench example, NOTICE, CHANGELOG, a codec feature in Cargo.toml, the local install, .dev/bin/install, a dispatch/ branch here. Excludes using pcod to convert, cut, probe or take stills (that is the pcod skill, shipped from skills/pcod)."
 ---
 
 # pito-codecs-dev
@@ -59,6 +59,8 @@ Each tool's `--help` (or the usage it prints on a wrong call) is the source of t
 
 A release is `v<Cargo.toml version>`: a `CHANGELOG.md` section (`## vX.Y.Z — date`), the README's `--tag vX.Y.Z` pins matching the version (`tests/readme.rs`), `bin/docs-bundle`, a signed tag, and a GitHub Release carrying pcod for Linux x86-64, Windows x86-64 and macOS arm64 (signed and notarized on a Mac), the docs bundle and `SHA256SUMS`. The release script is not in git. A session cuts a release only when asked.
 
+**Local install.** After a release, or a build that will be used, update this machine's install with `.dev/bin/install`, run from the main checkout: it sits in that checkout's git-ignored `.dev` beside AGENTS.md, so a worktree lacks it (from a worktree, `"$(git rev-parse --git-common-dir)/../.dev/bin/install"`). It builds the main checkout's tree with `cargo build --release --locked --bin pcod`, so merge into `main` first; it replaces the binary behind `~/.local/bin/pcod` and runs `skills/install-skill.sh install` (that is `pcod skill install`) to write the user skill. pcod has no window app. The script has no `--help`: any argument but `--uninstall` runs the install. Never copy the binary by hand. Check with `pcod --version` and `pcod skill status`. Anyone without that script installs from the README's Install and first use, then runs `pcod skill install`.
+
 ## Known pitfalls
 
 - `bin/gate` uses the first `rustc` on `PATH`. A toolchain without the Windows, macOS or ARM std skips those clippy runs with a `skipping` line, so put the rustup toolchain first.
@@ -76,4 +78,4 @@ A release is `v<Cargo.toml version>`: a `CHANGELOG.md` section (`## vX.Y.Z — d
 4. **A GPU route** → `src/gpu/<backend>`, headless, the VA-API size guard kept, a fallback or a report on failure; the GPU suite runs only when asked.
 5. **README, docs or a `bin/` script** → `bin/gate --fast` runs `readme` for the README and `no_ffmpeg` for `bin/`; `docs/site` has no test of its own.
 6. **A speed claim** → time it on a quiet machine against a baseline from the same run, then `bench`; never from a contended run.
-7. **A release** → only when asked: the Releases section.
+7. **A release** → only when asked: the Releases section. **A build he will use, or a release** → then the local install, same section.
