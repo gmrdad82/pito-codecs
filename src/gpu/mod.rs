@@ -636,6 +636,14 @@ impl GpuFrame {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn warm_dmabuf_pool(&self, separate_layers: bool) -> Result<usize> {
+        match &self.inner {
+            GpuInner::VaApi(g) => g.warm_pool(separate_layers).map_err(Error::Backend),
+            GpuInner::Cpu(_) => Ok(0),
+        }
+    }
+
     pub fn download(&self) -> Result<Frame> {
         let frame = match &self.inner {
             GpuInner::Cpu(f) => f.clone(),

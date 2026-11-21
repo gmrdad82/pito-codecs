@@ -671,6 +671,15 @@ impl Display {
         separate: bool,
     ) -> Result<ffi::VADRMPRIMESurfaceDescriptor, String> {
         self.sync(surface)?;
+        self.export_unsynced(surface, separate)
+    }
+
+    fn export_unsynced(
+        &self,
+        surface: VASurfaceID,
+        separate: bool,
+    ) -> Result<ffi::VADRMPRIMESurfaceDescriptor, String> {
+        self.live()?;
         let mut d = ffi::VADRMPRIMESurfaceDescriptor::default();
         let layout = if separate {
             ffi::VA_EXPORT_SURFACE_SEPARATE_LAYERS
@@ -909,6 +918,16 @@ impl GpuSurface {
     pub fn dmabuf(&self, separate: bool) -> Result<DmaBuf, String> {
         let d = self.pool.display.export(self.id()?, separate)?;
         describe(&d, self.geometry.crop)
+    }
+
+    pub fn warm_pool(&self, separate: bool) -> Result<usize, String> {
+        let mut done = 0;
+        for &id in &self.pool.ids {
+            let d = self.pool.display.export_unsynced(id, separate)?;
+            drop(describe(&d, self.geometry.crop)?);
+            done += 1;
+        }
+        Ok(done)
     }
 
     pub fn download(&self) -> Result<Frame, String> {
