@@ -162,6 +162,8 @@ wrote   out.mp4 (4.2 MB)
 pcod frames frames trailer.mp4 --fps 60 --audio trailer.wav
 ```
 
+To keep a finished film's sound exactly, `--audio-copy film.mp4` takes the first audio track of an MP4, MOV or MKV and muxes its AAC packets in as they are: no decode and no re-encode, so the loudness and true peak are the film's own (a -14 LUFS film keeps its true peak; re-encoding the same sound as AAC moved one to +2.36 dBTP). The track is cut to the video's length, and a shorter one just ends, the video running on in silence, with a `note`. It refuses `--audio`, `--loudness` and a codec an MP4 can't carry, naming it; from Matroska it takes AAC only.
+
 ```text
 frames  600 PNG 1920x1080 at 60 fps (10.00 s), 16 decode threads
 audio   trailer.wav: 10.00 s, AAC 48 kHz stereo at 192 kbps

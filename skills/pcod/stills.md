@@ -59,6 +59,7 @@ pcod frames/ trailer.webm --fps 30
 `pcod frames <dir> <output.mp4> --fps N` encodes the folder's `.png` files in name order, all one even size, as 8-bit 4:2:0 BT.709 H.264 (or `--codec hevc`), faststart. A gap in the numbering, a frame of another size and a missing WAV each stop it with one line.
 
 - `--audio` takes a WAV of any rate, cut or padded with silence to the video; without it the MP4 carries a silent stereo track. AAC at 192 kbps (320 with `--loudness`); `--audio-bitrate` 32 to 512.
+- `--audio-copy FILE` keeps another file's sound as it is: the first audio track of an MP4, MOV or MKV, its AAC packets muxed in with no decode and no re-encode, so loudness and true peak stay bit for bit (a short over a finished -14 LUFS film keeps its -1 dBTP ceiling). It is cut to the video's length; a shorter track just ends and the video runs on in silence, with a `note`. It refuses `--audio`, `--loudness` and a codec `.mp4` can't carry, naming it (Matroska takes AAC only).
 - `--crf` is 0 to 51 and 18 by default; 0 is near-lossless, not bit-exact.
 - `--route cpu` forces the CPU; `--threads` caps the PNG decoders (one per core, at most 16).
 - HEVC encodes on the GPU only; without a GPU HEVC encoder the file is H.264, and a `note` says why.

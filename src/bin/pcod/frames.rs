@@ -26,6 +26,7 @@ pub struct Job {
     pub output: PathBuf,
     pub fps: (u32, u32),
     pub audio: Option<PathBuf>,
+    pub audio_copy: Option<PathBuf>,
     pub loudness: Option<Loudness>,
     pub audio_kbps: u32,
     pub codec: Codec,
@@ -231,6 +232,10 @@ pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
         )
         .into());
     }
+    let taken = match &job.audio_copy {
+        Some(path) => Some(super::audiocopy::open(path)?),
+        None => None,
+    };
     let files = listed(&job.dir)?;
     let first = std::fs::read(&files[0]).map_err(|e| format!("{}: {e}", files[0].display()))?;
     let info = png::info(&first).map_err(|e| format!("{}: {e}", files[0].display()))?;
@@ -326,7 +331,16 @@ pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
             Some(buf)
         }
         None => {
-            writeln!(out, "audio   none, a silent AAC track")?;
+            match (&job.audio_copy, &taken) {
+                (Some(path), Some((_, t))) => writeln!(
+                    out,
+                    "audio   {}: {:.2} s of {} copied as it is, no re-encode",
+                    name(path),
+                    t.seconds,
+                    t.codec.to_ascii_uppercase()
+                )?,
+                _ => writeln!(out, "audio   none, a silent AAC track")?,
+            }
             None
         }
     };
@@ -419,8 +433,24 @@ pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
         done.frames,
         done.frames as f64 / took
     )?;
-    land_held(out, &part.0, job, |p| {
-        media::measure_loudness(p, 0, &Prefs::default(), |_| true)
+    let Some((source, _)) = taken else {
+        return land_held(out, &part.0, job, |p| {
+            media::measure_loudness(p, 0, &Prefs::default(), |_| true)
+        });
+    };
+    let joined = Partial(partial(&job.output)?);
+    let both = super::audiocopy::join(&part.0, &source, &joined.0)
+        .map_err(|e| format!("{}: {e}", job.output.display()))?;
+    if both.audio_seconds + 0.05 < both.video_seconds {
+        writeln!(
+            out,
+            "note    the audio ends at {:.2} s, {:.2} s before the video; the rest is silent",
+            both.audio_seconds,
+            both.video_seconds - both.audio_seconds
+        )?;
+    }
+    land_held(out, &joined.0, job, |_| {
+        unreachable!("no loudness with --audio-copy")
     })
 }
 
@@ -465,6 +495,7 @@ mod tests {
             output: dir.join("out.mp4"),
             fps: (24, 1),
             audio: None,
+            audio_copy: None,
             loudness: Some(Loudness {
                 integrated: -16.0,
                 true_peak: -1.0,
