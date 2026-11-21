@@ -18,6 +18,8 @@ use pito_codecs::{h264, hevc};
 
 type Fail = Box<dyn Error + Send + Sync>;
 
+#[path = "pcod/audiocopy.rs"]
+mod audiocopy;
 #[path = "pcod/filmstrip.rs"]
 mod filmstrip;
 #[path = "pcod/frames.rs"]
@@ -251,7 +253,7 @@ enum Command {
     },
     #[command(
         about = "Encode a folder of PNG frames and an optional WAV into an MP4",
-        long_about = "Encode a folder of PNG frames and an optional WAV into an MP4\n\nThe frames are the folder's .png files in name order (000000.png, 000001.png, ...), all of one even size. The video is 8-bit 4:2:0 BT.709, the audio AAC at 48 kHz stereo, and the file is written with its index first (faststart). The audio is cut or padded with silence to the length of the video; without --audio the MP4 carries a silent stereo track. An existing output is refused unless --force is given; pcod writes a hidden partial file beside the output and renames it into place at the end."
+        long_about = "Encode a folder of PNG frames and an optional WAV into an MP4\n\nThe frames are the folder's .png files in name order (000000.png, 000001.png, ...), all of one even size. The video is 8-bit 4:2:0 BT.709, the audio AAC at 48 kHz stereo, and the file is written with its index first (faststart). The audio is cut or padded with silence to the length of the video; without --audio the MP4 carries a silent stereo track. --audio-copy FILE takes the first audio track of an MP4, MOV or MKV instead and muxes its AAC packets as they are, no decode or re-encode, so its loudness and true peak stay bit for bit; it is cut to the video's length, and a shorter track simply ends. It refuses --audio, --loudness and a codec .mp4 can't carry. An existing output is refused unless --force is given; pcod writes a hidden partial file beside the output and renames it into place at the end."
     )]
     Frames {
         #[arg(help = "The folder of PNG frames")]
@@ -262,6 +264,12 @@ enum Command {
         fps: (u32, u32),
         #[arg(long, help = "A PCM WAV to encode as the audio track")]
         audio: Option<PathBuf>,
+        #[arg(
+            long,
+            conflicts_with_all = ["audio", "loudness"],
+            help = "Copy the first audio track of this MP4, MOV or MKV as it is, with no re-encode: its AAC packets and timing, cut to the video's length (a shorter track just ends); refuses --audio, --loudness and a codec .mp4 can't carry"
+        )]
+        audio_copy: Option<PathBuf>,
         #[arg(
             long,
             allow_hyphen_values = true,
@@ -742,6 +750,7 @@ fn run(command: Command) -> Result<(), Fail> {
             output,
             fps,
             audio,
+            audio_copy,
             loudness,
             true_peak,
             linear,
@@ -758,6 +767,7 @@ fn run(command: Command) -> Result<(), Fail> {
                 output,
                 fps,
                 audio,
+                audio_copy,
                 audio_kbps: audio_bitrate.unwrap_or(if loudness.is_some() {
                     plan::AAC_KBPS
                 } else {
