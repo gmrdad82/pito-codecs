@@ -1290,3 +1290,60 @@ mod dmabuf {
         }
     }
 }
+
+#[test]
+#[cfg(target_os = "linux")]
+fn the_pool_warms_and_every_export_gives_distinct_valid_fds() {
+    use std::os::fd::AsRawFd;
+    if !has(Codec::H264, Direction::Decode) {
+        return;
+    }
+    let r = Refs::open(refs::AREA);
+    let w = refs::FLOOR.0;
+    let units = access_units(Codec::H264, &r.bytes(&refs::high(refs::FLOOR)));
+    let mut dec = HwDecoder::new(Codec::H264, &[]).unwrap();
+    let mut kept = Vec::new();
+    for (i, u) in units.into_iter().take(6).enumerate() {
+        kept.extend(dec.decode_gpu(&packet(i, u, 1)).unwrap());
+    }
+    kept.extend(dec.flush_gpu().unwrap());
+    assert!(kept.len() >= 2);
+    assert!(kept[0].warm_dmabuf_pool(true).unwrap() >= kept.len());
+    let mut seen = std::collections::HashSet::new();
+    for f in &kept {
+        f.sync().unwrap();
+        for separate in [false, true] {
+            let a = f.dmabuf(separate).unwrap();
+            let b = f.dmabuf(separate).unwrap();
+            assert_eq!(a.fourcc, u32::from_le_bytes(*b"NV12"));
+            assert_eq!(a.layers.len(), if separate { 2 } else { 1 });
+            assert_eq!(a.layers.len(), b.layers.len());
+            for (la, lb) in a.layers.iter().zip(&b.layers) {
+                assert_eq!(la.drm_format, lb.drm_format);
+                for (pa, pb) in la.planes.iter().zip(&lb.planes) {
+                    assert_eq!(
+                        (pa.offset, pa.pitch, pa.object),
+                        (pb.offset, pb.pitch, pb.object)
+                    );
+                    assert!(pa.pitch >= w && pa.object < a.objects.len());
+                }
+            }
+            for o in a.objects.iter().chain(&b.objects) {
+                assert_ne!(unsafe { libc_fcntl(o.fd.as_raw_fd()) }, -1);
+                assert!(seen.insert(o.fd.as_raw_fd()), "fd shared between exports");
+            }
+            seen.clear();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    #[link_name = "fcntl"]
+    fn libc_fcntl_raw(fd: i32, cmd: i32, ...) -> i32;
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn libc_fcntl(fd: i32) -> i32 {
+    unsafe { libc_fcntl_raw(fd, 1) }
+}

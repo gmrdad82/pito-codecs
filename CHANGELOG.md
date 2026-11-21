@@ -1,5 +1,11 @@
 # Changelog
 
+## Next
+
+### Added
+
+- `GpuFrame::warm_dmabuf_pool(separate_layers)` exports every surface of a frame's decode pool once and closes the descriptors, from any thread, so an app can pay a driver's first-export cost on its decode thread and not on its drawing thread. Cause of the 9 ms on a pool's second surface: not in pito-codecs. Headless, `vaSyncSurface` returns in 0.1 to 0.8 ms and `vaExportSurfaceHandle` takes 4 to 33 µs for every surface of a pool at 352x240 and 1280x720, so the 9 ms is driver-side work that only shows beside the app's own Vulkan device, which this repo cannot reproduce; the warm call moves it off the drawing thread.
+
 ## v5.1.3 — 2026-11-20
 
 ### Added
