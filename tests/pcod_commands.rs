@@ -982,7 +982,7 @@ fn bare_pcod_prints_the_summary_of_every_command_in_aligned_columns() {
         .filter_map(|l| l.split_whitespace().next())
         .filter(|c| *c != "help")
         .collect();
-    assert_eq!(commands.len(), 13, "{help}");
+    assert_eq!(commands.len(), 14, "{help}");
     for command in commands {
         let lead = format!("  pcod {command} ");
         let count = rows

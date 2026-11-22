@@ -23,6 +23,10 @@ const LINES: &[(&str, &str)] = &[
         "measure an audio track's loudness (EBU R128)",
     ),
     (
+        "pcod compare <a> <b> [--diff <dir>]",
+        "measure how far two videos or frame folders drift: PSNR, differences, the worst frames",
+    ),
+    (
         "pcod synth <output> --size --fps --duration",
         "write a test video: colour bars, a frame counter, a moving box and tones",
     ),
@@ -72,6 +76,6 @@ pub fn text() -> String {
     for (usage, what) in LINES {
         out.push_str(&format!("  {usage:<width$}{what}\n"));
     }
-    out.push_str("\n--json prints a manifest for scripts on convert, join, probe, loudness, spectrum, stills and filmstrip.\n");
+    out.push_str("\n--json prints a manifest for scripts on convert, join, probe, loudness, spectrum, compare, stills and filmstrip.\n");
     out
 }
