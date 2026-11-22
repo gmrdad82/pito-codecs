@@ -249,7 +249,12 @@ mod run {
             .unwrap()
     }
 
-    const REFUSED: [(&[&str], i32, &str); 15] = [
+    const REFUSED: [(&[&str], i32, &str); 16] = [
+        (
+            &["clip.mp4", "dot.gif", "--progress", "bar"],
+            1,
+            "--progress draws on mp4, mov, mkv and webm video",
+        ),
         (
             &["clip.mp4", "site.mp4"],
             1,

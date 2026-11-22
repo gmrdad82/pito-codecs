@@ -110,6 +110,7 @@ pub struct Request {
     pub copy_video: bool,
     pub no_audio: bool,
     pub joins: Vec<PathBuf>,
+    pub bar: Option<pito_codecs::filter::ProgressBar>,
 }
 
 impl Request {
@@ -128,6 +129,7 @@ impl Request {
             copy_video: false,
             no_audio: false,
             joins: Vec::new(),
+            bar: None,
         }
     }
 

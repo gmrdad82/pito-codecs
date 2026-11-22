@@ -20,6 +20,8 @@ type Fail = Box<dyn Error + Send + Sync>;
 
 #[path = "pcod/audiocopy.rs"]
 mod audiocopy;
+#[path = "pcod/bar.rs"]
+mod bar;
 #[path = "pcod/filmstrip.rs"]
 mod filmstrip;
 #[path = "pcod/frames.rs"]
@@ -270,6 +272,8 @@ enum Command {
             help = "Copy the first audio track of this MP4, MOV or MKV as it is, with no re-encode: its AAC packets and timing, cut to the video's length (a shorter track just ends); refuses --audio, --loudness and a codec .mp4 can't carry"
         )]
         audio_copy: Option<PathBuf>,
+        #[arg(long = "progress", value_name = "SPEC", value_parser = bar::parse, help = "Draw a progress bar over the video: bar or contour, then ,key=value settings (see pcod --help)")]
+        bar: Option<pito_codecs::filter::ProgressBar>,
         #[arg(
             long,
             allow_hyphen_values = true,
@@ -751,6 +755,7 @@ fn run(command: Command) -> Result<(), Fail> {
             fps,
             audio,
             audio_copy,
+            bar,
             loudness,
             true_peak,
             linear,
@@ -768,6 +773,7 @@ fn run(command: Command) -> Result<(), Fail> {
                 fps,
                 audio,
                 audio_copy,
+                bar,
                 audio_kbps: audio_bitrate.unwrap_or(if loudness.is_some() {
                     plan::AAC_KBPS
                 } else {

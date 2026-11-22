@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 
 use pito_codecs::filter::{
-    ColorSpec, Image, ImageMut, Kernel, Light, Matrix, Range, Rotation, Scaler, Transfer,
-    convert_color, rgba_to_yuv, rotate,
+    ColorSpec, Image, ImageMut, Kernel, Light, Matrix, ProgressBar, Range, Rotation, Scaler,
+    Transfer, bar_fraction, convert_color, rgba_to_yuv, rotate,
 };
 use pito_codecs::gpu::{self, Backend, HwEncoder};
 use pito_codecs::media::{
@@ -52,6 +52,7 @@ pub struct Job<'a> {
     pub level: Option<media::LevelPlan>,
     pub profile: &'a str,
     pub alpha: bool,
+    pub bar: Option<ProgressBar>,
     pub window: Option<(i64, i64)>,
     pub stop: &'a AtomicBool,
     pub progress: &'a Progress,
@@ -1327,6 +1328,9 @@ fn palette_pass(job: &Job, want: Want) -> Result<gif::Palette, Fail> {
 }
 
 pub fn run(job: &Job) -> Result<Done, Fail> {
+    if job.bar.is_some() && job.frames.is_none() {
+        return Err("--progress needs the video's length, which this source doesn't give".into());
+    }
     if job.window.is_some() && job.media.kind != Kind::File {
         return Err("the decode pipeline windows only a video file".into());
     }
@@ -1522,16 +1526,39 @@ fn consume_video(
         }
         Ok(())
     };
+    let total = job.frames.unwrap_or(0);
+    let mut over = true;
     while let Some(pic) = next_pic(rx, job.stop)? {
         let pts = i64::try_from(n).unwrap_or(i64::MAX);
         let pic = match (pic, &mut enc) {
-            (Pic::Gpu(mut g), VEnc::Gpu(e)) if g.on_gpu() => {
+            (Pic::Gpu(mut g), VEnc::Gpu(e)) if g.on_gpu() && (over || job.bar.is_none()) => {
                 g.retime(pts, time_base);
-                let packets = plain(e.encode_gpu(&g)?);
-                feed(&enc, &mut mux, packets, &mut merge)?;
-                n += 1;
-                job.progress.frame(n);
-                continue;
+                let done = match &job.bar {
+                    None => Some(e.encode_gpu(&g)?),
+                    Some(bar) if e.composes() => {
+                        let (w, h) = g.size();
+                        let layer = std::sync::Arc::new(bar.layer(w, h, bar_fraction(n, total)));
+                        match e.encode_gpu_over(&g, &layer) {
+                            Ok(p) => Some(p),
+                            Err(err) => {
+                                notes.push(format!(
+                                    "the GPU couldn't draw the progress bar ({err}); it is drawn on the CPU"
+                                ));
+                                None
+                            }
+                        }
+                    }
+                    Some(_) => None,
+                };
+                if let Some(packets) = done {
+                    let packets = plain(packets);
+                    feed(&enc, &mut mux, packets, &mut merge)?;
+                    n += 1;
+                    job.progress.frame(n);
+                    continue;
+                }
+                over = false;
+                Pic::Yuv(g.download()?)
             }
             (Pic::Gpu(g), _) => Pic::Yuv(g.download()?),
             (pic, _) => pic,
@@ -1546,6 +1573,9 @@ fn consume_video(
         };
         frame.pts = pts;
         frame.time_base = time_base;
+        if let Some(bar) = &job.bar {
+            bar.draw(&mut frame, ColorSpec::BT709, n, total)?;
+        }
         let packets = enc.encode(&frame, alpha.as_ref())?;
         feed(&enc, &mut mux, packets, &mut merge)?;
         n += 1;

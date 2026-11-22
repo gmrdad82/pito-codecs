@@ -66,6 +66,23 @@ pcod clip.mp4 voiced.mp4 --add-audio bed.wav --title Voice,Music
 - `--audio-bitrate` is 32 to 512 kbps.
 - `--loudness`, `--true-peak` and `--linear` level the audio as it converts: see [`audio.md`](audio.md).
 
+## Progress bar
+
+```sh
+pcod clip.mp4 bar.mp4 --progress bar
+pcod clip.mp4 gradient.mp4 --progress bar,position=top,color=blue-purple-pink
+pcod clip.mp4 contour.mp4 --progress contour,start=bl,direction=ccw,thickness=0.8%
+```
+
+`--progress SPEC` draws a progress bar over the video while it encodes, on any video output (`.mp4`, `.mov`, `.mkv`, `.webm`), on `convert` and on `frames` (see [`stills.md`](stills.md)). `SPEC` is a mode, then optional `,key=value` settings:
+
+- `bar` is a line along one edge: `position=top` (the default) or `bottom` fills left to right, `left` or `right` fills bottom to top. `contour` runs around the frame's edge, all four sides, and fills the whole loop: `start=tl` (the default), `tr`, `br` or `bl`, and `direction=cw` (the default) or `ccw`.
+- `thickness=6` or `6px` is pixels; `0.8%` is a share of the short side; the default is 0.6% of the height.
+- `color=white` (the default), a `#rrggbb` or `#rgb`, or 2 to 4 joined with `+` for a gradient along the filled part; `blue-purple-pink` is a preset. Names: white, black, red, green, blue, yellow, cyan, magenta, orange, purple, pink, gray.
+- `track=#101018` colours the unfilled part and `opacity=60%` (or `0.6`) is how opaque it is; the defaults are a dark track at 60%.
+
+The fill is linear with the frame's time: empty at the first frame, full at the last, counted over a `--from`/`--to` window when there is one. The bar is crisp at any size. On the GPU route (`--profile fast` on an H.264 file) the GPU draws it; elsewhere the CPU does. The video is always re-encoded, so a bar with no other video option turns a stream copy into a re-encode; an AAC track is still copied byte for byte unless `--loudness` or `--audio-bitrate` changes it. `.gif`, `.webp`, a WebM with alpha, `join` and `--add-audio` refuse it (join or add the track first, then the bar), and so does any audio-only or still output.
+
 ## Join
 
 ```sh

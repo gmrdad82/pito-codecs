@@ -10,6 +10,7 @@ mod mix_edges;
 mod overlay;
 mod packed;
 mod plane;
+mod progress_bar;
 mod resample;
 mod scale;
 pub mod spectrum;
@@ -30,6 +31,10 @@ pub use packed::{
 };
 #[allow(unused_imports)]
 pub(crate) use plane::check as check_frame;
+pub use progress_bar::{
+    BLUE_PURPLE_PINK, Corner, Edge, Mode as BarMode, ProgressBar, Rgb, Thickness,
+    fraction as bar_fraction,
+};
 pub use resample::{Resampler, resample};
 pub use scale::{Kernel, Scaler, scale};
 pub use spectrum::{Spectrogram, spectrogram};

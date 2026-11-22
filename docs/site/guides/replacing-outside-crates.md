@@ -9,7 +9,7 @@ From 5.1.0, pito-codecs does what apps use these six crates for, as library call
 
 ```toml
 [dependencies]
-pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v5.2.0", default-features = false, features = ["png"] }
+pito-codecs = { git = "https://github.com/gmrdad82/pito-codecs", tag = "v5.3.0", default-features = false, features = ["png"] }
 ```
 
 ## Features

@@ -53,6 +53,7 @@ pcod filmstrip clip.mp4 strip.webp --count 20 --wrap 10 --height 120
 ```sh
 pcod frames frames trailer.mp4 --fps 30 --audio bed.wav
 pcod frames frames trailer-hevc.mp4 --fps 30 --codec hevc --crf 20 --audio-bitrate 256
+pcod frames frames barred.mp4 --fps 30 --progress bar,position=bottom
 pcod frames/ trailer.webm --fps 30
 ```
 
@@ -60,6 +61,7 @@ pcod frames/ trailer.webm --fps 30
 
 - `--audio` takes a WAV of any rate, cut or padded with silence to the video; without it the MP4 carries a silent stereo track. AAC at 192 kbps (320 with `--loudness`); `--audio-bitrate` 32 to 512.
 - `--audio-copy FILE` keeps another file's sound as it is: the first audio track of an MP4, MOV or MKV, its AAC packets muxed in with no decode and no re-encode, so loudness and true peak stay bit for bit (a short over a finished -14 LUFS film keeps its -1 dBTP ceiling). It is cut to the video's length; a shorter track just ends and the video runs on in silence, with a `note`. It refuses `--audio`, `--loudness` and a codec `.mp4` can't carry, naming it (Matroska takes AAC only).
+- `--progress SPEC` draws a progress bar over the video as it encodes, filling over the folder's frames: see [`convert.md`](convert.md) for the spec.
 - `--crf` is 0 to 51 and 18 by default; 0 is near-lossless, not bit-exact.
 - `--route cpu` forces the CPU; `--threads` caps the PNG decoders (one per core, at most 16).
 - HEVC encodes on the GPU only; without a GPU HEVC encoder the file is H.264, and a `note` says why.

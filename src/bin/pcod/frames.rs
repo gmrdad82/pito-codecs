@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex};
 use std::time::Instant;
 
-use pito_codecs::filter::{ColorSpec, Order, Packed, downmix, packed_to_yuv, resample};
+use pito_codecs::filter::{
+    ColorSpec, Order, Packed, ProgressBar, downmix, packed_to_yuv, resample,
+};
 use pito_codecs::media::{
     self, AudioBuffer, Canvas, Codec, Error, ExportOptions, Frame, PixelFormat, Prefs, Route,
     TimeBase, VideoFrame, export_frames, wav,
@@ -27,6 +29,7 @@ pub struct Job {
     pub fps: (u32, u32),
     pub audio: Option<PathBuf>,
     pub audio_copy: Option<PathBuf>,
+    pub bar: Option<ProgressBar>,
     pub loudness: Option<Loudness>,
     pub audio_kbps: u32,
     pub codec: Codec,
@@ -406,7 +409,11 @@ pub fn run(out: &mut impl Write, job: &Job) -> Result<(), Fail> {
                 if live && index.is_multiple_of(15) {
                     eprint!("\rpcod: frame {index} of {count}");
                 }
-                pool.take(index, spent).map(|f| Some(VideoFrame::Cpu(f)))
+                let mut frame = pool.take(index, spent)?;
+                if let Some(bar) = &job.bar {
+                    bar.draw(&mut frame, ColorSpec::BT709, n, count as u64)?;
+                }
+                Ok(Some(VideoFrame::Cpu(frame)))
             },
             audio,
             |_| true,
@@ -496,6 +503,7 @@ mod tests {
             fps: (24, 1),
             audio: None,
             audio_copy: None,
+            bar: None,
             loudness: Some(Loudness {
                 integrated: -16.0,
                 true_peak: -1.0,
