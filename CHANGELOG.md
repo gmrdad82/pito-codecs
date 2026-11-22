@@ -1,5 +1,12 @@
 # Changelog
 
+## v5.3.0 — 2026-11-22
+
+### Added
+
+- `pcod --progress SPEC` draws a progress bar over a video while it encodes, on `pcod convert` and `pcod frames`: `bar` is a line along one edge (`position=top|bottom|left|right`, left and right filling bottom to top) and `contour` runs around the frame's edge and fills the whole loop (`start=tl|tr|br|bl`, `direction=cw|ccw`), with `thickness` in pixels or as a share of the short side (0.6% of the height by default), one colour or 2 to 4 for a gradient along the filled part (`blue-purple-pink` is a preset), and a track colour and opacity for the unfilled part (a dark track at 60%). The fill is linear with the frame's time, empty at the first frame and full at the last, and counted over a `--from`/`--to` window. The GPU draws it on the GPU route, the CPU elsewhere; the audio is untouched.
+- `pito_codecs::filter::ProgressBar` is the same filter for apps: `strokes`, `layer` (a full-frame RGBA for `HwEncoder::encode_gpu_over`) and `draw` (on a YUV `Frame`).
+
 ## v5.2.0 — 2026-11-21
 
 ### Added

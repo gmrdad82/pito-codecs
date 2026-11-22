@@ -87,6 +87,12 @@ fn encoded_audio(request: &Request, container: Container) -> Audio {
 fn plan(request: &Request, media: &Media) -> Result<Planned, Fail> {
     let (container, encoder) = request.settings()?;
     let animated = container.animated();
+    if request.bar.is_some() && (animated || container == Container::Webm && media.alpha) {
+        return Err(
+            "--progress draws on mp4, mov, mkv and webm video, not .gif, .webp or a WebM with alpha"
+                .into(),
+        );
+    }
     if same_file(&request.input, &request.output) {
         return Err("input and output are the same file".into());
     }
@@ -160,11 +166,14 @@ fn plan(request: &Request, media: &Media) -> Result<Planned, Fail> {
         None if animated && media.fps_value() > f64::from(ANIMATED_FPS) => (ANIMATED_FPS, 1),
         None => reduced(source_fps.0, source_fps.1),
     };
-    let frames = media.seconds.map(|s| {
-        (s * f64::from(fps.0) / f64::from(fps.1))
-            .round()
-            .clamp(0.0, 1e15) as u64
-    });
+    let frames = match media.frames {
+        Some(n) if n > 0 && reduced(source_fps.0, source_fps.1) == fps => Some(n),
+        _ => media.seconds.map(|s| {
+            (s * f64::from(fps.0) / f64::from(fps.1))
+                .round()
+                .clamp(0.0, 1e15) as u64
+        }),
+    };
     let audio = match &media.audio {
         Some(a) if !animated => Some(audio_for(request, container, &a.codec)),
         _ => None,
@@ -254,7 +263,11 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
             .into());
         }
         let (container, _) = request.settings()?;
-        if media.kind == Kind::File && !media.alpha && !container.animated() {
+        if media.kind == Kind::File
+            && !media.alpha
+            && !container.animated()
+            && request.bar.is_none()
+        {
             return ranged(options, &media, span, partial_path);
         }
         if media.kind == Kind::File {
@@ -379,6 +392,7 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
         level: level.as_ref().map(|(_, p)| *p),
         profile: request.profile.name(),
         alpha: media.alpha && planned.container == Container::Webm,
+        bar: request.bar.clone(),
         window,
         stop: &signals::STOP,
         progress: &progress,

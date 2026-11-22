@@ -4,6 +4,7 @@ use clap::error::ErrorKind;
 use clap::{CommandFactory, ValueEnum};
 
 use super::Cli;
+use super::bar::HELP as BAR_HELP;
 use super::convert::{Options, Span};
 use super::extract::{
     OPUS_KBPS_HIGHEST, OPUS_KBPS_LOWEST, OPUS_KBPS_MONO, OPUS_KBPS_STEREO, RATES, Wav, is_opus,
@@ -27,6 +28,7 @@ For screen recordings: --tune animation
 --size takes a width (the height follows the aspect), WxH within 1% of the aspect, or 720p, 1080p, 1440p, 2160p; pcod never stretches a picture.
 Audio is AAC-LC 320k stereo at 48000 Hz, or Opus 128k in .webm; an AAC source is copied when nothing changes its audio. --audio-bitrate KBPS (32–512) sets the rate.
 --no-audio writes the video alone: with no video option it is copied as it is, index first. --add-audio WAV keeps the video and the first audio track as they are and adds the WAV as another AAC track, 160k stereo at 48000 Hz (--audio-bitrate sets it), the file cut to the shorter of the video and the WAV; --title Voice,Music titles each audio track in order; .mp4 or .mov only.
+{BAR_HELP}
 An existing output is refused unless --force is given; pcod writes a hidden partial file beside the output and renames it into place at the end.
 While it works, pcod draws one progress line on stderr when stderr is a terminal; never with --json, --no-progress, TERM=dumb or when stderr is a pipe or a file. --json prints one JSON manifest with each file's sha256.
 Exit codes: 0 it worked, 1 refused or failed (one line on stderr starting pcod:), 2 the command line is wrong, 128 plus the signal number when a signal stopped it."
@@ -135,6 +137,8 @@ pub struct ConvertArgs {
         help = "For a still .webp: lossless (VP8L at method 6, as ffmpeg's compression_level 6)"
     )]
     pub lossless: bool,
+    #[arg(long = "progress", value_name = "SPEC", value_parser = super::bar::parse, help = "Draw a progress bar over the video: bar or contour, then ,key=value settings (pcod --help lists them)")]
+    pub bar: Option<pito_codecs::filter::ProgressBar>,
     #[arg(long, value_parser = super::stills::crop_of, help = "For one PNG to a PNG: write only this rectangle, W:H:X:Y")]
     pub crop: Option<super::stills::Crop>,
     #[arg(
@@ -298,7 +302,15 @@ pub fn options(
         || args.fps.is_some()
         || args.crf.is_some()
         || args.qp.is_some()
-        || args.tune.is_some();
+        || args.tune.is_some()
+        || args.bar.is_some();
+    if joining && args.bar.is_some() {
+        usage_error(
+            sub,
+            ErrorKind::ArgumentConflict,
+            "--progress works on one file, not join: join first, then add the bar",
+        );
+    }
     let profile = match args.profile.unwrap_or(ProfileArg::Balanced) {
         ProfileArg::Fast => Profile::Fast,
         ProfileArg::Balanced => Profile::Balanced,
@@ -316,6 +328,7 @@ pub fn options(
     request.fps = args.fps;
     request.quality = args.crf.or(args.qp);
     request.tune = args.tune;
+    request.bar = args.bar;
     request.overwrite = args.force;
     request.copy_video =
         (joining || ranged || loudness.is_some() || args.audio_bitrate.is_some() || args.no_audio)
@@ -382,6 +395,7 @@ fn still(sub: Option<&str>, input: PathBuf, output: PathBuf, args: ConvertArgs) 
         (args.rate.is_some(), "--rate"),
         (args.no_audio, "--no-audio"),
         (args.add_audio.is_some(), "--add-audio"),
+        (args.bar.is_some(), "--progress"),
     ];
     if let Some((_, flag)) = video.iter().find(|(set, _)| *set) {
         usage_error(
@@ -448,6 +462,7 @@ fn wav(
         (args.lossless, "--lossless"),
         (args.no_audio, "--no-audio"),
         (args.add_audio.is_some(), "--add-audio"),
+        (args.bar.is_some(), "--progress"),
     ];
     if let Some((_, flag)) = picture.iter().find(|(set, _)| *set) {
         conflict(&if opus {
@@ -548,6 +563,7 @@ fn added(
         (args.to.is_some(), "--to"),
         (args.mono, "--mono"),
         (args.rate.is_some(), "--rate"),
+        (args.bar.is_some(), "--progress"),
     ];
     if let Some((_, flag)) = changes.iter().find(|(set, _)| *set) {
         conflict(&format!(
@@ -618,6 +634,7 @@ pub fn crop_conflict(
         track,
         no_audio,
         add_audio,
+        bar,
         title,
         crop: _,
         force: _,
@@ -644,6 +661,7 @@ pub fn crop_conflict(
         (track.is_some(), "--track"),
         (*no_audio, "--no-audio"),
         (add_audio.is_some(), "--add-audio"),
+        (bar.is_some(), "--progress"),
         (!title.is_empty(), "--title"),
     ];
     flags
@@ -746,6 +764,7 @@ fn raw(
         (args.lossless, "--lossless"),
         (args.no_audio, "--no-audio"),
         (args.add_audio.is_some(), "--add-audio"),
+        (args.bar.is_some(), "--progress"),
     ];
     if let Some((_, flag)) = other.iter().find(|(set, _)| *set) {
         conflict(&format!(
