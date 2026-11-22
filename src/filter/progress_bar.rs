@@ -469,7 +469,7 @@ mod tests {
         let a = solid(&b.layer(W, H, (192.0 + 50.0) / total));
         let (x0, y0, x1, y1) = bounds(&a);
         assert_eq!((x0, y0, x1), (0, 0, 199));
-        assert_eq!(y1, 50 - 1 + 0);
+        assert_eq!(y1, 49);
         let ccw = bar(Mode::Contour {
             start: Corner::TopLeft,
             clockwise: false,
