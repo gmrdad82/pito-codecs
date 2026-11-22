@@ -69,13 +69,12 @@ pcod clip.mp4 voiced.mp4 --add-audio bed.wav --title Voice,Music
 ## Progress bar
 
 ```sh
-pcod film.mp4 film-bar.mp4 --progress bar
-pcod film.mp4 short.mp4 --progress bar,position=top,color=blue-purple-pink
-pcod film.mp4 loop.mp4 --progress contour,start=bl,direction=ccw,thickness=0.8%
-pcod frames/ trailer.mp4 --fps 60 --progress bar,position=bottom
+pcod clip.mp4 bar.mp4 --progress bar
+pcod clip.mp4 gradient.mp4 --progress bar,position=top,color=blue-purple-pink
+pcod clip.mp4 contour.mp4 --progress contour,start=bl,direction=ccw,thickness=0.8%
 ```
 
-`--progress SPEC` draws a progress bar over the video while it encodes, on any video output (`.mp4`, `.mov`, `.mkv`, `.webm`), on `convert` and on `frames`. `SPEC` is a mode, then optional `,key=value` settings:
+`--progress SPEC` draws a progress bar over the video while it encodes, on any video output (`.mp4`, `.mov`, `.mkv`, `.webm`), on `convert` and on `frames` (see [`stills.md`](stills.md)). `SPEC` is a mode, then optional `,key=value` settings:
 
 - `bar` is a line along one edge: `position=top` (the default) or `bottom` fills left to right, `left` or `right` fills bottom to top. `contour` runs around the frame's edge, all four sides, and fills the whole loop: `start=tl` (the default), `tr`, `br` or `bl`, and `direction=cw` (the default) or `ccw`.
 - `thickness=6` or `6px` is pixels; `0.8%` is a share of the short side; the default is 0.6% of the height.

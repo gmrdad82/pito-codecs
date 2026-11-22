@@ -53,6 +53,7 @@ pcod filmstrip clip.mp4 strip.webp --count 20 --wrap 10 --height 120
 ```sh
 pcod frames frames trailer.mp4 --fps 30 --audio bed.wav
 pcod frames frames trailer-hevc.mp4 --fps 30 --codec hevc --crf 20 --audio-bitrate 256
+pcod frames frames barred.mp4 --fps 30 --progress bar,position=bottom
 pcod frames/ trailer.webm --fps 30
 ```
 
