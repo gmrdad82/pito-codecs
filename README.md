@@ -79,6 +79,7 @@ pcod 5.3.0: video, audio and image codecs in pure Rust, on the CPU and the GPU, 
   pcod profiles                                 list the profiles and what each one does
   pcod probe <file> [--json]                    show what is in a video, audio or image file
   pcod loudness <file> [--json]                 measure an audio track's loudness (EBU R128)
+  pcod compare <a> <b> [--diff <dir>]           measure how far two videos or frame folders drift: PSNR, differences, the worst frames
   pcod synth <output> --size --fps --duration   write a test video: colour bars, a frame counter, a moving box and tones
   pcod spectrum <file> <out.png>                draw an audio track's spectrogram as a PNG
   pcod decode <file> [--route cpu|gpu]          decode the whole video track and report the speed
@@ -86,10 +87,11 @@ pcod 5.3.0: video, audio and image codecs in pure Rust, on the CPU and the GPU, 
   pcod frames <dir> <output> --fps <fps>        encode a folder of PNG frames and an optional WAV into an MP4
   pcod stills <file> --out <dir>|--sheet <png>  write stills, frame ranges or one contact sheet
   pcod filmstrip <file> <output> [--every <t>]  draw tiles of a video on a cadence into one image
+  pcod skill install|status|uninstall           put pcod's agent skill into Claude Code, Codex, Pi and other agents
   pcod --help                                   the full help; pcod <command> --help for one command
   pcod --version                                print the version
 
---json prints a manifest for scripts on convert, join, probe, loudness, spectrum, stills and filmstrip.
+--json prints a manifest for scripts on convert, join, probe, loudness, spectrum, compare, stills and filmstrip.
 ```
 
 `SHA256SUMS` in each Release lists every archive's checksum. To build pcod from source anywhere, Linux arm64 included, with Rust 1.97 or newer: `cargo install --locked --git https://github.com/gmrdad82/pito-codecs --tag v5.3.0 pito-codecs --bin pcod`.

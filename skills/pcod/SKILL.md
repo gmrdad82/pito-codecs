@@ -26,6 +26,7 @@ pcod is pito-codecs' command line: video, audio and still-image conversion in pu
 | `pcod probe` | what is in a video, audio or image file | below |
 | `pcod loudness`, `pcod spectrum`, `pcod synth` | measure loudness, draw a spectrogram, write a test video | [`audio.md`](audio.md) |
 | `pcod stills`, `pcod filmstrip`, `pcod frames` | pictures out of a video, and PNG frames back into one | [`stills.md`](stills.md) |
+| `pcod compare` | how far two videos or frame folders drift: identical or PSNR and differences | [`stills.md`](stills.md) |
 | `pcod decode`, `pcod encode` | GPU and CPU routes and their speed | [`gpu.md`](gpu.md) |
 | `pcod skill` | `install`, `status` or `uninstall` this skill in the agents' skill folders | below |
 
@@ -43,7 +44,7 @@ pcod probe clip.mp4 --json
 
 - An existing output is refused (`pcod: <path> already exists; use --force to replace it`, exit 1). `--force` replaces only that file: an output that is also an input is refused even with it. pcod writes a hidden partial file and renames it at the end, so a failed run leaves nothing at the output path.
 - Exit codes: `0` worked; `1` refused or failed, one line on stderr starting `pcod: `; `2` the command line is wrong (clap prints `error:` and the usage); `128` plus the signal number when a signal stopped it. Check the code, then read the line.
-- For scripts, `--json` (`convert`, `join`, `probe`, `loudness`, `spectrum`, `stills`, `filmstrip`) prints one JSON object on stdout; parse that, not the text. The progress line appears only when stderr is a terminal; `--no-progress` turns it off there.
+- For scripts, `--json` (`convert`, `join`, `probe`, `loudness`, `spectrum`, `compare`, `stills`, `filmstrip`) prints one JSON object on stdout; parse that, not the text. The progress line appears only when stderr is a terminal; `--no-progress` turns it off there.
 - A `note` line says pcod did something other than what was asked, such as the GPU failing and the CPU taking over, or a cut re-encoding its whole window. Pass it on.
 - pcod reads 8-bit 4:2:0 progressive H.264 and 8 or 10-bit 4:2:0 HEVC, VP9 and AV1. Any other variant (10-bit H.264, 4:2:2 or 4:4:4, interlaced H.264) and audio such as DTS or TrueHD is refused by name. Report it; no flag changes that.
 - Quality by intent: `--profile fast` for a draft, the default `balanced`, `--profile best` for a keeper. Add `--crf` (balanced, best) or `--qp` (fast) only for a size or quality target; mixing them is a usage error.

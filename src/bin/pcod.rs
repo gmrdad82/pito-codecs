@@ -22,6 +22,8 @@ type Fail = Box<dyn Error + Send + Sync>;
 mod audiocopy;
 #[path = "pcod/bar.rs"]
 mod bar;
+#[path = "pcod/compare.rs"]
+mod compare;
 #[path = "pcod/filmstrip.rs"]
 mod filmstrip;
 #[path = "pcod/frames.rs"]
@@ -157,6 +159,42 @@ enum Command {
         #[arg(long, default_value_t = 0, help = "The audio track, counted from 0")]
         track: usize,
         #[arg(long, help = "Print the measurements as JSON")]
+        json: bool,
+    },
+    #[command(
+        about = "Measure how far two videos or frame folders drift",
+        long_about = "Measure how far two videos or frame folders drift\n\nEach side is a video (MP4, MOV, MKV or WebM) or a folder of PNG frames in name order (--fps gives a folder's rate), compared frame by frame in step on the CPU: the first frame of one against the first of the other. Both sides need one picture size (a mismatch is refused in one line naming both sizes); when the frame counts differ, the output says so and the shorter run is compared. It prints the frames compared, how many are identical, the PSNR over all frames (of their mean squared error over R, G and B; the worst frame's PSNR with its time; identical when nothing differs), the mean and the largest absolute difference per channel on 0-255, and the share of pixels where any channel differs by more than --tolerance (2 by default). --worst N lists the N worst differing frames with their times; --diff DIR writes diff-<frame>.png for each, the difference amplified 16 times and black where the frames are equal (it needs --worst). --from and --to window both sides. --json prints it all as one object. Audio is not compared. Exit 0 when compared, whatever the numbers, 1 refused, 2 a wrong command line."
+    )]
+    Compare {
+        #[arg(help = "The first video or folder of PNG frames")]
+        a: PathBuf,
+        #[arg(help = "The second video or folder of PNG frames")]
+        b: PathBuf,
+        #[arg(long, value_parser = args::rate_of, help = "The rate of a folder of PNG frames (30 by default): an integer, a ratio such as 24000/1001, or a decimal")]
+        fps: Option<(u32, u32)>,
+        #[arg(long, value_parser = time_of, help = "Start both sides at this time (seconds, m:ss or h:mm:ss)")]
+        from: Option<f64>,
+        #[arg(long, value_parser = time_of, help = "End both sides before this time")]
+        to: Option<f64>,
+        #[arg(
+            long,
+            default_value_t = 2,
+            help = "A pixel differs when a channel is off by more than this, 0 to 255"
+        )]
+        tolerance: u8,
+        #[arg(
+            long,
+            default_value_t = 0,
+            help = "List this many of the worst differing frames with their times"
+        )]
+        worst: usize,
+        #[arg(
+            long,
+            requires = "worst",
+            help = "A folder to write a diff PNG of each listed worst frame into, amplified and black where equal"
+        )]
+        diff: Option<PathBuf>,
+        #[arg(long, help = "Print the comparison as JSON")]
         json: bool,
     },
     #[command(
@@ -728,6 +766,31 @@ fn run(command: Command) -> Result<(), Fail> {
                     floor_db: f64::from(floor_db),
                 },
                 overwrite: force,
+                json,
+            },
+        ),
+        Command::Compare {
+            a,
+            b,
+            fps,
+            from,
+            to,
+            tolerance,
+            worst,
+            diff,
+            json,
+        } => compare::run(
+            &mut out,
+            &compare::Job {
+                a,
+                b,
+                fps,
+                from,
+                to,
+                tolerance,
+                worst,
+                diff,
+                prefs: Where::Cpu.prefs(),
                 json,
             },
         ),

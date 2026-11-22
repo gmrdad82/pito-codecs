@@ -1,4 +1,4 @@
-# Stills, frame ranges, filmstrips, frames to video
+# Stills, frame ranges, filmstrips, frames to video, compare
 
 `stills` and `filmstrip` read MP4, MOV, MKV and WebM, on the GPU first (`--route cpu` forces the CPU). `stills` also reads an animated GIF and a folder of PNG frames in name order (with `--fps` for their rate).
 
@@ -77,3 +77,18 @@ pcod poster.webp poster-back.png
 ```
 
 A PNG, JPEG or WebP still converts to a still `.webp` (lossy at `--quality` 0 to 100, 75 by default, or `--lossless`, keeping alpha, at the source's size or `--size`) or to a `.png`; `--crop W:H:X:Y` cuts one PNG to a PNG. A JPEG is turned upright by its EXIF orientation first.
+
+## Compare two videos or frame folders
+
+`compare` says whether a video re-made by another pipeline is pixel identical or how far it drifts. Each side is a video (MP4, MOV, MKV, WebM) or a folder of PNG frames in name order (`--fps` gives a folder's rate), compared frame by frame in step on the CPU.
+
+```sh
+pcod compare clip.mp4 clip.mp4
+pcod compare clip.mp4 clip.mp4 --from 1 --to 2 --worst 3 --diff drift --tolerance 4
+pcod compare clip.mp4 clip.mp4 --json
+```
+
+- It prints the frames compared and how many are identical, the PSNR over all frames (of the mean squared error over R, G and B; the worst frame's PSNR with its time; `identical` when nothing differs), the mean and largest absolute difference per channel on 0 to 255, and the share of pixels where any channel is off by more than `--tolerance` (2 by default).
+- `--worst N` lists the N worst differing frames with their times; `--diff DIR` (needs `--worst`) writes `diff-<frame>.png` for each, the difference amplified 16 times and black where the frames are equal. `--from` and `--to` window both sides; `--json` prints everything as one object.
+- Both sides need one picture size: a mismatch is refused in one line naming both sizes. When the frame counts differ the output says so and the shorter run is compared. Audio is not compared.
+- Exit 0 whenever it compared (the numbers are the verdict), 1 refused, 2 a wrong command line.
