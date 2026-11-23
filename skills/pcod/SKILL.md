@@ -3,12 +3,12 @@ name: pcod
 description: >
   Use pcod, pito-codecs' command line, for any video, audio or still-image job: convert a video to MP4,
   MOV, MKV, WebM, GIF or WebP, cut a clip with --from and --to, join clips, resize or change the frame
-  rate, extract audio to WAV, Opus or raw PCM, measure or level loudness (LUFS, -14 for YouTube), draw a
+  rate, extract audio to WAV, Opus or raw PCM, measure or level loudness (LUFS, -14 for YouTube), soften mouth clicks in speech, draw a
   spectrogram, take stills, a contact sheet, a frame range or a filmstrip, crop a frame, turn a folder of
   PNG frames into an MP4, write a test video, probe a file, or time GPU and CPU decode and encode
   (VA-API, NVENC, VideoToolbox). Triggers: pcod, convert video, transcode, trim, cut, join, concat, gif,
   webp, webm, mp4, thumbnail, poster, screenshot of a video, contact sheet, filmstrip, extract frames,
-  frames to video, loudness, LUFS, normalize audio, spectrogram, probe, ffprobe, ffmpeg replacement,
+  frames to video, loudness, LUFS, normalize audio, de-click, mouth clicks, spectrogram, probe, ffprobe, ffmpeg replacement,
   HEVC, H.264, VP9, VA-API.
 ---
 

@@ -69,6 +69,13 @@ impl Loudness {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Declick {
+    pub strength: pito_codecs::filter::DeclickStrength,
+    pub list: bool,
+    pub track: Option<usize>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Container {
     Mp4,
@@ -106,6 +113,7 @@ pub struct Request {
     pub tune: Option<String>,
     pub overwrite: bool,
     pub loudness: Option<Loudness>,
+    pub declick: Option<Declick>,
     pub audio_bitrate: Option<u32>,
     pub copy_video: bool,
     pub no_audio: bool,
@@ -125,6 +133,7 @@ impl Request {
             tune: None,
             overwrite: false,
             loudness: None,
+            declick: None,
             audio_bitrate: None,
             copy_video: false,
             no_audio: false,
@@ -217,6 +226,11 @@ impl Request {
                     "--loudness doesn't apply to .{extension}, which carries no audio"
                 ));
             }
+        }
+        if self.declick.is_some() && container.animated() {
+            return Err(format!(
+                "--declick doesn't apply to .{extension}, which carries no audio"
+            ));
         }
         if let Some(kbps) = self.audio_bitrate {
             if !(AUDIO_KBPS_LOWEST..=AUDIO_KBPS_HIGHEST).contains(&kbps) {

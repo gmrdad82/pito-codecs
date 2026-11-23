@@ -1,4 +1,5 @@
 mod color;
+mod declick;
 mod fps;
 mod geometry;
 mod limiter;
@@ -20,6 +21,7 @@ pub use color::{ColorSpec, Matrix, Range, Siting, convert_color};
 #[deprecated(note = "use pito_codecs::media::Rgba")]
 pub type Rgba = crate::media::Rgba;
 pub use crate::loudness::{Loudness, LoudnessMeter};
+pub use declick::{Click, Strength as DeclickStrength, declick, detect as detect_clicks};
 pub use fps::FpsConverter;
 pub use geometry::{Fill, Rotation, crop, flip_horizontal, flip_vertical, pad, rotate};
 pub use limiter::{Limiter, normalize, normalize_gain_db};

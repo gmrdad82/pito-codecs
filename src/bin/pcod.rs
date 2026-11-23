@@ -49,6 +49,8 @@ mod stills;
 mod args;
 #[path = "pcod/convert.rs"]
 mod convert;
+#[path = "pcod/declick.rs"]
+mod declick;
 #[path = "pcod/extract.rs"]
 mod extract;
 #[path = "pcod/pipeline.rs"]

@@ -62,6 +62,7 @@ The codecs here are written in Rust. Parts are adapted from permissively license
 - ITU-T T.81 (ISO/IEC 10918-1, JPEG) and its Annex K tables, and JFIF 1.02, for `src/jpeg/`.
 - ATSC A/52 and ETSI TS 102 366 (AC-3 and E-AC-3), which oxideav-ac3 follows; the KBD window in `src/ac3/` is computed from the A/52 definition.
 - RFC 9639 (FLAC) for `src/flac/`, the Matroska codec mapping for `A_FLAC` and the FLAC-in-ISOBMFF encapsulation (the `fLaC` sample entry and its `dfLa` box).
+- Janssen, Veldhuis and Vries, "Adaptive interpolation of discrete-time signals that can be modeled as autoregressive processes" (1986), and Godsill and Rayner's "Digital Audio Restoration" (1998), whose published methods (least-squares autoregressive interpolation across a gap, waveform substitution by the signal's own period) `src/filter/declick.rs` implements from the descriptions, with no source ported.
 - ITU-R BS.1770-4 and EBU Tech 3341 and 3342 (loudness), and ITU-R BT.601, BT.709 and BT.2020 (colour).
 - The paper "A novel macroblock-tree algorithm for high-performance optimization of dependent video coding in H.264/AVC" (2009), whose published description is the only source for the lookahead QP offsets in `src/h264/enc/mbtree.rs`.
 

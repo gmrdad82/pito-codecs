@@ -11,17 +11,18 @@ use super::extract::{
     is_wav,
 };
 use super::picture::{self, Still};
-use super::plan::{AUDIO_KBPS_HIGHEST, AUDIO_KBPS_LOWEST, Loudness, Request};
+use super::plan::{AUDIO_KBPS_HIGHEST, AUDIO_KBPS_LOWEST, Declick, Loudness, Request};
 use super::profile::{ANIMATED_FPS, ANIMATED_WIDTH, LIGHT_WEB_CRF, Profile, VP9_LIGHT_WEB_CRF};
 use super::raw::is_raw;
 use super::size::Size;
 use super::tracks::Add;
+use pito_codecs::filter::DeclickStrength;
 
 pub const USAGE: &str = "pcod [OPTIONS] <INPUT> <OUTPUT>\n       pcod <COMMAND>";
 
 pub fn help() -> String {
     format!(
-        "The output's extension picks the container: mp4, mov, mkv (H.264 and AAC), webm (VP9 and Opus), gif or webp (animated, looping, {ANIMATED_WIDTH} px wide at {ANIMATED_FPS} fps by default, or the source's width and rate where smaller). --from and --to cut a window of the input, video and audio in sync, starting at 0: the first frame at or after --from to the last before --to. With no video option the cut copies whole GOPs and re-encodes only the frames at its edges where the container carries the source's codec; a video option re-encodes it all. A .wav output is the audio alone: the first audio track as 16-bit PCM, stereo at the source's rate when it is 44100 or 48000 Hz (else 48000), with --from and --to for a range, --mono, --rate and --loudness. A .s16 output, or - for stdout, is one audio stream as raw 16-bit little-endian PCM from --from to its end: --track N picks the stream as the container numbers it (the first audio stream by default), --mono mixes it to one channel and --rate resamples it (the stream's own channels and rate by default). A .opus (or .ogg) output is the audio alone as Ogg Opus at 48000 Hz, 64k stereo or 32k with --mono by default, --audio-bitrate KBPS from 16 to 510, with --from, --to, --mono and --loudness. The input is a video file, an animated GIF or a folder of PNG frames in name order (--fps gives their rate). A PNG, JPEG or WebP still to a .webp writes a still WebP (no animation) at the source's size or --size, resized with Lanczos: lossy at --quality 0 to 100 on libwebp's scale (75 by default), or --lossless (VP8L at method 6, as ffmpeg's compression_level 6; fully transparent pixels keep their alpha, not their colour, as libwebp does by default), keeping alpha; to a .png it writes a PNG. A JPEG is turned upright by its EXIF orientation first. probe also reads PNG, JPEG, WebP and GIF files; a GIF's frame rate is 100 over its delay when every delay matches, else the whole or NTSC rate its frames start on to the hundredth of a second or its mean comes within 1% of, else that mean.
+        "The output's extension picks the container: mp4, mov, mkv (H.264 and AAC), webm (VP9 and Opus), gif or webp (animated, looping, {ANIMATED_WIDTH} px wide at {ANIMATED_FPS} fps by default, or the source's width and rate where smaller). --from and --to cut a window of the input, video and audio in sync, starting at 0: the first frame at or after --from to the last before --to. With no video option the cut copies whole GOPs and re-encodes only the frames at its edges where the container carries the source's codec; a video option re-encodes it all. A .wav output is the audio alone: the first audio track as 16-bit PCM, stereo at the source's rate when it is 44100 or 48000 Hz (else 48000), with --from and --to for a range, --mono, --rate, --declick and --loudness. --declick softens mouth clicks, tongue smacks and lip pops (spikes of 1 to 6 ms well above the audio's own high-passed level) by interpolating across each, light, medium or strong by how far above its surroundings a spike must be, on a video's audio (the video is copied untouched), a WAV or an Opus, with --track N for the stream, before --loudness; --declick-list prints each click's time and level. A .s16 output, or - for stdout, is one audio stream as raw 16-bit little-endian PCM from --from to its end: --track N picks the stream as the container numbers it (the first audio stream by default), --mono mixes it to one channel and --rate resamples it (the stream's own channels and rate by default). A .opus (or .ogg) output is the audio alone as Ogg Opus at 48000 Hz, 64k stereo or 32k with --mono by default, --audio-bitrate KBPS from 16 to 510, with --from, --to, --mono and --loudness. The input is a video file, an animated GIF or a folder of PNG frames in name order (--fps gives their rate). A PNG, JPEG or WebP still to a .webp writes a still WebP (no animation) at the source's size or --size, resized with Lanczos: lossy at --quality 0 to 100 on libwebp's scale (75 by default), or --lossless (VP8L at method 6, as ffmpeg's compression_level 6; fully transparent pixels keep their alpha, not their colour, as libwebp does by default), keeping alpha; to a .png it writes a PNG. A JPEG is turned upright by its EXIF orientation first. probe also reads PNG, JPEG, WebP and GIF files; a GIF's frame rate is 100 over its delay when every delay matches, else the whole or NTSC rate its frames start on to the hundredth of a second or its mean comes within 1% of, else that mean.
 Profiles: balanced (the default) and best are H.264 on the CPU at CRF 20 and 18 on x264's scale; fast is H.264 on the GPU at QP 25, on the CPU where no GPU encoder is found. For .webm, balanced is VP9 at CRF 32 and best at 28 on libvpx's scale.
 Light web: --profile best --crf {LIGHT_WEB_CRF} (.webm: --crf {VP9_LIGHT_WEB_CRF})
 For screen recordings: --tune animation
@@ -55,6 +56,14 @@ pub fn rate_hz(text: &str) -> Result<u32, String> {
         .ok()
         .filter(|r| (lowest..=highest).contains(r))
         .ok_or_else(|| format!("use 44100 or 48000 for a .wav, {lowest} to {highest} for raw PCM"))
+}
+
+pub fn declick_of(args: &ConvertArgs) -> Option<Declick> {
+    args.declick.as_deref().map(|text| Declick {
+        strength: DeclickStrength::parse(text).unwrap_or_default(),
+        list: args.declick_list,
+        track: args.track,
+    })
 }
 
 pub fn loudness_of(text: &str) -> Result<Loudness, String> {
@@ -115,6 +124,21 @@ pub struct ConvertArgs {
         help = "Keep the dynamics: gain to the target, then only a true-peak limiter at the ceiling (may land under the target)"
     )]
     pub linear: bool,
+    #[arg(
+        long,
+        value_name = "STRENGTH",
+        num_args = 0..=1,
+        default_missing_value = "medium",
+        value_parser = ["light", "medium", "strong"],
+        help = "Soften mouth clicks in the audio: light, medium or strong [default: medium]"
+    )]
+    pub declick: Option<String>,
+    #[arg(
+        long,
+        requires = "declick",
+        help = "With --declick: list each repaired click's time and level"
+    )]
+    pub declick_list: bool,
     #[arg(long, help = "The audio bitrate in kbps, 32 to 512 (.opus: 16 to 510)")]
     pub audio_bitrate: Option<u32>,
     #[arg(long, value_parser = super::time_of, help = "Start at this time (seconds, m:ss or h:mm:ss): the first frame at or after it")]
@@ -164,7 +188,7 @@ pub struct ConvertArgs {
     #[arg(
         long,
         value_name = "N",
-        help = "For .s16 or -: the audio stream, numbered as the container numbers its streams (ffmpeg's -map 0:N) [default: the first audio stream]"
+        help = "For .s16 or - and --declick: the audio stream, numbered as the container numbers its streams (ffmpeg's -map 0:N) [default: the first audio stream]"
     )]
     pub track: Option<usize>,
     #[arg(long, help = "Replace an existing output")]
@@ -245,11 +269,11 @@ pub fn options(
     if is_raw(&output) {
         return raw(sub, input, joining, output, args);
     }
-    if args.track.is_some() {
+    if args.track.is_some() && args.declick.is_none() {
         usage_error(
             sub,
             ErrorKind::ArgumentConflict,
-            "--track fits a .s16 or - output",
+            "--track fits a .s16 or - output, or --declick",
         );
     }
     if is_wav(&output) || is_opus(&output) {
@@ -290,6 +314,27 @@ pub fn options(
             "--no-audio takes one whole file: cut or join first, then drop the audio",
         );
     }
+    if args.declick.is_some() && joining {
+        usage_error(
+            sub,
+            ErrorKind::ArgumentConflict,
+            "--declick takes one file: join first, then de-click the joined file",
+        );
+    }
+    if args.declick.is_some() && ranged {
+        usage_error(
+            sub,
+            ErrorKind::ArgumentConflict,
+            "--declick takes the whole audio of a video: cut first, then de-click the cut (a .wav takes --from and --to)",
+        );
+    }
+    if args.no_audio && args.declick.is_some() {
+        usage_error(
+            sub,
+            ErrorKind::ArgumentConflict,
+            "--no-audio writes no audio for --declick to repair",
+        );
+    }
     if args.no_audio && (args.loudness.is_some() || args.audio_bitrate.is_some()) {
         usage_error(
             sub,
@@ -321,6 +366,7 @@ pub fn options(
         missing(sub, &["--fps <FPS>"]);
     }
     let loudness = loudness_with(args.loudness, args.true_peak, args.linear);
+    let declick = declick_of(&args);
     let mut request = Request::new(input, output);
     request.joins = joins;
     request.profile = profile;
@@ -330,12 +376,17 @@ pub fn options(
     request.tune = args.tune;
     request.bar = args.bar;
     request.overwrite = args.force;
-    request.copy_video =
-        (joining || ranged || loudness.is_some() || args.audio_bitrate.is_some() || args.no_audio)
-            && !picture
-            && !folder;
+    request.copy_video = (joining
+        || ranged
+        || loudness.is_some()
+        || args.declick.is_some()
+        || args.audio_bitrate.is_some()
+        || args.no_audio)
+        && !picture
+        && !folder;
     request.no_audio = args.no_audio;
     request.loudness = loudness;
+    request.declick = declick;
     request.audio_bitrate = args.audio_bitrate;
     let mut checked = request.clone();
     if folder {
@@ -388,6 +439,7 @@ fn still(sub: Option<&str>, input: PathBuf, output: PathBuf, args: ConvertArgs) 
         (args.qp.is_some(), "--qp"),
         (args.tune.is_some(), "--tune"),
         (args.loudness.is_some(), "--loudness"),
+        (args.declick.is_some(), "--declick"),
         (args.audio_bitrate.is_some(), "--audio-bitrate"),
         (args.from.is_some(), "--from"),
         (args.to.is_some(), "--to"),
@@ -503,6 +555,7 @@ fn wav(
     let mut request = Request::new(input, output);
     request.overwrite = args.force;
     request.loudness = loudness;
+    request.declick = declick_of(&args);
     Options {
         request,
         json: args.json,
@@ -559,6 +612,7 @@ fn added(
         (args.qp.is_some(), "--qp"),
         (args.tune.is_some(), "--tune"),
         (args.loudness.is_some(), "--loudness"),
+        (args.declick.is_some(), "--declick"),
         (args.from.is_some(), "--from"),
         (args.to.is_some(), "--to"),
         (args.mono, "--mono"),
@@ -624,6 +678,8 @@ pub fn crop_conflict(
         loudness,
         true_peak,
         linear,
+        declick,
+        declick_list: _,
         audio_bitrate,
         from,
         to,
@@ -651,6 +707,7 @@ pub fn crop_conflict(
         (loudness.is_some(), "--loudness"),
         (true_peak.is_some(), "--true-peak"),
         (*linear, "--linear"),
+        (declick.is_some(), "--declick"),
         (audio_bitrate.is_some(), "--audio-bitrate"),
         (from.is_some(), "--from"),
         (to.is_some(), "--to"),
@@ -758,6 +815,7 @@ fn raw(
         (args.tune.is_some(), "--tune"),
         (args.audio_bitrate.is_some(), "--audio-bitrate"),
         (args.loudness.is_some(), "--loudness"),
+        (args.declick.is_some(), "--declick"),
         (args.to.is_some(), "--to"),
         (args.json, "--json"),
         (args.quality.is_some(), "--quality"),

@@ -198,8 +198,23 @@ pub fn run(
     let part = partial(output)?;
     *partial_path = Some(part.clone());
     let progress = Progress::new(options.progress);
+    let prepared = match request.declick {
+        Some(job) => {
+            let made = super::declick::prepare(input, &probe, job, output, &progress);
+            if made.is_err() {
+                progress.clear();
+            }
+            Some(made?)
+        }
+        None => None,
+    };
+    let (source, track) = match &prepared {
+        Some(p) => (p.path.as_path(), 0),
+        None => (input.as_path(), probe.audio.first().map_or(0, |a| a.index)),
+    };
     let written = write(
-        input,
+        source,
+        track,
         &probe,
         &prefs,
         &span,
@@ -215,8 +230,12 @@ pub fn run(
     }
     land(&part, output, request.overwrite)?;
     *partial_path = None;
+    let cleaned = prepared.as_ref().map(|p| &p.report);
     if !options.json {
         let mut lines = vec![output.display().to_string()];
+        if let Some(r) = cleaned {
+            lines.push(r.lines());
+        }
         if let Some(l) = &loud {
             lines.push(l.lines());
         }
@@ -264,6 +283,7 @@ pub fn run(
         }],
         join: None,
         cut: None,
+        declick: cleaned.map(|r| r.manifest()),
     };
     Ok(document.to_json())
 }
@@ -271,6 +291,7 @@ pub fn run(
 #[allow(clippy::too_many_arguments)]
 fn write(
     input: &Path,
+    track: usize,
     probe: &media::Probe,
     prefs: &Prefs,
     span: &AudioSpan,
@@ -279,7 +300,6 @@ fn write(
     part: &Path,
     progress: &Progress,
 ) -> Result<(u64, Option<Loud>), Fail> {
-    let track = probe.audio.first().map_or(0, |a| a.index);
     let plan = match target {
         Some(t) => Some(
             media::plan_level_styled(

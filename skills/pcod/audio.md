@@ -1,6 +1,6 @@
-# Audio: loudness, audio alone, test video, spectrogram
+# Audio: loudness, de-click, audio alone, test video, spectrogram
 
-`--track` counts differently by command. `loudness` and `spectrum` count audio tracks from 0. Convert's `--track` (for `.s16` or `-`) numbers streams as the container does, so in an MP4 with the video first the first audio track is `1`; a number with no audio stream is refused and the line names the streams that exist.
+`--track` counts differently by command. `loudness` and `spectrum` count audio tracks from 0. Convert's `--track` (for `.s16` or `-`, and for `--declick`) numbers streams as the container does, so in an MP4 with the video first the first audio track is `1`; a number with no audio stream is refused and the line names the streams that exist.
 
 ## Measure loudness
 
@@ -22,6 +22,22 @@ pcod clip.mp4 voice.opus --loudness -16 --true-peak -1.5
 - `--loudness youtube` is -14 LUFS under a -2 dBTP ceiling; any number from -70 to -5 is a target. Two EBU R128 passes, then a true-peak limiter holds the ceiling (`--true-peak`, -1 dBTP by default).
 - `--linear` keeps the dynamics: gain to the target, then the limiter on peaks alone, so the result can land under the target.
 - pcod prints `loudness before` and `loudness after` (in `--json` too). With no video option the video is copied untouched. `pcod frames` takes the same three options.
+
+## De-click
+
+```sh
+pcod clip.mp4 clean.mp4 --declick
+pcod bed.wav clean.wav --declick strong --declick-list
+pcod clip.mp4 clean-upload.mp4 --declick --loudness youtube
+pcod clip.mp4 clean-track.mp4 --declick --track 1 --json
+```
+
+- `--declick` finds mouth clicks, tongue smacks and lip pops (spikes of 1 to 6 ms well above the track's own high-passed level around them) and repairs each by interpolating across it. Speech, plosives, fricatives and a word's onset are left as they were: only a lone transient is touched, every sample outside a repair is unchanged, and a track with no click comes out sample for sample.
+- `--declick light|medium|strong` sets how far above its surroundings a spike must stand: 20, 14 or 9 dB (medium by default). Try `strong` when a click you hear is not reported; `light` when it touches too much.
+- It works on a video's audio (the video is copied untouched, the audio re-encoded), a WAV or an `.opus`, from the first audio stream or the `--track N` you give (numbered as for `.s16`). A video takes it whole: cut first, then de-click; a `.wav` takes `--from` and `--to`.
+- With `--loudness` the de-click runs first, then the level.
+- pcod prints `declick: N clicks repaired`, and `--json` has `declick.repaired`; `--declick-list` adds each click's time and level (the high-passed peak in dBFS, and how far above its surroundings in dB), so a person can listen at those times.
+- Not with `join`, `--no-audio`, `--add-audio`, a `.gif`, a `.webp` or a `.s16`.
 
 ## Audio alone
 

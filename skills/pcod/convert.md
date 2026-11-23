@@ -64,7 +64,7 @@ pcod clip.mp4 voiced.mp4 --add-audio bed.wav --title Voice,Music
 - `--no-audio` writes the video alone; with no video option it is copied as it is, index first.
 - `--add-audio WAV` keeps the video and the first audio track as they are and adds the WAV as another AAC track (160 kbps, `--audio-bitrate` sets it), the file cut to the shorter of the two. `.mp4` and `.mov` only; `.webm` is refused. `--title` names each audio track in order.
 - `--audio-bitrate` is 32 to 512 kbps.
-- `--loudness`, `--true-peak` and `--linear` level the audio as it converts: see [`audio.md`](audio.md).
+- `--loudness`, `--true-peak` and `--linear` level the audio as it converts, and `--declick` softens mouth clicks in it first: see [`audio.md`](audio.md).
 
 ## Progress bar
 
