@@ -26,10 +26,10 @@ pcod clip.mp4 voice.opus --loudness -16 --true-peak -1.5
 ## De-click
 
 ```sh
-pcod talk.mp4 clean.mp4 --declick
-pcod voice.wav clean.wav --declick strong --declick-list
-pcod talk.mp4 upload.mp4 --declick --loudness youtube
-pcod take.mkv clean.mp4 --declick --track 2 --json
+pcod clip.mp4 clean.mp4 --declick
+pcod bed.wav clean.wav --declick strong --declick-list
+pcod clip.mp4 clean-upload.mp4 --declick --loudness youtube
+pcod clip.mp4 clean-track.mp4 --declick --track 1 --json
 ```
 
 - `--declick` finds mouth clicks, tongue smacks and lip pops (spikes of 1 to 6 ms well above the track's own high-passed level around them) and repairs each by interpolating across it. Speech, plosives, fricatives and a word's onset are left as they were: only a lone transient is touched, every sample outside a repair is unchanged, and a track with no click comes out sample for sample.
