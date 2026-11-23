@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use super::Fail;
+use super::declick;
 use super::manifest;
 use super::picture::{self, Still};
 use super::pipeline::{self, Audio, Stopped};
@@ -58,7 +59,8 @@ fn reduced(num: u32, den: u32) -> (u32, u32) {
 
 fn audio_for(request: &Request, container: Container, codec: &str) -> Audio {
     let webm = container == Container::Webm;
-    let untouched = request.loudness.is_none() && request.audio_bitrate.is_none();
+    let untouched =
+        request.loudness.is_none() && request.declick.is_none() && request.audio_bitrate.is_none();
     if untouched && !webm && codec == "aac" {
         return Audio::Copy {
             codec: codec.into(),
@@ -109,6 +111,9 @@ fn plan(request: &Request, media: &Media) -> Result<Planned, Fail> {
             target.integrated
         )
         .into());
+    }
+    if request.declick.is_some() && media.audio.is_none() {
+        return Err("the source has no audio to de-click".into());
     }
     if let (Some(kbps), None) = (request.audio_bitrate, &media.audio) {
         return Err(format!("the source has no audio to encode at {kbps} kbps").into());
@@ -312,8 +317,31 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
     let part = partial(&request.output)?;
     *partial_path = Some(part.clone());
     let progress = Progress::new(options.progress);
-    let track = media.audio.as_ref().map_or(0, |a| a.index);
-    if let (Some(target), Encoder::Copy { .. }) = (request.loudness, &planned.encoder) {
+    let prepared = match request.declick {
+        Some(job) => {
+            let probe = media::probe(&media.path, &media::Prefs::default())
+                .map_err(|e| format!("{}: {e}", media.path.display()));
+            let made = probe
+                .map_err(Fail::from)
+                .and_then(|p| declick::prepare(&media.path, &p, job, &request.output, &progress));
+            if made.is_err() {
+                progress.clear();
+            }
+            Some(made?)
+        }
+        None => None,
+    };
+    let (audio_source, track) = match &prepared {
+        Some(p) => (p.path.as_path(), 0),
+        None => (
+            media.path.as_path(),
+            media.audio.as_ref().map_or(0, |a| a.index),
+        ),
+    };
+    let cleaned = prepared.as_ref().map(|p| &p.report);
+    if let (Some(target), Encoder::Copy { .. }, None) =
+        (request.loudness, &planned.encoder, cleaned)
+    {
         let loud = level_copy(
             &media.path,
             &part,
@@ -335,6 +363,7 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
             "CPU",
             &[],
             Some(loud),
+            None,
             source_hash,
             origin,
         );
@@ -347,7 +376,7 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
                 _ => None,
             };
             let plan = media::plan_level_styled(
-                &media.path,
+                audio_source,
                 track,
                 &media::Prefs::default(),
                 &pipeline::window_span(window, media.fps).map_or(
@@ -390,6 +419,7 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
         partial: &part,
         tune: request.tune.as_deref(),
         level: level.as_ref().map(|(_, p)| *p),
+        audio_path: prepared.as_ref().map(|p| p.path.as_path()),
         profile: request.profile.name(),
         alpha: media.alpha && planned.container == Container::Webm,
         bar: request.bar.clone(),
@@ -437,6 +467,7 @@ fn convert(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<Stri
         &done.device,
         &done.notes,
         loud,
+        cleaned,
         source_hash,
         origin,
     )
@@ -451,6 +482,7 @@ fn finish(
     device: &str,
     notes: &[String],
     loud: Option<Loud>,
+    cleaned: Option<&declick::Report>,
     source_hash: String,
     origin: Option<&Origin>,
 ) -> Result<String, Fail> {
@@ -458,6 +490,9 @@ fn finish(
     if !options.json {
         let mut lines = vec![request.output.display().to_string()];
         lines.extend(notes.iter().map(|n| format!("note: {n}")));
+        if let Some(r) = cleaned {
+            lines.push(r.lines());
+        }
         if let Some(l) = &loud {
             lines.push(l.lines());
         }
@@ -496,6 +531,7 @@ fn finish(
         }],
         join: None,
         cut: origin.map(|o| o.cut.clone()),
+        declick: cleaned.map(|r| r.manifest()),
     };
     Ok(document.to_json())
 }
@@ -988,6 +1024,7 @@ fn ranged(
         }],
         join: None,
         cut: Some(cut_manifest(&made)),
+        declick: None,
     };
     Ok(document.to_json())
 }
@@ -1177,6 +1214,7 @@ fn join(options: &Options, partial_path: &mut Option<PathBuf>) -> Result<String,
             loudness: loud.as_ref().map(|l| stats(&l.before)),
         }),
         cut: None,
+        declick: None,
     };
     Ok(document.to_json())
 }

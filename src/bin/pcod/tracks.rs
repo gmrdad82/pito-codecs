@@ -420,6 +420,7 @@ pub fn run(
         }],
         join: None,
         cut: None,
+        declick: None,
     };
     Ok(document.to_json())
 }

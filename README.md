@@ -132,6 +132,7 @@ pcod frames/ hero.webm --fps 60                    # RGBA frames to a transparen
 pcod clip.mp4 readme.gif --size 640                # a looping README GIF
 pcod join intro.mp4 scene.mp4 outro.mp4 film.mp4   # copied when the clips match
 pcod talk.mp4 upload.mp4 --loudness youtube        # -14 LUFS in two EBU R128 passes, video copied
+pcod talk.mp4 clean.mp4 --declick --declick-list   # soften mouth clicks, list each one
 pcod phone.mp4 engine.wav --from 0:12 --to 0:20     # a range of the audio as 16-bit PCM WAV
 pcod mix.wav master.wav --loudness -14 --linear     # -14 LUFS keeping the dynamics, peaks limited
 pcod loudness master.mp4 --json                     # EBU R128 integrated, range, true peak, maxima, max_volume, duration

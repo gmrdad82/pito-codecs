@@ -50,6 +50,7 @@ pub struct Job<'a> {
     pub partial: &'a Path,
     pub tune: Option<&'a str>,
     pub level: Option<media::LevelPlan>,
+    pub audio_path: Option<&'a Path>,
     pub profile: &'a str,
     pub alpha: bool,
     pub bar: Option<ProgressBar>,
@@ -981,14 +982,12 @@ fn audio_plan(job: &Job, audio: &Audio) -> Result<AudioPlan, Fail> {
             }
         }
         Audio::Aac { kbps } => {
-            let stream = media::audio_stream(
-                &media.path,
-                sound.index,
-                from,
-                SAMPLE_RATE,
-                2,
-                &Prefs::default(),
-            )?;
+            let (source, track) = match job.audio_path {
+                Some(path) => (path, 0),
+                None => (media.path.as_path(), sound.index),
+            };
+            let stream =
+                media::audio_stream(source, track, from, SAMPLE_RATE, 2, &Prefs::default())?;
             let enc = aac::Encoder::new(aac::EncoderConfig {
                 rate: SAMPLE_RATE,
                 channels: 2,
@@ -1013,14 +1012,12 @@ fn audio_plan(job: &Job, audio: &Audio) -> Result<AudioPlan, Fail> {
             })
         }
         Audio::Opus { kbps } => {
-            let stream = media::audio_stream(
-                &media.path,
-                sound.index,
-                from,
-                SAMPLE_RATE,
-                2,
-                &Prefs::default(),
-            )?;
+            let (source, track) = match job.audio_path {
+                Some(path) => (path, 0),
+                None => (media.path.as_path(), sound.index),
+            };
+            let stream =
+                media::audio_stream(source, track, from, SAMPLE_RATE, 2, &Prefs::default())?;
             let enc = opus::enc::Encoder::new(opus::enc::EncoderConfig::new(2, kbps * 1000))?;
             let cfg = mkv::TrackConfig::opus(enc.codec_private());
             let shift = -i64::from(enc.pre_skip());

@@ -507,6 +507,7 @@ pub fn convert(job: &Job, partial_path: &mut Option<PathBuf>) -> Result<String, 
         }],
         join: None,
         cut: None,
+        declick: None,
     };
     Ok(document.to_json())
 }

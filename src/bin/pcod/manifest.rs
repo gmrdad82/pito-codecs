@@ -102,6 +102,37 @@ pub struct Manifest {
     pub files: Vec<Output>,
     pub join: Option<Join>,
     pub cut: Option<Cut>,
+    pub declick: Option<Declicked>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Declicked {
+    pub strength: String,
+    pub repaired: usize,
+    pub clicks: Option<Vec<(f64, f64, f64)>>,
+}
+
+impl Declicked {
+    pub fn json(&self) -> Json {
+        let mut fields = vec![
+            ("strength", self.strength.as_str().into()),
+            ("repaired", self.repaired.into()),
+        ];
+        if let Some(list) = &self.clicks {
+            let each = list
+                .iter()
+                .map(|&(time, level_db, above_db)| {
+                    Json::Obj(vec![
+                        ("time", time.into()),
+                        ("level_db", level_db.into()),
+                        ("above_db", above_db.into()),
+                    ])
+                })
+                .collect();
+            fields.push(("clicks", Json::Arr(each)));
+        }
+        Json::Obj(fields)
+    }
 }
 
 impl Measured {
@@ -267,6 +298,9 @@ impl Manifest {
                 ]),
             ));
         }
+        if let Some(d) = &self.declick {
+            fields.push(("declick", d.json()));
+        }
         if let Some(c) = &self.cut {
             fields.push((
                 "cut",
@@ -338,6 +372,7 @@ mod tests {
             }],
             join: None,
             cut: None,
+            declick: None,
         };
         let v: serde_json::Value = serde_json::from_str(&m.to_json()).unwrap();
         assert_eq!(v["tool"]["name"], "pcod");
