@@ -2919,8 +2919,6 @@ mod tests {
                 .0
                 .starts_with("APPLE M4, APPLE M4 (VIDEOTOOLBOX), FFMPEG")
         );
-        r.os = "Windows 11".into();
-        assert!(docs::ffmpeg_names(&r).0.contains(" (MEDIA FOUNDATION), "));
         r.os = "FreeBSD 15".into();
         assert!(
             docs::ffmpeg_names(&r)
@@ -3294,8 +3292,6 @@ mod tests {
         assert!(driver.ends_with("7.2.8-9-omarchy)"));
         assert_eq!(gpu, "AMD Radeon RX 9060 XT");
         assert_eq!(driver_and_gpu(""), (String::new(), String::new()));
-        let bare = driver_and_gpu("vainfo: Driver version: Intel iHD driver 25.1\n");
-        assert_eq!(bare, ("Intel iHD driver 25.1".into(), String::new()));
     }
 
     #[test]

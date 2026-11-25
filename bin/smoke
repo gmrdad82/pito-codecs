@@ -3,9 +3,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 pcod=${1:-target/release/pcod}
-if [ -f "$pcod.exe" ]; then
-    pcod="$pcod.exe"
-fi
 dir=tmp/smoke
 mkdir -p "$dir"
 
