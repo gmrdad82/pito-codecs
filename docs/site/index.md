@@ -29,7 +29,7 @@ Every speed number here was measured on one machine (AMD Ryzen 9 9950X, AMD Rade
 - [Probe, decode and encode with pcod](guides/pcod/) from a terminal.
 - [Use the library](guides/library/): the `media` front picks the fastest route for each job and says why when it falls back.
 - [First frames and filmstrips](guides/stills/), [audio as PCM](guides/audio/), [smart-cut exports](guides/export/), [overlays and captions](guides/overlays/) and [exports of your own frames](guides/frames/).
-- [GPU routes per vendor and system](guides/gpu/): what is tested and what is built but untested.
+- [GPU routes per vendor and system](guides/gpu/): what each has been run on.
 - [Low-level codecs](guides/low-level/): H.264 decode and encode, GIF and WebP without the front.
 - The [command reference](reference/cli/), the [formats](reference/formats/) and the [API reference](api/pito_codecs/index.html).
 

@@ -9,7 +9,7 @@ Every decode and encode tries the GPU first and then pcod's own CPU code. When t
 | NVENC | Linux, Windows | none | H.264, H.265 |
 | Media Foundation | Windows | H.264, H.265, AV1 | none |
 
-Nothing extra is installed: libva loads at run time, and without a GPU everything runs on the CPU. VA-API on AMD is the route run before every release. NVENC, Media Foundation and Intel VA-API are built but untested on their hardware, and VideoToolbox has run on one Apple M1 Max.
+Nothing extra is installed: libva loads at run time, and without a GPU everything runs on the CPU. VA-API on AMD is the route run before every release. VideoToolbox has run on one Apple M1 Max.
 
 ```sh
 pcod decode clip.mp4

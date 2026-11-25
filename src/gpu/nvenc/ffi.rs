@@ -20,14 +20,6 @@ impl Guid {
             data4,
         }
     }
-
-    #[cfg(test)]
-    pub const fn to_u128(self) -> u128 {
-        ((self.data1 as u128) << 96)
-            | ((self.data2 as u128) << 80)
-            | ((self.data3 as u128) << 64)
-            | u64::from_be_bytes(self.data4) as u128
-    }
 }
 
 pub const NVENCAPI_VERSION: u32 = 12 | (1 << 24);
