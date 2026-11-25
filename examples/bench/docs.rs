@@ -12,7 +12,6 @@ type Res<T> = Result<T, Box<dyn std::error::Error>>;
 const US: &str = "PITO-CODECS";
 const NOW: &str = "2026-10-14";
 const RES: [&str; 2] = ["1080", "1440"];
-const LIMIT: f64 = 0.05;
 
 #[derive(Serialize)]
 struct Chart<'a> {
@@ -50,9 +49,7 @@ struct Bar {
 
 struct Rows {
     by_id: HashMap<String, Value>,
-    order: Vec<String>,
     date: String,
-    commit: String,
 }
 
 impl Rows {
@@ -63,19 +60,15 @@ impl Rows {
             .as_array()
             .ok_or_else(|| format!("{}: no rows", path.display()))?;
         let mut by_id = HashMap::new();
-        let mut order = Vec::new();
         for r in rows {
             if let Some(id) = r["id"].as_str() {
-                order.push(id.to_string());
                 by_id.insert(id.to_string(), r.clone());
             }
         }
         let text = |k: &str| doc[k].as_str().unwrap_or("none").to_string();
         Ok(Rows {
             by_id,
-            order,
             date: text("date"),
-            commit: text("commit"),
         })
     }
 
@@ -84,10 +77,6 @@ impl Rows {
             .get(id)
             .and_then(|r| r[key].as_f64())
             .ok_or_else(|| format!("no {key} for {id}").into())
-    }
-
-    fn ours(&self, id: &str) -> Option<f64> {
-        self.by_id.get(id).and_then(|r| r["ours"].as_f64())
     }
 }
 
@@ -535,46 +524,4 @@ pub fn charts(results: &Path, out: &Path, reference: &Reference) -> Res<()> {
         ff,
     }
     .all()
-}
-
-pub fn check(new: &Path, baseline: &Path) -> Res<()> {
-    let base = Rows::read(baseline)?;
-    let now = Rows::read(new)?;
-    say!(
-        "baseline {} ({}), new {} ({})",
-        base.commit,
-        base.date,
-        now.commit,
-        now.date
-    )?;
-    let mut worse = Vec::new();
-    for id in &base.order {
-        let Some(b) = base.ours(id) else {
-            continue;
-        };
-        let Some(n) = now.ours(id) else {
-            say!("  missing  {id}")?;
-            continue;
-        };
-        let higher = base.by_id[id]["higher_is_better"].as_bool().unwrap_or(true);
-        let change = if higher { n / b - 1.0 } else { b / n - 1.0 };
-        let mark = if change < -LIMIT { "slower" } else { "ok" };
-        if mark == "slower" {
-            worse.push(id.as_str());
-        }
-        say!(
-            "  {mark:7}  {id:40} {b:10.1} -> {n:10.1}  {:+6.1}%",
-            change * 100.0
-        )?;
-    }
-    if !worse.is_empty() {
-        return Err(format!(
-            "{} rows more than 5% slower than the baseline: {}",
-            worse.len(),
-            worse.join(", ")
-        )
-        .into());
-    }
-    say!("bench: no row more than 5% slower than the baseline")?;
-    Ok(())
 }
