@@ -48,7 +48,7 @@ AGENTS.md and CLAUDE.md hold the rules and prompts/RESUME.md what runs now and w
 | `bin/smoke [pcod]` | end to end on a built pcod: synth, probe, decode on both routes, encode, one-line failures |
 | `bin/cov [--json]` | coverage with cargo-llvm-cov and nextest, into `tmp/cov.txt` or `tmp/cov.json` |
 | `bin/docs-bundle vX.Y.Z [out dir]` | the release docs: `docs/site`, a command reference from pcod's help, `cargo doc`, the changelog |
-| `cargo run --release --example bench -- --help` | the bench: `--quick`, `--only ID`, `--check <results.json>`, `--chart-docs <results.json> docs/charts` |
+| `cargo run --release --example bench -- --help` | the bench: `--quick`, `--only ID`, `--chart-docs <results.json> docs/charts` |
 | `cargo run --release --example record_refs -- <area>` | re-record one area's references; a wrong area names the valid ones |
 | `cargo run --release --example media_speed -- <file> [mode]` | speed of one file; a wrong call prints its usage (as does `png_speed`) |
 | `cargo fuzz list`, `fuzz/seeds <target>`, `cargo fuzz run <target>` | the fuzz targets, a target's seed corpus, a run |
