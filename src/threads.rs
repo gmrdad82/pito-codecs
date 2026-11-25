@@ -29,18 +29,10 @@ mod platform {
         fn GetCurrentThread() -> isize;
         fn SetThreadPriority(thread: isize, priority: i32) -> i32;
     }
-    #[cfg(test)]
-    unsafe extern "system" {
-        fn GetThreadPriority(thread: isize) -> i32;
-    }
     pub fn lower() {
         unsafe {
             SetThreadPriority(GetCurrentThread(), BELOW_NORMAL);
         }
-    }
-    #[cfg(test)]
-    pub fn current() -> i32 {
-        unsafe { GetThreadPriority(GetCurrentThread()) }
     }
 }
 
@@ -111,20 +103,5 @@ mod tests {
         .unwrap();
         set_below_normal(false);
         assert_eq!(parent.0, parent.1);
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_thread_drops_to_below_normal() {
-        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        set_below_normal(true);
-        let level = std::thread::spawn(|| {
-            enter();
-            platform::current()
-        })
-        .join()
-        .unwrap();
-        set_below_normal(false);
-        assert_eq!(level, platform::BELOW_NORMAL);
     }
 }

@@ -307,12 +307,10 @@ The front tries the GPU first and our own CPU code second, for every decode and 
 | Route | System | Decode | Encode | Tested on |
 | --- | --- | --- | --- | --- |
 | VA-API, AMD (Mesa radeonsi) | Linux | H.264, H.265, VP9, AV1 | H.264, H.265; overlays composed on the card | AMD Radeon RX 9060 XT (RDNA 4), before every release |
-| VA-API, Intel (iHD) | Linux | H.264, H.265, VP9, AV1 | H.264, H.265 | Built, untested on Intel hardware |
+| VA-API, Intel (iHD) | Linux | H.264, H.265, VP9, AV1 | H.264, H.265 | — |
 | VideoToolbox | macOS | H.264, H.265, AV1 | H.264, H.265 | Run on an Apple M1 Max: H.264 decode, H.264 and H.265 encode; H.265 and AV1 decode (AV1 on Apple M3 and later) built, untested |
-| NVENC | Linux, Windows | — | H.264, H.265 | Built and unit-tested, untested on NVIDIA hardware |
-| Media Foundation | Windows | H.264, H.265, AV1 | — | Built and unit-tested, untested on GPU hardware |
-
-The NVIDIA paths are built and unit-tested but untested on NVIDIA hardware here; contributions from people with NVIDIA cards are welcome.
+| NVENC | Linux, Windows | — | H.264, H.265 | — |
+| Media Foundation | Windows | H.264, H.265, AV1 | — | — |
 
 The CPU codecs target Linux x86-64 and arm64, Windows x86-64 and macOS on Apple Silicon, with AVX2 kernels on x86-64 and NEON or portable paths on arm64. Every merge is checked for all four (format, lints and a full type-check) and runs the whole test suite on Linux x86-64; every release also runs the GPU suite on the AMD card above, and builds the Linux x86-64, macOS arm64 and Windows x86-64 binaries. No hosted CI runs this repository.
 

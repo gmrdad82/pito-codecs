@@ -41,7 +41,6 @@ const ENCODE_FRAMES: usize = 240;
 const ALL_SIZES: [(u32, u32); 2] = [(1920, 1080), (2560, 1440)];
 
 const USAGE: &str = "usage: bench [--runs N] [--quick] [--only ID]... [--out DIR] [--images DIR] [--fixtures DIR] [--reference FILE] [--charts-only] [--no-charts]
-       bench --check <new results.json> [baseline.json]
        bench --chart-docs <results.json> <dir> [reference.toml]
        bench --hash-inputs [--out DIR] [--reference FILE]
        bench --record-ffmpeg [--runs N] [--only ID]... [--out DIR] [--fixtures DIR] [--reference FILE]
@@ -2098,28 +2097,21 @@ impl Default for Opts {
 
 #[derive(Debug, PartialEq)]
 enum Mode {
-    Check(PathBuf, PathBuf),
     ChartDocs(PathBuf, PathBuf, PathBuf),
     Help,
     Run(Opts),
 }
 
-const SHORT_USAGE: &str = "usage: bench --check <new results.json> [baseline.json] | bench --chart-docs <results.json> <dir> [reference.toml]";
+const SHORT_USAGE: &str = "usage: bench --chart-docs <results.json> <dir> [reference.toml]";
 
 fn parse_args(given: &[String]) -> Res<Mode> {
     let arg = |i: usize| PathBuf::from(&given[i]);
     match given.first().map(String::as_str) {
-        Some("--check") if (2..=3).contains(&given.len()) => {
-            let baseline = given
-                .get(2)
-                .map_or(".dev/bench/baseline.json", String::as_str);
-            return Ok(Mode::Check(arg(1), PathBuf::from(baseline)));
-        }
         Some("--chart-docs") if (3..=4).contains(&given.len()) => {
             let reference = given.get(3).map_or(reference::PATH, String::as_str);
             return Ok(Mode::ChartDocs(arg(1), arg(2), PathBuf::from(reference)));
         }
-        Some("--check" | "--chart-docs") => return Err(SHORT_USAGE.into()),
+        Some("--chart-docs") => return Err(SHORT_USAGE.into()),
         Some("--help" | "-h") => return Ok(Mode::Help),
         _ => {}
     }
@@ -2208,7 +2200,6 @@ fn hash_inputs(path: &Path, inputs: &Path) -> Res<String> {
 fn run() -> Res<()> {
     let given: Vec<String> = std::env::args().skip(1).collect();
     let o = match parse_args(&given)? {
-        Mode::Check(new, baseline) => return docs::check(&new, &baseline),
         Mode::ChartDocs(results, dir, reference) => {
             return docs::charts(&results, &dir, &Reference::read(&reference)?);
         }
@@ -3042,15 +3033,7 @@ mod tests {
     }
 
     #[test]
-    fn check_chart_docs_and_help_take_their_own_arguments() {
-        assert_eq!(
-            parse_args(&strings(&["--check", "new.json"])).unwrap(),
-            Mode::Check("new.json".into(), ".dev/bench/baseline.json".into())
-        );
-        assert_eq!(
-            parse_args(&strings(&["--check", "new.json", "base.json"])).unwrap(),
-            Mode::Check("new.json".into(), "base.json".into())
-        );
+    fn chart_docs_and_help_take_their_own_arguments() {
         assert_eq!(
             parse_args(&strings(&["--chart-docs", "r.json", "docs/charts"])).unwrap(),
             Mode::ChartDocs(
@@ -3066,8 +3049,6 @@ mod tests {
         for bad in [
             vec!["--chart-docs", "r.json"],
             vec!["--chart-docs", "r.json", "d", "ref.toml", "x"],
-            vec!["--check"],
-            vec!["--check", "a", "b", "c"],
         ] {
             let err = parse_args(&strings(&bad)).unwrap_err().to_string();
             assert_eq!(err, SHORT_USAGE, "{bad:?}");
