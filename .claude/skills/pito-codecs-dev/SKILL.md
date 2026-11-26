@@ -7,7 +7,7 @@ description: "Develop pito-codecs itself: its Rust codecs, containers, filters a
 
 pito-codecs is one Cargo package (MIT, edition 2024, Rust 1.97 or newer): pure-Rust video, audio and image codecs, containers, filters and GPU routes, a media front for apps, and `pcod`, its command line. Speed is the goal and bit-exact decode is the floor. This skill is for the sessions that change the repo; using pcod is `skills/pcod`.
 
-AGENTS.md and CLAUDE.md hold the rules and prompts/RESUME.md what runs now and what is next. They are git-ignored, so a fresh worktree lacks them: read them from the repository's main checkout first. This page adds the how-to and does not repeat them.
+AGENTS.md and CLAUDE.md hold the rules; they are git-ignored, so a fresh worktree lacks them: read them from the repository's main checkout first. Open work is cards on its P99 board (space pito, project pito-codecs): read them with `p99 cards --space pito --project pito-codecs --json` and file one with `p99 card new --space pito --project pito-codecs --agent`. This page adds the how-to and does not repeat them.
 
 ## Layout
 
