@@ -7,7 +7,7 @@ description: "Develop pito-codecs itself: its Rust codecs, containers, filters a
 
 pito-codecs is one Cargo package (MIT, edition 2024, Rust 1.97 or newer): pure-Rust video, audio and image codecs, containers, filters and GPU routes, a media front for apps, and `pcod`, its command line. Speed is the goal and bit-exact decode is the floor. This skill is for the sessions that change the repo; using pcod is `skills/pcod`.
 
-AGENTS.md and CLAUDE.md hold the rules; they are git-ignored, so a fresh worktree lacks them: read them from the repository's main checkout first. Open work is cards on its P99 board (space pito, project pito-codecs): read them with `p99 cards --space pito --project pito-codecs --json` and file one with `p99 card new --space pito --project pito-codecs --agent`. This page adds the how-to and does not repeat them.
+AGENTS.md and CLAUDE.md hold the rules; they are git-ignored, so a fresh worktree lacks them: read them from the repository's main checkout first. Open work is cards on the shared Open Source board (space pito, project "Open Source"), each titled `[pito-codecs] what it is`, no labels: read them with `p99 cards --space pito --project "Open Source" --json` and keep only titles starting `[pito-codecs]`; file one with `p99 card new --space pito --project "Open Source" --title "[pito-codecs] …" --agent`. This page adds the how-to and does not repeat them.
 
 ## Layout
 
@@ -57,7 +57,7 @@ Each tool's `--help` (or the usage it prints on a wrong call) is the source of t
 
 ## Releases
 
-A release is `v<Cargo.toml version>`: a `CHANGELOG.md` section (`## vX.Y.Z — date`), the README's `--tag vX.Y.Z` pins matching the version (`tests/readme.rs`), `bin/docs-bundle`, a signed tag, and a GitHub Release carrying pcod for Linux x86-64, Windows x86-64 and macOS arm64 (signed and notarized on a Mac), the docs bundle and `SHA256SUMS`. The release script is not in git. A session cuts a release only when asked.
+A release is `v<Cargo.toml version>`: a `CHANGELOG.md` section (`## vX.Y.Z — date`), the README's `--tag vX.Y.Z` pins matching the version (`tests/readme.rs`), `bin/docs-bundle`, a signed tag, and a GitHub Release carrying pcod for Linux x86-64, Windows x86-64 and macOS arm64 (signed and notarized on a Mac), the docs bundle and `SHA256SUMS`, then a post on the PITO MD Discord's #open-source (the release kit's `discord-post.sh --github`, its webhook through pkey as `discord-open-source`; `--dry-run` prints the message without posting, and a ledger stops a second post). The release script is not in git. A session cuts a release only when asked.
 
 **Local install.** After a release, or a build that will be used, update this machine's install with `.dev/bin/install`, run from the main checkout: it sits in that checkout's git-ignored `.dev` beside AGENTS.md, so a worktree lacks it (from a worktree, `"$(git rev-parse --git-common-dir)/../.dev/bin/install"`). It builds the main checkout's tree with `cargo build --release --locked --bin pcod`, so merge into `main` first; it replaces the binary behind `~/.local/bin/pcod` and runs `skills/install-skill.sh install` (that is `pcod skill install`) to write the user skill. pcod has no window app. The script has no `--help`: any argument but `--uninstall` runs the install. Never copy the binary by hand. Check with `pcod --version` and `pcod skill status`. Anyone without that script installs from the README's Install and first use, then runs `pcod skill install`.
 
